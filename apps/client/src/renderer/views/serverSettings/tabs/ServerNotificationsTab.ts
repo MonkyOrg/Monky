@@ -1,5 +1,6 @@
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { renderSwitch } from '../../../utils/formControls';
 import { LIMITS, Permission } from '@monky/shared';
 import { serverStore } from '../../../stores/serverStore';
 
@@ -16,10 +17,7 @@ export class ServerNotificationsTab {
               <label for="${setting.id}">${t(setting.label)}</label>
               <div style="font-size: 11px; color: var(--text-muted);">${t(setting.description)}</div>
             </div>
-            <label class="toggle-switch" aria-label="${escapeHtml(t(setting.label))}">
-              <input id="${setting.id}" type="checkbox" ${setting.enabled ? 'checked' : ''}>
-              <span class="toggle-slider"></span>
-            </label>
+            ${renderSwitch({ id: setting.id, label: t(setting.label), checked: setting.enabled })}
           </div>
         `).join('')}
         <div class="dialog-text-field" data-settings-section="delete-undo" data-settings-label="${escapeHtml(t('serverSettings.deleteUndo'))}">

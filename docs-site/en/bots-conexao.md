@@ -63,6 +63,8 @@ if (marketplace) {
     description: 'Example bot / Bot de exemplo',
     port: validateBotServePort(requiredEnvironment('MONKY_SERVE_PORT')),
     publicHost: validateBotPublicHost(requiredEnvironment('MONKY_SERVE_PUBLIC_HOST')),
+    // Only set when the profile has a public URL (TLS proxy).
+    publicUrl: process.env.MONKY_SERVE_PUBLIC_URL || undefined,
   });
 } else {
   bot.connect({
@@ -79,6 +81,12 @@ After setup, run `npm run cli -- start --foreground`. The
 This exposes:
 - `GET /manifest` — returns the bot manifest (name, description, requested capabilities, registration URL)
 - `POST /register` — receives the token from each server that adds the bot
+
+Only Monky servers talk to these routes, never web pages, so they do not answer
+CORS. `POST /register` only accepts `Content-Type: application/json`, with a body
+of up to 16 KiB. Each source address may make 10 registration attempts per
+minute, and at most 4 registrations complete at the same time; beyond that, the
+bot answers `429`. Behind a proxy, the counted address is the proxy's.
 
 Each server that adds the bot creates an **independent WebSocket connection**. The bot manages all of them automatically, with reconnection.
 
@@ -130,6 +138,38 @@ sudo ufw allow 7780/tcp
 
 Also, `publicHost` must be the machine's **public IP or domain** — `localhost` only works if bot and server run on the same machine.
 
+### HTTPS with a reverse proxy {#https-com-proxy-reverso}
+
+Without `publicUrl`, the manifest announces `http://<publicHost>:<port>/register`,
+and the Monky server sends the bot token to that address **unencrypted**. To keep
+the token protected on the way, put the bot behind a TLS reverse proxy (Caddy,
+nginx, etc.) and set the public origin in `publicUrl`:
+
+```ts
+await bot.serve({
+  name: 'My Bot',
+  port: 7780,
+  host: '127.0.0.1', // only the proxy, on the same machine, reaches the port
+  publicUrl: 'https://bot.example.com',
+});
+```
+
+The manifest then announces `https://bot.example.com/register`, and the Monky
+server installs the bot from `https://bot.example.com/manifest`. In the manifest,
+`publicUrl` takes precedence over `publicHost` and `port`. Give only the origin,
+with no path, user name, password, query or fragment: the proxy forwards the
+domain root to the bot, and that is where `doctor` and the server prove access.
+When installing, use the final manifest URL: the server does not follow
+redirects, such as the `http://` to `https://` one proxies usually send.
+
+With the bot CLI, save the URL in the profile instead of hard-coding it:
+`npm run cli -- config set publicUrl https://bot.example.com`, or
+`--public-url https://bot.example.com` in `setup --non-interactive`. The runner
+hands the value over in `MONKY_SERVE_PUBLIC_URL`, which the entry in the example
+above passes to `serve()`, and `start` and `doctor` then check the manifest
+through that URL. `config set publicUrl clear` goes back to announcing the host
+and port.
+
 Connectivity must also work **from the bot to the Monky server**. Registration
 sends the WebSocket URL the client used to reach the server, preserving its
 host, port and path; it does not turn a `0.0.0.0` listener into `localhost`.
@@ -167,11 +207,24 @@ bot.on('error', (err) => console.error(err));
 bot.on('serving', ({ port, manifest }) => console.log(`Manifest at :${port}/manifest`));
 ```
 
-## Security: TOFU (Trust On First Use)
+## Security: token and identity {#security-tofu-trust-on-first-use}
 
-On the first connection, the bot presents its **Ed25519 public key**. The server permanently binds it to the bot (TOFU binding). Future connections require the same key — if someone tries to use the token with a different key, it's rejected.
+The **token** is the bot's secret: whoever holds the token of a registration
+connects as the bot on that server. Treat it like a password. Keep the
+`registrationFile` with restricted access, never log the token (the `registered`
+event does not include it) and, in marketplace mode, use HTTPS through
+`publicUrl`. To reach the server, prefer `wss://`.
 
-In marketplace mode, TOFU binding happens automatically during installation.
+The **Ed25519 public key** only identifies the bot. On the first connection, the
+server binds the presented key to the bot (TOFU, *Trust On First Use*) and from
+then on rejects connections with a different key. This binding prevents an
+accidental identity swap, but it does **not** protect a leaked token: the key is
+public (it travels in the manifest and in commands), and the server does not ask
+for proof of possession of the private key. In marketplace mode, the binding
+happens during installation.
+
+If a token leaks, revoke the bot on the server and add it again. The new
+registration gets another token, and the bot keeps the same identity.
 
 > 💡 The [Monky Bot](https://github.com/MonkyOrg/MonkyBot) automatically generates and reuses its Ed25519 key pair. When building your own bot with the SDK, generate and persist your key using Node.js cryptography APIs and pass the public key in `publicKey`; do not generate a new identity on every restart.
 

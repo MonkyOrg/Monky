@@ -540,7 +540,7 @@ export class BotScreenFrame {
 
   private onLoad = (): void => {
     // Navigation is allowed, but the new page cannot inherit the authenticated bridge.
-    if (this.destroyed) return;
+    if (this.destroyed || !this.documentUrl) return;
     if (this.connected) {
       this.channel.port1.onmessage = null;
       this.channel.port1.close();
@@ -552,7 +552,9 @@ export class BotScreenFrame {
       return;
     }
     this.connected = true;
-    this.element.contentWindow?.postMessage('monky-screen-connect', '*', [this.channel.port2]);
+    // A document that navigated before its own load makes this the destination's load: only the
+    // miniapp's own origin may receive the port, so such a page is left without the bridge.
+    this.element.contentWindow?.postMessage('monky-screen-connect', new URL(this.documentUrl).origin, [this.channel.port2]);
     this.channel.port1.postMessage({ type: 'state', state: this.snapshot.state, revision: this.snapshot.revision } satisfies FrameUpdate);
     this.channel.port1.postMessage({ type: 'locale', locale: this.locale } satisfies FrameUpdate);
     // The document started with the volume of its creation; it may have changed while loading.

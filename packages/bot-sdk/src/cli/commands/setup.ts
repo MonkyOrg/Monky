@@ -2,7 +2,7 @@ import os from 'node:os';
 import type { BotLocale } from '@monky/shared';
 import { localizedText, MANIFEST_PORT_ID } from '../../tooling/requirements';
 import { CliError, cliErrorMessage, cliText } from '../locale';
-import { askCliChoice, askCliText } from '../prompts';
+import { askCliChoice, askCliValue } from '../prompts';
 import { readBotPublicKey } from '../keys';
 import {
   assertDeclaredPortAvailable, assertManifestPortAvailable, assertNoOwnPortConflict, type OwnPort, type PortUse,
@@ -31,6 +31,7 @@ import {
   validateBotName,
   validateBotToken,
   validatePublicHost,
+  validatePublicUrl,
   validateServerUrl,
   validateServePort,
   validateTokenEnv,
@@ -46,12 +47,13 @@ type NonInteractiveSetupInput = {
   botDir?: string;
 } & (
   | { mode: 'manual'; serverUrl: string; tokenEnv: string }
-  | { mode: 'marketplace'; servePort: number; publicHost: string }
+  | { mode: 'marketplace'; servePort: number; publicHost: string; publicUrl?: string }
 );
 
 const SETUP_CANCELLED_MESSAGE = 'Setup cancelado; a configuração não foi alterada.';
 
-type Ask = (question: string, secret?: boolean) => Promise<string>;
+/** Asks until `validate` accepts the answer (`askCliValue`); the setup's own questions all go through it. */
+type AskValue = <T>(question: string, validate: (value: string) => T | Promise<T>, secret?: boolean) => Promise<T>;
 
 type SetupMode = BotConfig['mode'];
 
@@ -68,20 +70,6 @@ function promptModeLabel(mode: SetupMode, locale: BotLocale): string {
 function promptModes(modes: readonly SetupMode[]): SetupMode[] {
   const preferredOrder: readonly SetupMode[] = ['marketplace', 'manual'];
   return preferredOrder.filter((mode) => modes.includes(mode));
-}
-
-async function validatedPrompt<T>(
-  locale: BotLocale, ask: Ask, question: string, validate: (value: string) => T | Promise<T>, secret = false,
-): Promise<T> {
-  while (true) {
-    const answer = await ask(question, secret);
-    try {
-      return await validate(answer);
-    } catch (error: unknown) {
-      if (!(error instanceof Error)) throw error;
-      console.error(color(cliErrorMessage(error, locale), ANSI.red));
-    }
-  }
 }
 
 function localIpv4(): string | null {
@@ -102,6 +90,7 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
   let tokenEnv: string | undefined;
   let servePort: number | undefined;
   let publicHost: string | undefined;
+  let publicUrl: string | undefined;
   let botName: string | undefined;
   let botDir: string | undefined;
   const ports = new Map<string, string>();
@@ -109,7 +98,8 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
     const argument = args[index];
     if (argument === '--non-interactive') continue;
     if (argument === '--yes' || argument === '-y') continue;
-    if (['--mode', '--server-url', '--token-env', '--serve-port', '--public-host', '--name', '--bot-dir', '--port'].includes(argument)) {
+    if (['--mode', '--server-url', '--token-env', '--serve-port', '--public-host', '--public-url', '--name', '--bot-dir', '--port']
+      .includes(argument)) {
       const value = args[++index];
       if (!value || value.startsWith('--')) throw new CliError(`${argument} requer um valor.`, `${argument} requires a value.`);
       if (argument === '--mode') {
@@ -120,6 +110,7 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
       else if (argument === '--token-env') tokenEnv = validateTokenEnv(value);
       else if (argument === '--serve-port') servePort = validateServePort(value);
       else if (argument === '--public-host') publicHost = validatePublicHost(value);
+      else if (argument === '--public-url') publicUrl = validatePublicUrl(value);
       else if (argument === '--name') botName = validateBotName(value);
       else if (argument === '--port') {
         const match = /^([a-z][a-z0-9-]{0,31})=(.+)$/.exec(value);
@@ -134,8 +125,9 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
   }
   const common = { ...(botName ? { botName } : {}), ...(botDir ? { botDir } : {}) };
   if (mode === 'manual') {
-    if (servePort !== undefined || publicHost !== undefined) throw new CliError('Opções de manifest exigem --mode marketplace.',
-      'Manifest options require --mode marketplace.');
+    if (servePort !== undefined || publicHost !== undefined || publicUrl !== undefined) {
+      throw new CliError('Opções de manifest exigem --mode marketplace.', 'Manifest options require --mode marketplace.');
+    }
     if (!serverUrl) throw new CliError('setup --non-interactive requer --server-url <ws://...>.',
       'setup --non-interactive requires --server-url <ws://...>.');
     return { input: { ...common, mode, serverUrl, tokenEnv: tokenEnv ?? DEFAULT_TOKEN_ENV }, ports };
@@ -144,7 +136,10 @@ function parseNonInteractiveSetup(args: string[]): { input: NonInteractiveSetupI
     'Server and token options require --mode manual.');
   if (!publicHost) throw new CliError('setup --non-interactive --mode marketplace requer --public-host <domínio-ou-IP>.',
     'setup --non-interactive --mode marketplace requires --public-host <hostname-or-IP>.');
-  return { input: { ...common, mode, servePort: servePort ?? DEFAULT_MARKETPLACE_PORT, publicHost }, ports };
+  return {
+    input: { ...common, mode, servePort: servePort ?? DEFAULT_MARKETPLACE_PORT, publicHost, ...(publicUrl ? { publicUrl } : {}) },
+    ports,
+  };
 }
 
 /** A declared port whose value this setup sets (and saves in the profile). */
@@ -231,7 +226,7 @@ async function checkNonInteractivePorts(
 }
 
 async function askDeclaredPorts(
-  context: CliContext, ask: Ask, states: readonly DeclaredPortState[], taken: OwnPort[], publicKey: string | undefined,
+  context: CliContext, askValue: AskValue, states: readonly DeclaredPortState[], taken: OwnPort[], publicKey: string | undefined,
   uses: PortUse[],
 ): Promise<DeclaredPortChoice[]> {
   const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
@@ -263,7 +258,7 @@ async function askDeclaredPorts(
       continue;
     }
     const suggested = String(state.port ?? requirement.defaultPort);
-    const port = await validatedPrompt(context.locale, ask, text(`Porta ${label} [${suggested}]: `, `${label} port [${suggested}]: `),
+    const port = await askValue(text(`Porta ${label} [${suggested}]: `, `${label} port [${suggested}]: `),
       async (answer) => {
         const target = ownPort(requirement, Number(validateDeclaredValue(state.resolved.variable, answer || suggested)));
         assertNoOwnPortConflict(target, others());
@@ -390,9 +385,9 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
   process.stdin.once('end', onClose);
   process.stdin.once('close', onClose);
   process.once('SIGINT', onClose);
-  const ask: Ask = async (question, secret = false) => {
+  const askValue: AskValue = async (question, validate, secret = false) => {
     if (closed) throw new Error(text(SETUP_CANCELLED_MESSAGE, 'Setup cancelled; the configuration was not changed.'));
-    return askCliText(context.locale, question.trim().replace(/:$/, ''), { secret });
+    return askCliValue(context.locale, question.trim().replace(/:$/, ''), validate, { secret });
   };
   try {
     console.log(color(`${context.displayName} — Setup`, ANSI.bold));
@@ -424,7 +419,7 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     const portStates = declaredPortStates(context.project.definition.requirements, readProfileEnvironment(context.homeDir),
       process.env, mode);
     const portUses: PortUse[] = [];
-    const botDir = await validatedPrompt(context.locale, ask, text(`Diretório de trabalho [${current.botDir}]: `, `Working directory [${current.botDir}]: `),
+    const botDir = await askValue(text(`Diretório de trabalho [${current.botDir}]: `, `Working directory [${current.botDir}]: `),
       (answer) => normalizeBotDir(answer || current.botDir));
     let config: BotConfig;
     console.log();
@@ -436,14 +431,14 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       console.log(text('  3. Copie o token exibido (só aparece uma vez!)', '  3. Copy the displayed token (it is shown only once!)'));
       console.log();
       const defaultUrl = current.mode === 'manual' ? current.serverUrl : DEFAULT_MANUAL_SERVER_URL;
-      const serverUrl = await validatedPrompt(context.locale, ask, text(`URL do servidor [${defaultUrl}]: `, `Server URL [${defaultUrl}]: `),
+      const serverUrl = await askValue(text(`URL do servidor [${defaultUrl}]: `, `Server URL [${defaultUrl}]: `),
         (answer) => validateServerUrl(answer || defaultUrl));
       const tokenHint = existing?.mode === 'manual'
         ? existing.botToken === undefined
           ? text(` [Enter mantém ${existing.tokenEnv}]`, ` [Enter keeps ${existing.tokenEnv}]`)
           : text(' [Enter mantém o atual]', ' [Enter keeps the current token]')
         : '';
-      const credentials = await validatedPrompt(context.locale, ask, text(`Token do bot${tokenHint}: `, `Bot token${tokenHint}: `), (answer): ManualBotCredentials => {
+      const credentials = await askValue(text(`Token do bot${tokenHint}: `, `Bot token${tokenHint}: `), (answer): ManualBotCredentials => {
         if (answer) return { botToken: validateBotToken(answer) };
         if (existing?.mode === 'manual') {
           return existing.botToken === undefined
@@ -460,7 +455,7 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
         'The manifest host and port must be reachable by the servers that will install the bot.'));
       console.log();
       const defaultPort = current.mode === 'marketplace' ? current.servePort : DEFAULT_MARKETPLACE_PORT;
-      const servePort = await validatedPrompt(context.locale, ask, text(`Porta do manifest [${defaultPort}]: `, `Manifest port [${defaultPort}]: `),
+      const servePort = await askValue(text(`Porta do manifest [${defaultPort}]: `, `Manifest port [${defaultPort}]: `),
         async (answer) => {
           const port = validateServePort(answer || String(defaultPort));
           assertNoOwnPortConflict({ id: MANIFEST_PORT_ID, protocol: 'tcp', port }, environmentPorts(portStates));
@@ -471,17 +466,23 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       console.log(text(`Informe o IP ou domínio público desta máquina.${detectedIp ? ` (IP local detectado: ${detectedIp})` : ''}`,
         `Enter this machine's public IP or domain.${detectedIp ? ` (Detected local IP: ${detectedIp})` : ''}`));
       const defaultHost = existing?.mode === 'marketplace' ? existing.publicHost : '';
-      const publicHost = await validatedPrompt(context.locale, ask, text(`Host público${defaultHost ? ` [${defaultHost}]` : ''}: `,
+      const publicHost = await askValue(text(`Host público${defaultHost ? ` [${defaultHost}]` : ''}: `,
         `Public host${defaultHost ? ` [${defaultHost}]` : ''}: `),
         (answer) => validatePublicHost(answer || defaultHost));
       if (['localhost', '127.0.0.1', '::1', '[::1]'].includes(publicHost.toLowerCase())) {
         console.log(color(text('Host local: somente servidores na mesma máquina conseguirão acessar.',
           'Local host: only servers on this machine will be able to connect.'), ANSI.yellow));
       }
-      config = marketplaceConfig(context, { botDir, botName: current.botName, servePort, publicHost });
+      // A TLS proxy URL is an advanced choice made with config set; redoing setup must not drop it.
+      const publicUrl = existing?.mode === 'marketplace' ? existing.publicUrl : undefined;
+      if (publicUrl) {
+        console.log(text(`URL pública mantida: ${publicUrl}. Para alterar, use "${context.cliName} config set publicUrl".`,
+          `Public URL kept: ${publicUrl}. To change it, use "${context.cliName} config set publicUrl".`));
+      }
+      config = marketplaceConfig(context, { botDir, botName: current.botName, servePort, publicHost, publicUrl });
     }
-    const declaredChoices = await askDeclaredPorts(context, ask, portStates, manifestPort(config), publicKey, portUses);
-    config = { ...config, botName: await validatedPrompt(context.locale, ask, text(`Nome do bot [${current.botName}]: `, `Bot name [${current.botName}]: `),
+    const declaredChoices = await askDeclaredPorts(context, askValue, portStates, manifestPort(config), publicKey, portUses);
+    config = { ...config, botName: await askValue(text(`Nome do bot [${current.botName}]: `, `Bot name [${current.botName}]: `),
       (answer) => validateBotName(answer || current.botName)) };
 
     if (config.mode === 'marketplace') {

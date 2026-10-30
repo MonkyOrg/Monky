@@ -1,39 +1,9 @@
-import {
-  AdminKickVoicePayload,
-  AdminMoveUserPayload,
-  AuthSuccessPayload,
-  ChannelCreatedPayload,
-  ChannelDeletedPayload,
-  ChannelUpdatedPayload,
-  ChannelsReorderedPayload,
-  ChatHistoryPayload,
-  ChatMessageUpdatedPayload,
-  ChatMessage,
-  chatReactionEventSchema,
-  MessageType,
-  type NativeScreenEvent,
-  nativePollSchema,
-  MemberKickedPayload,
-  Permission,
-  ProtocolErrorCode,
-  RolesListPayload,
-  ServerErrorPayload,
-  ServerSettingsUpdatedPayload,
-  UserJoinedPayload,
-  UserLeftPayload,
-  UserConnectionStatePayload,
-  UserUpdatedPayload,
-  VoiceStateChangedPayload,
-  VoiceRestrictionsUpdatedPayload,
-  VoiceUserJoinedPayload,
-  VoiceUserLeftPayload,
-  hasEveryoneMention,
-  getMessageText,
-} from '@monky/shared';
+// First import: marks when the bundle starts running.
+import { markStartup, startupTimings } from './core/startupTiming';
+import { MessageType, Permission, type AppIdentityStatus, type AuthSuccessPayload } from '@monky/shared';
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
-import { networkClient, type ConnectionStatus } from './core/NetworkClient';
-import { callClient, leaveCurrentCall, rejoinCallOnSession, showHome, suspendCallForNetworkLoss } from './core/serverConnection';
+import { leaveCurrentCall, rejoinCallOnSession, showHome } from './core/serverConnection';
 import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
@@ -41,14 +11,10 @@ import { gamePresence } from './core/GamePresenceController';
 import { gameShareRequests } from './core/GameShareRequests';
 import { gameShareSuggestion } from './core/GameShareSuggestion';
 import { afkMonitor } from './core/AfkMonitor';
-import type { LocalExecutionTaskNotice } from './core/LocalExecutionController';
-import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
-import { presentServerShutdownNotice } from './core/serverShutdownNotice';
+import { currentEventOrigin, isForegroundEvent } from './core/sessionRouting';
 import { soundEffects } from './core/SoundEffects';
-import type { CommunityStartNotice } from './core/CommunityFeed';
 import { soundboardService } from './core/SoundboardService';
 import { keybindService } from './core/KeybindService';
-import { isCallInAfkChannel, toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute, updateLocalSpeaking } from './core/voiceControls';
 import { updateService } from './core/UpdateService';
 import { videoService } from './core/VideoService';
 import { webRtcManager } from './core/WebRtcManager';
@@ -65,21 +31,16 @@ import { addServerModal } from './views/addServer/AddServerModal';
 import { MainView } from './views/MainView';
 import { HomeView } from './views/home/HomeView';
 import { hasValidLocalProfile, showIdentityProfileStep } from './views/IdentityProfileStep';
-import { screenAudioService } from './core/ScreenAudioService';
 import { stopLocalScreenShares } from './core/screenShareControls';
 import { screenSharePickerModal } from './views/ScreenSharePickerModal';
 import { showAlert } from './views/Dialog';
-import { showInfoToast } from './views/CopyToast';
-import { showIdentityImportDialog } from './views/IdentityDialogs';
-import { getLanguage, initI18n, t } from './i18n';
-import { translateProtocolError } from './i18n/protocolErrors';
-import { toAbsoluteServerIconUrl } from './utils/avatar';
-import { afkChannelIdOf } from './utils/voiceRooms';
+import { reportError } from './utils/feedback';
+import { showIdentityOnboarding } from './views/IdentityOnboarding';
+import { initI18n, t } from './i18n';
 import { installImageFallback } from './utils/imageFallback';
 import { clientLog } from './core/ClientLogService';
 import { startResponsivenessMonitor } from './core/ResponsivenessMonitor';
 import { overlayBridgeService } from './core/OverlayBridgeService';
-import { OverlayStageView } from './views/OverlayStageView';
 import { bindBotChatEvents } from './core/botChatEvents';
 import { bindBotScreenEvents } from './core/botScreenEvents';
 import { bindBotVoiceCommandEvents } from './core/botVoiceCommandEvents';
@@ -87,10 +48,16 @@ import { selectEnhancer } from './core/SelectEnhancer';
 import { dateTimeControls } from './core/DateTimeControls';
 import { initTooltips } from './core/TooltipService';
 import { bindCameraPublication } from './core/CameraPublication';
-import { cameraEffectErrorMessage } from './utils/cameraEffectErrors';
 import { AutoEntryService } from './core/AutoEntryService';
 import { runFatalBootstrap } from './utils/fatalBootstrap';
 import { prepareDevelopmentQaProfile, startDevelopmentQa } from './core/DevelopmentQa';
+import { bindServerStateEvents, hydrateServerSession } from './core/serverStateEvents';
+import { bindChatEvents } from './core/chatEvents';
+import { adoptCallAfterSignIn, bindVoiceEvents, callBeforeSignIn, resumeCallAfterSignIn } from './core/voiceEvents';
+import { syncSavedServer } from './core/savedServerSync';
+import { bindUserNotices } from './core/userNotices';
+import { bindTraySync } from './core/traySync';
+import { bindKeybindActions } from './core/keybindActions';
 
 class App {
   private appContainer: HTMLElement;
@@ -123,7 +90,7 @@ class App {
       webRtcManager.suspendForVoiceReconnect();
       audioProcessor.stopMicrophone();
       videoService.stopCamera();
-      const stoppedScreens = stopLocalScreenShares(screenAudioService, { teardown: true });
+      const stoppedScreens = stopLocalScreenShares({ teardown: true });
       voiceStore.setCameraOn(false);
       voiceStore.setSpeaking(false);
       voiceStore.setReconnecting(true);
@@ -172,22 +139,17 @@ class App {
       disposeTooltips();
     }, { once: true });
 
-    const isOverlay = window.location.search.includes('overlay=1');
-    if (isOverlay) {
-      initI18n();
-      new OverlayStageView(this.appContainer).init();
-      return;
-    }
+    // The overlay window loads overlay.html, not this app: microphone, push-to-talk,
+    // cues and soundboard start here, in the main window only (R-MEDIA-3).
+    audioProcessor.init();
+    soundEffects.init();
+    soundboardService.init();
 
     // Routes incoming server events to the right state bundle. It must be in
     // place before any connection exists, otherwise the first events would be
     // applied to whatever store happens to be active (#400).
     sessionManager.install();
     const stopResponsivenessMonitor = startResponsivenessMonitor();
-    appEvents.on<CommunityStartNotice>('community.event_started', notice => {
-      soundEffects.play('chat_message');
-      showInfoToast(t('community.started', { event: notice.title, server: notice.serverName }), 7000);
-    });
     // Only starts polling if the person turned game sharing on (#675).
     gamePresence.start();
     gameShareRequests.start();
@@ -195,7 +157,7 @@ class App {
     afkMonitor.start();
     this.homeView = new HomeView();
     this.mainView = new MainView(this.appContainer, this.homeView);
-    appEvents.on<string>('dm.open', (peer) => {
+    appEvents.on('dm.open', (peer) => {
       this.homeView.openConversation(peer);
       if (!sessionManager.isHome()) showHome();
     });
@@ -225,23 +187,36 @@ class App {
   }
 
   private async init(): Promise<void> {
-    // Initialise client logging (#444)
-    await clientLog.init();
-    clientLog.info('APP', 'Renderer process initialising');
-
     initI18n();
 
-    const developmentQa = await window.api?.getDevelopmentQaConfig?.() ?? null;
-    if (developmentQa) await prepareDevelopmentQaProfile(developmentQa);
-
-    // Check if identity exists BEFORE rendering anything
-    if (window.api?.hasIdentity) {
-      connectionStore.hasIdentity = await window.api.hasIdentity();
+    // Startup reads that do not depend on each other run together (R-SHELL-14).
+    // Prepared QA creates its identity first, so the status is read again after it.
+    const readIdentityStatus = (): Promise<AppIdentityStatus> => window.api?.getIdentityStatus
+      ? window.api.getIdentityStatus()
+      : Promise.resolve({ state: 'missing' });
+    // Initialise client logging (#444)
+    let [, developmentQa, identityStatus] = await Promise.all([
+      clientLog.init(),
+      window.api?.getDevelopmentQaConfig?.() ?? Promise.resolve(null),
+      readIdentityStatus(),
+    ]);
+    clientLog.info('APP', 'Renderer process initialising');
+    if (developmentQa) {
+      await prepareDevelopmentQaProfile(developmentQa);
+      identityStatus = await readIdentityStatus();
     }
 
+    // Check the identity BEFORE rendering anything. An identity that exists but
+    // could not be opened is never replaced on its own (#490): the onboarding
+    // offers to try again, import or explicitly create another one.
+    connectionStore.hasIdentity = identityStatus.state === 'ready';
+
     if (!connectionStore.hasIdentity) {
-      // Show onboarding screen and wait for identity to be created/imported
-      await this.showIdentityOnboarding();
+      const identity = await showIdentityOnboarding(this.appContainer, identityStatus, () => this.signalRendererReady());
+      connectionStore.setIdentity(identity);
+      // Monky always runs maximized once an identity exists; only the compact
+      // first-launch identity card is shown in the smaller window.
+      void window.api?.maximize?.().catch(() => clientLog.warn('APP', 'Could not maximize after choosing an identity'));
     }
 
     // At this point, identity is guaranteed to exist
@@ -249,6 +224,7 @@ class App {
       const identity = await window.api.getIdentity();
       connectionStore.setIdentity(identity);
     }
+    markStartup('identity');
 
     connectionStore.loadUserProfile();
     if (!hasValidLocalProfile()) {
@@ -256,7 +232,7 @@ class App {
     }
 
     this.setupGlobalEventListeners();
-    this.setupTraySync();
+    bindTraySync({ isWatchingBotScreen: () => this.mainView.isWatchingAnyBotScreen() });
 
     // Initialize and sync quality preset to WebRtcManager and VideoService (#474)
     void webRtcManager.setQualityPreset(settingsStore.qualityPreset);
@@ -264,23 +240,31 @@ class App {
     // Initialize overlay bridge service (#169)
     overlayBridgeService.init((sessionId, shareId) => webRtcManager.getScreenCaptureMode(sessionId, shareId));
 
-    // Friends and DMs need the identity; the transport rides on server
-    // sessions, so it must be listening before auto-entry connects them.
-    await dmStore.init().catch((error: unknown) => {
+    // Friends and DMs need the identity. Their store opens in the main process
+    // (keys and the encrypted history), so Home is drawn without waiting for it
+    // and shows the conversations as soon as they load (R-SHELL-14).
+    const directMessages = dmStore.init().catch((error: unknown) => {
       clientLog.error('DM', 'Direct messages failed to start', { error: error instanceof Error ? error.message : String(error) });
     });
-    this.unbindDm = bindDmNotifications();
-    // Nickname/avatar follow the identity across devices; runs once DMs are up.
-    void initProfileSync().then((off) => { this.unbindProfileSync = off; });
 
     // The product now lands on Home: server connections are opened from the rail
     // or in the background after the shell has painted.
     sessionManager.showHome();
     this.mainView.render();
+    markStartup('home');
 
     // The main UI has now been written to the DOM — let the main process lift
     // the post-update splash once it actually paints (#498).
     this.signalRendererReady();
+
+    // The DM transport rides on server sessions, so it must be listening before
+    // invitations or auto-entry connect them.
+    await directMessages;
+    markStartup('dm');
+    this.unbindDm = bindDmNotifications();
+    // Nickname/avatar follow the identity across devices; runs once DMs are up.
+    void initProfileSync().then((off) => { this.unbindProfileSync = off; });
+
     this.unbindInvites = window.api?.onServerInviteAvailable?.(() => { void this.consumeServerInvites(); }) ?? null;
     const invitations = this.consumeServerInvites();
 
@@ -311,7 +295,7 @@ class App {
     }
 
     // Debug helper to check voice engine status in console
-    (window as any).debugVoice = () => {
+    window.debugVoice = () => {
       const status = webRtcManager.getVoiceStatus();
       console.log('%c🎙️ [Monky Voice Status]', 'color: #5865f2; font-weight: bold; font-size: 14px;');
       console.table(status);
@@ -334,14 +318,14 @@ class App {
           this.autoEntryService.dispose();
           if (!pending.ok) {
             clientLog.warn('CONNECTION', 'Invalid server invitation');
-            await showAlert({ message: t('invite.invalidLink'), variant: 'danger' });
+            reportError(t('invite.invalidLink'));
           } else {
             await joinInviteModal.open(pending.invite);
           }
         }
       } catch (error: unknown) {
         clientLog.warn('CONNECTION', 'Could not process the pending server invitation');
-        if (!this.disposed) await showAlert({ message: t('invite.readFailed'), variant: 'danger' });
+        if (!this.disposed) reportError(t('invite.readFailed'));
       }
       return received;
     })();
@@ -362,109 +346,10 @@ class App {
     this.rendererReadySignalled = true;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        markStartup('painted');
         window.api?.signalRendererReady?.();
+        clientLog.info('APP', 'Renderer startup timing', startupTimings());
       });
-    });
-  }
-
-  private showIdentityOnboarding(): Promise<void> {
-    return new Promise((resolve) => {
-      const logoUrl = new URL('./assets/Logo.png', import.meta.url).href;
-      this.appContainer.innerHTML = `
-        <div class="identity-onboarding">
-          <img src="${logoUrl}" alt="Monky" style="width: 120px; height: 120px; object-fit: contain; margin-bottom: 16px; filter: drop-shadow(0 4px 16px rgba(88, 101, 242, 0.4));">
-          <h1 style="font-size: 28px; font-weight: 700; margin: 0 0 8px; color: var(--text-primary);">Monky</h1>
-          <p style="font-size: 14px; color: var(--text-secondary); margin: 0 0 32px; text-align: center; max-width: 360px; line-height: 1.5;">
-            ${t('identity.onboardingDesc')}
-          </p>
-          <div style="display: flex; flex-direction: column; gap: 12px; width: 280px;">
-            <button type="button" id="btn-onboard-create" class="btn btn-primary" style="padding: 14px 24px; font-size: 15px; font-weight: 600;">
-              <span class="material-symbols-outlined md-20" style="margin-right: 8px;">add_circle</span>
-              ${t('identity.onboardingCreate')}
-            </button>
-            <button type="button" id="btn-onboard-import" class="btn btn-secondary" style="padding: 14px 24px; font-size: 15px;">
-              <span class="material-symbols-outlined md-20" style="margin-right: 8px;">qr_code_scanner</span>
-              ${t('identity.onboardingImport')}
-            </button>
-          </div>
-        </div>
-      `;
-
-      // Onboarding is the first real paint for a user without an identity; let
-      // the main process lift the post-update splash here too (#498).
-      this.signalRendererReady();
-
-      // Monky always runs maximized once an identity exists; only the compact
-      // first-launch identity card above is shown in the smaller window.
-      const maximizeForApp = (): void => {
-        void window.api?.maximize?.().catch(() => clientLog.warn('APP', 'Could not maximize after choosing an identity'));
-      };
-
-      document.getElementById('btn-onboard-create')?.addEventListener('click', async () => {
-        // Generate identity
-        if (window.api?.getIdentity) {
-          const identity = await window.api.getIdentity();
-          connectionStore.setIdentity(identity);
-          connectionStore.hasIdentity = true;
-        }
-        maximizeForApp();
-        resolve();
-      });
-
-      document.getElementById('btn-onboard-import')?.addEventListener('click', async () => {
-        const result = await showIdentityImportDialog();
-        if (result) {
-          connectionStore.setIdentity(result);
-          connectionStore.hasIdentity = true;
-          maximizeForApp();
-          resolve();
-        }
-      });
-    });
-  }
-
-  private setupTraySync(): void {
-    const syncTrayVoiceStatus = () => {
-      window.api?.updateTrayVoiceStatus({
-        inCall: !!voiceStore.currentVoiceChannelId,
-        isMuted: voiceStore.getEffectiveMuted(),
-        isDeafened: voiceStore.getEffectiveDeafened(),
-        isSpeaking: voiceStore.isSpeaking,
-        selfMuted: voiceStore.isMuted,
-        selfDeafened: voiceStore.isDeafened,
-        micLock: voiceStore.permissionMuted ? (isCallInAfkChannel() ? 'afk' : 'permission') : null,
-        isWatching: voiceStore.isWatchingAnyScreenShare() || this.mainView.isWatchingAnyBotScreen(),
-        isPlayingSound: soundboardService.isPlayingOwnSound(),
-        isRecording: voiceStore.isCameraOn || voiceStore.isScreenSharing,
-      });
-    };
-
-    appEvents.on('voice.state_updated', syncTrayVoiceStatus);
-    appEvents.on('voice.speaking_changed', syncTrayVoiceStatus);
-    appEvents.on('voice.channel_changed', syncTrayVoiceStatus);
-    // Watching someone's screen or a miniapp puts 3D glasses on the tray monkey.
-    appEvents.on('voice.screen_watch_changed', syncTrayVoiceStatus);
-    appEvents.on('stage.bot_screens_changed', syncTrayVoiceStatus);
-    // Our own soundboard sound puts a megaphone in its hand (a pause counts as stopping).
-    appEvents.on('soundboard.playback_started', syncTrayVoiceStatus);
-    appEvents.on('soundboard.playback_changed', syncTrayVoiceStatus);
-    appEvents.on('soundboard.playback_ended', syncTrayVoiceStatus);
-
-    // Initial sync
-    syncTrayVoiceStatus();
-
-    // Tray context menu and Windows taskbar thumbnail actions
-    window.api?.onTrayToggleMute(() => {
-      toggleMicrophoneMute();
-    });
-
-    window.api?.onTrayToggleDeafen(() => {
-      toggleAudioDeafen();
-    });
-
-    // Same path as the hang-up button in the sidebar's voice connection row.
-    window.api?.onTrayLeaveCall(() => {
-      this.mainView.voiceStageView?.leaveVoice();
     });
   }
 
@@ -504,98 +389,40 @@ class App {
     document.getElementById('win-close')?.addEventListener('click', () => window.api?.close());
   }
 
-  private syncLocalVoiceMediaState(): void {
-    audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-    audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-    webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
-    void webRtcManager.syncMicrophonePublication().catch((error: unknown) => {
-      clientLog.warn('AUDIO', 'Could not publish the microphone after Speak was allowed', { error: String(error) });
-    });
-    if (voiceStore.permissionMuted && screenAudioService.getIsCapturing()) {
-      void screenAudioService.stop().catch((error: unknown) => {
-        clientLog.warn('SCREEN_SHARE', 'Could not stop screen audio after permission mute', { error: String(error) });
-      });
-    }
-    if (voiceStore.permissionMuted && voiceStore.currentVoiceChannelId && voiceStore.isScreenSharing) {
-      callClient().send(MessageType.VOICE_STATE_UPDATE, webRtcManager.getLocalScreenState());
-    }
-  }
-
   /**
-   * Whether the event being handled came from the server hosting the call.
-   *
-   * Voice, microphone and peer connections are global — there is only one of
-   * each machine-wide — so handlers that touch them must ignore events from the
-   * other connected servers (#400).
+   * Wires what the app does on its own: navigation, server traffic, voice,
+   * shortcuts and notices. Each domain lives in its own `bind*` module; the
+   * app keeps the root navigation and the order in which a sign-in and a
+   * disconnection touch stores, call and screen.
    */
-  private eventOwnsCall(): boolean {
-    const voiceKey = voiceStore.voiceSessionKey;
-    if (!voiceKey) return true;
-    const origin = currentEventOrigin();
-    return !origin || origin === voiceKey;
-  }
-
-  private setupGlobalEventListeners(): void {    // Global Keybind Actions (#252)
+  private setupGlobalEventListeners(): void {
     const renderHome = (): void => {
       void window.api?.setWindowInServer?.(false);
       this.mainView.render();
     };
-    const unbindNavigation = [
+    const unbindOnPageHide = [
       appEvents.on('navigation.home', renderHome),
       appEvents.on('session.changed', ({ key }: { key: string | null }) => {
         if (!key || sessionManager.isHome() || !sessionManager.get(key)?.serverStore.serverDetails) return;
         this.mainView.render();
       }),
       appEvents.on('session.connections_changed', () => {
-        if (sessionManager.isHome() || !sessionManager.getAll().length) renderHome();
+        // Inside a server that is gone there is nothing left to show but Home.
+        if (!sessionManager.isHome() && !sessionManager.getAll().length) renderHome();
+        // Anywhere else connections only show on the rail and the call row:
+        // rebuilding the layout would also rebuild an open DM, losing what was
+        // being typed and attached.
+        else this.mainView.refreshConnections();
       }),
+      bindCameraPublication(),
+      bindUserNotices(),
     ];
-    window.addEventListener('pagehide', () => unbindNavigation.forEach(unbind => unbind()), { once: true });
-    const unbindCameraPublication = bindCameraPublication();
-    window.addEventListener('pagehide', unbindCameraPublication, { once: true });
-    const unbindLocalExecution = appEvents.on('localExecution.task_failed', (notice: LocalExecutionTaskNotice) => {
-      if (!sessionManager.get(notice.sessionKey)) return;
-      void showAlert({
-        title: t('settings.tabLocalTools'),
-        message: t('localExecution.taskFailed', {
-          bot: notice.botName, server: notice.serverName, error: t(`localExecution.failure.${notice.reason}`),
-        }),
-        variant: 'danger',
-      });
-    });
-    window.addEventListener('pagehide', unbindLocalExecution, { once: true });
-    appEvents.on<unknown>('camera.error_notice', (error) => {
-      void showAlert({
-        title: t('stage.cameraErrorTitle'),
-        message: cameraEffectErrorMessage(error),
-        variant: 'danger',
-      });
-    });
+    window.addEventListener('pagehide', () => unbindOnPageHide.forEach(unbind => unbind()), { once: true });
+
     appEvents.on('voice.join_requested', () => this.voiceModeReconnect.cancel());
-    appEvents.on('voice.rejoin_failed', (payload: { error: string }) => {
-      void showAlert({
-        title: t('voiceReconnect.failedTitle'),
-        message: t('voiceReconnect.failed', { error: payload.error }),
-        variant: 'danger',
-      });
-    });
-    appEvents.on('voice.microphone_failed', (payload: { error: string }) => {
-      void showAlert({
-        title: t('voiceJoin.microphoneTitle'),
-        message: t('voiceJoin.microphoneUnavailable', { error: payload.error }),
-        variant: 'danger',
-      });
-    });
-    appEvents.on('audio.processing_error', () => {
-      void showAlert({
-        title: t('audioNoise.title'),
-        message: t('audioNoise.processingFailed'),
-        variant: 'danger',
-      });
-    });
     appEvents.on('voice.channel_changed', () => this.voiceModeReconnect.validate());
     for (const event of ['network.status', `message.${MessageType.ROLES_LIST}`,
-      `message.${MessageType.CHANNEL_DELETED}`, `message.${MessageType.CHANNEL_UPDATED}`]) {
+      `message.${MessageType.CHANNEL_DELETED}`, `message.${MessageType.CHANNEL_UPDATED}`] as const) {
       appEvents.on(event, () => {
         // Validation runs after all synchronous handlers have updated the
         // scoped stores; it reads the captured call, never foreground globals.
@@ -603,31 +430,7 @@ class App {
       });
     }
 
-    appEvents.on('keybind.toggle_mute', () => {
-      toggleMicrophoneMute();
-    });
-
-    appEvents.on('keybind.toggle_deafen', () => {
-      toggleAudioDeafen();
-    });
-
-    appEvents.on('keybind.toggle_camera', () => {
-      if (voiceStore.currentVoiceChannelId) {
-        void this.mainView.voiceStageView?.toggleCamera();
-      }
-    });
-
-    appEvents.on('keybind.toggle_screen_share', () => {
-      if (voiceStore.currentVoiceChannelId) {
-        appEvents.emit('modal.open_screenshare_picker');
-      }
-    });
-
-    appEvents.on('keybind.toggle_soundboard_mute', toggleSoundboardMute);
-
-    appEvents.on('keybind.stop_soundboard', () => {
-      if (voiceStore.currentVoiceChannelId) soundboardService.stopAllFromUi();
-    });
+    bindKeybindActions({ toggleCamera: () => this.mainView.toggleCamera() });
 
     // Language switch (#16): re-render whichever screen is on, so every label
     // built into the templates comes back in the new language.
@@ -635,505 +438,16 @@ class App {
       this.mainView.render(true);
     });
 
-    // Network Connect / Disconnect
-    appEvents.on('network.connected', (payload: AuthSuccessPayload) => {
-      const origin = currentEventOrigin();
-      const connectedSession = origin ? sessionManager.get(origin) : undefined;
-      if (connectedSession) {
-        connectionStore.rememberSavedServerIdentity(connectedSession.host, connectedSession.port, payload.server.id);
-      }
-      // Voice is a single physical resource shared by every session (#400), so
-      // only the connection actually hosting the call may touch it. Without
-      // this, connecting to a second server would tear down an ongoing call.
-      const ownsCall = !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === origin;
-      // Preserve the voice channel we were in so we can auto-rejoin after an
-      // automatic reconnection (null on a fresh connect, so this no-ops then).
-      const previousVoiceChannelId = ownsCall ? voiceStore.currentVoiceChannelId : null;
-      // Same server and identity as before the drop: the view on screen is
-      // still right, it only has to catch up.
-      const resumingView = serverStore.serverDetails?.id === payload.server.id
-        && serverStore.currentUser?.id === payload.currentUser.id;
+    appEvents.on('network.connected', (payload: AuthSuccessPayload) => this.handleSignedIn(payload));
+    appEvents.on('network.disconnected', () => this.handleDisconnected());
 
-      chatStore.setCommandUsageScope({ serverId: payload.server.id, callerId: payload.currentUser.id });
-      serverStore.setServerDetails(payload.server, payload.currentUser);
-      serverStore.updateVoiceRestrictions(payload.currentUser.id, payload.voiceRestrictions);
-      // The in-server layout needs more room than the connection card (#342).
-      if (isForegroundEvent()) void window.api?.setWindowInServer?.(true);
-      // Seed unread @-mention badges, including mentions received while this
-      // user was offline (#14).
-      chatStore.setMentions(payload.server.mentionedChannelIds ?? []);
-      participantManager.clear();
-      participantManager.setUsers(payload.server.members);
-
-      // Populate existing voice states
-      const knownVoiceUsers = new Map(payload.server.knownMembers?.map((user) => [user.id, user]));
-      for (const [_, state] of Object.entries(payload.server.voiceStates)) {
-        // Invisible users are absent from the online member list, but their
-        // physical voice session still exists and can still carry media.
-        if (!participantManager.get(state.sessionId)) {
-          const user = knownVoiceUsers.get(state.userId);
-          if (user) participantManager.addUser({ ...user, sessionId: state.sessionId });
-        }
-        participantManager.updateVoiceState(state);
-      }
-
-      const myVoiceState = payload.currentUser.sessionId
-        ? payload.server.voiceStates[payload.currentUser.sessionId]
-        : undefined;
-      if (myVoiceState && (!ownsCall || !previousVoiceChannelId)) {
-        // A half-open server socket may still remember the room the user left
-        // while offline. Authentication must not restore that abandoned call.
-        networkClient.send(MessageType.VOICE_LEAVE, { channelId: myVoiceState.channelId });
-        participantManager.removeVoiceState(myVoiceState.sessionId);
-      }
-      if (ownsCall) {
-        const resumingChannel = myVoiceState?.channelId === previousVoiceChannelId;
-        voiceStore.setServerMuted(resumingChannel && !!myVoiceState?.serverMuted);
-        voiceStore.setServerDeafened(resumingChannel && !!myVoiceState?.serverDeafened);
-        voiceStore.setPermissionMuted(resumingChannel && !!myVoiceState?.permissionMuted);
-        this.syncLocalVoiceMediaState();
-
-        webRtcManager.setCurrentSessionId(payload.currentUser.sessionId || payload.currentUser.id);
-        // Adopt the relay this server offers before any peer connection is
-        // opened, so calls started right after login can already use it (#425).
-        webRtcManager.setIceServers(payload.iceServers);
-        // Drop any stale peer connections left over from a dropped session.
-        webRtcManager.closeAllPeers();
-      }
-
-      if (isForegroundEvent()) {
-        if (resumingView) this.mainView.refreshAfterReconnect();
-        else this.mainView.render();
-      }
-
-      // Persist the server icon on the saved server entry so the rail shows it
-      // even when not connected (#301).
-      if (payload.server.iconUrl) {
-        const url = networkClient.getCurrentServerUrl();
-        if (url) {
-          const match = url.match(/\/\/([^:]+):(\d+)/);
-          if (match) {
-            const port = parseInt(match[2], 10);
-            connectionStore.updateSavedServerIcon(
-              match[1],
-              port,
-              toAbsoluteServerIconUrl(match[1], port, payload.server.iconUrl)
-            );
-          }
-        }
-      }
-
-      const stillHasVoiceChannel =
-        !!previousVoiceChannelId &&
-        payload.server.channels.some(
-          (c) => c.id === previousVoiceChannelId && c.type === 'VOICE'
-        );
-      if (stillHasVoiceChannel) {
-        // A background server that reconnected has to rejoin through its own
-        // session: the view-driven path would migrate the call here (#400).
-        if (isForegroundEvent()) {
-          this.mainView.rejoinVoiceChannel(previousVoiceChannelId!);
-        } else if (origin) {
-          void rejoinCallOnSession(origin, previousVoiceChannelId!);
-        }
-      } else if (previousVoiceChannelId) {
-        leaveCurrentCall(false);
-        clientLog.warn('CONNECTION', 'Voice channel is no longer available after reconnection', {
-          channelId: previousVoiceChannelId,
-        });
-        emitOutsideRouting(() => appEvents.emit('voice.rejoin_failed', { error: t('voiceReconnect.unavailable') }));
-      }
-    });
-
-    appEvents.on('network.status', (status: ConnectionStatus) => {
-      if (status === 'RECONNECTING') {
-        const origin = currentEventOrigin();
-        if (origin) suspendCallForNetworkLoss(origin);
-      }
-      if (status !== 'CONNECTED') {
-        chatStore.finishAllInvocations('caller_disconnected');
-        chatStore.setCommands([]);
-      }
-    });
-
-    appEvents.on('network.disconnected', () => {
-      const origin = currentEventOrigin();
-      const ownsCall = !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === origin;
-      // A server restart, update or removal drops the call just like a voice
-      // kick: leaving it plays the leave cue (callCues), as any other ending.
-      if (ownsCall) leaveCurrentCall(false);
-
-      // The stores resolve to the session that dropped, so this clears the
-      // right bundle even when a background server is the one going away.
-      serverStore.clear();
-      chatStore.clear();
-      participantManager.clear();
-
-      // This event only fires once a socket is gone for good — a client that
-      // still intends to retry emits `network.reconnecting` instead. Leaving the
-      // dead session in the map would show it as connected on the rail and let a
-      // click "switch" to a server that is no longer there (#400).
-      if (origin) sessionManager.remove(origin);
-
-      // A background server dropping must not disturb what is on screen (#400).
-      if (!isForegroundEvent()) return;
-
-      // Another server may still be connected — typically the one hosting the
-      // call. Showing it beats dumping the user on the connection screen while
-      // they are still talking to someone.
-      const next = sessionManager
-        .getBackground()
-        .find((session) => session.client.getStatus() === 'CONNECTED');
-      if (next) {
-        sessionManager.activate(next.key);
-        return;
-      }
-
-      // Nothing left to show: return to Home while keeping the rail available.
-      sessionManager.showHome();
-      void window.api?.setWindowInServer?.(false);
-      this.mainView.render();
-    });
-
-    // Protocol Server -> Client Broadcast Handlers
-    appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: ServerSettingsUpdatedPayload) => {
-      serverStore.updateServerMeta(payload.name, payload.hasPassword, payload.allowSoundboard, payload.iconUrl,
-        payload.attachmentStorage, payload.maxUsers, payload.turnEnabled, payload.allowEveryoneMention,
-        payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone, payload.maxMessageLength,
-        payload.messageDeleteUndoSeconds, payload.recentSoundCacheEnabled, payload.recentSoundCacheLimit,
-        payload.dmRelayEnabled, { channelId: payload.afkChannelId, timeoutSeconds: payload.afkTimeoutSeconds });
-      serverStore.setTurnAvailability(payload.turnAvailability);
-      const origin = currentEventOrigin();
-      if (!origin) return;
-      this.voiceModeReconnect.settingsUpdated(origin, payload);
-      if (voiceStore.voiceSessionKey === origin) void webRtcManager.handleVoiceModeUpdate();
-    });
-
-    appEvents.on(`message.${MessageType.USER_JOINED}`, (payload: UserJoinedPayload) => {
-      serverStore.addMember(payload.user);
-      participantManager.addUser(payload.user);
-    });
-
-    appEvents.on(`message.${MessageType.ROLES_LIST}`, (payload: RolesListPayload) => {
-      serverStore.updateRoles(payload.roles, payload.userRoles, payload.everyonePermissions);
-      for (const channel of serverStore.serverDetails?.channels ?? []) {
-        if (!serverStore.hasPermission(Permission.READ_MESSAGES, channel.id)) chatStore.revokeChannel(channel.id);
-        else if (!serverStore.hasPermission(Permission.SEND_MESSAGES, channel.id) ||
-            !serverStore.hasPermission(Permission.USE_BOT_COMMANDS, channel.id)) chatStore.finishChannelInvocations(channel.id);
-      }
-    });
-
-    appEvents.on(`message.${MessageType.USER_LEFT}`, (payload: UserLeftPayload) => {
-      if (payload.sessionId) {
-        participantManager.removeUser(payload.sessionId);
-        // Peers belong to the call, which may live on another server (#400).
-        if (this.eventOwnsCall()) webRtcManager.removePeer(payload.sessionId);
-      }
-      // Only drop the member row once the person has no device left online (#309).
-      if (participantManager.getSessionsOfUser(payload.userId).length === 0) {
-        if (serverStore.knownMembers.get(payload.userId)?.isBot) chatStore.finishBotInvocations(payload.userId);
-        serverStore.removeMember(payload.userId);
-      }
-    });
-
-    appEvents.on(`message.${MessageType.MEMBER_KICKED}`, (payload: MemberKickedPayload) => {
-      if (payload.userId === serverStore.currentUser?.id) {
-        // We were removed from the server: return home with a notice. Being
-        // kicked from a server we are not looking at only closes that session.
-        if (isForegroundEvent()) {
-          appEvents.emit('network.server_shutdown', { reason: t('app.kickedFromServerMessage') });
-        }
-        networkClient.disconnect('server');
-        return;
-      }
-      serverStore.removeMemberCompletely(payload.userId);
-      // A kick takes every device of that person down at once (#309).
-      for (const session of participantManager.getSessionsOfUser(payload.userId)) {
-        const key = session.user.sessionId || session.user.id;
-        participantManager.removeUser(key);
-        if (this.eventOwnsCall()) webRtcManager.removePeer(key);
-      }
-    });
-
-    appEvents.on(`message.${MessageType.USER_CONNECTION_STATE}`, (payload: UserConnectionStatePayload) => {
-      // Reflect other users' temporary connection loss / recovery (#44).
-      if (payload.sessionId) {
-        participantManager.setReconnecting(payload.sessionId, payload.status === 'reconnecting');
-      }
-    });
-
-    appEvents.on(`message.${MessageType.USER_UPDATED}`, (payload: UserUpdatedPayload) => {
-      serverStore.updateMember(payload.user);
-      participantManager.updateUser(payload.user);
-      if (payload.user.id === serverStore.currentUser?.id) {
-        serverStore.updateCurrentUser(payload.user);
-        const invisible = payload.user.invisible;
-        // Another device changed the status: only servers that know "Volto já"
-        // say anything about it, so the others must not clear it here.
-        const brb = serverStore.serverDetails?.protocol?.features.includes('user-brb') ? payload.user.brb === true : undefined;
-        if (typeof invisible === 'boolean' || brb !== undefined) {
-          emitOutsideRouting(() => {
-            let changed = false;
-            if (typeof invisible === 'boolean' && settingsStore.appearOffline !== invisible) {
-              settingsStore.appearOffline = invisible;
-              changed = true;
-            }
-            if (brb !== undefined && !settingsStore.appearOffline && settingsStore.brb !== brb) {
-              settingsStore.brb = brb;
-              changed = true;
-            }
-            if (changed) {
-              settingsStore.save();
-              appEvents.emit('settings.updated');
-            }
-          });
-        }
-      }
-    });
-
-    appEvents.on(`message.${MessageType.CHANNEL_CREATED}`, (payload: ChannelCreatedPayload) => {
-      serverStore.addChannel(payload.channel);
-    });
-
-    appEvents.on(`message.${MessageType.CHANNEL_DELETED}`, (payload: ChannelDeletedPayload) => {
-      serverStore.removeChannel(payload.channelId);
-      chatStore.revokeChannel(payload.channelId);
-    });
-
-    appEvents.on(`message.${MessageType.CHANNEL_UPDATED}`, (payload: ChannelUpdatedPayload) => {
-      serverStore.updateChannel(payload.channel);
-      if (!serverStore.hasPermission(Permission.READ_MESSAGES, payload.channel.id)) chatStore.revokeChannel(payload.channel.id);
-      else if (!serverStore.hasPermission(Permission.SEND_MESSAGES, payload.channel.id) ||
-          !serverStore.hasPermission(Permission.USE_BOT_COMMANDS, payload.channel.id)) chatStore.finishChannelInvocations(payload.channel.id);
-    });
-
-    appEvents.on(`message.${MessageType.CHANNELS_REORDERED}`, (payload: ChannelsReorderedPayload) => {
-      serverStore.applyChannelPositions(payload.positions);
-    });
-
-    appEvents.on(`message.${MessageType.CATEGORIES_UPDATED}`, (payload: import('@monky/shared').CategoriesUpdatedPayload) => {
-      serverStore.setCategories(payload.categories);
-      for (const channel of serverStore.serverDetails?.channels ?? []) {
-        if (!serverStore.hasPermission(Permission.READ_MESSAGES, channel.id)) chatStore.revokeChannel(channel.id);
-        else if (!serverStore.hasPermission(Permission.SEND_MESSAGES, channel.id) ||
-            !serverStore.hasPermission(Permission.USE_BOT_COMMANDS, channel.id)) chatStore.finishChannelInvocations(channel.id);
-      }
-    });
-
-    appEvents.on(`message.${MessageType.CHAT_MESSAGE}`, (message: ChatMessage) => {
-      if (!serverStore.hasPermission(Permission.READ_MESSAGES, message.channelId)) return;
-      chatStore.addMessage(message);
-      // Incoming chat cue (#152), honoring the mute / mentions-only settings
-      // (#153). Own and system messages are ignored. A mention is "@<nickname>"
-      // appearing in the message body (#14).
-      if (!message.isSystem) {
-        const me = serverStore.currentUser;
-        if (me && message.userId !== me.id && serverStore.canUserReadChannel(me.id, message.channelId)) {
-          const nick = (me.nickname || '').trim().toLowerCase();
-          // `@todos` counts as a mention for everyone in the channel when the
-          // server allows it (#464).
-          const everyoneAllowed = serverStore.serverDetails?.allowEveryoneMention !== false;
-          const content = getMessageText(message, getLanguage());
-          const isMention =
-            (!!nick && content.toLowerCase().includes(`@${nick}`)) ||
-            (everyoneAllowed && hasEveryoneMention(content));
-
-          // Resolve the chat-sound mode with the 3-level precedence
-          // channel → server → global (#153).
-          const soundMode = settingsStore.getEffectiveChatSoundMode(
-            serverStore.serverDetails?.id,
-            message.channelId
-          );
-          const shouldPlay = soundMode === 'all' || (soundMode === 'mentions' && isMention);
-          // A message from a server the user is not looking at gets a badge on
-          // the rail instead of a sound, which would have no visible cause (#400).
-          const isForeground = isForegroundEvent();
-          if (shouldPlay && isForeground) soundEffects.play('chat_message');
-          const isViewingChannel = isForeground && this.mainView.isViewingTextChannel(message.channelId);
-
-          // Unread dot in the sidebar, following the same notification settings
-          // as the sound: 'none' never marks, 'mentions' only marks mentions
-          // (which render as the @-badge instead) and 'all' marks everything
-          // (#263).
-          if (shouldPlay && !isViewingChannel) {
-            chatStore.markUnread(message.channelId);
-          }
-
-          // Mark the text channel in the sidebar until the user opens it (#14).
-          if (isMention) {
-            if (isViewingChannel) {
-              // Seen live: clear the server-side unread row so it isn't
-              // re-delivered as unread on the next reconnect (#14).
-              networkClient.send(MessageType.CHAT_MENTIONS_READ, { channelId: message.channelId });
-            } else {
-              chatStore.markMention(message.channelId);
-            }
-          }
-        }
-      }
-    });
-
-    appEvents.on(`message.${MessageType.CHAT_HISTORY}`, (payload: ChatHistoryPayload) => {
-      if (!serverStore.hasPermission(Permission.READ_MESSAGES, payload.channelId)) return;
-      chatStore.setHistory(payload.channelId, payload.messages, payload.aroundMessageId);
-    });
-
-    for (const type of [MessageType.CHAT_REACTION_ADDED, MessageType.CHAT_REACTION_REMOVED]) {
-      appEvents.on(`message.${type}`, (payload: unknown) => {
-        const parsed = chatReactionEventSchema.safeParse(payload);
-        if (parsed.success) chatStore.updateReaction(parsed.data, type === MessageType.CHAT_REACTION_ADDED);
-      });
-    }
-
-    // An existing message was edited or deleted (#504). No sound and no unread
-    // marker: nothing new was said, so nothing should call attention to it.
-    appEvents.on(`message.${MessageType.CHAT_MESSAGE_UPDATED}`, (payload: ChatMessageUpdatedPayload) => {
-      if (payload?.message && serverStore.hasPermission(Permission.READ_MESSAGES, payload.message.channelId)) chatStore.updateMessage(payload.message);
-    });
-    appEvents.on(`message.${MessageType.POLL_UPDATED}`, (payload: unknown) => {
-      const poll = nativePollSchema.safeParse(payload);
-      if (poll.success && serverStore.hasPermission(Permission.READ_MESSAGES, poll.data.channelId)) chatStore.updatePoll(poll.data);
-    });
-
-    appEvents.on(`message.${MessageType.VOICE_USER_JOINED}`, (payload: VoiceUserJoinedPayload) => {
-      if (serverStore.isMySession(payload.sessionId) && this.eventOwnsCall()
-        && voiceStore.currentVoiceChannelId === payload.channelId) {
-        voiceStore.setServerMuted(payload.voiceState.serverMuted);
-        voiceStore.setServerDeafened(payload.voiceState.serverDeafened);
-        voiceStore.setPermissionMuted(!!payload.voiceState.permissionMuted);
-        this.syncLocalVoiceMediaState();
-      }
-      if (payload.user) participantManager.addUser(payload.user);
-      if (payload.participants) {
-        participantManager.reconcileVoiceChannel(payload.channelId, payload.participants);
-        if (this.eventOwnsCall() && voiceStore.currentVoiceChannelId === payload.channelId && !webRtcManager.isSfuMode()) {
-          for (const { voiceState } of payload.participants) {
-            if (!serverStore.isMySession(voiceState.sessionId)) {
-              void webRtcManager.connectToPeer(voiceState.sessionId, true);
-            }
-          }
-        }
-      }
-      // Read before the state is overwritten: an admin move announces the
-      // arrival once itself and once more when the moved client re-joins, so
-      // the room would hear the join sound twice (#500). A repeated
-      // announcement for a session already listed in this channel is that
-      // second copy — the mesh still reconnects, only the cue is skipped.
-      const alreadyInChannel =
-        participantManager.get(payload.sessionId)?.voiceState?.channelId === payload.channelId;
-
-      participantManager.updateVoiceState(payload.voiceState);
-
-      // If we are also in this voice channel and not the joining session, connect P2P Mesh
-      if (this.eventOwnsCall()) webRtcManager.reconcileScreenSources();
-      if (
-        this.eventOwnsCall() &&
-        voiceStore.currentVoiceChannelId === payload.channelId &&
-        !serverStore.isMySession(payload.sessionId)
-      ) {
-        webRtcManager.connectToPeer(payload.sessionId, false);
-        // Let everyone already in the channel hear that someone joined (#54).
-        // App cues ignore deafen, which only silences voices and the soundboard.
-        if (!alreadyInChannel) soundEffects.play('join_voice');
-      }
-    });
-
-    appEvents.on(`message.${MessageType.VOICE_USER_LEFT}`, (payload: VoiceUserLeftPayload) => {
-      const isMySession = serverStore.isMySession(payload.sessionId);
-      const origin = currentEventOrigin();
-      // A delayed acknowledgement belongs to the local leave, never a newer admission.
-      if (isMySession && networkClient.isLocalVoiceLeaveAcknowledgement(payload)) {
-        if (participantManager.get(payload.sessionId)?.voiceState?.channelId === payload.channelId
-          && !(this.eventOwnsCall() && voiceStore.currentVoiceChannelId === payload.channelId)) {
-          participantManager.removeVoiceState(payload.sessionId);
-        }
-        return;
-      }
-      if (isMySession && origin) {
-        const transition = this.voiceModeReconnect.departed(origin, payload);
-        if (transition) {
-          if (transition === 'reconnect') participantManager.removeVoiceState(payload.sessionId);
-          return;
-        }
-      }
-      if (this.eventOwnsCall()) {
-        if (isMySession && voiceStore.currentVoiceChannelId === payload.channelId) {
-          leaveCurrentCall(false);
-          if (isForegroundEvent()) this.mainView.render();
-        } else {
-          if (voiceStore.currentVoiceChannelId === payload.channelId) soundEffects.play('leave_voice');
-          webRtcManager.removePeer(payload.sessionId);
-        }
-      }
-      participantManager.removeVoiceState(payload.sessionId);
-    });
-
-    appEvents.on(`message.${MessageType.VOICE_STATE_CHANGED}`, (payload: VoiceStateChangedPayload) => {
-      const previousVoiceState = participantManager.get(payload.voiceState.sessionId)?.voiceState;
-      const isRemoteUser = !serverStore.isMySession(payload.voiceState.sessionId);
-      const isSameVoiceChannel =
-        this.eventOwnsCall() && voiceStore.currentVoiceChannelId === payload.voiceState.channelId;
-
-      if (isRemoteUser && isSameVoiceChannel) {
-        if (
-          previousVoiceState?.isScreenSharing === false &&
-          payload.voiceState.isScreenSharing === true
-        ) {
-          soundEffects.play('screen_share_start');
-        } else if (
-          previousVoiceState?.isScreenSharing === true &&
-          payload.voiceState.isScreenSharing === false
-        ) {
-          soundEffects.play('screen_share_stop');
-        }
-      }
-
-      participantManager.updateVoiceState(payload.voiceState);
-      if (this.eventOwnsCall()) webRtcManager.reconcileScreenSources();
-      if (isRemoteUser && isSameVoiceChannel && (
-        previousVoiceState?.receivesVoice !== payload.voiceState.receivesVoice ||
-        previousVoiceState?.isDeafened !== payload.voiceState.isDeafened ||
-        previousVoiceState?.serverDeafened !== payload.voiceState.serverDeafened
-      )) webRtcManager.syncBotVoiceReception(payload.voiceState.sessionId);
-      if (serverStore.isMySession(payload.voiceState.sessionId) && this.eventOwnsCall()
-        && voiceStore.currentVoiceChannelId === payload.voiceState.channelId) {
-        voiceStore.setServerMuted(payload.voiceState.serverMuted);
-        voiceStore.setServerDeafened(payload.voiceState.serverDeafened);
-        voiceStore.setPermissionMuted(!!payload.voiceState.permissionMuted);
-        this.syncLocalVoiceMediaState();
-      }
-    });
-
-    appEvents.on(`message.${MessageType.VOICE_RESTRICTIONS_UPDATED}`, (payload: VoiceRestrictionsUpdatedPayload) => {
-      serverStore.updateVoiceRestrictions(payload.userId, payload);
-    });
-
-    appEvents.on(`message.${MessageType.ADMIN_KICK_VOICE}`, (payload: AdminKickVoicePayload) => {
-      if (!serverStore.isMySession(payload.targetSessionId) || !this.eventOwnsCall()) return;
-      audioProcessor.stopMicrophone();
-      videoService.stopCamera();
-      void stopLocalScreenShares(screenAudioService, { teardown: true }).catch((error: unknown) => {
-        clientLog.error('SCREEN_SHARE', 'Failed to stop screen sharing after voice kick', { error: String(error) });
-      });
-      webRtcManager.closeAllPeers();
-      // Being kicked is still leaving the call: reset() ends it with the same
-      // leave cue as leaving on your own (#533).
-      voiceStore.reset();
-      if (isForegroundEvent()) this.mainView.render();
-    });
-
-    appEvents.on(`message.${MessageType.ADMIN_MOVE_USER}`, (payload: AdminMoveUserPayload) => {
-      // Being moved only makes sense on the server hosting the call; obeying it
-      // elsewhere would silently drag the call to another server (#400).
-      if (!serverStore.isMySession(payload.targetSessionId) || !this.eventOwnsCall()) return;
-      // The server muted the microphone in there; say why before the call follows.
-      if (payload.channelId === afkChannelIdOf(serverStore.serverDetails)) showInfoToast(t('afk.movedToast'), 8000);
-      if (isForegroundEvent()) {
-        void this.mainView.rejoinVoiceChannel(payload.channelId);
-      } else {
-        const origin = currentEventOrigin();
-        if (origin) void rejoinCallOnSession(origin, payload.channelId);
-      }
+    // Server -> client traffic, applied to the stores of whichever server sent it (#400).
+    bindServerStateEvents({ reconnect: this.voiceModeReconnect });
+    bindChatEvents({ isViewingTextChannel: channelId => this.mainView.isViewingTextChannel(channelId) });
+    bindVoiceEvents({
+      reconnect: this.voiceModeReconnect,
+      render: () => this.mainView.render(),
+      rejoinOnScreen: channelId => { void this.mainView.rejoinVoiceChannel(channelId); },
     });
 
     // ── Bot infrastructure (#569) ────────────────────────────────────────
@@ -1141,108 +455,84 @@ class App {
     bindBotScreenEvents();
     bindBotVoiceCommandEvents();
 
-    // Local VAD speaking state
-    appEvents.on('local.speaking', updateLocalSpeaking);
-
-    // Modals
     appEvents.on('modal.open_screenshare_picker', () => {
       screenSharePickerModal.open();
     });
+  }
 
-    // Screen-share start/stop sound cue (picker, quick-stop and source-ended).
-    appEvents.on('local.screen_started', () => {
-      soundEffects.play('screen_share_start');
-    });
-    appEvents.on('screen.codec_failed', (payload: { error: string; notify: boolean; stopAudio: boolean }) => {
-      if (payload.stopAudio || videoService.getScreenShareCount() === 0) {
-        void screenAudioService.stop().catch((error: unknown) => {
-          clientLog.error('SCREEN_SHARE', 'Failed to stop audio of a rejected screen', {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-      }
-      if (!payload.notify) return;
-      void showAlert({
-        title: t('screenShare.errorTitle'),
-        message: t('screenShare.errorMessage', { error: payload.error }),
-        variant: 'danger',
-      });
-    });
-    appEvents.on('local.screen_stopped', () => {
-      soundEffects.play('screen_share_stop');
-    });
-    const unbindCaptureFallback = appEvents.on('native_screen.capture_fallback', (_payload: { shareId: string }) => {
-      showInfoToast(t('screenShare.gameFallback'), 8000);
-    });
-    window.addEventListener('pagehide', unbindCaptureFallback, { once: true });
-    appEvents.on('native_screen.source_failed', (payload: Pick<Extract<NativeScreenEvent, { type: 'error' }>, 'reason' | 'code'>) => {
-      if (payload.reason === 'source-unavailable') {
-        showInfoToast(t('screenShare.sourceStopping'), 8000);
-        return;
-      }
-      if (payload.reason === 'connection-failed') {
-        showInfoToast(t('screenShare.nativeFailure.connection-failed'), 8000);
-        return;
-      }
-      void showAlert({
-        title: t('screenShare.errorTitle'),
-        message: payload.code === 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE'
-          ? t('screenShare.gameCaptureUnavailable') : t(`screenShare.nativeFailure.${payload.reason}`),
-        variant: 'danger',
-      });
-    });
+  /**
+   * A server signed this user in, for the first time or after an automatic
+   * reconnection. The order matters: the stores are filled before the call
+   * adopts the session, the screen is drawn before the call returns to its room.
+   */
+  private handleSignedIn(payload: AuthSuccessPayload): void {
+    const origin = currentEventOrigin();
+    const session = origin ? sessionManager.get(origin) : undefined;
+    // Another server answering at a saved address leaves the entry as the
+    // person saved it: automatic entry refuses it, and entering by hand saves
+    // it again. Read before its identity is remembered below.
+    const saved = session ? connectionStore.findSavedServer(session) : undefined;
+    const sameServer = !saved?.serverId || saved.serverId === payload.server.id;
+    if (session) connectionStore.rememberSavedServerIdentity(session.host, session.port, payload.server.id);
+    const call = callBeforeSignIn(origin);
+    // Same server and identity as before the drop: the view on screen is
+    // still right, it only has to catch up.
+    const resumingView = serverStore.serverDetails?.id === payload.server.id
+      && serverStore.currentUser?.id === payload.currentUser.id;
 
-    // The shared window/app was closed (or the OS "stop sharing" button was
-    // used): finish tearing down that one screen share so peers stop seeing a
-    // frozen frame and the local controls return to the idle state (#159, #253).
-    appEvents.on('local.screen_ended_externally', (shareId: string) => {
-      if (!voiceStore.screenShareIds.includes(shareId) && !videoService.getScreenStream(shareId)) return;
-      void stopLocalScreenShares(screenAudioService, { shareIds: [shareId] }).catch((error: unknown) => {
-        clientLog.error('SCREEN_SHARE', 'Failed to stop an ended screen share', { shareId, error: String(error) });
-      });
-    });
+    hydrateServerSession(payload);
+    // The in-server layout needs more room than the connection card (#342).
+    if (isForegroundEvent()) void window.api?.setWindowInServer?.(true);
+    adoptCallAfterSignIn(payload, call);
 
-    // A server ended the session on purpose (closed, updating or removed us).
-    // The server in use gets a modal; one kept in the background, a toast.
-    appEvents.on('network.server_shutdown', presentServerShutdownNotice);
+    if (isForegroundEvent()) {
+      if (resumingView) this.mainView.refreshAfterReconnect();
+      else this.mainView.render();
+    }
+    // The rail shows the saved entry even when not connected (#301).
+    if (session && sameServer) syncSavedServer(session, payload.server);
+    resumeCallAfterSignIn(payload, call, origin, channelId => { void this.mainView.rejoinVoiceChannel(channelId); });
+  }
 
-    // The SFU link dropped and is being rebuilt. Instead of a blocking modal,
-    // this surfaces in the sidebar voice indicator (yellow) plus a recurring
-    // audio cue, and clears itself once media flows again (#553).
-    appEvents.on('sfu.reconnecting', () => {
-      voiceStore.setReconnecting(true);
-    });
-    appEvents.on('sfu.reconnected', () => {
-      voiceStore.setReconnecting(false);
-    });
+  /** A server's socket is gone for good; a client that will retry emits `network.reconnecting` instead. */
+  private handleDisconnected(): void {
+    const origin = currentEventOrigin();
+    // A server restart, update or removal drops the call just like a voice
+    // kick: leaving it plays the leave cue (callCues), as any other ending.
+    if (!voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === origin) leaveCurrentCall(false);
 
-    // Drives the recurring reconnection cue for the whole attempt, stopping as
-    // soon as the call recovers or the user leaves the channel (#553).
-    appEvents.on('voice.reconnecting_changed', (reconnecting: boolean) => {
-      if (reconnecting) soundEffects.startReconnectingLoop();
-      else soundEffects.stopReconnectingLoop();
-    });
+    // The stores resolve to the session that dropped, so this clears the
+    // right bundle even when a background server is the one going away.
+    serverStore.clear();
+    chatStore.clear();
+    participantManager.clear();
 
-    // The SFU refusing to start after an admin switched the server to it
-    // arrives as an error with no requestId, which `NetworkClient` cannot
-    // correlate to anything and therefore only re-emits — so without a
-    // listener the admin would never hear about it.
-    //
-    // The server's own message is preferred over the code's canned text: it
-    // carries what actually failed (the worker error and the port preflight),
-    // while the canned string only describes the port conflict. Uncorrelated
-    // errors are otherwise left alone, since fire-and-forget requests fail
-    // this way too and have always been silent here.
-    appEvents.on(`message.${MessageType.SERVER_ERROR}`, (payload: ServerErrorPayload) => {
-      if (payload?.code !== ProtocolErrorCode.SFU_UNAVAILABLE) return;
-      showAlert({
-        title: t('sfu.unavailableTitle'),
-        message: payload.message || translateProtocolError(payload.code, payload.message),
-        variant: 'warning',
-      });
-    });
+    // Leaving the dead session in the map would show it as connected on the
+    // rail and let a click "switch" to a server that is no longer there (#400).
+    if (origin) sessionManager.remove(origin);
+
+    // A background server dropping must not disturb what is on screen (#400).
+    if (!isForegroundEvent()) return;
+
+    // Another server may still be connected — typically the one hosting the
+    // call. Showing it beats dumping the user on the connection screen while
+    // they are still talking to someone.
+    const next = sessionManager
+      .getBackground()
+      .find((candidate) => candidate.client.getStatus() === 'CONNECTED');
+    if (next) {
+      sessionManager.activate(next.key);
+      return;
+    }
+
+    // Nothing left to show: return to Home while keeping the rail available.
+    sessionManager.showHome();
+    void window.api?.setWindowInServer?.(false);
+    this.mainView.render();
   }
 }
+
+markStartup('modules');
 
 // Bootstrap when DOM ready
 document.addEventListener('DOMContentLoaded', () => {

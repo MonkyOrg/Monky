@@ -184,6 +184,10 @@ async function runRegression(language) {
   const permission = id => field(`[data-local-permission="${id}"]`);
   const tool = id => field(`[data-local-tool-row="${id}"]`);
   const feedback = () => field('[data-local-feedback]').textContent;
+  // Failed actions are explained in the shared alert toast, never in the panel (#490).
+  const alertToast = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+  const failure = () => alertToast()?.querySelector('.chat-copy-toast-label')?.textContent ?? '';
+  const clearToasts = () => document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
   mount();
   tab.attachEvents(container);
   check(listeners.size === 1 && reads.length === 1, 'mounting twice subscribes and reads only once');
@@ -266,6 +270,9 @@ async function runRegression(language) {
   check(tool('node').querySelector('[data-field="dependents"]').textContent.includes('b'.repeat(64)), 'requiredBy resolves permission IDs to bot identities');
   check(tool('ffmpeg').textContent.includes(t('localExecution.unknownDependent', { id: '4'.repeat(64) })), 'unavailable dependency details are explicit rather than silently dropped');
   check(tool('ffmpeg').textContent.includes(t('localExecution.failure.integrity_failed')), 'tool failure is localized');
+  check(tool('ffmpeg').querySelector('[data-field="tool-status"]').textContent
+    === `${t('localExecution.toolStatus.invalid')} · ${t('localExecution.failure.integrity_failed')}` && !container.querySelector('.bot-error'),
+  'why a tool failed is part of its status line, never a loose alert in the panel');
   check(tool('yt-dlp').querySelector('progress').position === 0.5, 'known download totals have determinate progress');
   check(field('[data-local-tools-size]').textContent === '4 KB' && field('[data-local-cache-size]').textContent === '1 KB', 'summary uses Main-provided totals');
   check(field('[data-local-task-row="task-1"]').textContent.includes(t('localExecution.operation.youtube.stream')), 'tasks show operation');
@@ -286,14 +293,25 @@ async function runRegression(language) {
   check(!permission(ids[1]).disabled && !field('[data-local-action="cache"]').disabled, 'unsupported platform still allows revoking and cleaning existing data');
   emit({ ...state, supported: true });
   const focused = permission(ids[0]);
-  const details = focused.closest('article').querySelector('details');
-  details.open = true;
+  const disclosure = focused.closest('article').querySelector('[data-local-disclosure]');
+  const details = document.getElementById(disclosure.getAttribute('aria-controls'));
+  check(disclosure.getAttribute('aria-expanded') === 'false' && details.hidden && !focused.closest('article').querySelector('details'),
+    'identity details start collapsed behind a disclosure button, not a native details element');
+  check(focused.getAttribute('aria-describedby').split(' ').includes(details.id),
+    'the switch is still described by the identity, collapsed or not');
+  disclosure.click();
+  check(disclosure.getAttribute('aria-expanded') === 'true' && !details.hidden && details.textContent.includes('a'.repeat(64)),
+    'the disclosure opens the identity details it controls');
+  const dependents = tool('node').querySelector('[data-local-disclosure]');
+  check(dependents.textContent.includes(t('localExecution.dependents', { count: 2 }))
+    && document.getElementById(dependents.getAttribute('aria-controls')).hidden, 'tool dependents use the same collapsed disclosure');
   focused.focus();
   for (const stage of ['resolving', 'downloading', 'verifying', 'extracting', 'checking']) {
     emit({ ...state, tools: state.tools.map(entry => entry.id === 'yt-dlp' ? { ...entry, progress: { stage, downloadedBytes: 700, totalBytes: null } } : entry) });
     const progress = tool('yt-dlp').querySelector('progress');
     check(!progress.hasAttribute('value') && progress.getAttribute('aria-label').includes(t(`localExecution.stage.${stage}`)), `${stage} exposes accurate indeterminate stage progress`);
-    check(permission(ids[0]) === focused && document.activeElement === focused && details.open, 'progress never replaces focused controls or collapses identity details');
+    check(permission(ids[0]) === focused && document.activeElement === focused && disclosure.getAttribute('aria-expanded') === 'true' && !details.hidden,
+      'progress never replaces focused controls or collapses identity details');
   }
   focused.click();
   check(mutations.length === 1 && mutations[0].input.permissionId === ids[0] && mutations[0].input.enabled === true, 'switch requests authorization by permission ID, not names');
@@ -325,19 +343,21 @@ async function runRegression(language) {
   }
   focused.click();
   await complete({ status: 'failed', reason: 'storage_failed' });
-  check(feedback() === t('localExecution.failure.storage_failed') && !focused.checked, 'failed mutations use localized typed failures, not optimistic success');
+  check(failure() === t('localExecution.failure.storage_failed') && alertToast().getAttribute('role') === 'alert' && !feedback() && !focused.checked,
+    'failed mutations are explained in the alert toast with localized typed failures, not optimistic success');
   focused.click();
   mutations.at(-1).reject(new Error('<script>private executable path</script>'));
   await flush();
   await answerRead();
-  check(feedback() === t('localExecution.failure.transport_failed') && !container.textContent.includes('private executable path'), 'unexpected IPC errors never disclose raw error text');
+  check(failure() === t('localExecution.failure.transport_failed') && !document.body.textContent.includes('private executable path'),
+    'unexpected IPC errors never disclose raw error text');
 
   const source = tool('node').querySelector('[data-local-action="source"]');
   source.click();
   check(sources.at(-1).url === state.tools[0].sourceUrl, 'source opens the exact Main URL only through openExternal');
   sources.at(-1).resolve({ success: false });
   await flush();
-  check(feedback() === t('localExecution.sourceFailed'), 'external opening failures remain visible and localized');
+  check(failure() === t('localExecution.sourceFailed') && !feedback(), 'external opening failures remain visible and localized');
   tool('node').querySelector('[data-local-action="remove"]').click();
   check(mutations.at(-1).kind === 'remove' && mutations.at(-1).input === 'node', 'removal identifies the shared tool');
   await complete({ status: 'cancelled' });
@@ -370,6 +390,16 @@ async function runRegression(language) {
   await flush();
   check(!field('[data-local-load-error]').hidden && field('[data-local-load-error]').textContent.includes(t('localExecution.failure.transport_failed')), 'state failures are visible and localized');
   check(permission(ids[0]).disabled && !container.textContent.includes('private get-state error'), 'stale state cannot authorize a mutation or expose exception text');
+  // A read that failed is the kit's notice with a retry, never a loose alert (#490).
+  const retry = field('[data-local-load-error] .loading-error[role="alert"] [data-loading-retry]');
+  check(!container.querySelector('.bot-error'), 'the failed read is not a loose alert line');
+  const readsBeforeRetry = reads.length;
+  retry.focus();
+  retry.click();
+  check(reads.length === readsBeforeRetry + 1, 'the notice of a failed read offers to read again');
+  await answerRead();
+  check(field('[data-local-load-error]').hidden && document.activeElement === field('[data-local-action="refresh"]'),
+    'a successful retry removes the notice and hands focus to Refresh');
   field('[data-local-action="refresh"]').click();
   const staleRead = reads.at(-1);
   emit({ ...state, toolsBytes: 8192 });
@@ -399,9 +429,10 @@ async function runRegression(language) {
   container.remove();
   mount();
   const readCount = reads.length;
+  clearToasts();
   oldMutation.resolve({ status: 'failed', reason: 'timeout' });
   await flush();
-  check(reads.length === readCount && !feedback(), 'late mutation completion cannot refresh or show errors in a reopened panel');
+  check(reads.length === readCount && !feedback() && !alertToast(), 'late mutation completion cannot refresh or show errors in a reopened panel');
   await answerRead();
   const detachedSwitch = permission(ids[0]);
   tab.cleanup();
@@ -508,8 +539,9 @@ async function runRegression(language) {
     type: event.type, key: event.key, code: event.code, trusted: event.isTrusted,
     targetIsSwitch: event.target === permission(ids[0]), defaultPrevented: event.defaultPrevented,
   });
-  window.addEventListener('keydown', recordKey);
-  window.addEventListener('keyup', recordKey);
+  // Recorded on the way in: a modal that owns the keyboard stops Escape before it bubbles back up.
+  window.addEventListener('keydown', recordKey, true);
+  window.addEventListener('keyup', recordKey, true);
   const describeKeyboard = () => JSON.stringify({
     keyboardStart, mutations: mutations.length, documentFocused: document.hasFocus(),
     focused: document.activeElement?.outerHTML.slice(0, 400), switchDisabled: permission(ids[0]).disabled,
@@ -542,8 +574,8 @@ async function runRegression(language) {
       await waitFor(() => !document.querySelector('.modal-backdrop--settings') && listeners.size === 0,
         () => `native Escape must close and clean the modal: ${describeKeyboard()}`);
       check(!document.querySelector('.modal-backdrop--settings') && listeners.size === 0, 'native Escape closes and cleans local tools');
-      window.removeEventListener('keydown', recordKey);
-      window.removeEventListener('keyup', recordKey);
+      window.removeEventListener('keydown', recordKey, true);
+      window.removeEventListener('keyup', recordKey, true);
       modal.close();
       delete window.localToolsKeyboardFixture;
     },

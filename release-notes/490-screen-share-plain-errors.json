@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quando a tela compartilhada falha ao começar ou parar, o aviso explica no idioma do app o que aconteceu e o que fazer, em vez de mostrar o erro técnico. O detalhe fica no log.",
+  "en": "When screen sharing fails to start or stop, the notice explains in the app's language what happened and what to do, instead of showing the technical error. The details stay in the log."
+}

@@ -203,8 +203,11 @@ async function runMediaSettingsPopoverSmoke() {
     failNoise = true;
     cards.find(card => card.dataset.noiseMode === 'speex').click();
     await until(() => !cards[0].disabled, 'Failed noise choice settles');
-    check(settings.noiseSuppressionMode === 'off' && panel().textContent.includes(language.t('audioNoise.selectionFailed')),
-      'A failed quick engine choice retains the previous selection and reports a localized error');
+    const noiseError = document.querySelector('.chat-copy-toast[role="alert"]:not([data-ui-closing]) .chat-copy-toast-label');
+    check(settings.noiseSuppressionMode === 'off' && noiseError?.textContent === language.t('audioNoise.selectionFailed')
+      && !panel().textContent.includes(language.t('audioNoise.selectionFailed')),
+      'A failed quick engine choice retains the previous selection and reports a localized error in the alert toast');
+    noiseError?.closest('.chat-copy-toast').querySelector('.chat-copy-toast-close').click();
     failNoise = false;
     pendingNoise = { mode: 'gtcrn' };
     cards.find(card => card.dataset.noiseMode === 'gtcrn').click();

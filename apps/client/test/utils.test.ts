@@ -4,20 +4,23 @@
  * ícones/tamanhos de anexos e o barramento de eventos (EventBus).
  */
 
-import { escapeHtml } from '../src/renderer/utils/html';
+import { escapeHtml, html, trustedHtml } from '../src/renderer/utils/html';
 import { renderMarkdown } from '../src/renderer/utils/markdown';
-import { formatBytes, fileIconName } from '../src/renderer/utils/attachment';
-import { avatarFileExtension } from '../src/renderer/utils/avatar';
+import { serverMentionMatcher } from '../src/renderer/utils/mentions';
+import { MentionMatcher, compareReleaseVersions as compareVersions, type UserSummary } from '@monky/shared';
+import { formatBytes, fileIconName, resolveAttachmentUrl } from '../src/renderer/utils/attachment';
+import { avatarFileExtension, DEFAULT_AVATAR_URL, resolveAvatarUrl, resolveImageUrl, toAbsoluteServerIconUrl } from '../src/renderer/utils/avatar';
 import { EventBus } from '../src/renderer/core/EventBus';
 import { normalizeSearchString, matchesSearch } from '../src/renderer/utils/search';
-import { compareVersions, feedUrlForTag, isNewer, pickBestRelease } from '../src/main/updateVersions';
+import { feedUrlForTag, isNewer, pickBestRelease } from '../src/main/updateVersions';
 import { extractStickerIds, stickerToken, stripStickerTokens } from '../src/renderer/utils/stickers';
 import { buildCodeMessage, indentEdit } from '../src/renderer/views/CodeBlockModal';
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from '../src/main/serverDataDir';
 import { createActiveProxy, silentBus } from '../src/renderer/core/activeProxy';
 import { createChatStore, setActiveChatStore, chatStore } from '../src/renderer/stores/chatStore';
+import { createServerStore as createMentionServerStore } from '../src/renderer/stores/serverStore';
 import { appEvents } from '../src/renderer/core/EventBus';
-import { isPrivateAddress, isPrivateHostname } from '../src/main/privateAddress';
+import { isLocalHostname, isPublicAddress } from '../src/main/net/addressPolicy';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -49,6 +52,61 @@ function runTests() {
       '&lt;script&gt;alert(&quot;xss&quot;) &amp; &#039;test&#039;&lt;/script&gt;',
     'Caracteres perigosos (<, >, &, ", \') são escapados corretamente'
   );
+
+  // Template que escapa por padrão (#490)
+  console.log('\n--- Testando html`` (escape por padrão) ---');
+  assert(html`<img src="${'" onerror="alert(1)" x="'}">`.toString()
+    === '<img src="&quot; onerror=&quot;alert(1)&quot; x=&quot;">', 'Valor em atributo não fecha as aspas');
+  assert(html`<p>${'<img src=x onerror=alert(1)>'}</p>`.toString() === '<p>&lt;img src=x onerror=alert(1)&gt;</p>',
+    'Texto com marcação entra como texto');
+  const listItem = (label: string) => html`<li>${label}</li>`;
+  assert(html`<ul>${['<a>', 'b'].map(listItem)}</ul>`.toString() === '<ul><li>&lt;a&gt;</li><li>b</li></ul>',
+    'Templates aninhados e listas entram como marcação, sem vírgulas');
+  assert(html`${null}${undefined}|${0}|${false}`.toString() === '|0|false', 'null e undefined somem; número e booleano viram texto');
+  assert(html`<b>${trustedHtml('<i>ok</i>')}</b>`.toString() === '<b><i>ok</i></b>', 'trustedHtml mantém marcação já segura');
+  assert(`<div>${html`<b>${'&'}</b>`}</div>` === '<div><b>&amp;</b></div>', 'Dentro de template comum, vira a própria marcação');
+
+  // Endereços vindos do servidor (#490)
+  console.log('\n--- Testando resolveAvatarUrl (#490) ---');
+  const callBase = 'http://call.example:3000';
+  assert(resolveAvatarUrl('/avatars/srv-1f2e.png', callBase) === `${callBase}/avatars/srv-1f2e.png`,
+    'Avatar do servidor resolve contra a base informada (a do servidor da chamada)');
+  assert(resolveAvatarUrl('/avatars/1f2e.png', '') === DEFAULT_AVATAR_URL, 'Sem servidor, caminho relativo vira o avatar padrão');
+  for (const hostile of ['x" onerror="alert(1)', '/avatars/x" onerror="alert(1)', 'https://cdn.example/a"b.png',
+    'http://a"b/x.png', "https://cdn.example/a'b.png", 'javascript:alert(1)', 'file:///C:/Users/x/foto.png',
+    'data:image/png;base64,AA" onerror="x', 'data:text/html;base64,PHA+', '/assets/Logo.png']) {
+    assert(resolveAvatarUrl(hostile, callBase) === DEFAULT_AVATAR_URL, `Recusa ${hostile}`);
+  }
+  assert(resolveAvatarUrl('https://cdn.example/a.png?v=2', callBase) === 'https://cdn.example/a.png?v=2', 'URL web válida passa intacta');
+  assert(resolveAvatarUrl('data:image/png;base64,iVBORw0KGgo=', callBase) === 'data:image/png;base64,iVBORw0KGgo=',
+    'Imagem embutida pelo app passa');
+  assert(resolveAvatarUrl(DEFAULT_AVATAR_URL, callBase) === DEFAULT_AVATAR_URL, 'O próprio avatar padrão (SVG) passa');
+  assert(resolveAvatarUrl(null, callBase) === DEFAULT_AVATAR_URL && resolveAvatarUrl('  ', callBase) === DEFAULT_AVATAR_URL,
+    'Avatar ausente vira o padrão');
+
+  console.log('\n--- Testando resolveImageUrl e ícones salvos (#490, R-COMMUNITY-11) ---');
+  assert(resolveImageUrl('/avatars/capa-1.png', callBase) === `${callBase}/avatars/capa-1.png`,
+    'Imagem do servidor resolve contra a base do servidor que a enviou');
+  // Concatenada à base, "@host" virava usuário e senha de uma URL que apontava para outro servidor.
+  for (const hostile of ['@tracker.example/pixel.png', '/attachments/a.png', '/../../segredo.png', 'javascript:alert(1)', null, '']) {
+    assert(resolveImageUrl(hostile, callBase) === null, `Imagem recusa ${String(hostile)}, sem trocar por silhueta`);
+  }
+  assert(toAbsoluteServerIconUrl('a.test', 5101, ' /avatars/icone.png ') === 'http://a.test:5101/avatars/icone.png',
+    'O ícone salvo de um servidor resolve contra o próprio servidor');
+  assert(toAbsoluteServerIconUrl('a.test', 5101, 'https://cdn.example/icone.png') === 'https://cdn.example/icone.png',
+    'Um ícone já absoluto continua igual');
+  for (const hostile of ['@tracker.example/icone.png', '/etc/passwd', 'file:///C:/icone.png', '  ']) {
+    assert(toAbsoluteServerIconUrl('a.test', 5101, hostile) === null, `Ícone salvo recusa ${hostile}`);
+  }
+
+  console.log('\n--- Testando resolveAttachmentUrl (#490) ---');
+  assert(resolveAttachmentUrl('/attachments/6f1c-9a.png', callBase) === `${callBase}/attachments/6f1c-9a.png`,
+    'Anexo do servidor resolve contra a base');
+  assert(resolveAttachmentUrl('/attachments/6f1c.png', '') === '', 'Sem conexão não há endereço');
+  for (const hostile of ['x" onerror="alert(1)', '/attachments/a" onerror="b', 'https://evil.example/a.png',
+    'file:///C:/Users/x/segredo.txt', '/attachments/../../segredo', 'data:image/png;base64,AA==', null]) {
+    assert(resolveAttachmentUrl(hostile, callBase) === '', `Anexo recusa ${String(hostile)}`);
+  }
 
   // 2. formatBytes
   console.log('\n--- Testando formatBytes ---');
@@ -146,23 +204,86 @@ function runTests() {
   const mentionTest = renderMarkdown('Olá @Murilo!', { currentNickname: 'Murilo' });
   assert(mentionTest.includes('<span class="chat-mention chat-mention-me">@Murilo</span>'), 'Menção ao próprio usuário recebe classe destacada');
 
-  const mentionOtherTest = renderMarkdown('Olá @Carlos!', { currentNickname: 'Murilo', knownNicknames: ['Carlos', 'Murilo'] });
+  const mentionOtherTest = renderMarkdown('Olá @Carlos!', { currentNickname: 'Murilo', mentions: new MentionMatcher(['Carlos', 'Murilo']) });
   assert(mentionOtherTest.includes('<span class="chat-mention">@Carlos</span>'), 'Menção a outros usuários recebe classe de menção');
+
+  // O destaque segue a mesma regra do som, do badge e do servidor (R-SHELL-6, R-CHAT-9).
+  const members = new MentionMatcher(['Lu', 'Lucas', 'Ana', 'Ana Paula', '$ara', 'A&B'], { everyone: true });
+  const spans = (source: string) => [...renderMarkdown(source, { currentNickname: 'Lu', mentions: members })
+    .matchAll(/<span class="chat-mention( chat-mention-me)?">([^<]*)<\/span>/g)].map(match => `${match[1] ? 'me:' : ''}${match[2]}`);
+  assert(spans('@Lucas, vem cá').join() === '@Lucas', 'Apelido que começa outro não destaca a pessoa errada');
+  assert(spans('falem com @Ana Paula').join() === '@Ana Paula', 'O apelido mais longo vence');
+  assert(spans('**@lu** e (@ana)').join() === 'me:@Lu,@Ana', 'Menção em negrito e entre parênteses é destacada');
+  assert(renderMarkdown('**@Lu**', { currentNickname: 'Lu', mentions: members })
+    .includes('<strong><span class="chat-mention chat-mention-me">@Lu</span></strong>'), 'Negrito envolve a menção destacada');
+  assert(spans('`@Lu` lu@exemplo.com site.com/@Lu contato@todos.com.br').length === 0, 'Código, e-mail e endereço não destacam ninguém');
+  assert(spans('bom dia @todos').join() === 'me:@todos', '@todos é destacado para quem lê');
+  assert(spans('@$ara e @A&B').join() === '@$ara,@A&amp;B', 'Caracteres especiais no apelido são exibidos uma vez e escapados');
+  assert(spans('[@Lucas](https://monky.chat)').join() === '@Lucas', 'Menção no texto de um link é destacada como no servidor');
+  for (const source of ['@Lucas @Lu', '**@ana paula** `@Lu`', '> @todos\n- @Ana\n# @Lu', '```\n@Lu\n```\n@Lucas', 'x@Lu (@Lu)']) {
+    assert(spans(source).length === members.find(source).length, `O destaque mostra exatamente as menções que a regra encontra: ${source}`);
+  }
+  assert(spans('_@Lu_ e __@Lucas__').join() === 'me:@Lu,@Lucas' && renderMarkdown('_@Lu_', { currentNickname: 'Lu', mentions: members })
+    .includes('<em><span class="chat-mention chat-mention-me">@Lu</span></em>'), 'Itálico e negrito com _ envolvem a menção destacada');
+
+  // Um link Markdown mantém endereço, classe e rótulo com menção ou código no endereço, que nunca vira marcação ali.
+  for (const [source, href, label] of [
+    ['[perfil](https://exemplo.com/(@Lucas)/x)', 'https://exemplo.com/(@Lucas', 'perfil'],
+    ["[perfil](https://exemplo.com/'@todos)", 'https://exemplo.com/&#039;@todos', 'perfil'],
+    ['[x](https://a.com/`code`)', 'https://a.com/`code`', 'x'],
+    ['[x](https://a.com/```y```)', 'https://a.com/```y```', 'x'],
+  ]) {
+    const rendered = renderMarkdown(source, { currentNickname: 'Lu', mentions: members });
+    assert(rendered.includes(`<a href="${href}" class="md-link" data-external-link="${href}">${label}</a>`)
+      && !/chat-mention|<code|md-code/.test(rendered), `Link com menção ou código no endereço mantém endereço, classe e rótulo: ${source}`);
+  }
+  const splitLink = renderMarkdown('[a](https://x.com/\n"@Lucas")', { currentNickname: 'Lu', mentions: members });
+  assert(!splitLink.includes('<a ') && splitLink.includes('<span class="chat-mention">@Lucas</span>'),
+    'Um endereço que continua na linha seguinte não vira link e a menção ali segue destacada, como no aviso');
+  const forged = renderMarkdown('@Lu \u0000MN0\u0000 \u0000CB0\u0000 \u0000IC0\u0000 \u0000AL0\u0000', { currentNickname: 'Lu', mentions: members });
+  assert((forged.match(/<span class="chat-mention/g) ?? []).length === 1 && !/md-code|<code|<a |undefined/.test(forged)
+    && forged.includes('\uFFFDMN0\uFFFD'), 'NUL digitado não forja menção, código nem link');
+
+  // O som e o badge usam todos os membros conhecidos, o próprio leitor e o @todos só quando o servidor permite.
+  const mentionServer = createMentionServerStore();
+  mentionServer.bus = new EventBus();
+  const reader: UserSummary = { id: 'reader', clientId: 'reader-device', nickname: 'Lu', status: 'ONLINE', joinedAt: 1 };
+  const offline: UserSummary = { ...reader, id: 'offline', clientId: 'offline-device', nickname: 'Lucas', status: 'DISCONNECTED' };
+  const mentionDetails = { id: 'mentions', name: 'Mentions', createdAt: 1, channels: [], members: [reader], knownMembers: [offline], maxUsers: 10, voiceStates: {} };
+  mentionServer.setServerDetails(mentionDetails, reader);
+  const cue = serverMentionMatcher(mentionServer);
+  assert(!cue.mentions('@Lucas, olha', 'Lu') && cue.mentions('oi @lu!', 'Lu') && cue.mentions('bom dia @todos', 'Lu'),
+    'O aviso de menção só toca para o apelido inteiro do leitor e para @todos');
+  mentionServer.setServerDetails({ ...mentionDetails, allowEveryoneMention: false }, reader);
+  assert(!serverMentionMatcher(mentionServer).mentions('bom dia @todos', 'Lu'), '@todos não avisa quando o servidor desligou a menção');
+
+  // Os mesmos nomes do servidor, só de membros: "@Lucas Bot" menciona o Lucas, com o bot online ou não.
+  const lucasMember: UserSummary = { ...reader, id: 'lucas', clientId: 'lucas-device', nickname: 'Lucas' };
+  const lucasBot: UserSummary = { ...reader, id: 'lucas-bot', clientId: 'bot-lucas-bot', nickname: 'Lucas Bot', isBot: true };
+  mentionServer.setServerDetails({ ...mentionDetails, members: [lucasMember, lucasBot], knownMembers: [lucasMember] }, lucasMember);
+  const withBot = serverMentionMatcher(mentionServer);
+  assert(mentionServer.knownMembers.has(lucasBot.id) && withBot.mentions('@Lucas Bot toca a próxima', 'Lucas')
+    && renderMarkdown('@Lucas Bot toca', { currentNickname: 'Lucas', mentions: withBot })
+      .includes('<span class="chat-mention chat-mention-me">@Lucas</span> Bot'),
+  'Um bot online não é mencionável: "@Lucas Bot" avisa e destaca o Lucas, como no servidor');
+  mentionServer.removeMember(lucasBot.id);
+  assert(serverMentionMatcher(mentionServer).mentions('@Lucas Bot toca a próxima', 'Lucas'),
+    'Depois que o bot sai, a mesma mensagem continua mencionando o Lucas');
 
   // 5. EventBus
   console.log('\n--- Testando EventBus ---');
-  const bus = new EventBus();
+  const bus = new EventBus<{ 'test.event': { foo: string }; 'multi.event': null }>();
   let callCount = 0;
-  let receivedData: any = null;
+  const received: Array<{ foo: string }> = [];
 
   const unsubscribe = bus.on('test.event', (data) => {
     callCount++;
-    receivedData = data;
+    received.push(data);
   });
 
   bus.emit('test.event', { foo: 'bar' });
   assert(callCount === 1, 'Listener executado uma vez no emit');
-  assert(receivedData?.foo === 'bar', 'Payload transmitido corretamente');
+  assert(received[0]?.foo === 'bar', 'Payload transmitido corretamente');
 
   // Testando unsubscribe
   unsubscribe();
@@ -684,7 +805,7 @@ function runTests() {
 
   // Priorização de Codecs de Vídeo WebRTC (AV1 > VP9 > VP8 > H264)
   console.log('\n--- Testando priorização de codecs de vídeo WebRTC ---');
-  const { sortVideoCodecs, getSdpVideoCodecOrder } = require('../src/renderer/core/webrtc/codecPreferences');
+  const { sortVideoCodecs } = require('../src/renderer/core/webrtc/codecPreferences');
 
   const mockCodecs = [
     { mimeType: 'video/H264', clockRate: 90000 },
@@ -713,56 +834,33 @@ function runTests() {
   assert(subset[0].mimeType === 'video/VP8', 'VP8 supera H264 quando AV1 e VP9 não estão presentes');
   assert(subset[1].mimeType === 'video/H264', 'H264 fica como fallback');
 
-  // Testar preferência personalizada do usuário
-  const prefH264 = sortVideoCodecs(mockCodecs, 'h264');
-  assert(prefH264[0].mimeType === 'video/H264', 'H.264 passa a ser o primeiro quando selecionado pelo usuário');
-  assert(prefH264[1].mimeType === 'video/AV1', 'AV1 permanece como segundo fallback na preferência H.264');
+  // 60+ FPS presets put the hardware-friendly codec first (#526)
+  const hardwareFirst = sortVideoCodecs(mockCodecs, true);
+  assert(hardwareFirst[0].mimeType === 'video/H264', 'H.264 passa a ser o primeiro nos presets de movimento');
+  assert(hardwareFirst[1].mimeType === 'video/AV1', 'AV1 permanece como segundo fallback quando o hardware é preferido');
 
-  const prefVp9 = sortVideoCodecs(mockCodecs, 'vp9');
-  assert(prefVp9[0].mimeType === 'video/VP9', 'VP9 passa a ser o primeiro quando selecionado pelo usuário');
-
-  const prefVp8 = sortVideoCodecs(mockCodecs, 'vp8');
-  assert(prefVp8[0].mimeType === 'video/VP8', 'VP8 passa a ser o primeiro quando selecionado pelo usuário');
-
-  // #566: leitura da ordem real de codecs de vídeo a partir do SDP (diagnóstico)
-  console.log('\n--- Testando getSdpVideoCodecOrder (#566) ---');
-  const sdpAv1First = [
-    'v=0',
-    'm=audio 9 UDP/TLS/RTP/SAVPF 111',
-    'a=rtpmap:111 opus/48000/2',
-    'm=video 9 UDP/TLS/RTP/SAVPF 98 99 100 101 96 97',
-    'a=rtpmap:98 AV1/90000',
-    'a=rtpmap:99 rtx/90000',
-    'a=rtpmap:100 VP9/90000',
-    'a=rtpmap:101 rtx/90000',
-    'a=rtpmap:96 H264/90000',
-    'a=rtpmap:97 rtx/90000',
-  ].join('\r\n');
-  assert(
-    JSON.stringify(getSdpVideoCodecOrder(sdpAv1First)) === JSON.stringify(['av1', 'vp9', 'h264']),
-    'getSdpVideoCodecOrder lê a ordem do m=video e descarta rtx (AV1 primeiro)'
-  );
-
-  const sdpH264First = [
-    'm=video 9 UDP/TLS/RTP/SAVPF 96 98 100',
-    'a=rtpmap:96 H264/90000',
-    'a=rtpmap:98 AV1/90000',
-    'a=rtpmap:100 VP9/90000',
-  ].join('\n');
-  assert(getSdpVideoCodecOrder(sdpH264First)[0] === 'h264', 'getSdpVideoCodecOrder reflete H.264 primeiro quando o SDP o prioriza');
-
-  assert(getSdpVideoCodecOrder('').length === 0, 'getSdpVideoCodecOrder("") retorna lista vazia');
-  assert(
-    getSdpVideoCodecOrder('v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2').length === 0,
-    'getSdpVideoCodecOrder retorna vazio quando não há seção de vídeo'
-  );
-
-  // Testar persistência de preferredVideoCodec na SettingsStore
-  const storeCodec = new SettingsStore();
-  assert(storeCodec.preferredVideoCodec === 'auto', 'preferredVideoCodec tem valor padrão "auto"');
-  storeCodec.preferredVideoCodec = 'h264';
-  storeCodec.save();
-  assert(storeCodec.preferredVideoCodec === 'h264', 'preferredVideoCodec foi atualizado e salvo');
+  // R-VOICE-10: a escolha de codec da câmera salva antes do #717 não decide mais nada
+  storageMap.set('monky_settings', JSON.stringify({ preferredVideoCodec: 'vp9', qualityPreset: 'NORMAL' }));
+  const legacyCodecStore = new SettingsStore();
+  legacyCodecStore.save();
+  assert(!('preferredVideoCodec' in JSON.parse(storageMap.get('monky_settings')!)),
+    'A preferência de codec da câmera sem UI some das configurações salvas');
+  globalSettingsStore.qualityPreset = 'NORMAL';
+  const { getPrioritizedVideoCodecs } = require('../src/renderer/core/webrtc/codecPreferences');
+  const fakeCapabilities = { codecs: mockCodecs.map(codec => ({ ...codec })) };
+  const runtime = ['RTCRtpSender', 'RTCRtpReceiver'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
+  for (const [name] of runtime) {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: { getCapabilities: () => fakeCapabilities } });
+  }
+  try {
+    assert(getPrioritizedVideoCodecs()[0].mimeType === 'video/AV1',
+      'Uma preferência VP9 salva antes do #717 não decide mais o codec da câmera');
+  } finally {
+    for (const [name, descriptor] of runtime) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else Reflect.deleteProperty(globalThis, name);
+    }
+  }
 
   // Testar ServerStore com VoiceMode
   console.log('\n--- Testando ServerStore com voiceMode ---');
@@ -777,8 +875,13 @@ function runTests() {
     voiceMode: 'sfu',
   }, { id: 'u1', nickname: 'TestUser', status: 'ONLINE' });
   assert(sStore.serverDetails?.voiceMode === 'sfu', 'ServerStore armazena voiceMode: "sfu"');
-  sStore.updateServerMeta('Servidor P2P', false, true, undefined, undefined, undefined, undefined, true, true, 'p2p');
-  assert(sStore.serverDetails?.voiceMode === 'p2p', 'updateServerMeta atualiza voiceMode para "p2p"');
+  sStore.applySettings({ name: 'Servidor P2P', hasPassword: false, allowSoundboard: true, allowEveryoneMention: true, allowMessageEdit: true, voiceMode: 'p2p' });
+  assert(sStore.serverDetails?.voiceMode === 'p2p', 'applySettings atualiza voiceMode para "p2p"');
+  assert(sStore.serverDetails?.name === 'Servidor P2P' && sStore.serverDetails.allowMessageEdit === true,
+    'applySettings aplica nome e interruptores enviados');
+  sStore.applySettings({ name: 'Servidor P2P', hasPassword: true });
+  assert(sStore.serverDetails?.voiceMode === 'p2p' && sStore.serverDetails.allowMessageEdit === true && sStore.serverDetails.hasPassword,
+    'applySettings preserva o que o servidor não enviou');
 
   // Testar SfuClientEngine
   console.log('\n--- Testando SfuClientEngine ---');
@@ -798,8 +901,6 @@ function runTests() {
   assert(typeof sfuEngine.join === 'function', 'SfuClientEngine possui método join');
   assert(typeof sfuEngine.produceMic === 'function', 'SfuClientEngine possui método produceMic');
   assert(typeof sfuEngine.produceCamera === 'function', 'SfuClientEngine possui método produceCamera');
-  assert(typeof sfuEngine.produceScreenVideo === 'function', 'SfuClientEngine possui método produceScreenVideo');
-  assert(typeof sfuEngine.produceScreenAudio === 'function', 'SfuClientEngine possui método produceScreenAudio');
   assert(sfuEngine.isReady() === false, 'SfuClientEngine nasce com isReady() === false antes do join');
   sfuEngine.leave();
   assert(sfuEngine.isReady() === false, 'SfuClientEngine.leave() limpa o estado com segurança');
@@ -807,18 +908,18 @@ function runTests() {
   // Alvos da pré-visualização de link (#372)
   console.log('\n--- Endereços recusados pela pré-visualização de link ---');
   for (const interno of ['127.0.0.1', '10.0.0.5', '192.168.1.1', '172.16.4.2', '169.254.169.254', '100.64.0.1', '0.0.0.0']) {
-    assert(isPrivateAddress(interno), `${interno} é tratado como interno`);
+    assert(!isPublicAddress(interno), `${interno} é tratado como interno`);
   }
   for (const publico of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '192.169.0.1', '99.99.99.99']) {
-    assert(!isPrivateAddress(publico), `${publico} continua alcançável`);
+    assert(isPublicAddress(publico), `${publico} continua alcançável`);
   }
-  assert(isPrivateAddress('::1'), 'Loopback IPv6 é interno');
-  assert(isPrivateAddress('fd00::1'), 'Unique local IPv6 é interno');
-  assert(isPrivateAddress('fe80::1'), 'Link-local IPv6 é interno');
-  assert(isPrivateAddress('::ffff:192.168.0.1'), 'IPv4 mapeado em IPv6 não escapa da checagem');
-  assert(!isPrivateAddress('2606:4700:4700::1111'), 'IPv6 público continua alcançável');
-  assert(isPrivateHostname('localhost') && isPrivateHostname('impressora.local'), 'Nomes locais são recusados');
-  assert(!isPrivateHostname('exemplo.com'), 'Domínio comum não é recusado pelo nome');
+  assert(!isPublicAddress('::1'), 'Loopback IPv6 é interno');
+  assert(!isPublicAddress('fd00::1'), 'Unique local IPv6 é interno');
+  assert(!isPublicAddress('fe80::1'), 'Link-local IPv6 é interno');
+  assert(!isPublicAddress('::ffff:192.168.0.1'), 'IPv4 mapeado em IPv6 não escapa da checagem');
+  assert(isPublicAddress('2606:4700:4700::1111'), 'IPv6 público continua alcançável');
+  assert(isLocalHostname('localhost') && isLocalHostname('impressora.local'), 'Nomes locais são recusados');
+  assert(!isLocalHostname('exemplo.com'), 'Domínio comum não é recusado pelo nome');
 
   console.log(`\n=== Relatório dos Testes ===`);
   console.log(`Total: ${passed + failed} | Passaram: ${passed} | Falharam: ${failed}`);

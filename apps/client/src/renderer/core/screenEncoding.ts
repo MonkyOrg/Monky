@@ -3,6 +3,7 @@ import type {
 } from '@monky/shared';
 import { settingsStore } from '../stores/settingsStore';
 import { t } from '../i18n';
+import { screenEncodingFallbackMessage } from '../utils/screenShareFailure';
 import { showInfoToast } from '../views/CopyToast';
 
 export interface ScreenEncodingPreferences {
@@ -40,5 +41,5 @@ export async function probeScreenEncoding(
 
 export function acceptScreenEncoding(availability: ScreenEncodingAvailability | undefined): void {
   if (!availability?.fallback || availability.selection?.mode !== 'software') return;
-  showInfoToast(t('screenShare.encodingFallback', { reason: availability.hardware.reason ?? '' }));
+  showInfoToast(screenEncodingFallbackMessage(availability.hardware));
 }

@@ -1,4 +1,6 @@
 #include "h264_bitstream.h"
+#include "annex_b.h"
+#include "h264_levels.h"
 
 #include <algorithm>
 #include <array>
@@ -30,19 +32,8 @@ H264Sps ParseProfileLevelId(const std::string& value) {
 
 namespace {
 
-struct Level {
-  std::uint8_t id;
-  std::uint32_t mbps;
-  std::uint32_t frameMbs;
-  std::uint32_t bitrate;
-};
-
-constexpr Level levels[] = {
-    {31, 108000, 3600, 14000000}, {32, 216000, 5120, 20000000},
-    {40, 245760, 8192, 20000000}, {41, 245760, 8192, 50000000},
-    {42, 522240, 8704, 50000000}, {50, 589824, 22080, 135000000},
-    {51, 983040, 36864, 240000000}, {52, 2073600, 36864, 240000000},
-    {60, 4177920, 139264, 240000000}};
+// The RTC side negotiates H.264 from Level 3.1 up.
+constexpr std::uint8_t kMinimumRtcLevel = 31;
 constexpr std::size_t maxAccessUnitBytes = 8 * 1024 * 1024;
 constexpr std::size_t maxParameterBytes = 64 * 1024;
 
@@ -100,14 +91,6 @@ unsigned Type(std::span<const std::uint8_t> nal) {
   return nal[0] & 31;
 }
 
-std::size_t StartCode(std::span<const std::uint8_t> bytes, std::size_t offset) {
-  if (offset + 3 <= bytes.size() && bytes[offset] == 0 && bytes[offset + 1] == 0) {
-    if (bytes[offset + 2] == 1) return 3;
-    if (offset + 4 <= bytes.size() && bytes[offset + 2] == 0 && bytes[offset + 3] == 1) return 4;
-  }
-  return 0;
-}
-
 void Append(std::vector<std::uint8_t>& bytes, std::span<const std::uint8_t> nal) {
   if (bytes.size() + nal.size() + 4 > maxAccessUnitBytes) {
     throw std::runtime_error("H264 access unit exceeds the bounded output limit");
@@ -121,18 +104,16 @@ void Append(std::vector<std::uint8_t>& bytes, std::span<const std::uint8_t> nal)
 std::uint8_t RequiredH264Level(std::uint32_t width, std::uint32_t height,
                                std::uint32_t fps, std::uint32_t bitrateBps) {
   if (!width || !height || !fps || !bitrateBps) throw std::runtime_error("Invalid H264 configuration");
-  const std::uint64_t w = (static_cast<std::uint64_t>(width) + 15) / 16;
-  const std::uint64_t h = (static_cast<std::uint64_t>(height) + 15) / 16;
-  for (const auto& level : levels) {
-    if (w * h <= level.frameMbs && w * h * fps <= level.mbps &&
-        w * w <= 8ull * level.frameMbs && h * h <= 8ull * level.frameMbs &&
-        bitrateBps <= level.bitrate) return level.id;
+  for (const auto& level : kH264Levels) {
+    if (level.level >= kMinimumRtcLevel && H264LevelAdmits(level, width, height, fps) &&
+        bitrateBps <= std::uint64_t{level.bitrateKbps} * 1000) return level.level;
   }
   throw std::runtime_error("Requested H264 mode exceeds supported Level 6 bounds");
 }
 
 std::uint32_t H264LevelMaxBitrate(std::uint8_t id) {
-  for (const auto& level : levels) if (level.id == id) return level.bitrate;
+  for (const auto& level : kH264Levels)
+    if (level.level >= kMinimumRtcLevel && level.level == id) return level.bitrateKbps * 1000;
   throw std::runtime_error("Unsupported H264 level");
 }
 
@@ -260,19 +241,12 @@ std::vector<std::span<const std::uint8_t>> H264Bitstream::Split(std::span<const 
   if (bytes.empty() || bytes.size() > maxAccessUnitBytes) throw std::runtime_error("Invalid H264 output size");
   std::vector<std::span<const std::uint8_t>> nals;
   // An AVC length such as 00 00 01 00 is not an Annex B start code.
-  if (!avcConfiguration_ && StartCode(bytes, 0)) {
-    std::size_t position = 0;
-    while (position < bytes.size()) {
-      const auto prefix = StartCode(bytes, position);
-      if (!prefix) throw std::runtime_error("Malformed Annex B stream");
-      const auto begin = position + prefix;
-      position = begin;
-      while (position < bytes.size() && !StartCode(bytes, position)) ++position;
-      auto end = position;
-      while (end > begin && bytes[end - 1] == 0) --end;
-      if (end == begin) throw std::runtime_error("Empty Annex B NAL");
-      if (nals.size() == 4096) throw std::runtime_error("Too many H264 NALs in an access unit");
-      nals.push_back(bytes.subspan(begin, end - begin));
+  if (!avcConfiguration_ && AnnexBStartCode(bytes, 0)) {
+    switch (ForEachAnnexBNal(bytes, 4096, [&](std::span<const std::uint8_t> nal) { nals.push_back(nal); })) {
+      case AnnexBError::kNone: break;
+      case AnnexBError::kEmptyNal: throw std::runtime_error("Empty Annex B NAL");
+      case AnnexBError::kTooManyNals: throw std::runtime_error("Too many H264 NALs in an access unit");
+      case AnnexBError::kNoStartCode: throw std::runtime_error("Malformed Annex B stream");
     }
   } else {
     std::size_t position = 0;

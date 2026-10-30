@@ -14,6 +14,17 @@ using Clock = std::chrono::steady_clock;
 enum class Scope { Peer, Transport, Producer, Consumer };
 enum class Execution { Success, Failure, Cancelled, Timeout, PreCancelled };
 
+// winerror.h values, spelled out because macOS has no HRESULTs. The checks need
+// distinct nonzero codes that must reach the delivered error unchanged; 0 means none.
+constexpr std::int32_t kAccessDenied = static_cast<std::int32_t>(0x80070005u);
+constexpr std::int32_t kAborted = static_cast<std::int32_t>(0x80004004u);
+constexpr std::int32_t kOutOfMemory = static_cast<std::int32_t>(0x8007000Eu);
+constexpr std::int32_t kFailed = static_cast<std::int32_t>(0x80004005u);
+#if defined(_WIN32)
+static_assert(kAccessDenied == E_ACCESSDENIED && kAborted == E_ABORT && kOutOfMemory == E_OUTOFMEMORY &&
+              kFailed == E_FAIL);
+#endif
+
 inline Json ErrorValue(const Error& error) {
   return {{"code", error.code}, {"message", error.what()}, {"status", error.status},
           {"hresult", static_cast<std::int32_t>(error.hr)}};
@@ -78,7 +89,7 @@ class Fixture {
     Selected()["receiveStreamDiagnostics"] = nullptr;
     now += std::chrono::milliseconds(1);
     if (execution == Execution::Failure)
-      throw Error("ERR_CPU_STATS_READ", "Original scoped stats failure", MONKY_ENGINE_FAILURE, E_ACCESSDENIED);
+      throw Error("ERR_CPU_STATS_READ", "Original scoped stats failure", MONKY_ENGINE_FAILURE, kAccessDenied);
     if (execution == Execution::Cancelled || execution == Execution::Timeout) {
       // The actual controllers retire this PC/owning transport on a cancelled
       // or timed-out GetStats wait before rethrowing; no other owner is retired.
@@ -88,7 +99,7 @@ class Fixture {
       throw Error(execution == Execution::Cancelled ? "ERR_RTC_CANCELLED" : "ERR_RTC_TIMEOUT",
                   "Original stats wait failed",
                   execution == Execution::Cancelled ? MONKY_ENGINE_CANCELLED : MONKY_ENGINE_TIMEOUT,
-                  E_ABORT);
+                  kAborted);
     }
     Selected()["receiveStreamDiagnostics"] = Observation(++report_timestamp);
     return Json::array({Json{{"id", "actual-selector-control"}, {"timestamp", report_timestamp}}});
@@ -106,7 +117,7 @@ class Fixture {
     if ((fail_first_publication && publish_calls == 1) ||
         (fail_final_publication && publish_calls == 2))
       throw Error(publish_calls == 1 ? "ERR_CPU_SNAPSHOT_1" : "ERR_CPU_SNAPSHOT_2",
-                  "Control snapshot publication failed", MONKY_ENGINE_FAILURE, E_OUTOFMEMORY);
+                  "Control snapshot publication failed", MONKY_ENGINE_FAILURE, kOutOfMemory);
     std::lock_guard lock(mutex);
     cache_peers = std::move(next_peers);
     cache_sfu = std::move(next_sfu);
@@ -129,7 +140,7 @@ class Fixture {
     // double also guards the shared completion flow against rollback side effects.
     if (retire_during_rollback) RetireOwner();
     if (throw_rollback)
-      throw Error("ERR_CPU_ROLLBACK", "Secondary rollback failure", MONKY_ENGINE_FAILURE, E_FAIL);
+      throw Error("ERR_CPU_ROLLBACK", "Secondary rollback failure", MONKY_ENGINE_FAILURE, kFailed);
   }
 
   void RememberRollbackFailure() {
@@ -317,7 +328,7 @@ inline void Run(Check check) {
       fixture.Run();
       fixture.RequireActualState();
       const auto expected = ErrorValue(Error("ERR_CPU_STATS_READ", "Original scoped stats failure",
-                                           MONKY_ENGINE_FAILURE, E_ACCESSDENIED));
+                                           MONKY_ENGINE_FAILURE, kAccessDenied));
       check(fixture.delivered.at("ok") == false && fixture.delivered.at("error") == expected &&
             !fixture.delivered.contains("result") && fixture.publish_calls == 1 &&
             fixture.decision_calls == 0 && fixture.rollback_calls == 0 &&
@@ -334,7 +345,7 @@ inline void Run(Check check) {
       const auto expected = ErrorValue(Error(
           execution == Execution::Cancelled ? "ERR_RTC_CANCELLED" : "ERR_RTC_TIMEOUT",
           "Original stats wait failed",
-          execution == Execution::Cancelled ? MONKY_ENGINE_CANCELLED : MONKY_ENGINE_TIMEOUT, E_ABORT));
+          execution == Execution::Cancelled ? MONKY_ENGINE_CANCELLED : MONKY_ENGINE_TIMEOUT, kAborted));
       check(fixture.delivered.at("ok") == false && fixture.delivered.at("error") == expected &&
             fixture.SelectedIsMissing() && fixture.decision_calls == 0 &&
             fixture.rollback_calls == 0 && fixture.publish_calls == 1,
@@ -389,7 +400,7 @@ inline void Run(Check check) {
       fixture.Run();
       check(fixture.delivered.at("ok") == false &&
             fixture.delivered.at("error").at("code") == "ERR_CPU_STATS_READ" &&
-            fixture.delivered.at("error").at("hresult") == static_cast<std::int32_t>(E_ACCESSDENIED) &&
+            fixture.delivered.at("error").at("hresult") == kAccessDenied &&
             fixture.publication_errors.size() == 1 &&
             fixture.publication_errors.front().at("code") == "ERR_CPU_SNAPSHOT_1" &&
             fixture.observed.at("peers").is_null() && fixture.observed.at("sfu").is_null() &&
@@ -403,7 +414,7 @@ inline void Run(Check check) {
       fixture.Run();
       check(fixture.delivered.at("ok") == false &&
             fixture.delivered.at("error").at("code") == "ERR_CPU_SNAPSHOT_1" &&
-            fixture.delivered.at("error").at("hresult") == static_cast<std::int32_t>(E_OUTOFMEMORY) &&
+            fixture.delivered.at("error").at("hresult") == kOutOfMemory &&
             !fixture.delivered.contains("result") && fixture.publish_calls == 2 &&
             fixture.decision_calls == 0 && fixture.rollback_calls == 0,
             "A publication failure on the success path became an ok DTO or moved the result decision");
@@ -442,6 +453,32 @@ inline void Run(Check check) {
 
 template <typename Check>
 void RunOperationCompletionChecks(Check&& check) {
+  // One table names every operation with its scope and its rollback (engine_operations.h).
+  std::size_t creations = 0;
+  for (const auto& spec : kOperations) {
+    const bool sfu = spec.name.starts_with("sfu.");
+    check(FindOperation(spec.name) == &spec, "Operation names must be unique");
+    check(sfu || spec.name.starts_with("peer.") || spec.name.starts_with("source.") ||
+          spec.name.starts_with("audio.") || spec.name == "resource.close", "Operation outside the engine families");
+    check(spec.observes_control == spec.name.ends_with(".getStats"), "Only stats observe the controller snapshot");
+    check(spec.rollback != Rollback::kRetireTransport || sfu, "Only SFU producer/consumer work retires its transport");
+    if (spec.scope == OperationScope::kCreates) ++creations;
+  }
+  check(!FindOperation("peer.unknown") && !FindOperation(""), "Unknown operations must be refused");
+  check(creations == 6 && FindOperation("peer.create")->scope == OperationScope::kCreates &&
+        FindOperation("sfu.load")->scope == OperationScope::kCreates &&
+        FindOperation("audio.configureOutput")->scope == OperationScope::kCreates &&
+        FindOperation("sfu.createTransport")->scope == OperationScope::kResource,
+        "Only the six creations take target zero");
+  check(FindOperation("audio.configureOutput")->rollback == Rollback::kStopAudioOutput &&
+        FindOperation("source.setEnabled")->rollback == Rollback::kDisableSource &&
+        FindOperation("source.beginAudioEpoch")->rollback == Rollback::kDisableSource &&
+        FindOperation("source.createAudio")->rollback == Rollback::kRetire &&
+        FindOperation("peer.createOffer")->rollback == Rollback::kNone &&
+        FindOperation("resource.close")->rollback == Rollback::kNone &&
+        FindOperation("sfu.consume")->rollback == Rollback::kRetireTransport &&
+        FindOperation("sfu.setConsumerVolume")->rollback == Rollback::kRetire,
+        "A cancelled operation's rollback policy changed");
   std::mutex mutex;
   OperationReservations reservations;
   std::shared_ptr<Cancellation> active;

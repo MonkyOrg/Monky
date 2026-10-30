@@ -69,7 +69,7 @@ export function uploadAttachment(
       };
       request.onerror = () => {
         cleanupListeners();
-        reject(new Error('Falha de rede ao enviar o arquivo'));
+        reject(new Error(t('upload.networkFailed')));
       };
       request.onabort = () => {
         cleanupListeners();

@@ -4,6 +4,13 @@ import { settingsStore } from './settingsStore';
 import { clientLog } from '../core/ClientLogService';
 import { screenShareQualitySchema, type ScreenShareQuality, type VoiceConnectionHealth } from '@monky/shared';
 
+/** Restrictions the call's server imposes on this member. */
+export interface VoiceModeration {
+  serverMuted: boolean;
+  serverDeafened: boolean;
+  permissionMuted: boolean;
+}
+
 export class VoiceStore {
   public currentVoiceChannelId: string | null = null;
   /**
@@ -238,7 +245,7 @@ export class VoiceStore {
     if (this.getEffectiveMuted()) this.setSpeaking(false);
     settingsStore.isMuted = muted;
     settingsStore.save();
-    appEvents.emit('voice.state_updated');
+    this.notifyStateUpdated();
   }
 
   public setDeafened(deafened: boolean): void {
@@ -258,28 +265,32 @@ export class VoiceStore {
     settingsStore.isMuted = this.isMuted;
     if (this.getEffectiveMuted()) this.setSpeaking(false);
     settingsStore.save();
-    appEvents.emit('voice.state_updated');
+    this.notifyStateUpdated();
   }
 
   public setServerMuted(muted: boolean): void {
-    clientLog.warn('AUDIO', `Server muted: ${muted}`);
-    this.serverMuted = muted;
-    if (this.getEffectiveMuted()) this.setSpeaking(false);
-    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
+    this.applyModeration({ serverMuted: muted });
   }
 
   public setServerDeafened(deafened: boolean): void {
-    clientLog.warn('AUDIO', `Server deafened: ${deafened}`);
-    this.serverDeafened = deafened;
-    if (this.getEffectiveMuted()) this.setSpeaking(false);
-    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
+    this.applyModeration({ serverDeafened: deafened });
   }
 
   public setPermissionMuted(muted: boolean): void {
-    clientLog.warn('AUDIO', `Permission muted: ${muted}`);
-    this.permissionMuted = muted;
+    this.applyModeration({ permissionMuted: muted });
+  }
+
+  /**
+   * What the call's server imposes on this member. Applied at once, so the
+   * views redraw a single time instead of once per flag.
+   */
+  public applyModeration(moderation: Partial<VoiceModeration>): void {
+    clientLog.warn('AUDIO', 'Voice moderation applied', { ...moderation });
+    this.serverMuted = moderation.serverMuted ?? this.serverMuted;
+    this.serverDeafened = moderation.serverDeafened ?? this.serverDeafened;
+    this.permissionMuted = moderation.permissionMuted ?? this.permissionMuted;
     if (this.getEffectiveMuted()) this.setSpeaking(false);
-    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
+    this.notifyStateUpdated();
   }
 
   public getEffectiveMuted(): boolean {
@@ -340,7 +351,7 @@ export class VoiceStore {
 
   public setCameraOn(on: boolean): void {
     this.isCameraOn = on;
-    appEvents.emit('voice.state_updated');
+    this.notifyStateUpdated();
   }
 
   public setScreenSharing(sharing: boolean): void {
@@ -349,7 +360,7 @@ export class VoiceStore {
       this.screenShareIds = [];
       this.screenAudioShareIds = [];
     }
-    appEvents.emit('voice.state_updated');
+    this.notifyStateUpdated();
   }
 
   public addScreenShare(shareId: string): void {
@@ -357,14 +368,14 @@ export class VoiceStore {
       this.screenShareIds.push(shareId);
     }
     this.isScreenSharing = this.screenShareIds.length > 0;
-    appEvents.emit('voice.state_updated');
+    this.notifyStateUpdated();
   }
 
   public removeScreenShare(shareId: string): void {
     this.screenShareIds = this.screenShareIds.filter((id) => id !== shareId);
     this.isScreenSharing = this.screenShareIds.length > 0;
     this.screenAudioShareIds = this.screenAudioShareIds.filter((id) => id !== shareId);
-    appEvents.emit('voice.state_updated');
+    this.notifyStateUpdated();
   }
 
   public get hasScreenAudio(): boolean {
@@ -373,17 +384,26 @@ export class VoiceStore {
 
   public addScreenAudioShare(shareId: string): void {
     if (!this.screenAudioShareIds.includes(shareId)) this.screenAudioShareIds.push(shareId);
-    appEvents.emit('voice.state_updated');
+    this.notifyStateUpdated();
   }
 
   public removeScreenAudioShare(shareId: string): void {
     this.screenAudioShareIds = this.screenAudioShareIds.filter((id) => id !== shareId);
-    appEvents.emit('voice.state_updated');
+    this.notifyStateUpdated();
   }
 
   /** `limit` depends on the call's server: see screenShareLimit() (#253). */
   public canAddScreenShare(limit: number): boolean {
     return this.screenShareIds.length < limit;
+  }
+
+  /**
+   * The call is global state: notifying while another server's event is routed
+   * would repaint the screen with that server's stores (#400). Every state
+   * change goes out through here.
+   */
+  private notifyStateUpdated(): void {
+    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
   }
 
   public reset(): void {

@@ -1,4 +1,4 @@
-import type { BotLocale } from '@monky/shared';
+import { normalizeBotReachabilityOrigin, type BotLocale } from '@monky/shared';
 import {
   EMPTY_BOT_REQUIREMENTS, MANIFEST_PORT_ID, localizedText, type BotLocalizedText, type BotPortActivation,
   type BotPortExposure, type BotPortProtocol, type BotPortRequirement,
@@ -7,7 +7,7 @@ import type { BotMode } from '../tooling/config';
 import { DEFAULT_MARKETPLACE_PORT, ANSI, color } from './constants';
 import type { BotConfig, CliContext } from './config';
 import { cliText } from './locale';
-import { readProfileEnvironment, resolveDeclaredVariables, displayValue, type ResolvedVariable } from './profileEnvironment';
+import { declaredPortStates, displayValue, readProfileEnvironment, resolveDeclaredVariables } from './profileEnvironment';
 
 export interface EffectivePort {
   id: string;
@@ -43,21 +43,28 @@ function originOf(host: string, port: number): string | null {
   }
 }
 
-function valueOf(resolved: ResolvedVariable[], name: string | undefined): ResolvedVariable | undefined {
-  return name === undefined ? undefined : resolved.find((entry) => entry.variable.name === name);
+function configuredOrigin(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Ports this bot uses with the configuration and environment that would apply
  * to its process. `env` is the bot process environment when it is running.
+ *
+ * Declared ports come from `declaredPortStates`, the model setup and
+ * `config env set` use, and a public URL is held to the same rule the server
+ * validates (`normalizeBotReachabilityOrigin`): doctor used to accept a URL
+ * such as `http://host:80/` that `config env set` refuses.
  */
 export function effectivePorts(
   context: CliContext, config: BotConfig | null, env: NodeJS.ProcessEnv | Record<string, unknown>,
   saved: Record<string, string> = readProfileEnvironment(context.homeDir),
 ): EffectivePort[] {
   const definition = context.project.definition;
-  const requirements = definition.requirements ?? EMPTY_BOT_REQUIREMENTS;
-  const resolved = resolveDeclaredVariables(requirements, saved, env);
   const mode = config?.mode;
   const ports: EffectivePort[] = [];
   if (definition.modes.includes('marketplace') && (!mode || mode === 'marketplace')) {
@@ -67,35 +74,29 @@ export function effectivePorts(
       id: MANIFEST_PORT_ID, description: MANIFEST_DESCRIPTION, protocol: 'tcp', exposure: 'public', when: 'always',
       modes: ['marketplace'], port: servePort,
       bindHost: typeof serveHost === 'string' && serveHost ? serveHost : '0.0.0.0',
-      publicOrigin: config?.mode === 'marketplace' ? originOf(config.publicHost, servePort) : null,
+      // Behind a TLS proxy the bot is reached, and its reachability proven, at the configured origin.
+      publicOrigin: config?.mode !== 'marketplace' ? null
+        : config.publicUrl ? configuredOrigin(config.publicUrl) : originOf(config.publicHost, servePort),
     });
   }
-  for (const declared of requirements.ports) {
-    if (mode && !declared.modes.includes(mode)) continue;
-    const portValue = valueOf(resolved, declared.portEnv)?.value ?? String(declared.defaultPort);
-    const port = /^\d{1,5}$/.test(portValue) && Number(portValue) >= 1 && Number(portValue) <= 65535 ? Number(portValue) : null;
-    const publicUrl = valueOf(resolved, declared.publicUrlEnv)?.value;
+  for (const state of declaredPortStates(definition.requirements, saved, env, mode)) {
+    const declared = state.requirement;
     let publicOrigin: string | null = null;
     let invalid: EffectivePort['invalid'];
-    if (port === null) {
+    if (state.port === null) {
       invalid = { pt: `${declared.portEnv} contém uma porta inválida.`, en: `${declared.portEnv} contains an invalid port.` };
     }
-    if (publicUrl !== undefined) {
-      try {
-        const url = new URL(publicUrl);
-        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-          throw new Error('Invalid public URL.');
-        }
-        publicOrigin = url.origin;
-      } catch {
+    if (state.publicUrl !== undefined) {
+      publicOrigin = normalizeBotReachabilityOrigin(state.publicUrl);
+      if (!publicOrigin) {
         invalid = { pt: `${declared.publicUrlEnv} não é uma URL http(s) sem caminho.`, en: `${declared.publicUrlEnv} is not an http(s) URL without a path.` };
       }
-    } else if (declared.exposure === 'public' && declared.protocol === 'tcp' && config?.mode === 'marketplace' && port !== null) {
-      publicOrigin = originOf(config.publicHost, port);
+    } else if (declared.exposure === 'public' && declared.protocol === 'tcp' && config?.mode === 'marketplace' && state.port !== null) {
+      publicOrigin = originOf(config.publicHost, state.port);
     }
     ports.push({
       id: declared.id, description: declared.description, protocol: declared.protocol, exposure: declared.exposure,
-      when: declared.when, modes: declared.modes, port, bindHost: valueOf(resolved, declared.hostEnv)?.value ?? '0.0.0.0',
+      when: declared.when, modes: declared.modes, port: state.port, bindHost: state.bindHost,
       publicOrigin, declared, ...(invalid ? { invalid } : {}),
     });
   }

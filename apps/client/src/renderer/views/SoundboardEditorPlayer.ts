@@ -47,12 +47,12 @@ export class SoundboardEditorPlayer {
     root.querySelector('[data-player-restart]')!.addEventListener('click', () => this.seekTo(0), { signal });
     root.querySelector('[data-player-stop]')!.addEventListener('click', () => this.stop(), { signal });
     this.seek.addEventListener('input', () => this.seekTo(Number(this.seek.value)), { signal });
-    for (const event of ['soundboard.playback_started', 'soundboard.playback_changed', 'soundboard.playback_progress']) {
-      this.unbind.push(appEvents.on<{ userId?: string }>(event, data => {
+    for (const event of ['soundboard.playback_started', 'soundboard.playback_changed', 'soundboard.playback_progress'] as const) {
+      this.unbind.push(appEvents.on(event, data => {
         if (data?.userId === 'editor-preview') this.render();
       }));
     }
-    this.unbind.push(appEvents.on<{ userId?: string; ended?: boolean; failed?: boolean }>('soundboard.playback_ended', data => {
+    this.unbind.push(appEvents.on('soundboard.playback_ended', data => {
       if (data?.userId !== 'editor-preview') return;
       this.position = data.ended ? this.duration : 0;
       if (data.failed) this.onError(new Error(t('soundboard.previewFailed')));

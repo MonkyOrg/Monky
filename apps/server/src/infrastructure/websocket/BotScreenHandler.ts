@@ -1,26 +1,43 @@
-import {
-  BOT_SCREEN_LIMITS, MessageType, Permission, ProtocolErrorCode, canAccessChannel, hasPermission,
+import { serverMessage,
+  BOT_SCREEN_LIMITS, MessageType, Permission, ProtocolErrorCode, hasPermission,
   botScreenActionSchema, botScreenCreateSchema, botScreenRefSchema, botScreenListSchema, botScreenUpdateSchema,
-  type BotScreenActionEvent, type BotScreenRef, type BotScreenRemoved, type ProtocolMessage,
+  type BotScreenActionEvent, type BotScreenRef, type BotScreenRemoved, type ServerMessage, type ServerMessageArgs,
 } from '@monky/shared';
+import { ZodError } from 'zod';
 import type { BotInteractionSession, VoiceInvocationAuthorization } from './BotInteractionHandler';
 import { BotScreenError, BotScreenService, type ActiveBotScreen } from '../../application/services/BotScreenService';
 import type { ChannelService } from '../../application/services/ChannelService';
 import type { UserService } from '../../application/services/UserService';
+import { ServiceError } from '../../application/errors';
+import {
+  BOT_ACCESS_REFUSALS, BotAccess, BotAccessGate, withStableAccess, type BotAccessDenial, type BotAccessReads,
+} from '../../application/services/BotAccessPolicy';
 import { Logger } from '../logger/Logger';
+import { toProtocolError } from './protocolErrors';
 
 export interface BotScreenTransport {
   sessions(): Iterable<BotInteractionSession>;
   isCurrent(session: BotInteractionSession): boolean;
+  /**
+   * Moves with every change to who may use a voice room, other than role writes:
+   * channels, membership, connections, and voice presence with the grants that
+   * keep someone in a room. While it holds, the periodic sweep skips (BOTS-3).
+   */
   accessVersion(): number;
   getVoiceChannelId(sessionId: string): string | null;
-  send(session: BotInteractionSession, message: ProtocolMessage): void;
+  send(session: BotInteractionSession, message: ServerMessage): void;
   authorizeInvocation(session: BotInteractionSession, invocationId: string, channelId: string): Promise<VoiceInvocationAuthorization | undefined>;
   endInvocation(session: BotInteractionSession, invocationId: string): void;
 }
 
-class ScreenAccessError extends Error {
-  constructor(message: string, readonly code = ProtocolErrorCode.PERMISSION_DENIED) { super(message); }
+class ScreenAccessError extends ServiceError {
+  constructor(message: string, code: ProtocolErrorCode = ProtocolErrorCode.PERMISSION_DENIED) { super(code, message); }
+}
+
+/** Miniapps have always answered a lost membership with PERMISSION_DENIED. */
+function screenRefusal(denial: BotAccessDenial): ScreenAccessError {
+  const { code, message } = BOT_ACCESS_REFUSALS[denial];
+  return new ScreenAccessError(message, denial === 'member' ? ProtocolErrorCode.PERMISSION_DENIED : code);
 }
 
 interface RateWindow { start: number; count: number }
@@ -35,15 +52,20 @@ export class BotScreenHandler {
   private screenRate = new WeakMap<ActiveBotScreen, RateWindow>();
   private actionIds = new WeakMap<ActiveBotScreen, Set<string>>();
   private timer: ReturnType<typeof setInterval>;
+  /** The access versions every screen and viewer was last checked against. */
+  private sweptKey: string | null = null;
+  /** Who may see or use a miniapp: the rule shared with commands and selectors (BOTS-8). */
+  private readonly gate: BotAccessGate;
 
   constructor(
     private screens: BotScreenService,
-    private channels: Pick<ChannelService, 'getChannelSummary' | 'getAccessContext' | 'getRoleAccessVersion' | 'rulesFor'>,
-    private users: Pick<UserService, 'isMember'>,
+    private channels: Pick<ChannelService, 'accessScope' | 'getAccessContext' | 'getRoleAccessVersion' | 'rulesFor'>,
+    users: Pick<UserService, 'isMember'>,
     private transport: BotScreenTransport,
   ) {
+    this.gate = new BotAccessGate(channels, users);
     this.timer = setInterval(() => {
-      if (this.queued === 0) void this.revokeInvalid().catch((error: unknown) => Logger.error('BOT', 'Screen cleanup failed.', error));
+      if (this.queued === 0) void this.enqueue(() => this.sweep()).catch((error: unknown) => Logger.error('BOT', 'Screen cleanup failed.', error));
     }, 1000);
     this.timer.unref();
   }
@@ -60,18 +82,27 @@ export class BotScreenHandler {
         await this.sweep();
         if (type === MessageType.BOT_SCREEN_LIST) {
           const { channelId } = botScreenListSchema.parse(payload);
-          const visible = this.screens.list().filter((entry) =>
+          const candidates = this.screens.list().filter((entry) =>
             entry.screen.channelId === channelId && (!session.isBot || entry.screen.botId === session.botId));
+          let visible: ActiveBotScreen[] = [];
+          const access = this.fanOut();
           await this.stableAccess(async () => {
-            if (!session.isBot) await this.requireViewer(session, channelId, false);
-            for (const entry of visible) await this.requireOwner(entry);
+            if (!session.isBot) await this.requireViewer(session, channelId, false, access());
+            // A screen whose bot lost access is left out rather than failing the whole list.
+            visible = [];
+            for (const entry of candidates) {
+              try {
+                await this.requireOwner(entry, access());
+                visible.push(entry);
+              } catch (error: unknown) {
+                if (!(error instanceof ScreenAccessError)) throw error;
+              }
+            }
           }, () => {
             if (!session.isBot) this.requireVoiceMembership(session, channelId);
-            for (const entry of visible) {
-              this.requireOwnerSession(entry);
-              this.remember(session, entry.screen.id);
-            }
-            this.send(session, MessageType.BOT_SCREEN_LIST_RESULT, { channelId, screens: visible.map(({ screen }) => screen) }, requestId);
+            const listed = visible.filter((entry) => this.screens.get(entry.screen.id) === entry && this.ownerIsCurrent(entry));
+            for (const entry of listed) this.remember(session, entry.screen.id);
+            this.send(session, MessageType.BOT_SCREEN_LIST_RESULT, { channelId, screens: listed.map(({ screen }) => screen) }, requestId);
           });
           return;
         }
@@ -113,7 +144,9 @@ export class BotScreenHandler {
             const ids = this.actionIds.get(entry) ?? new Set<string>();
             const key = JSON.stringify([session.user!.id, input.actionId]);
             if (!ids.has(key)) {
-              if (!this.allow(this.screenRate, entry, BOT_SCREEN_LIMITS.actionsPerScreenPerSecond)) throw new Error('Screen action rate exceeded.');
+              if (!this.allow(this.screenRate, entry, BOT_SCREEN_LIMITS.actionsPerScreenPerSecond)) {
+                throw new BotScreenError('Screen action rate exceeded.', ProtocolErrorCode.BOT_INTERACTION_INVALID);
+              }
               ids.add(key);
               if (ids.size > 256) ids.delete(ids.values().next().value!);
               this.actionIds.set(entry, ids);
@@ -153,7 +186,9 @@ export class BotScreenHandler {
           return;
         }
         this.requireBot(session);
-        if (type !== MessageType.BOT_SCREEN_UPDATE && type !== MessageType.BOT_SCREEN_CLOSE) throw new Error('Unsupported screen operation.');
+        if (type !== MessageType.BOT_SCREEN_UPDATE && type !== MessageType.BOT_SCREEN_CLOSE) {
+          throw new BotScreenError('Unsupported screen operation.', ProtocolErrorCode.BOT_INTERACTION_INVALID);
+        }
         const input = type === MessageType.BOT_SCREEN_UPDATE ? botScreenUpdateSchema.parse(payload) : botScreenRefSchema.parse(payload);
         const entry = this.requireInstance(input);
         if (entry.screen.botId !== session.botId || this.owners.get(input.id) !== session) throw new BotScreenError('Screen not found.', ProtocolErrorCode.BOT_SCREEN_NOT_FOUND);
@@ -182,7 +217,7 @@ export class BotScreenHandler {
   }
 
   /** Call on access mutations; the periodic sweep is only a lifecycle safety net. */
-  revokeInvalid(): Promise<void> { return this.enqueue(() => this.sweep()); }
+  revokeInvalid(): Promise<void> { return this.enqueue(() => this.sweep(true)); }
 
   disconnect(session: BotInteractionSession): Promise<void> {
     return this.enqueue(async () => {
@@ -203,36 +238,39 @@ export class BotScreenHandler {
     this.owners.clear();
   }
 
-  private async stableAccess<T>(check: () => Promise<void>, use: () => T): Promise<T> {
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const version = this.transport.accessVersion();
-      // Role writes can precede their WebSocket access-epoch update.
-      const roleVersion = this.channels.getRoleAccessVersion();
-      if (roleVersion === null) break;
-      const unchanged = () => version === this.transport.accessVersion() &&
-        roleVersion === this.channels.getRoleAccessVersion();
-      try {
-        await check();
-      } catch (error: unknown) {
-        if (error instanceof ScreenAccessError && !unchanged()) continue;
-        throw error;
-      }
-      if (this.closed) throw new ScreenAccessError('The server is stopping.');
-      if (unchanged()) return use();
-    }
-    throw new ScreenAccessError('Permissions are changing. Retry shortly.', ProtocolErrorCode.BOT_COMMAND_BUSY);
+  private stableAccess<T>(check: () => Promise<void>, use: () => T): Promise<T> {
+    return withStableAccess({
+      version: () => this.accessKey(),
+      check,
+      use: () => {
+        if (this.closed) throw new ScreenAccessError('The server is stopping.');
+        return use();
+      },
+      isRefusal: (error) => error instanceof ScreenAccessError,
+      busy: () => new ScreenAccessError('Permissions are changing. Retry shortly.', ProtocolErrorCode.BOT_COMMAND_BUSY),
+    });
   }
 
-  private async requirePrincipal(userId: string, channelId: string, human: boolean, interact: boolean): Promise<void> {
-    const [channel, context] = await Promise.all([this.channels.getChannelSummary(channelId), this.channels.getAccessContext(userId, channelId)]);
-    if (!channel || channel.type !== 'VOICE' ||
-        !canAccessChannel(this.channels.rulesFor(channel, context), context.permissions, context.roleIds, context.isBot, context.userId)) {
-      throw new ScreenAccessError('Channel is unavailable.', ProtocolErrorCode.CHANNEL_NOT_FOUND);
-    }
-    if (human && !(await this.users.isMember(userId))) throw new ScreenAccessError('Membership is required.');
-    if (interact && !hasPermission(context.permissions, human ? Permission.USE_BOT_COMMANDS : Permission.SEND_MESSAGES)) {
-      throw new ScreenAccessError('Bot interactions are not permitted in this channel.');
-    }
+  /** Without `reads`, a single check reads everything afresh. */
+  private async requirePrincipal(
+    userId: string, channelId: string, human: boolean, interact: boolean, reads?: BotAccessReads,
+  ): Promise<void> {
+    const denial = await this.gate.check(userId, channelId, BotAccess.screen(human, interact), reads);
+    if (denial) throw screenRefusal(denial);
+  }
+
+  /**
+   * Access only changes along with these versions (see BotScreenTransport.accessVersion).
+   * Null while a role write is pending: role writes can precede their WebSocket access-epoch update.
+   */
+  private accessKey(): string | null {
+    const roles = this.channels.getRoleAccessVersion();
+    return roles === null ? null : `${this.transport.accessVersion()}:${roles}`;
+  }
+
+  /** The reads one fan-out shares, so reaching every viewer reads the channel and each member once (BOTS-3). */
+  private fanOut(): () => BotAccessReads {
+    return this.gate.fanOut(() => this.accessKey());
   }
 
   private requireVoiceMembership(session: BotInteractionSession, channelId: string): void {
@@ -242,9 +280,11 @@ export class BotScreenHandler {
     }
   }
 
-  private async requireViewer(session: BotInteractionSession, channelId: string, interact: boolean): Promise<void> {
+  private async requireViewer(
+    session: BotInteractionSession, channelId: string, interact: boolean, reads?: BotAccessReads,
+  ): Promise<void> {
     this.requireVoiceMembership(session, channelId);
-    await this.requirePrincipal(session.user!.id, channelId, true, interact);
+    await this.requirePrincipal(session.user!.id, channelId, true, interact, reads);
     this.requireVoiceMembership(session, channelId);
   }
 
@@ -266,15 +306,28 @@ export class BotScreenHandler {
     return owner;
   }
 
-  private async requireOwner(entry: ActiveBotScreen): Promise<void> {
-    const owner = this.requireOwnerSession(entry);
-    await this.requirePrincipal(entry.creatorUserId ?? owner.user!.id, entry.screen.channelId, !!entry.creatorUserId, true);
+  private ownerIsCurrent(entry: ActiveBotScreen): boolean {
+    const owner = this.owners.get(entry.screen.id);
+    return !!owner?.user && this.transport.isCurrent(owner);
   }
 
-  private async sweep(): Promise<void> {
+  private async requireOwner(entry: ActiveBotScreen, reads?: BotAccessReads): Promise<void> {
+    const owner = this.requireOwnerSession(entry);
+    await this.requirePrincipal(entry.creatorUserId ?? owner.user!.id, entry.screen.channelId, !!entry.creatorUserId, true, reads);
+  }
+
+  /**
+   * Every access mutation calls revokeInvalid, which forces a sweep. Otherwise
+   * a sweep only runs once the access versions moved since the last one: an
+   * unchanged pair keeps its verdict, so an idle server reads nothing (BOTS-3).
+   */
+  private async sweep(force = false): Promise<void> {
+    const key = this.accessKey();
+    if (!force && key !== null && key === this.sweptKey) return;
+    const access = this.fanOut();
     for (const entry of this.screens.list()) {
       if (this.closed) return;
-      try { await this.stableAccess(() => this.requireOwner(entry), () => {}); }
+      try { await this.stableAccess(() => this.requireOwner(entry, access()), () => {}); }
       catch (error: unknown) {
         if (!(error instanceof ScreenAccessError) || error.code === ProtocolErrorCode.BOT_COMMAND_BUSY) throw error;
         const owner = this.owners.get(entry.screen.id);
@@ -286,22 +339,28 @@ export class BotScreenHandler {
       }
       for (const session of this.transport.sessions()) {
         if (session.isBot || !session.user || !this.known.get(session)?.has(entry.screen.id)) continue;
-        try { await this.stableAccess(() => this.requireViewer(session, entry.screen.channelId, false), () => {}); }
+        try { await this.stableAccess(() => this.requireViewer(session, entry.screen.channelId, false, access()), () => {}); }
         catch (error: unknown) {
           if (!(error instanceof ScreenAccessError) || error.code === ProtocolErrorCode.BOT_COMMAND_BUSY) throw error;
           this.forget(session, entry);
         }
       }
     }
+    // A change during the sweep leaves the versions ahead of this key, so the next one runs again.
+    this.sweptKey = key;
   }
 
   private async notify(entry: ActiveBotScreen): Promise<void> {
+    const owner = this.owners.get(entry.screen.id);
+    const access = this.fanOut();
     for (const session of this.transport.sessions()) {
-      if (!session.user || !this.transport.isCurrent(session) || (session.isBot && session !== this.owners.get(entry.screen.id))) continue;
+      if (!session.user || !this.transport.isCurrent(session)) continue;
+      // Only the owning bot, the people in the room and those who still hold the screen are concerned (BOTS-3).
+      if (session.isBot ? session !== owner : !this.inRoom(session, entry.screen.channelId) && !this.known.get(session)?.has(entry.screen.id)) continue;
       try {
         await this.stableAccess(async () => {
-          await this.requireOwner(entry);
-          if (!session.isBot) await this.requireViewer(session, entry.screen.channelId, false);
+          await this.requireOwner(entry, access());
+          if (!session.isBot) await this.requireViewer(session, entry.screen.channelId, false, access());
         }, () => {
           if (!session.isBot) this.requireVoiceMembership(session, entry.screen.channelId);
           this.requireOwnerSession(entry);
@@ -362,14 +421,23 @@ export class BotScreenHandler {
     return next;
   }
 
-  private error(session: BotInteractionSession, error: unknown, requestId?: string): void {
-    this.send(session, MessageType.SERVER_ERROR, {
-      code: error instanceof ScreenAccessError || error instanceof BotScreenError ? error.code : ProtocolErrorCode.BOT_INTERACTION_INVALID,
-      message: error instanceof Error ? error.message : 'Screen operation failed.',
-    }, requestId);
+  private inRoom(session: BotInteractionSession, channelId: string): boolean {
+    return !!session.sessionId && this.transport.getVoiceChannelId(session.sessionId) === channelId;
   }
 
-  private send(session: BotInteractionSession, type: MessageType, payload: unknown, requestId?: string): void {
-    if (!this.closed && this.transport.isCurrent(session)) this.transport.send(session, { type, payload, requestId });
+  /**
+   * A refusal goes out as worded. An invalid payload tells the bot developer
+   * what was wrong with it; any other failure is logged and answered in
+   * general terms, without the words of a database or runtime error (BOTS-8).
+   */
+  private error(session: BotInteractionSession, error: unknown, requestId?: string): void {
+    this.send(session, MessageType.SERVER_ERROR, error instanceof ZodError
+      ? { code: ProtocolErrorCode.BOT_INTERACTION_INVALID, message: error.message }
+      : toProtocolError(error, { message: 'Screen operation failed.', category: 'BOT', code: ProtocolErrorCode.BOT_INTERACTION_INVALID }),
+    requestId);
+  }
+
+  private send(session: BotInteractionSession, ...message: [...ServerMessageArgs, requestId?: string]): void {
+    if (!this.closed && this.transport.isCurrent(session)) this.transport.send(session, serverMessage(...message));
   }
 }

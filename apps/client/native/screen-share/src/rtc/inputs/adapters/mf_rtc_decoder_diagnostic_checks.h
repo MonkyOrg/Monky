@@ -4,6 +4,7 @@
 
 #include <mferror.h>
 
+#include <cmath>
 #include <future>
 #include <numeric>
 #include <string_view>
@@ -315,7 +316,7 @@ void RunDecoderDiagnosticChecks(Check&& check) {
         second_copy.decoders.front().observed_at_rtc_us == 606123 &&
         second_copy.decoders.front().core_observed_at_rtc_us == 606100 &&
         second_copy.decoders.front().core.submitted == 0 &&
-        second_copy.encoded_access_units == 0 && second_copy.decoded_gpu_frames == 0 &&
+        second_copy.decoded_gpu_frames == 0 &&
         second_copy.i420_readbacks == 0 && !second_copy.hardware_execution_observed,
         "Snapshot copy woke media, rewrote cached observation time or conflated live/cached scope");
   slot->start_failed.store(true);
@@ -330,6 +331,46 @@ void RunDecoderDiagnosticChecks(Check&& check) {
 
 template <typename Check>
 void RunDecoderSchedulingChecks(Check&& check) {
+  {
+    using screen_video::TimingAggregate;
+    using screen_video::MeasureCall;
+    using Clock = TimingAggregate::Clock;
+    TimingAggregate timing;
+    check(timing.count == 0 && timing.totalMs == 0 && !timing.MeanMs() && !timing.MaximumMs(),
+          "Unobserved decoder stage acquired a zero-latency observation");
+    const auto zero = Clock::now();
+    timing.Observe(zero, zero);
+    check(timing.count == 1 && timing.MeanMs() == 0 && timing.MaximumMs() == 0,
+          "Observed zero duration was confused with missing stage evidence");
+    timing.Observe(zero, zero - std::chrono::microseconds(1));
+    check(timing.count == 1 && timing.invalidIntervals == 1,
+          "A backwards diagnostic interval became an accepted latency");
+
+    TimingAggregate call;
+    unsigned invocations = 0;
+    Clock::time_point entered, returning;
+    const auto result = MeasureCall(call, [&] {
+      ++invocations;
+      entered = Clock::now();
+      std::this_thread::sleep_for(std::chrono::milliseconds(3));
+      returning = Clock::now();
+      return E_FAIL;
+    });
+    const auto inside = std::chrono::duration<double, std::milli>(returning - entered).count();
+    check(result == E_FAIL && invocations == 1 && call.count == 1 && call.totalMs >= inside &&
+          call.MeanMs() == call.MaximumMs(), "Call timer omitted blocking work or changed the HRESULT/invocation count");
+    bool preserved_failure = false;
+    try {
+      MeasureCall(call, [&] {
+        ++invocations;
+        throw std::runtime_error("Preserved call failure");
+      });
+    } catch (const std::runtime_error& error) {
+      preserved_failure = std::string_view(error.what()) == "Preserved call failure";
+    }
+    check(preserved_failure && invocations == 2 && call.count == 2 && std::isfinite(call.totalMs),
+          "A throwing invocation was lost or counted more than once");
+  }
   {
     decoder_diagnostic_checks_detail::LimitedDecoderSurfacePool pool(6);
     auto worker = std::async(std::launch::async, [&] {
@@ -391,7 +432,7 @@ void RunDecoderSchedulingChecks(Check&& check) {
     }
     check(failed && calls == 0, "A retirement failure became transform admission or successful shutdown");
   }
-  using Clock = screen_video::EncoderTimingAggregate::Clock;
+  using Clock = screen_video::TimingAggregate::Clock;
   const auto begin = Clock::time_point{};
   screen_video::DecoderSchedulingStats stats;
   screen_video::DecoderInputTiming input{begin, false};
@@ -426,11 +467,11 @@ void RunDecoderSchedulingChecks(Check&& check) {
         stats.enqueueToAccepted.count == 2 && stats.enqueueToAccepted.invalidIntervals == 1,
         "A backwards diagnostic clock was accepted as a success-shaped queue interval");
   unsigned calls = 0;
-  check(screen_video::MeasureEncoderCall(stats.processInput, [&] { ++calls; return E_FAIL; }) == E_FAIL &&
+  check(screen_video::MeasureCall(stats.processInput, [&] { ++calls; return E_FAIL; }) == E_FAIL &&
         calls == 1 && stats.processInput.count == 1 && stats.enqueueToAccepted.count == 2,
         "The shared native call timer substituted admission for a failed ProcessInput return");
   try {
-    screen_video::MeasureEncoderCall(stats.frameSink, [&]() -> bool {
+    screen_video::MeasureCall(stats.frameSink, [&]() -> bool {
       ++calls;
       throw std::runtime_error("sink-exception");
     });

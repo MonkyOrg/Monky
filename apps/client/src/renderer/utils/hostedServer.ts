@@ -2,15 +2,7 @@ import { networkClient } from '../core/NetworkClient';
 import { settingsStore } from '../stores/settingsStore';
 import { showConfirm, showConfirmWithOption } from '../views/Dialog';
 import { t, tCount } from '../i18n';
-
-const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
-
-function hostOf(url: string | null): { host: string; port: number } | null {
-  if (!url) return null;
-  const match = url.replace(/^wss?:\/\//, '').match(/^(.+):(\d+)$/);
-  if (!match) return null;
-  return { host: match[1], port: Number.parseInt(match[2], 10) };
-}
+import { isLoopbackHost, parseServerUrl } from './serverAddress';
 
 /**
  * Number of people connected to the server this app hosts on `port`, or null
@@ -60,8 +52,8 @@ export async function captureHostedServerLeaveState(
   if (!window.api?.hostServerStatus || !window.api?.hostServerStats) return null;
 
   try {
-    const current = hostOf(serverUrl);
-    if (!current || !LOCAL_HOSTS.has(current.host)) return null;
+    const current = parseServerUrl(serverUrl);
+    if (!current || !isLoopbackHost(current.host)) return null;
 
     const status = await window.api.hostServerStatus();
     if (!status.servers.some((server) => server.port === current.port)) return null;

@@ -1,15 +1,18 @@
-import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
+import { app, dialog, type BrowserWindow } from 'electron';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { EVENT_CALENDAR_IPC, eventCalendarExportSchema, type EventCalendarSaveResult } from '@monky/shared';
 import { createEventCalendar } from './serverEventCalendar';
 import { mt } from './i18n';
+import type { IpcRegistry } from './ipc/registry';
 
-export function setupEventCalendarIpc(mainWindow: BrowserWindow, sanitizeFileName: (name: string) => string): () => void {
+export function registerEventCalendarIpc(registry: IpcRegistry, mainWindow: BrowserWindow,
+  sanitizeFileName: (name: string) => string): void {
   let saving = false, disposed = false;
-  ipcMain.handle(EVENT_CALENDAR_IPC, async (event, input: unknown): Promise<EventCalendarSaveResult> => {
-    if (disposed || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
-      || event.senderFrame !== mainWindow.webContents.mainFrame || saving) {
+  registry.onDispose(() => { disposed = true; });
+  const refused: EventCalendarSaveResult = { status: 'failed', error: mt('calendar.failed') };
+  registry.handle(EVENT_CALENDAR_IPC, { from: 'main', refused }, async (_event, input): Promise<EventCalendarSaveResult> => {
+    if (disposed || mainWindow.isDestroyed() || saving) {
       console.warn('[Community] Rejected calendar export from an unavailable sender or while saving.');
       return { status: 'failed', error: mt('calendar.failed') };
     }
@@ -30,5 +33,4 @@ export function setupEventCalendarIpc(mainWindow: BrowserWindow, sanitizeFileNam
       return { status: 'failed', error: mt('calendar.failed') };
     } finally { saving = false; }
   });
-  return () => { disposed = true; ipcMain.removeHandler(EVENT_CALENDAR_IPC); };
 }

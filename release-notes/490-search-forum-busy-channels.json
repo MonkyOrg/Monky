@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A busca não perde os resultados quando alguém entra ou sai do servidor, o fórum não volta ao topo quando chegam respostas, e canais muito movimentados continuam leves com o chat aberto.",
+  "en": "Search no longer loses its results when someone joins or leaves the server, the forum no longer jumps to the top when replies arrive, and very busy channels stay light while the chat is open."
+}

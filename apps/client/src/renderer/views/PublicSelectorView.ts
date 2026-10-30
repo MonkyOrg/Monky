@@ -6,6 +6,7 @@ import type { NetworkClient } from '../core/NetworkClient';
 import { currentEventOrigin } from '../core/sessionRouting';
 import type { ServerStore } from '../stores/serverStore';
 import { getLanguage, t } from '../i18n';
+import { reportError } from '../utils/feedback';
 import { escapeHtml } from '../utils/html';
 import { renderLoadingIndicator } from '../utils/loadingIndicator';
 import { showErrorToast } from './CopyToast';
@@ -27,7 +28,6 @@ export class PublicSelectorView {
   private snapshots = new Map<string, BotSelectorPublic>();
   private drafts = new Map<string, string>();
   private pending = new Set<string>();
-  private errors = new Map<string, string>();
   private rendered = new Map<string, string>();
   private unbind: Array<() => void> = [];
   private observer: MutationObserver;
@@ -143,7 +143,7 @@ export class PublicSelectorView {
       const disabled = closed || !permitted || !selector.canRespond || pending;
       controls.setAttribute('aria-busy', String(pending));
       const selected = this.drafts.get(selector.id) ?? selector.ownResponse ?? selector.choices[0]?.value ?? '';
-      const renderKey = JSON.stringify([selector, selected, disabled, closed, pending, this.errors.get(selector.id), getLanguage()]);
+      const renderKey = JSON.stringify([selector, selected, disabled, closed, pending, getLanguage()]);
       if (this.rendered.get(selector.id) === renderKey) continue;
       const selectorChoices: RenderableSelectionChoice[] = selector.choices.map((choice) => ({
         ...choice, count: selector.counts[choice.value] ?? 0,
@@ -189,8 +189,7 @@ export class PublicSelectorView {
         ? t('botSelector.closed')
         : pending ? renderLoadingIndicator(t('botChat.submitting'))
           : t('botSelector.responses', { count: selector.responseCount })}</p>
-        <p class="bot-field-description">${escapeHtml(conditions)}</p>
-        <p class="bot-error" role="alert" ${this.errors.has(selector.id) ? '' : 'hidden'}>${escapeHtml(this.errors.get(selector.id) ?? '')}</p>`;
+        <p class="bot-field-description">${escapeHtml(conditions)}</p>`;
       if (this.rendered.get(selector.id) !== renderKey) {
         const focused = document.activeElement instanceof HTMLElement && controls.contains(document.activeElement)
           ? document.activeElement : null;
@@ -259,7 +258,6 @@ export class PublicSelectorView {
   private async respond(id: string, value: string): Promise<void> {
     if (this.pending.has(id) || this.destroyed) return;
     this.pending.add(id);
-    this.errors.delete(id);
     this.refresh();
     try {
       const selector = this.snapshots.get(id);
@@ -272,7 +270,8 @@ export class PublicSelectorView {
       this.snapshots.set(id, parsed);
       this.drafts.delete(id);
     } catch (error: unknown) {
-      if (!this.destroyed) this.errors.set(id, error instanceof Error ? error.message : t('botSelector.responseFailed'));
+      // The selector stays open for another try; why it failed goes to the alert toast (#490).
+      if (!this.destroyed) reportError(error instanceof Error ? error.message : t('botSelector.responseFailed'));
     } finally {
       this.pending.delete(id);
       this.refresh();
@@ -290,7 +289,6 @@ export class PublicSelectorView {
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.snapshots.clear();
     this.drafts.clear();
-    this.errors.clear();
     this.rendered.clear();
   }
 }

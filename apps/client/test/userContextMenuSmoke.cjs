@@ -543,9 +543,11 @@ async function runUserContextMenuSmoke() {
     network.sendRequest = async () => { throw new Error('Policy lookup failed'); };
     menu.open(30, 30, remote);
     await delay();
-    check(!document.querySelector('.user-context-menu:not([data-ui-closing])') && document.querySelector('.modal-backdrop:not([data-ui-closing])')?.textContent.includes('Policy lookup failed'),
-      'A failed lookup is surfaced instead of guessing an unmuted state');
-    document.querySelector('.modal-backdrop [data-action="confirm"]').click();
+    const lookupFailure = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])') && lookupFailure?.getAttribute('role') === 'alert'
+      && lookupFailure.textContent.includes('Policy lookup failed') && !document.querySelector('.modal-backdrop:not([data-ui-closing])'),
+      'A failed lookup is explained in the alert toast instead of guessing an unmuted state');
+    lookupFailure.querySelector('.chat-copy-toast-close').click();
     network.sendRequest = request;
     await delay();
 
@@ -564,18 +566,55 @@ async function runUserContextMenuSmoke() {
     check(roleMembers.includes(`data-user-id="${user.id}"`) && !roleMembers.includes(`data-user-id="${musicBot.id}"`),
       'Role membership lists assigned humans, not bots');
     server.userRoles = originalRoleMemberships;
+    const toastText = danger => document.querySelector(`.chat-copy-toast${danger ? '.chat-copy-toast--danger' : ':not(.chat-copy-toast--danger)'}:not([data-ui-closing]) .chat-copy-toast-label`)?.textContent ?? '';
     await open(user);
     click('toggle-role');
     await delay();
-    check(requests.at(-1).payload.userId === user.id, 'Permitted self role assignment remains available');
-    await open(user);
+    check(requests.at(-1).type === 'ROLE_ASSIGN' && requests.at(-1).payload.userId === user.id,
+      'Permitted self role assignment remains available');
+    check(toastText(false) === language.t('roles.memberAdded', { name: user.nickname, role: 'Custom' }),
+      'A role change from the member menu is confirmed like in the Members tab');
+    const refuse = message => async (type, payload) => {
+      if (type !== 'ROLE_ASSIGN') return request(type, payload);
+      requests.push({ type, payload });
+      throw new Error(message);
+    };
+    network.sendRequest = refuse('Role change refused');
+    await open(remote);
+    const roleButton = button('toggle-role');
+    roleButton.click();
+    check(roleButton.querySelector('.role-option-check').classList.contains('checked') && roleButton.disabled,
+      'A role toggle shows the change at once and cannot be sent twice while pending');
+    await delay();
+    check(!roleButton.querySelector('.role-option-check').classList.contains('checked') && !roleButton.disabled,
+      'A refused role change takes back the optimistic check mark');
+    check(toastText(true) === 'Role change refused', 'A refused role change is reported instead of swallowed');
+    check(!button('toggle-admin'), 'Members who manage roles but do not own the server are not offered administrator changes (#397)');
+    network.sendRequest = request;
+    server.ownerId = user.id;
+    await open(remote);
     click('toggle-admin');
     await delay();
-    check(requests.at(-1).payload.userId === user.id && requests.at(-1).payload.roleId === 'admin-role',
-      'Permitted self administrator assignment retains target and role');
-    server.ownerId = user.id;
+    check(requests.at(-1).type === 'ROLE_ASSIGN' && requests.at(-1).payload.userId === remote.id
+      && requests.at(-1).payload.roleId === 'admin-role'
+      && !document.querySelector('.user-context-menu:not([data-ui-closing])'),
+    'The owner promotes a member to administrator from the menu, which then closes');
+    network.sendRequest = refuse('Administrator change refused');
+    await open(remote);
+    click('toggle-admin');
+    await delay();
+    check(!!button('toggle-admin') && !button('toggle-admin').disabled && toastText(true) === 'Administrator change refused',
+      'A refused administrator change keeps the menu open and reports the refusal');
+    network.sendRequest = request;
     await open(user);
     check(!button('toggle-admin') && !!button('toggle-role'), 'Owner keeps roles but not redundant administrator toggle');
+    const { ServerMembersTab } = await import('/views/serverSettings/tabs/ServerMembersTab.ts');
+    const memberRows = () => new ServerMembersTab().renderRows();
+    check(memberRows().includes('data-member-action="toggle-admin"'), 'The owner is offered administrator changes in the Members tab');
+    server.ownerId = 'owner';
+    check(!memberRows().includes('data-member-action="toggle-admin"') && memberRows().includes('data-member-action="toggle-role"'),
+      'The Members tab follows the same owner-only administrator rule as the member menu');
+    server.ownerId = user.id;
 
     for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
       await open(user);

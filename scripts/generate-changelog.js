@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { FEATURE_TYPES, FIX_TYPES, parseCommitHeader, SQUASH_ENTRY } from './conventional-commits.js';
 
 /**
  * Builds the technical GitHub changelog from commit messages. Client notes are
@@ -10,18 +11,13 @@ import { execFileSync } from 'node:child_process';
  * then to its subject. Each commit is placed in a section by its *subject*
  * conventional type (feat → Novidades, fix → Correções, everything else →
  * Outros), because the body lines carry the description but not the type.
+ *
+ * The conventional-commit rules come from conventional-commits.js, the same
+ * ones the version is calculated with. Squash bullets (`* fix: subject`,
+ * SQUASH_ENTRY) are skipped when reading descriptions: the team curates
+ * `#NNN:` lines instead, and a stray squash bullet would otherwise leak a raw,
+ * typed subject into the notes.
  */
-
-/** Conventional-commit types we recognise, mirroring calculate-version.js. */
-const COMMIT_TYPES =
-  'feat|feature|minor|fix|bugfix|perf|refactor|style|docs|chore|test|build|ci|revert|major';
-
-/**
- * A bullet GitHub writes into a squash body (`* fix: subject`). We skip these
- * when reading descriptions: the team curates `#NNN:` lines instead, and a
- * stray squash bullet would otherwise leak a raw, typed subject into the notes.
- */
-const SQUASH_ENTRY = new RegExp(`^\\s*[*-]\\s+(${COMMIT_TYPES})(\\([^)]*\\))?(!)?:`, 'i');
 
 /** A curated changelog line as kept in commit bodies: `#498: descrição`. */
 const ISSUE_LINE = /^#\d+:/;
@@ -40,11 +36,11 @@ const FALLBACK_LINE = '- Nenhuma alteração registrada neste intervalo.';
  * untyped commits go.
  */
 export function classifyGroup(subjectLine) {
-  const header = String(subjectLine || '')
+  const commit = parseCommitHeader(String(subjectLine || '')
     .replace(/^\s*[*-]\s+/, '')
-    .trim();
-  if (/^(feat|feature|minor)(\([^)]*\))?!?:/i.test(header)) return 'novidades';
-  if (/^(fix|bugfix)(\([^)]*\))?!?:/i.test(header)) return 'correcoes';
+    .trim());
+  if (commit && FEATURE_TYPES.has(commit.type)) return 'novidades';
+  if (commit && FIX_TYPES.has(commit.type)) return 'correcoes';
   return 'outros';
 }
 
@@ -53,10 +49,9 @@ export function classifyGroup(subjectLine) {
  * a subject, leaving the human part (kept as the last-resort description).
  */
 export function stripType(subject) {
-  return String(subject || '')
-    .replace(/^\s*[*-]\s+/, '')
-    .replace(new RegExp(`^(${COMMIT_TYPES})(\\([^)]*\\))?!?:\\s*`, 'i'), '')
-    .trim();
+  const text = String(subject || '').replace(/^\s*[*-]\s+/, '');
+  const commit = parseCommitHeader(text);
+  return (commit?.known ? text.slice(commit.length) : text).trim();
 }
 
 /**

@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, '..');
 if (!process.versions.electron) {
   const { test } = require('node:test');
   const assert = require('node:assert/strict');
-  test('events, native actions, forums and banner cropping work in both locales', { timeout: 120000 }, async () => {
+  test('events, native actions, forums and banner cropping work in both locales', { timeout: 240000 }, async () => {
     const profile = path.join(root, 'dist-test', `community-profile-${process.pid}`);
     fs.mkdirSync(profile, { recursive: true });
     const env = { ...process.env, MONKY_COMMUNITY_PROFILE: profile };
@@ -22,6 +22,7 @@ if (!process.versions.electron) {
   });
 } else {
   const { app, BrowserWindow } = require('electron');
+  const { recordFeed } = require('./fixtures/feedRecorder.cjs');
   app.on('window-all-closed', () => {});
   app.setPath('userData', process.env.MONKY_COMMUNITY_PROFILE);
   let vite, browser, timeout;
@@ -46,6 +47,13 @@ if (!process.versions.electron) {
             response.end('<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="400"><rect width="1000" height="400" fill="#363586"/><circle cx="700" cy="180" r="170" fill="#6965d9"/><path d="M0 400L360 90L670 400" fill="#88b8d4"/></svg>');
             return;
           }
+          // Chat attachments only resolve from the server's own `/attachments/` path.
+          const forumImage = /^\/attachments\/forum-([0-9a-f]{6})\.svg$/.exec(request.url);
+          if (forumImage) {
+            response.setHeader('Content-Type', 'image/svg+xml');
+            response.end(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="#${forumImage[1]}"/></svg>`);
+            return;
+          }
           if (request.url !== '/__community__') return next();
           response.setHeader('Content-Type', 'text/html');
           response.end(`<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css">${fonts}</head><body><main id="root"></main></body></html>`);
@@ -59,7 +67,7 @@ if (!process.versions.electron) {
     browser = new BrowserWindow({ show: false, width: 800, height: 600,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true } });
     browser.webContents.debugger.attach('1.3');
-    timeout = setTimeout(() => { console.error('Community DOM timeout'); void finish(1); }, 90000);
+    timeout = setTimeout(() => { console.error('Community DOM timeout'); void finish(1); }, 210000);
     for (const locale of ['pt-BR', 'en']) {
       await browser.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/__community__`);
       await browser.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
@@ -69,6 +77,7 @@ if (!process.versions.electron) {
         features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
       });
       const inviteModule = '/@fs/' + path.resolve(root, '..', '..', 'packages', 'shared', 'src', 'serverInvites.ts').replaceAll('\\', '/');
+      await browser.webContents.executeJavaScript(`window.recordFeed = ${recordFeed}; void 0`);
       await browser.webContents.executeJavaScript(`window.communityRegression = (${regression.toString()})(${JSON.stringify(locale)}, ${JSON.stringify(inviteModule)}); void 0`);
       for (;;) {
         const step = await browser.webContents.executeJavaScript('window.communityRegression.next().catch(error => ({ failure: error.stack || String(error) }))', true);
@@ -76,6 +85,8 @@ if (!process.versions.electron) {
         if (step.done) { console.log(`Community DOM (${locale}): ${step.value} checks`); break; }
         if (process.env.MONKY_COMMUNITY_TRACE) console.log(`Community step (${locale}): ${step.value}`);
         if (['event-step-reduced-motion', 'event-step-motion-enabled',
+          'poll-step-reduced-motion', 'poll-step-motion-enabled',
+          'form-step-reduced-motion', 'form-step-motion-enabled',
           'live-action-reduced-motion', 'live-action-motion-enabled',
           'chat-entry-reduced-motion', 'chat-entry-motion-enabled'].includes(step.value)) {
           await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
@@ -118,6 +129,52 @@ if (!process.versions.electron) {
             return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
           })()`);
           browser.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+          await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        }
+        if (step.value === 'keyboard-enter') {
+          // A native Enter, as a keyboard user would press it, delivered to whatever holds focus.
+          browser.focus();
+          browser.webContents.focus();
+          await browser.webContents.executeJavaScript(`window.communityKeyDelivery = new Promise((resolve, reject) => {
+            const received = event => {
+              if (!event.isTrusted || event.key !== 'Enter') return;
+              clearTimeout(timer);
+              window.removeEventListener('keyup', received, true);
+              resolve();
+            };
+            const timer = setTimeout(() => {
+              window.removeEventListener('keyup', received, true);
+              reject(new Error('Native Enter was not delivered to ' + document.activeElement?.outerHTML));
+            }, 5000);
+            window.addEventListener('keyup', received, true);
+          }); void 0`);
+          browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+          browser.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+          browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+          await browser.webContents.executeJavaScript('window.communityKeyDelivery');
+          await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        }
+        if (step.value === 'keyboard-tab' || step.value === 'keyboard-shift-tab') {
+          // A native Tab moves focus as the browser does; a dispatched event would not move it at all.
+          const modifiers = step.value === 'keyboard-shift-tab' ? ['shift'] : [];
+          browser.focus();
+          browser.webContents.focus();
+          await browser.webContents.executeJavaScript(`window.communityKeyDelivery = new Promise((resolve, reject) => {
+            const received = event => {
+              if (!event.isTrusted || event.key !== 'Tab') return;
+              clearTimeout(timer);
+              window.removeEventListener('keyup', received, true);
+              resolve();
+            };
+            const timer = setTimeout(() => {
+              window.removeEventListener('keyup', received, true);
+              reject(new Error('Native Tab was not delivered to ' + document.activeElement?.outerHTML));
+            }, 5000);
+            window.addEventListener('keyup', received, true);
+          }); void 0`);
+          browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab', modifiers });
+          browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab', modifiers });
+          await browser.webContents.executeJavaScript('window.communityKeyDelivery');
           await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
         }
         if (step.value.startsWith('event-audience-wheel-')) {
@@ -191,7 +248,7 @@ if (!process.versions.electron) {
                   expanded: root?.querySelector('[data-audience-toggle]')?.getAttribute('aria-expanded'),
                   value: search?.value, focused: document.activeElement === search,
                   searchBox: box && [box.left, box.top, box.width, box.height].map(Math.round),
-                  stepScroll: document.querySelector('[data-poll-step-viewport]')?.scrollTop };
+                  stepScroll: document.querySelector('[data-poll-viewport]')?.scrollTop };
               })()`).catch(stateError => String(stateError));
               throw new Error(`${error.message} ${JSON.stringify(state)}`);
             });
@@ -246,13 +303,14 @@ async function* regression(locale, inviteModule) {
   const { ServerCommunityView } = await import('/views/ServerCommunityView.ts');
   const { openNativePollWizard } = await import('/views/NativePollWizard.ts');
   const { imageCarouselNavigationButton, moveImageCarousel, renderImageCarouselEditor } = await import('/views/ImageCarousel.ts');
+  const { renderAttachments } = await import('/views/chat/channelMessage.ts');
   const { serverRailCallIcon } = await import('/views/ServerRailView.ts');
   const { ForumView } = await import('/views/ForumView.ts');
   const { openImageCropper, openImageCropperBatch } = await import('/views/ImageCropModal.ts');
   const { uploadAttachment } = await import('/core/AttachmentUploader.ts');
   const { openFileInputPicker, setButtonLoading } = await import('/utils/buttonLoading.ts');
   const { automaticScrollBehavior } = await import('/utils/scroll.ts');
-  const { getActiveNetworkClient, setActiveNetworkClient } = await import('/core/NetworkClient.ts');
+  const { ProtocolRequestError, RequestTimeoutError, getActiveNetworkClient, setActiveNetworkClient } = await import('/core/NetworkClient.ts');
   const { appEvents } = await import('/core/EventBus.ts');
   const { setLanguage, t } = await import('/i18n/index.ts');
   const { translateProtocolError } = await import('/i18n/protocolErrors.ts');
@@ -338,6 +396,67 @@ async function* regression(locale, inviteModule) {
     && parseFloat(getComputedStyle(carousel.querySelector('.image-carousel-track')).transitionDuration) > 0,
   'Carousel navigation animates the track and updates the active accessible indicator');
   carouselFixture.remove();
+  const { preserveViewState } = await import('/utils/preserveViewState.ts');
+  const focusList = document.createElement('div');
+  const focusTitle = document.createElement('h2');
+  document.body.append(focusTitle, focusList);
+  const drawCards = ids => {
+    focusList.innerHTML = `${ids.map(id => `<article data-card="${id}"><button type="button" data-act="menu">${id}</button>
+      <button type="button" data-act="join">${id}</button></article>`).join('')}<input data-note value="caret">`;
+  };
+  const redrawCards = ids => preserveViewState(focusList, () => drawCards(ids),
+    { itemKeys: ['data-card'], fallback: () => focusTitle });
+  const cardButton = (id, act) => focusList.querySelector(`[data-card="${id}"] [data-act="${act}"]`);
+  drawCards(['a', 'b', 'c']);
+  cardButton('b', 'join').focus();
+  redrawCards(['b', 'c']);
+  check(document.activeElement === cardButton('b', 'join'),
+    'A rebuilt list keeps focus in the same card after one above it leaves, not in the card now in its place');
+  redrawCards(['c', 'b']);
+  check(document.activeElement === cardButton('b', 'join'), 'A rebuilt list keeps focus in the same card when cards swap places');
+  redrawCards(['c']);
+  check(document.activeElement === focusTitle && focusTitle.getAttribute('tabindex') === '-1',
+    'When the focused card leaves, focus goes to the fallback instead of the same button of another card');
+  const note = focusList.querySelector('[data-note]');
+  note.focus();
+  note.setSelectionRange(2, 2);
+  redrawCards(['c', 'd']);
+  const rebuiltNote = focusList.querySelector('[data-note]');
+  check(rebuiltNote !== note && document.activeElement === rebuiltNote && rebuiltNote.selectionStart === 2,
+    'A control outside the cards is found again in the rebuilt markup with its caret');
+  // A popup opened from a card keeps focus while its opener stays; once the opener is
+  // rebuilt, focus lands on the same control of the same card.
+  const surface = document.createElement('button');
+  document.body.append(surface);
+  surface.focus();
+  preserveViewState(focusList, () => { focusList.querySelector('[data-note]').value = 'kept'; },
+    { itemKeys: ['data-card'], fallback: () => focusTitle, origin: cardButton('d', 'menu') });
+  check(document.activeElement === surface, 'A render that keeps the opener of a popup leaves focus in the popup');
+  preserveViewState(focusList, () => { surface.remove(); drawCards(['c', 'd']); },
+    { itemKeys: ['data-card'], fallback: () => focusTitle, origin: cardButton('d', 'menu') });
+  check(document.activeElement === cardButton('d', 'menu'),
+    'A render that replaces the opener of a closed popup moves focus to the same control of the same card');
+  focusList.remove();
+  focusTitle.remove();
+  // Keyed lists rebuild only the items whose markup changed; the others keep their element.
+  const { renderKeyedList } = await import('/utils/keyedList.ts');
+  const keyedList = document.createElement('div');
+  keyedList.innerHTML = 'Loading…';
+  document.body.append(keyedList);
+  const keyedCard = (id, label = id) => ({ key: `card:${id}`, html: `<article data-card="${id}"><button type="button">${label}</button></article>` });
+  const keyedElement = id => keyedList.querySelector(`[data-card="${id}"]`);
+  const keyedOrder = () => [...keyedList.childNodes].map(node => node instanceof Element ? node.dataset.card : `#${node.nodeType}`).join();
+  renderKeyedList(keyedList, [keyedCard('a'), keyedCard('b'), keyedCard('c')]);
+  const [firstA, firstB, firstC] = ['a', 'b', 'c'].map(keyedElement);
+  check(keyedOrder() === 'a,b,c', 'A keyed list replaces whatever the container held before its first render');
+  renderKeyedList(keyedList, [keyedCard('a'), keyedCard('b', 'B changed'), keyedCard('c')]);
+  check(keyedElement('a') === firstA && keyedElement('c') === firstC && keyedElement('b') !== firstB
+    && keyedElement('b').textContent === 'B changed', 'A keyed list rebuilds only the item whose markup changed');
+  const rebuiltB = keyedElement('b');
+  renderKeyedList(keyedList, [keyedCard('d'), keyedCard('c'), keyedCard('b', 'B changed')]);
+  check(keyedOrder() === 'd,c,b' && keyedElement('c') === firstC && keyedElement('b') === rebuiltB && !firstA.isConnected,
+    'A keyed list inserts, removes and reorders items without rebuilding the unchanged ones');
+  keyedList.remove();
   const composerFixture = document.createElement('div');
   composerFixture.className = 'chat-composer-surface';
   composerFixture.innerHTML = '<div class="chat-create-menu"><button type="button">Action</button></div>';
@@ -365,6 +484,8 @@ async function* regression(locale, inviteModule) {
       } finally { clearTimeout(timeout); }
     }
   };
+  // A click as a mouse gives it: `detail` counts the clicks of one gesture, 2 for the second of a double click.
+  const clickWithCount = (button, detail) => button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail }));
   const initiallyDisabled = document.createElement('button');
   initiallyDisabled.disabled = true;
   setButtonLoading(initiallyDisabled, true);
@@ -506,7 +627,11 @@ async function* regression(locale, inviteModule) {
     settings: { eventsEnabled: true, bannerUrl: null },
     events: [event], liveActions: [action], polls: [poll], nativeForms: [nativeForm],
   };
-  let allowed = true, rejectSubmit = true, interestedMode = 'normal', interestedGate;
+  let allowed = true, rejectSubmit = true, interestedMode = 'normal', interestedGate, namedResults = false;
+  let eventGetGate = null;
+  // A failure that is not a refusal, such as a timeout, for the next EVENT_GET requests.
+  let eventGetFailure = null;
+  const deletedEvents = new Set();
   let uploadedCommunityImages = 0;
   const cancelled = [];
   const calls = [], listeners = new Set();
@@ -530,6 +655,10 @@ async function* regression(locale, inviteModule) {
     replyCount: 3, preview: '<script>bad()</script>', firstMessageId: 'message' };
   let forumPosts = [post];
   let forumListGate = null;
+  // When set, the server's forum budget: 30 requests in any 10 s, per person, all devices together.
+  let forumLimiter = null;
+  // When set, pages after the first fail with its error, and the time of each failure is kept.
+  let forumPageFailure = null;
   const client = {
     sessionKey: 'community-test', getStatus: () => 'CONNECTED', getHttpBaseUrl: () => window.location.origin,
     send(type, payload) { calls.push({ type, payload }); },
@@ -537,9 +666,18 @@ async function* regression(locale, inviteModule) {
     cancelRequest(id) { cancelled.push(id); return true; },
     async sendRequest(type, payload, requestId) {
       calls.push({ type, payload, requestId });
+      if (forumLimiter && type.startsWith('FORUM_')) {
+        const sentAt = performance.now();
+        forumLimiter.times = forumLimiter.times.filter(time => sentAt - time < 10_000);
+        if (forumLimiter.times.length >= 30) throw new ProtocolRequestError('Too many forum requests.', 'RATE_LIMITED');
+        forumLimiter.times.push(sentAt);
+      }
       if (type === 'COMMUNITY_GET') return structuredClone(snapshot);
       if (type === 'EVENT_GET') {
-        if (payload.id === 'missing') throw new Error('Event unavailable');
+        if (eventGetGate) await eventGetGate;
+        if (eventGetFailure) throw eventGetFailure;
+        // As the server answers for an event this member can no longer see.
+        if (payload.id === 'missing' || deletedEvents.has(payload.id)) throw new ProtocolRequestError('Event unavailable', 'PERMISSION_DENIED');
         return { event: { ...event, id: payload.id, ...(payload.id === 'historic' ? { status: 'ended' } : {}) } };
       }
       if (type === 'EVENT_GET_INTERESTED') {
@@ -558,6 +696,12 @@ async function* regression(locale, inviteModule) {
         form.responseCount = 1;
         queueMicrotask(() => emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot)));
         return structuredClone(form);
+      }
+      if (type === 'NATIVE_FORM_RESULTS' && namedResults) {
+        return { id: payload.id, nextCursor: null, responses: [{
+          user: { id: 'member', nickname: 'Named member', avatarUrl: '/avatars/named-member.png' },
+          response: { values: { name: 'Named answer' }, createdAt: now, updatedAt: now },
+        }] };
       }
       if (type === 'NATIVE_FORM_RESULTS') {
         const offset = payload.cursor ? 50 : 0;
@@ -640,11 +784,16 @@ async function* regression(locale, inviteModule) {
       }
       if (type === 'FORUM_LIST') {
         if (payload.offset > 0 && forumListGate) await forumListGate;
-        const posts = [...forumPosts].sort((left, right) => payload.sort === 'oldest'
+        if (payload.offset > 0 && forumPageFailure) {
+          forumPageFailure.times.push(performance.now());
+          throw forumPageFailure.error;
+        }
+        // Pinned threads first, as the server orders them.
+        const posts = [...forumPosts].sort((left, right) => (right.pinned - left.pinned) || (payload.sort === 'oldest'
           ? left.createdAt - right.createdAt
           : payload.sort === 'newest'
             ? right.createdAt - left.createdAt
-            : right.updatedAt - left.updatedAt);
+            : right.updatedAt - left.updatedAt));
         const offset = payload.offset ?? 0;
         const page = posts.slice(offset, offset + 25);
         return { channelId: 'forum', posts: page, hasMore: offset + page.length < posts.length, nextOffset: offset + page.length };
@@ -664,6 +813,14 @@ async function* regression(locale, inviteModule) {
   emit('message.EVENT_STARTED', { event: { ...event, interested: true } });
   check(notices.length === 1 && notices[0].serverName === 'Community', 'Start notices deduplicate per occurrence and retain their server');
   offNotice();
+  let railSignals = 0;
+  const offRailSignal = appEvents.on('community.updated', () => { railSignals++; });
+  emit('message.COMMUNITY_SNAPSHOT', { ...structuredClone(snapshot), polls: [{ ...structuredClone(poll), totalVotes: 3 }] });
+  check(railSignals === 0, 'A vote is not announced app-wide, so the server rail is not rebuilt for it');
+  emit('message.COMMUNITY_SNAPSHOT', { ...structuredClone(snapshot), events: [] });
+  check(railSignals === 1, 'An active voice event ending still reaches the server rail call icon');
+  emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+  offRailSignal();
   const view = new ServerCommunityView(root, feed, async () => {});
   check(root.querySelectorAll('.community-banner').length === 1, 'Only one banner is visible');
   check(root.querySelector('.community-navigation'), 'Simultaneous activities have navigation');
@@ -800,10 +957,18 @@ async function* regression(locale, inviteModule) {
   check(!actionWizard.querySelector('[data-live-close]'),
     'Live Action details keep management actions out of the response footer');
   document.querySelector('[data-bot-select-value=b]').click();
-  document.querySelector('[data-live-submit]').click();
+  const liveSubmit = document.querySelector('[data-live-submit]');
+  liveSubmit.focus();
+  liveSubmit.click();
+  check(document.querySelector('[data-live-submit]').disabled
+    && document.activeElement === actionWizard.querySelector('.live-action-step > h2'),
+  'Sending disables the live action submit button and moves focus to the form title instead of losing it');
   await flush();
   check(!document.querySelector('[data-live-submit]').disabled, 'Failed form response restores controls');
-  check(document.querySelector('[data-community-error]:not([hidden])'), 'Form failure is visible');
+  check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.getAttribute('role') === 'alert' && !document.querySelector('[data-community-error]'),
+    'Form failure is explained in the alert toast, not in the layout');
+  check(document.activeElement === actionWizard.querySelector('.live-action-step > h2'),
+    'After a failed send, focus stays on the form title');
   document.querySelector('[data-live-submit]').click();
   await flush();
   check(calls.filter(call => call.type === 'LIVE_ACTION_SUBMIT').at(-1).payload.values.answer === 'b', 'Native choice reaches the request');
@@ -875,6 +1040,27 @@ async function* regression(locale, inviteModule) {
   nativeFormModal.querySelector('[name=name]').dispatchEvent(new Event('input', { bubbles: true }));
   check(!nativeFormModal.querySelector('[data-field-name=name]').classList.contains('native-form-question--invalid'),
     'Editing the invalid answer clears its question-level error treatment');
+  await settleScroll(nativeFormScroller);
+  nativeFormScroller.scrollTop = nativeFormScroller.scrollHeight;
+  const answeringScrollTop = nativeFormScroller.scrollTop;
+  const teamChoice = nativeFormModal.querySelector('[data-field-name=team] [data-bot-select-value=a]');
+  teamChoice.focus({ preventScroll: true });
+  teamChoice.click();
+  check(teamChoice.isConnected && nativeFormScroller.isConnected && nativeFormScroller.scrollTop === answeringScrollTop
+    && document.activeElement === teamChoice && teamChoice.getAttribute('aria-pressed') === 'true'
+    && nativeFormModal.querySelector('[data-field-name=team] [data-bot-select-value=b]').getAttribute('aria-pressed') === 'false'
+    && !nativeFormModal.querySelector('[data-field-name=team] .bot-field-clear').hidden,
+  'Choosing a single answer marks it in place, keeping the scroll position and keyboard focus');
+  const typedBio = nativeFormModal.querySelector('[name=bio]');
+  typedBio.focus({ preventScroll: true });
+  typedBio.value = 'Half typed';
+  typedBio.dispatchEvent(new Event('input', { bubbles: true }));
+  typedBio.setSelectionRange(4, 4);
+  nativeForm.responseCount++;
+  emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+  check(typedBio.isConnected && document.activeElement === typedBio && typedBio.value === 'Half typed'
+    && typedBio.selectionStart === 4 && nativeFormScroller.scrollTop === answeringScrollTop,
+  'Another member\'s response does not rebuild the questions while this member is typing');
   nativeFormModal.querySelector('[data-bot-select-value=a]').click();
   nativeFormModal.querySelector('[data-field-name=topics] [data-choice-value=news]').click();
   nativeFormModal.querySelector('[data-field-name=topics] [data-choice-value=events]').click();
@@ -892,7 +1078,12 @@ async function* regression(locale, inviteModule) {
   'Answered optional native-form questions offer an unambiguous clear action');
   check(nativeFormModal.querySelectorAll('[data-field-name=topics] [aria-pressed=true]').length === 2,
     'Multiple-choice form fields visibly retain every selected option');
-  nativeFormModal.querySelector('[data-native-form-submit]').click();
+  const nativeSubmit = nativeFormModal.querySelector('[data-native-form-submit]');
+  nativeSubmit.focus();
+  nativeSubmit.click();
+  check(nativeFormModal.querySelector('[data-native-form-submit]').disabled
+    && document.activeElement === nativeFormModal.querySelector('.native-form-action-header h2'),
+  'Sending disables the native form submit button and moves focus to the form title instead of losing it');
   await flush();
   check(calls.filter(call => call.type === 'NATIVE_FORM_SUBMIT').at(-1).payload.values.name === 'Lucas'
     && calls.filter(call => call.type === 'NATIVE_FORM_SUBMIT').at(-1).payload.values.team === 'a'
@@ -904,6 +1095,31 @@ async function* regression(locale, inviteModule) {
   await flush();
   check(document.querySelector('.live-action-wizard [name=name]').value === 'Lucas',
     'Reopening a native form restores the member editable response');
+  const otherDevice = name => {
+    nativeForm.myResponse = { ...nativeForm.myResponse, values: { ...nativeForm.myResponse.values, name },
+      updatedAt: nativeForm.myResponse.updatedAt + 1 };
+    emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+  };
+  otherDevice('Sent elsewhere');
+  const reopenedName = document.querySelector('.live-action-wizard [name=name]');
+  check(reopenedName.value === 'Sent elsewhere', 'An answer sent from another device replaces a form left untouched here');
+  reopenedName.value = 'Edited here';
+  reopenedName.dispatchEvent(new Event('input', { bubbles: true }));
+  otherDevice('Arrived later');
+  check(reopenedName.isConnected && reopenedName.value === 'Edited here',
+    'Answers edited and not yet sent survive later snapshots, including this member\'s own');
+  const reopenedForm = document.querySelector('.live-action-wizard');
+  reopenedForm.querySelector('[data-field-name=rating] .bot-field-clear').focus();
+  emit('message.COMMUNITY_SNAPSHOT', { ...structuredClone(snapshot), nativeForms: [{
+    ...structuredClone(nativeForm), revision: nativeForm.revision + 1,
+    form: { ...structuredClone(nativeForm.form),
+      fields: [{ name: 'intro', label: 'Intro', type: 'text' }, ...structuredClone(nativeForm.form.fields)] },
+  }] });
+  check(reopenedForm.querySelector('[data-field-name=intro]')
+    && document.activeElement === reopenedForm.querySelector('[data-field-name=rating] .bot-field-clear')
+    && reopenedForm.querySelector('[name=name]').value === 'Edited here',
+  'A question added above keeps focus on the same control of the same question, and unsent answers stay');
+  emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
   check(!document.querySelector('.live-action-wizard [data-native-form-results]')
     && !document.querySelector('.live-action-wizard [data-native-form-close]'),
   'Native form details keep results and end controls out of the response footer');
@@ -999,6 +1215,20 @@ async function* regression(locale, inviteModule) {
   document.querySelector('.native-live-form-results-modal [data-community-close]').click();
   await flush();
   if (resultsApi === undefined) delete window.api; else window.api = resultsApi;
+  namedResults = true;
+  document.querySelector('[data-live-action-menu=form]').click();
+  [...document.querySelectorAll('[role=menuitem]')]
+    .find(item => item.textContent.includes(t('liveForm.viewResults', { count: nativeForm.responseCount }))).click();
+  await flush();
+  const namedResultsModal = document.querySelector('.native-live-form-results-modal');
+  namedResultsModal.querySelector('[data-native-form-results-tab=individual]').click();
+  const respondentAvatar = namedResultsModal.querySelector('.native-live-form-results-person img');
+  check(respondentAvatar?.getAttribute('src') === `${location.origin}/avatars/named-member.png`
+    && respondentAvatar.dataset.fallback === 'avatar',
+  'Named results load each respondent avatar from the server instead of an address relative to the app files');
+  namedResultsModal.querySelector('[data-community-close]').click();
+  namedResults = false;
+  await flush();
   document.querySelector('[data-live-action-menu=form]').click();
   [...document.querySelectorAll('[role=menuitem]')]
     .find(item => item.textContent.includes(t('community.closeLiveAction'))).click();
@@ -1169,7 +1399,7 @@ async function* regression(locale, inviteModule) {
   await flush();
   const refreshedLoss = t('poll.editLossChanged', { option: 'Yes', count: 3 });
   check(calls.filter(call => call.type === 'POLL_EDIT').at(-1)?.payload.expectedRevision === 0
-    && editWizard.querySelector('[data-community-error]')?.textContent === t('poll.editChanged')
+    && document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('poll.editChanged'))
     && editWizard.querySelector('.native-poll-edit-summary--loss')?.textContent.includes(refreshedLoss)
     && editWizard.querySelector('[data-poll-option]') === null,
   'Votes cast while editing are never discarded unseen: the wizard reloads them and shows the new effects');
@@ -1353,7 +1583,7 @@ async function* regression(locale, inviteModule) {
   check(document.querySelectorAll('.native-poll-image-editor .image-carousel-dot').length === 2,
     'Dropping multiple images crops and adds every supported file to the carousel');
   document.querySelector('[data-poll-duration]').closest('.native-poll-number-control')
-    .querySelector('[data-poll-number-step="1"]').click();
+    .querySelector('[data-number-step="1"]').click();
   check(document.querySelector('[data-poll-duration]').value === '25',
     'The custom duration increment control updates the numeric value');
   input('[data-poll-duration]', '');
@@ -1368,8 +1598,10 @@ async function* regression(locale, inviteModule) {
   check(pollAudience.querySelector('[data-audience-toggle]').getAttribute('aria-expanded') === 'false'
     && pollAudience.querySelector('[data-audience-popup]').hidden,
   'Enabling private poll visibility reveals the audience field without opening its dropdown');
-  await settleScroll(document.querySelector('[data-poll-step-viewport]'));
+  await settleScroll(document.querySelector('[data-poll-viewport]'));
   pollAudience.querySelector('[data-audience-toggle]').click();
+  // Measured where the dropdown rests, after its entrance motion.
+  await flush();
   const liveRowBox = document.querySelector('.native-poll-live-row').getBoundingClientRect();
   const audienceBox = pollAudience.getBoundingClientRect();
   const audienceLabelBox = pollAudience.querySelector('.share-audience-label').getBoundingClientRect();
@@ -1451,8 +1683,16 @@ async function* regression(locale, inviteModule) {
   check(Math.abs(pollPreviewImage.left - pollPreviewCard.left) <= 3
     && Math.abs(pollPreviewImage.right - pollPreviewCard.right) <= 3,
   'Poll preview images fill the card from edge to edge');
-  document.querySelector('[data-poll-submit]').click();
+  check(document.querySelector('[data-poll-submit]').disabled,
+    'Publish waits for the preview to slide in');
   await flush();
+  // Publishing from the keyboard: a real Enter on the focused button, which the double-click guard lets through.
+  const pollsBeforeEnter = calls.filter(call => call.type === 'POLL_CREATE').length;
+  document.querySelector('[data-poll-submit]').focus();
+  yield 'keyboard-enter';
+  await flush();
+  check(calls.filter(call => call.type === 'POLL_CREATE').length === pollsBeforeEnter + 1,
+    'A real Enter on Publish publishes the poll');
   const creation = calls.filter(call => call.type === 'POLL_CREATE').at(-1);
   check(creation.payload.maxVoters === 2 && creation.payload.durationMinutes === undefined
     && creation.payload.liveAction && creation.payload.allowMultiple && creation.payload.options.length === 3
@@ -1489,9 +1729,146 @@ async function* regression(locale, inviteModule) {
   'The live-action switch is unavailable with the exact reason when server activities are disabled');
   disabledLiveWizard.close(true);
   server.communityEventsEnabled = true;
+  // The three wizards share one frame: the stepper and the footer stay while the steps slide.
+  const shellWizard = openNativePollWizard(client, server, 'text');
+  const shellFooter = shellWizard.element.querySelector('.event-wizard-footer');
+  const shellNext = shellWizard.element.querySelector('[data-poll-next]');
+  const shellViewport = shellWizard.element.querySelector('[data-poll-viewport]');
+  check(document.activeElement === shellWizard.element.querySelector('[data-poll-question]'),
+    'The poll wizard opens with focus on its first field');
+  input('[data-poll-question]', 'Shell poll');
+  input('[data-poll-option][data-option-index="0"]', 'Yes');
+  input('[data-poll-option][data-option-index="1"]', 'No');
+  shellNext.click();
+  const slideKeyframes = () => shellViewport.getAnimations({ subtree: true })
+    .map(animation => animation.effect.getKeyframes()[0].transform);
+  check(slideKeyframes().includes('translateX(100%)') && slideKeyframes().length === 2
+    && shellViewport.querySelector('[data-poll-step="0"][data-ui-closing][inert][aria-hidden=true]')
+    && shellViewport.firstElementChild.matches('[data-poll-step="1"]'),
+  'Next slides the content step out while the appearance step comes in from the right');
+  check(shellWizard.element.querySelector('.event-wizard-footer') === shellFooter && shellNext.isConnected
+    && shellNext.disabled && document.activeElement === shellViewport.querySelector('[data-poll-step="1"] h2'),
+  'The footer stays, Next waits for the slide and focus moves to the title of the new step');
+  await flush();
+  check(!shellNext.disabled && !shellViewport.querySelector('[data-ui-closing]'),
+    'The slide lands without leaving the old step behind, and Next works again');
+  yield 'keyboard-tab';
+  check(document.activeElement === shellViewport.querySelector('[data-poll-step="1"] [data-carousel-dropzone]'),
+    `Tab from the title of a new step goes on to its first field: ${document.activeElement?.outerHTML.slice(0, 120)}`);
+  yield 'keyboard-shift-tab';
+  check(document.activeElement === shellNext,
+    `Shift+Tab from the first field wraps to the last control of the wizard: ${document.activeElement?.outerHTML.slice(0, 120)}`);
+  shellNext.click();
+  check(shellNext.hasAttribute('data-poll-submit') && !shellNext.hasAttribute('data-poll-next')
+    && shellNext.textContent.trim() === t('poll.publish'),
+  'On the last step the same button publishes');
+  await flush();
+  shellWizard.element.querySelector('[data-poll-back]').click();
+  check(slideKeyframes().includes('translateX(-100%)'), 'Back slides the other way');
+  await flush();
+  yield 'poll-step-reduced-motion';
+  shellWizard.element.querySelector('[data-poll-back]').click();
+  check(shellViewport.getAnimations({ subtree: true }).length === 0 && shellViewport.childElementCount === 1
+    && shellViewport.querySelector('[data-poll-step="0"]') && !shellNext.disabled
+    && shellWizard.element.querySelector('[data-poll-question]').value === 'Shell poll',
+  'With reduced motion the step changes at once, keeping the draft');
+  // The footer stays put, so the second click of a double click lands on the button the first one
+  // just changed. Without motion nothing holds the buttons back: that click itself must not count.
+  const shellBack = shellWizard.element.querySelector('[data-poll-back]');
+  const shellStep = () => Number(shellViewport.firstElementChild?.dataset.pollStep);
+  const pollCreations = () => calls.filter(call => call.type === 'POLL_CREATE').length;
+  const pollsBeforeDoubleClicks = pollCreations();
+  clickWithCount(shellNext, 1);
+  clickWithCount(shellNext, 2);
+  check(shellStep() === 1 && shellNext.hasAttribute('data-poll-next') && !shellNext.disabled,
+    `With reduced motion, a double click on Next moves one step, not two: step ${shellStep()}`);
+  clickWithCount(shellNext, 1);
+  check(shellStep() === 2 && shellNext.hasAttribute('data-poll-submit') && !shellNext.disabled,
+    'With reduced motion, the preview is ready to publish as soon as it shows');
+  clickWithCount(shellNext, 2);
+  await flush();
+  check(pollCreations() === pollsBeforeDoubleClicks && shellStep() === 2 && !shellWizard.signal.aborted,
+    'With reduced motion, the second click of a double click on Next does not publish the preview it brought up');
+  clickWithCount(shellBack, 1);
+  clickWithCount(shellBack, 2);
+  check(shellStep() === 1, `A double click on Back also moves one step: step ${shellStep()}`);
+  yield 'poll-step-motion-enabled';
+  clickWithCount(shellNext, 1);
+  await flush();
+  check(shellStep() === 2 && !shellNext.disabled && !shellViewport.querySelector('[data-ui-closing]'),
+    'With motion, the preview lands and Publish works again');
+  clickWithCount(shellNext, 2);
+  await flush();
+  check(pollCreations() === pollsBeforeDoubleClicks && !shellWizard.signal.aborted,
+    'With motion, the second click of a double click slower than the slide does not publish the preview either');
+  appEvents.emit('session.changed', { key: 'another-server' });
+  check(shellWizard.signal.aborted && !shellWizard.element.isConnected,
+    'A poll draft leaves at once when the visible server changes');
+  // The form wizard publishes through the same frame: a double click stops at its preview, a new click publishes.
+  const { openNativeLiveFormWizard } = await import('/views/NativeLiveFormWizard.ts');
+  yield 'form-step-reduced-motion';
+  const doubleClickForm = openNativeLiveFormWizard(client, server, 'text');
+  const formPrimary = doubleClickForm.element.querySelector('[data-live-form-next]');
+  const formCreations = () => calls.filter(call => call.type === 'NATIVE_FORM_CREATE');
+  const formsBeforeDoubleClick = formCreations().length;
+  input('[data-live-form-title]', 'Double click form');
+  clickWithCount(formPrimary, 1);
+  input('[data-live-form-field-label]', 'Name');
+  clickWithCount(formPrimary, 1);
+  check(formPrimary.hasAttribute('data-live-form-submit') && !formPrimary.disabled && formCreations().length === formsBeforeDoubleClick,
+    'With reduced motion, the native form preview is ready to publish as soon as it shows');
+  clickWithCount(formPrimary, 2);
+  await flush();
+  check(formCreations().length === formsBeforeDoubleClick && !doubleClickForm.signal.aborted,
+    'The second click of a double click on Next does not publish the native form it brought up');
+  clickWithCount(formPrimary, 1);
+  await flush();
+  check(formCreations().length === formsBeforeDoubleClick + 1 && formCreations().at(-1).payload.form.title === 'Double click form'
+    && formCreations().at(-1).payload.form.fields[0].label === 'Name' && doubleClickForm.signal.aborted,
+  'A new click on Publish creates the native form and closes its wizard');
+  yield 'form-step-motion-enabled';
+  const { EventBus } = await import('/core/EventBus.ts');
+  const wizardServer = { ...server, bus: new EventBus(), communityEventsEnabled: true };
+  const escapeWizard = openNativePollWizard(client, wizardServer, 'text');
+  input('[data-poll-question]', 'Escape poll');
+  input('[data-poll-option][data-option-index="0"]', 'Yes');
+  input('[data-poll-option][data-option-index="1"]', 'No');
+  document.querySelector('[data-poll-next]').click();
+  await flush();
+  const wizardDuration = escapeWizard.element.querySelector('[data-poll-duration]');
+  wizardDuration.focus({ preventScroll: true });
+  wizardServer.bus.emit('community.updated');
+  check(wizardDuration.isConnected && document.activeElement === wizardDuration,
+    'Community updates that leave live actions as they were do not rebuild the poll step being typed in');
+  wizardServer.communityEventsEnabled = false;
+  wizardServer.bus.emit('community.updated');
+  check(escapeWizard.element.querySelector('[data-poll-live]').disabled
+    && document.activeElement === escapeWizard.element.querySelector('[data-poll-duration]'),
+  'Live actions being switched off updates the step without moving keyboard focus');
+  const escapePrivate = escapeWizard.element.querySelector('[data-resource-audience=poll-audience] [data-audience-private]');
+  escapePrivate.checked = true;
+  escapePrivate.dispatchEvent(new Event('change', { bubbles: true }));
+  const escapeToggle = escapeWizard.element.querySelector('[data-resource-audience=poll-audience] [data-audience-toggle]');
+  escapeToggle.click();
+  const escapeSearch = escapeWizard.element.querySelector('[data-resource-audience=poll-audience] [data-audience-search]');
+  check(document.activeElement === escapeSearch && escapeToggle.getAttribute('aria-expanded') === 'true',
+    'The audience dropdown opens with focus in its search');
+  escapeSearch.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(!escapeWizard.signal.aborted && escapeToggle.getAttribute('aria-expanded') === 'false'
+    && document.activeElement === escapeToggle,
+  'Escape in the audience search closes only its dropdown and keeps the poll draft open');
+  escapeToggle.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(escapeWizard.signal.aborted, 'With the dropdown closed, Escape still closes the wizard');
+  await flush();
+  root.querySelector('[data-community=actions]').click();
+  [...document.querySelectorAll('.live-action-list-modal [data-create-live-action]')].at(-1).click();
+  await flush();
+  [...document.querySelectorAll('.live-action-create-modal [data-live-action-type=form]')].at(-1).click();
+  await flush();
+  check(document.querySelector('.native-live-form-wizard'), 'Create live action opens the form wizard from the list');
   view.destroy();
   await flush();
-  check(!document.querySelector('.community-modal'), 'All activity dialogs close on teardown');
+  check(!document.querySelector('.community-modal'), 'All activity dialogs close on teardown, wizards opened from them included');
   const openedTextChannels = [];
   const restored = new ServerCommunityView(root, feed, async () => {}, undefined, channelId => openedTextChannels.push(channelId));
   check(!root.textContent.includes(event.title), 'Banner dismissal persists for the occurrence');
@@ -1508,22 +1885,22 @@ async function* regression(locale, inviteModule) {
   await flush();
   check(eventListBackdrop.hidden || eventListCard.hidden, 'The parent event list is hidden when the modal transition finishes');
   yield 'event-location';
-  check(!document.querySelector('[data-action=next]').disabled, 'Wizard keeps Next actionable so validation can explain missing data');
-  document.querySelector('[data-action=next]').click();
+  check(!document.querySelector('[data-event-next]').disabled, 'Wizard keeps Next actionable so validation can explain missing data');
+  document.querySelector('[data-event-next]').click();
   check(document.querySelector('.chat-copy-toast--danger')?.textContent.includes(t('community.locationRequired'))
     && document.querySelector('.community-location-cards').getAttribute('aria-invalid') === 'true',
   'Missing location uses a danger toast and highlights the relevant control');
   const locationOptions = [...document.querySelectorAll('[data-location]')].map(node => node.getBoundingClientRect());
   check(locationOptions[1].top >= locationOptions[0].bottom, 'Location cards are stacked like the reference');
   document.querySelector('[data-location=channel]').click();
-  check(!document.querySelector('[data-action=next]').disabled, 'Channel validation remains actionable before a channel is selected');
+  check(!document.querySelector('[data-event-next]').disabled, 'Channel validation remains actionable before a channel is selected');
   const channelSelect = () => document.querySelector('[data-input=channel]');
   document.querySelector('[data-channel-type=text]').click();
   check([...channelSelect().options].some(option => option.value === 'text')
     && ![...channelSelect().options].some(option => option.value === 'event-thread'),
   'Event locations include real text channels but exclude forum threads');
   document.querySelector('[data-channel-type=voice]').click();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   check(channelSelect().getAttribute('aria-invalid') === 'true'
     && document.querySelector('.chat-copy-toast--danger')?.textContent.includes(t('community.selectChannel')),
   'Missing channel uses a toast and highlights its selector');
@@ -1571,17 +1948,33 @@ async function* regression(locale, inviteModule) {
     && parseFloat(getComputedStyle(wizardShell.querySelector('.event-step-body')).paddingRight) >= 16
     && getComputedStyle(wizardShell.querySelector('.event-step-viewport')).overflowY === 'auto',
   'The event wizard keeps its fields inset from the scrolling edges while preserving its width and bounded height');
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   check(document.querySelector('.event-step-viewport').getAnimations({ subtree: true }).length >= 2,
     'Advancing runs the incoming and outgoing slides inside the fixed-height wizard');
   yield 'event-step-forward-motion';
   yield 'event-step-reduced-motion';
-  check(!document.querySelector('.event-step-viewport').getAnimations({ subtree: true }).some(animation => animation.playState === 'running'),
-    'Enabling reduced motion during a step transition immediately settles its final state');
+  // Only the step's own motion: a field the slide brought under the resting pointer still fades its hover color.
+  const stillRunning = document.querySelector('.event-step-viewport').getAnimations({ subtree: true })
+    .filter(animation => animation.playState === 'running' && !(animation instanceof CSSTransition));
+  check(!stillRunning.length,
+    `Enabling reduced motion during a step transition immediately settles its final state: ${JSON.stringify(stillRunning
+      .map(animation => [animation.effect.target?.outerHTML.slice(0, 100), animation.effect.getKeyframes().at(-1)]))}`);
   check(automaticScrollBehavior() === 'instant',
     'Reduced motion makes automatic scrolling settle immediately');
   check(document.querySelector('.event-wizard') === wizardShell && wizardShell.querySelector('.community-steps') === wizardStepper
     && wizardShell.querySelector('.event-wizard-footer') === wizardFooter, 'Step changes preserve the wizard shell, stepper and footer');
+  const stillDurations = element => getComputedStyle(element).transitionDuration.split(',').every(value => parseFloat(value) === 0);
+  const reducedCarousel = document.createElement('div');
+  reducedCarousel.innerHTML = renderImageCarouselEditor(['/avatars/cover.png', '/avatars/cover.png'], {
+    label: 'Images', addLabel: 'Add', removeLabel: 'Remove', moveBackLabel: 'Move back', moveForwardLabel: 'Move forward',
+  });
+  document.body.append(reducedCarousel);
+  check(stillDurations(document.querySelector('.event-step-viewport [data-carousel-dropzone]'))
+    && stillDurations(reducedCarousel.querySelector('.image-carousel-track'))
+    && stillDurations(reducedCarousel.querySelector('.image-carousel-dot'))
+    && stillDurations(reducedCarousel.querySelector('.image-carousel-editor-toolbar button')),
+  'Reduced motion also stops the image drop zone and the carousel track, dots and toolbar');
+  reducedCarousel.remove();
   yield 'event-step-motion-enabled';
   check(automaticScrollBehavior() === 'smooth',
     'Automatic scrolling resumes smooth movement when reduced motion is disabled');
@@ -1606,7 +1999,7 @@ async function* regression(locale, inviteModule) {
   eventPrivate.dispatchEvent(new Event('change', { bubbles: true }));
   await flush();
   HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
-  check(!document.querySelector('[data-action=next]').disabled,
+  check(!document.querySelector('[data-event-next]').disabled,
     'Private audience validation leaves Next actionable');
   const eventAudienceTrigger = document.querySelector(
     '[data-resource-audience=event-audience] [data-audience-toggle]',
@@ -1617,6 +2010,8 @@ async function* regression(locale, inviteModule) {
     && privateAudienceScroll?.behavior === 'smooth',
   'Enabling private event visibility smoothly scrolls to its audience field without opening the dropdown');
   eventAudienceTrigger.click();
+  // Measured where the dropdown rests, after its entrance motion.
+  await flush();
   const audiencePopupBounds = document.querySelector(
     '[data-resource-audience=event-audience] [data-audience-popup]',
   ).getBoundingClientRect();
@@ -1686,10 +2081,36 @@ async function* regression(locale, inviteModule) {
   check(eventAudienceTrigger.getAttribute('aria-expanded') === 'false'
     && audiencePopup.hidden,
   'Scrolling the event modal outside the dropdown closes the audience picker and scrolls the form');
+  // A scroll event is dispatched a frame after the movement. The one of a scroll that
+  // ended right before the dropdown opened must not count as the user scrolling it away.
+  const viewportBox = eventStepScroller.getBoundingClientRect();
+  const restingTriggerBox = eventAudienceTrigger.getBoundingClientRect();
+  const restingAudienceTop = Math.max(0, Math.min(eventStepScroller.scrollHeight - eventStepScroller.clientHeight,
+    eventStepScroller.scrollTop + restingTriggerBox.top - viewportBox.top - eventStepScroller.clientTop
+      - Math.max(0, (eventStepScroller.clientHeight - restingTriggerBox.height) / 2)));
+  eventStepScroller.scrollTo({ top: restingAudienceTop - 80, behavior: 'instant' });
+  await settleScroll(eventStepScroller);
+  let lateScrollEvents = 0;
+  const countLateScroll = event => { if (event.target === eventStepScroller) lateScrollEvents++; };
+  eventStepScroller.scrollTo({ top: restingAudienceTop, behavior: 'instant' });
+  eventAudienceTrigger.click();
+  document.addEventListener('scroll', countLateScroll, { capture: true });
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  document.removeEventListener('scroll', countLateScroll, { capture: true });
+  check(lateScrollEvents > 0 && !audiencePopup.hidden && eventAudienceTrigger.getAttribute('aria-expanded') === 'true',
+    `The late event of a scroll that ended before the audience dropdown opened leaves it open: ${JSON.stringify({
+      lateScrollEvents, hidden: audiencePopup.hidden, expanded: eventAudienceTrigger.getAttribute('aria-expanded'),
+    })}`);
+  eventStepScroller.scrollTo({ top: eventStepScroller.scrollTop - 40, behavior: 'instant' });
+  await until(() => audiencePopup.hidden);
+  check(eventAudienceTrigger.getAttribute('aria-expanded') === 'false',
+    'Scrolling the form under the open audience dropdown still closes it');
   eventAudienceTrigger.click();
   await settleScroll(eventStepScroller);
   const eventScrollBeforeDrag = eventStepScroller.scrollTop;
   yield 'event-audience-scrollbar-modal';
+  // The dismissed dropdown fades out before it is hidden.
+  await until(() => audiencePopup.hidden).catch(() => {});
   check(audiencePopup.hidden && eventAudienceTrigger.getAttribute('aria-expanded') === 'false'
     && eventStepScroller.scrollTop < eventScrollBeforeDrag - 30,
   `Dragging the native modal scrollbar dismisses the audience picker: ${JSON.stringify({
@@ -1707,6 +2128,7 @@ async function* regression(locale, inviteModule) {
   await settleScroll(eventStepScroller);
   eventAudienceTrigger.click();
   yield 'event-audience-scrollbar-modal';
+  await until(() => audiencePopup.hidden).catch(() => {});
   check(audiencePopup.hidden && eventAudienceTrigger.getAttribute('aria-expanded') === 'false',
     'A scrollbar drag also dismisses the audience picker while its opening scroll is in progress');
   const interruptedAudienceScroll = eventStepScroller.scrollTop;
@@ -1717,16 +2139,16 @@ async function* regression(locale, inviteModule) {
   audienceScrollSpace.remove();
   for (let index = 0; index < 40; index++) server.knownMembers.delete(`scroll-audience-${index}`);
   eventAudienceTrigger.click();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   check(document.querySelector('[data-audience-toggle]').getAttribute('aria-invalid') === 'true'
     && document.querySelector('.chat-copy-toast--danger')?.textContent.includes(t('audience.empty'))
     && getComputedStyle(document.querySelector('[data-audience-toggle]')).outlineOffset === '-2px',
   'An empty private audience uses a toast and highlights its picker');
   check(!document.querySelector('[data-date-error]')
-    && !document.querySelector('.event-wizard [data-community-error]:not([hidden])'),
+    && !document.querySelector('.event-wizard [data-community-error]'),
   'Incomplete event details do not print an inline red error while the user is still editing');
   document.querySelector('[data-resource-audience=event-audience] [data-audience-kind=role]').click();
-  check(!document.querySelector('[data-action=next]').disabled
+  check(!document.querySelector('[data-event-next]').disabled
     && document.querySelector('[data-resource-audience=event-audience] .share-audience-chip'),
   'Event creation reuses the audience picker and restores validity after a role is selected');
   check(document.querySelector('[data-carousel-dropzone]')
@@ -1861,20 +2283,30 @@ async function* regression(locale, inviteModule) {
     && wizardFooter.scrollWidth <= wizardFooter.clientWidth, 'Narrow event fields and footer do not overflow horizontally');
   yield 'event-details-narrow';
   wizardShell.style.width = '';
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   check(document.querySelector('.community-modal:last-child') || document.querySelector('[aria-current=step]'), 'Event review is rendered');
-  check(document.querySelectorAll('.event-step-body:not(.event-step-outgoing) .image-carousel-dot').length === 2,
+  check(document.querySelectorAll('.event-step-body:not([data-ui-closing]) .image-carousel-dot').length === 2,
     'The event review renders every selected image');
   yield 'event-review';
-  document.querySelector('[data-action=back]').click();
-  const returning = document.querySelector('.event-step-body:not(.event-step-outgoing)').getAnimations()[0];
+  document.querySelector('[data-event-back]').click();
+  const returning = document.querySelector('.event-step-body:not([data-ui-closing])').getAnimations()[0];
   check(returning?.effect.getKeyframes()[0].transform === 'translateX(-100%)', 'Going back reverses the step slide direction');
   await flush();
   check(document.querySelector('[data-input=title]').value === 'Scheduled event', 'Returning to details preserves the event draft');
-  document.querySelector('[data-action=next]').click();
+  // A double click on Next whose second click comes after the review has slid in, onto Save.
+  const eventSaves = () => calls.filter(call => call.type === 'EVENT_SAVE').length;
+  const savesBeforeDoubleClick = eventSaves();
+  const eventPrimary = document.querySelector('[data-event-next]');
+  clickWithCount(eventPrimary, 1);
   await flush();
-  document.querySelector('[data-action=next]').click();
+  check(eventPrimary.hasAttribute('data-event-submit') && !eventPrimary.disabled,
+    'The event review lands with Save ready');
+  clickWithCount(eventPrimary, 2);
+  await flush();
+  check(eventSaves() === savesBeforeDoubleClick && document.querySelector('.server-event-wizard'),
+    'The second click of a double click on Next does not save the event it brought up for review');
+  clickWithCount(eventPrimary, 1);
   await flush();
   check(calls.some(call => call.type === 'EVENT_SAVE' && call.payload.title === 'Scheduled event'
     && call.payload.imageSources.length === 2
@@ -1893,14 +2325,14 @@ async function* regression(locale, inviteModule) {
     'Text selection filters out voice channels');
   picker().querySelector('[role=option][aria-disabled=false]').click();
   await flush();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   document.querySelector('[data-input=title]').value = 'Text event';
   document.querySelector('[data-input=title]').dispatchEvent(new Event('input', { bubbles: true }));
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   yield 'event-text-review';
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-submit]').click();
   await flush();
   check(calls.some(call => call.type === 'EVENT_SAVE' && call.payload.title === 'Text event' &&
     call.payload.location.kind === 'text' && call.payload.location.channelId === 'text'), 'Text events persist a channel identity, not a free-text label');
@@ -1919,20 +2351,75 @@ async function* regression(locale, inviteModule) {
   yield 'event-external-placeholder';
   external.value = 'https://example.test/event';
   external.dispatchEvent(new Event('input', { bubbles: true }));
-  check(!document.querySelector('[data-action=next]').disabled && !channelSelect(),
+  check(!document.querySelector('[data-event-next]').disabled && !channelSelect(),
     'Somewhere else accepts a URL directly without a channel dropdown');
   yield 'event-external';
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   document.querySelector('[data-input=title]').value = 'External event';
   document.querySelector('[data-input=title]').dispatchEvent(new Event('input', { bubbles: true }));
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-submit]').click();
   await flush();
   check(calls.some(call => call.type === 'EVENT_SAVE' && call.payload.title === 'External event' &&
     call.payload.location.kind === 'external' && call.payload.location.label === 'https://example.test/event'),
     'External URLs survive review and event creation');
+  // Five detailed covers (noise, as in a sharp photo) cannot travel in one WebSocket message.
+  const noiseCanvas = document.createElement('canvas');
+  noiseCanvas.width = 1000;
+  noiseCanvas.height = 400;
+  const noiseContext = noiseCanvas.getContext('2d');
+  const noisyCovers = Array.from({ length: 5 }, () => {
+    const pixels = noiseContext.createImageData(1000, 400);
+    for (let index = 0; index < pixels.data.length; index += 4) {
+      pixels.data[index] = Math.random() * 256;
+      pixels.data[index + 1] = Math.random() * 256;
+      pixels.data[index + 2] = Math.random() * 256;
+      pixels.data[index + 3] = 255;
+    }
+    noiseContext.putImageData(pixels, 0, 0);
+    return noiseCanvas.toDataURL('image/png');
+  });
+  const oversizedApi = window.api;
+  window.api = { ...(oversizedApi ?? {}), selectImagesDialog: async maxFiles => noisyCovers.slice(0, maxFiles)
+    .map((base64, index) => ({ fileName: `cover-${index}.png`, mimeType: 'image/png', base64 })) };
+  document.querySelector('[data-create-event]').click();
+  document.querySelector('[data-location=external]').click();
+  document.querySelector('[data-input=location]').value = 'https://example.test/covers';
+  document.querySelector('[data-input=location]').dispatchEvent(new Event('input', { bubbles: true }));
+  document.querySelector('[data-event-next]').click();
+  await flush();
+  document.querySelector('[data-input=title]').value = 'Oversized event';
+  document.querySelector('[data-input=title]').dispatchEvent(new Event('input', { bubbles: true }));
+  document.querySelector('[data-carousel-dropzone]').click();
+  for (let index = 0; index < 5; index++) {
+    await until(() => activeCrop('[data-action=confirm]')?.disabled === false);
+    activeCrop('[data-action=confirm]').click();
+    await flush();
+  }
+  await until(() => document.querySelectorAll('.event-cover-field .image-carousel-slide').length === 5);
+  if (oversizedApi === undefined) delete window.api; else window.api = oversizedApi;
+  document.querySelector('[data-event-next]').click();
+  await flush();
+  const savesBeforeOversize = calls.filter(call => call.type === 'EVENT_SAVE').length;
+  document.querySelector('[data-event-submit]').click();
+  await flush();
+  check(calls.filter(call => call.type === 'EVENT_SAVE').length === savesBeforeOversize
+    && document.querySelector('.chat-copy-toast--danger')?.textContent.includes(t('community.eventImagesTooLarge'))
+    && document.querySelector('.server-event-wizard') && !document.querySelector('[data-event-submit]').disabled,
+  'An event too large for one WebSocket message stays open with an explanation instead of dropping the connection');
+  document.querySelector('[data-event-back]').click();
+  await flush();
+  document.querySelector('.event-cover-field [data-carousel-edit=remove]').click();
+  await flush();
+  document.querySelector('[data-event-next]').click();
+  await flush();
+  document.querySelector('[data-event-submit]').click();
+  await flush();
+  check(calls.some(call => call.type === 'EVENT_SAVE' && call.payload.title === 'Oversized event'
+    && call.payload.imageSources.length === 4) && !document.querySelector('.server-event-wizard'),
+  'Removing a cover brings the event back under the limit and it is saved');
   document.querySelector('[data-create-event]').click();
   document.querySelector('[data-location=channel]').click();
   openChannel();
@@ -2021,7 +2508,7 @@ async function* regression(locale, inviteModule) {
     copyFailure = true;
     chooseEventAction('community.copyLink');
     await flush();
-    check(detail().querySelector('[data-community-error]').textContent === t('community.copyFailed'), 'Clipboard failure is localized and visible');
+    check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('community.copyFailed')), 'Clipboard failure is localized and visible');
     chooseEventAction('community.exportCalendar');
     await flush();
     check(calendarInput.event.id === event.id && !detail().querySelector('[data-event-feedback]'), 'Calendar cancel sends no success notice');
@@ -2032,7 +2519,7 @@ async function* regression(locale, inviteModule) {
     calendarResult = { status: 'failed', error: 'Fixture save failure' };
     chooseEventAction('community.exportCalendar');
     await flush();
-    check(detail().querySelector('[data-community-error]').textContent === 'Fixture save failure'
+    check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes('Fixture save failure')
       && !detail().querySelector('[data-event-feedback]'), 'Calendar write failures never report success');
   } finally {
     if (originalApi === undefined) delete window.api; else window.api = originalApi;
@@ -2049,15 +2536,68 @@ async function* regression(locale, inviteModule) {
   interestedMode = 'normal';
   feed.requestOpenEvent('historic');
   await flush();
-  check(detail() && calls.some(call => call.type === 'EVENT_GET' && call.payload.id === 'historic'), 'Links fetch historical events by ID instead of depending on the snapshot');
-  emit('message.COMMUNITY_SNAPSHOT', snapshot);
+  const historicReads = () => calls.filter(call => call.type === 'EVENT_GET' && call.payload.id === 'historic').length;
+  check(detail() && historicReads() === 1,
+    'Links fetch historical events by ID instead of depending on the snapshot, and do not ask again for the copy just fetched');
+  const readsBeforeBurst = historicReads();
+  for (let index = 0; index < 5; index++) emit('message.COMMUNITY_SNAPSHOT', snapshot);
+  check(detail()?.querySelector('[data-event-id="historic"]') && !detail().textContent.includes(t('community.loadingEvent')),
+    'Snapshots that never carried a historical event keep it on screen while it is confirmed again');
+  await until(() => historicReads() > readsBeforeBurst);
   await flush();
-  check(detail(), 'Historical detail survives unrelated snapshot refreshes');
+  check(historicReads() === readsBeforeBurst + 1 && detail().querySelector('[data-event-id="historic"]'),
+    'A burst of snapshots confirms an event outside the snapshot with a single request');
+  // A check that fails without a refusal, such as a timeout, says nothing about the event:
+  // what is on screen stays, with no error, until a later check.
+  const eventToast = () => [...document.querySelectorAll('.chat-copy-toast--danger:not([data-ui-closing])')]
+    .find(toast => [t('community.eventUnavailable'), t('community.eventLoadError'), t('community.changed')]
+      .some(message => toast.textContent.includes(message)));
+  eventGetFailure = new RequestTimeoutError('EVENT_GET');
+  const readsBeforeTimeout = historicReads();
+  emit('message.COMMUNITY_SNAPSHOT', snapshot);
+  await until(() => historicReads() > readsBeforeTimeout);
+  await flush();
+  check(detail()?.querySelector('[data-event-id="historic"]') && detail().querySelector('.modal-title').textContent === event.title
+    && !eventToast(),
+  'A check that times out keeps the event on screen, with its name and no error');
+  eventGetFailure = null;
   yield 'event-linked-details';
+  deletedEvents.add('historic');
+  emit('message.COMMUNITY_SNAPSHOT', snapshot);
+  await until(() => !detail());
+  check(eventToast()?.textContent.includes(t('community.eventUnavailable')) && !eventToast().textContent.includes(t('community.changed')),
+    'A historical event deleted meanwhile closes its dialog at the next confirmation and says why, without sending the reader back to a list');
+  deletedEvents.delete('historic');
+  // Closing the dialog cancels a check already scheduled, and one already on its way.
+  feed.requestOpenEvent('historic');
+  await until(() => detail());
+  const readsWhenReopened = historicReads();
+  emit('message.COMMUNITY_SNAPSHOT', snapshot);
+  await until(() => historicReads() === readsWhenReopened + 1);
+  await flush();
+  emit('message.COMMUNITY_SNAPSHOT', snapshot);
   detail().querySelector('[data-community-close]').click();
+  await new Promise(resolve => setTimeout(resolve, 1300));
+  check(historicReads() === readsWhenReopened + 1, 'Closing an event dialog cancels the check it had scheduled');
+  feed.requestOpenEvent('historic');
+  await until(() => detail());
+  const readsBeforeInFlight = historicReads();
+  let releaseCheck;
+  eventGetGate = new Promise(resolve => { releaseCheck = resolve; });
+  emit('message.COMMUNITY_SNAPSHOT', snapshot);
+  await until(() => historicReads() === readsBeforeInFlight + 1);
+  const inFlightCheck = calls.filter(call => call.type === 'EVENT_GET').at(-1);
+  detail().querySelector('[data-community-close]').click();
+  check(cancelled.includes(inFlightCheck.requestId), 'Closing an event dialog cancels the check on its way');
+  releaseCheck();
+  eventGetGate = null;
+  await new Promise(resolve => setTimeout(resolve, 1300));
+  check(historicReads() === readsBeforeInFlight + 1 && !detail(),
+    'A cancelled check neither brings the dialog back nor asks the server again');
+  document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
   feed.requestOpenEvent('missing');
   await flush();
-  check(document.querySelector('[data-community-error]:not([hidden])'), 'Unavailable linked events show an explicit failure');
+  check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])'), 'Unavailable linked events show an explicit failure');
   allowed = true;
   document.querySelector('[data-community-close]').click();
   event.imageUrl = '/avatars/cover.png';
@@ -2070,12 +2610,74 @@ async function* regression(locale, inviteModule) {
   check(document.querySelector('.event-list-modal [data-event-action=copyLink]')
     && !document.querySelector('.event-list-modal .image-carousel'),
   'Active event lists use the first image as a compact cover');
+  const voteElsewhere = () => emit('message.COMMUNITY_SNAPSHOT',
+    { ...structuredClone(snapshot), polls: [{ ...structuredClone(poll), totalVotes: poll.totalVotes + 1 }] });
+  const listedEvent = document.querySelector('.event-list-modal [data-event-openable=true]');
+  const listedMenu = listedEvent.querySelector('[data-event-action=menu]');
+  const sidebarEvents = root.querySelector('[data-community=events]');
+  listedMenu.focus();
+  voteElsewhere();
+  check(listedEvent.isConnected && document.activeElement === listedMenu && sidebarEvents.isConnected,
+    'A vote elsewhere leaves the event list, its keyboard focus and the sidebar section untouched');
   yield 'event-active-list';
   document.querySelector('.event-list-modal [data-event-openable=true] .community-event-content').click();
   check(detail().querySelectorAll('.image-carousel-dot').length === 2,
     'Event details expose the complete image carousel');
+  detail().querySelector('[data-event-tab=interested]').click();
+  await flush();
+  detail().querySelector('[data-interested-more]').click();
+  await flush();
+  const interestedRequests = calls.filter(call => call.type === 'EVENT_GET_INTERESTED').length;
+  voteElsewhere();
+  await flush();
+  check(detail().querySelectorAll('.event-interest-list li').length === 2
+    && calls.filter(call => call.type === 'EVENT_GET_INTERESTED').length === interestedRequests,
+  'A vote elsewhere keeps every loaded page of interested members without asking the server again');
+  detail().querySelector('[data-event-tab=details]').click();
   yield 'event-active-details';
-  detail().querySelector('[data-community-close]').click();
+  const detailApi = window.api;
+  const calendarExports = [];
+  window.api = { ...(detailApi ?? {}), saveEventCalendar: async input => { calendarExports.push(input); return { status: 'saved' }; } };
+  let releaseEventGet;
+  eventGetGate = new Promise(resolve => { releaseEventGet = resolve; });
+  detail().querySelector('[data-event-action=menu]').click();
+  const openEventMenu = () => document.querySelector('.floating-context-menu:not([data-ui-closing])');
+  const staleExport = [...(openEventMenu()?.querySelectorAll('[role=menuitem]') ?? [])]
+    .find(item => item.textContent.includes(t('community.exportCalendar')));
+  check(staleExport && openEventMenu().contains(document.activeElement), 'The event menu opens with keyboard focus inside it');
+  emit('message.COMMUNITY_SNAPSHOT', { ...structuredClone(snapshot), events: [] });
+  const detailCard = detail();
+  check(detailCard && !detailCard.querySelector('[data-event-id], [data-event-action], .event-interest-list, [data-community-content] img')
+    && detailCard.querySelector('[data-community-content]').textContent === t('community.loadingEvent')
+    && document.activeElement === detailCard.querySelector('.modal-title'),
+  'An event that leaves the snapshot disappears at once, focus included, while the server is asked about it');
+  check(detailCard.querySelector('.modal-title').textContent === t('community.details')
+    && detailCard.getAttribute('aria-label') === t('community.details') && !detailCard.textContent.includes(event.title),
+  'A hidden event leaves no trace of its name in the dialog heading or in the name read by screen readers');
+  check(!openEventMenu(), 'The menu opened from the hidden event closes with it');
+  staleExport.click();
+  await flush();
+  check(calendarExports.length === 0, 'An item of the closed menu no longer acts on the hidden event');
+  releaseEventGet();
+  eventGetGate = null;
+  await until(() => detail().querySelector('[data-event-id="event"] [data-event-action=menu]'));
+  check(!detail().textContent.includes(t('community.loadingEvent'))
+    && detail().querySelector('.modal-title').textContent === event.title && detail().getAttribute('aria-label') === event.title,
+  'An event the server still shows comes back after the check, with its name');
+  emit('message.COMMUNITY_SNAPSHOT', { ...structuredClone(snapshot), events: [{ ...structuredClone(event), title: 'Renamed event' }] });
+  check(detail().querySelector('.modal-title').textContent === 'Renamed event' && detail().getAttribute('aria-label') === 'Renamed event',
+    'The dialog heading follows a rename');
+  emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+  // A hidden event only comes back through the server: when its check fails for another
+  // reason, such as a timeout, the dialog closes with a localized error, not the internal one.
+  eventGetFailure = new RequestTimeoutError('EVENT_GET');
+  emit('message.COMMUNITY_SNAPSHOT', { ...structuredClone(snapshot), events: [] });
+  await until(() => !detail());
+  check(eventToast()?.querySelector('.chat-copy-toast-label')?.textContent === t('community.eventLoadError'),
+    'A hidden event whose check times out closes its dialog with a localized error');
+  eventGetFailure = null;
+  emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+  if (detailApi === undefined) delete window.api; else window.api = detailApi;
   snapshot = { ...snapshot, events: [{ ...event, status: 'scheduled', startsAt: now + 60000, startedAt: null }] };
   emit('message.COMMUNITY_SNAPSHOT', snapshot);
   yield 'event-scheduled-list';
@@ -2103,6 +2705,222 @@ async function* regression(locale, inviteModule) {
   await flush();
   check(openedTextChannels.join() === 'text' && !document.querySelector('.community-modal'),
     'Active text events open the correct conversation and dismiss event dialogs');
+  // Keyboard focus stays with its own card while cards around it come and go, and goes to
+  // the list title when that card leaves: Enter must never act on a neighbor.
+  const focusBaseline = snapshot;
+  const scheduledCard = id => ({ ...event, id, title: `Card ${id}`, status: 'scheduled', startsAt: now + 60000, startedAt: null });
+  const pollCard = id => ({ ...structuredClone(poll), id, messageId: `${id}-message`, question: `Poll ${id}` });
+  // Data that differs from the plain card, by card id: votes, interest, renames, revisions.
+  const cardChanges = {};
+  const showCards = (eventIds, pollIds) => {
+    snapshot = { ...focusBaseline, events: eventIds.map(id => ({ ...scheduledCard(id), ...cardChanges[id] })),
+      liveActions: [], polls: pollIds.map(id => ({ ...pollCard(id), ...cardChanges[id] })), nativeForms: [] };
+    emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+  };
+  showCards(['card-a', 'card-b', 'card-c'], ['poll-a', 'poll-b', 'poll-c']);
+  root.querySelector('[data-community=events]').click();
+  await flush();
+  const eventMenu = id => document.querySelector(`.event-list-modal [data-event-id="${id}"] [data-event-action=menu]`);
+  eventMenu('card-b').focus();
+  showCards(['card-b', 'card-c'], ['poll-a', 'poll-b', 'poll-c']);
+  check(document.activeElement === eventMenu('card-b'),
+    'When an event above ends, keyboard focus stays on the same card, not on the one moving into its place');
+  const listMenu = () => document.querySelector('.floating-context-menu:not([data-ui-closing])');
+  const menuItem = label => [...(listMenu()?.querySelectorAll('[role=menuitem]') ?? [])].find(item => item.textContent.trim() === label);
+  eventMenu('card-b').click();
+  check(listMenu()?.contains(document.activeElement), 'An event card menu opens with keyboard focus inside it');
+  // Only the card that changed is rebuilt: the menu of an unchanged one stays open.
+  const unchangedMenu = eventMenu('card-b');
+  const interestCard = document.querySelector('.event-list-modal [data-event-id="card-c"]');
+  cardChanges['card-c'] = { interestedCount: 41 };
+  showCards(['card-b', 'card-c'], ['poll-a', 'poll-b', 'poll-c']);
+  check(listMenu()?.contains(document.activeElement) && eventMenu('card-b') === unchangedMenu
+    && document.querySelector('.event-list-modal [data-event-id="card-c"]') !== interestCard,
+  'Interest in another event rebuilds only that card and leaves the open menu of an unchanged card open, with focus in it');
+  cardChanges['card-b'] = { revision: 7 };
+  showCards(['card-b', 'card-c'], ['poll-a', 'poll-b', 'poll-c']);
+  const controlsBeforeCancel = calls.filter(call => call.type === 'EVENT_CONTROL').length;
+  menuItem(t('community.cancelEvent')).click();
+  await until(() => document.querySelector('.modal-backdrop:not([data-ui-closing]) [data-action=confirm]'));
+  document.querySelector('.modal-backdrop:not([data-ui-closing]) [data-action=confirm]').click();
+  await until(() => calls.filter(call => call.type === 'EVENT_CONTROL').length > controlsBeforeCancel);
+  await flush();
+  const cancelControl = calls.filter(call => call.type === 'EVENT_CONTROL').at(-1).payload;
+  check(cancelControl.id === 'card-b' && cancelControl.action === 'cancel' && cancelControl.expectedRevision === 7,
+    'A menu left open acts on its event as it is now, not as it was when the menu opened');
+  eventMenu('card-b').click();
+  const changedMenu = eventMenu('card-b');
+  cardChanges['card-b'] = { revision: 8, title: 'Card b renamed' };
+  showCards(['card-b', 'card-c'], ['poll-a', 'poll-b', 'poll-c']);
+  check(!listMenu() && eventMenu('card-b') !== changedMenu && document.activeElement === eventMenu('card-b'),
+    'A change to the card of an open menu closes it and returns focus to the ⋯ of the same card');
+  eventMenu('card-b').click();
+  const movedMenu = eventMenu('card-b');
+  showCards(['card-a', 'card-b', 'card-c'], ['poll-a', 'poll-b', 'poll-c']);
+  check(!listMenu() && eventMenu('card-b') === movedMenu && document.activeElement === movedMenu,
+    'A card entering the list moves the ⋯ of an open menu: the menu closes instead of floating away, and focus returns to that ⋯');
+  // In a scrolled list, a card leaving above keeps what is on screen in place by scrolling
+  // (scroll anchoring), and the menu closes on any scroll: focus still returns to its ⋯.
+  const manyCards = ['card-a', 'card-b', 'card-c', 'card-d', 'card-e', 'card-f', 'card-g', 'card-h'];
+  showCards(manyCards, ['poll-a', 'poll-b', 'poll-c']);
+  const eventListScroller = document.querySelector('.event-list-modal');
+  eventListScroller.scrollTop = eventListScroller.scrollHeight;
+  await settleScroll(eventListScroller);
+  eventMenu('card-g').click();
+  const anchoredMenu = eventMenu('card-g');
+  const anchoredTop = anchoredMenu.getBoundingClientRect().top;
+  const scrolledFrom = eventListScroller.scrollTop;
+  showCards(manyCards.filter(id => id !== 'card-a'), ['poll-a', 'poll-b', 'poll-c']);
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  check(scrolledFrom > 0 && eventListScroller.scrollTop < scrolledFrom
+    && Math.abs(anchoredMenu.getBoundingClientRect().top - anchoredTop) < 1
+    && !listMenu() && eventMenu('card-g') === anchoredMenu && document.activeElement === anchoredMenu,
+  `A card leaving above a scrolled list closes the menu of a card held in place and returns focus to its ⋯: ${JSON.stringify({
+    scrolledFrom, scrollTop: eventListScroller.scrollTop, moved: anchoredMenu.getBoundingClientRect().top - anchoredTop,
+    menu: !!listMenu(), focus: document.activeElement?.outerHTML.slice(0, 80),
+  })}`);
+  eventListScroller.scrollTop = 0;
+  eventMenu('card-b').click();
+  const staleStart = menuItem(t('community.start'));
+  showCards(['card-c', 'card-d'], ['poll-a', 'poll-b', 'poll-c']);
+  const eventListTitle = document.querySelector('.event-list-modal .modal-title');
+  check(document.activeElement === eventListTitle && !listMenu(),
+    'When the event of an open menu goes away, the menu closes and focus moves to the list title, not to the card now in its place');
+  staleStart.click();
+  check(staleStart && !document.querySelector('.event-start-modal'), 'An item of that closed menu starts nothing');
+  const controlsBeforeEnter = calls.filter(call => call.type === 'EVENT_CONTROL').length;
+  yield 'keyboard-enter';
+  check(document.activeElement === eventListTitle && !document.querySelector('.floating-context-menu:not([data-ui-closing])')
+    && calls.filter(call => call.type === 'EVENT_CONTROL').length === controlsBeforeEnter,
+  'A real Enter after the focused event vanished opens nothing for another event');
+  // The history only comes when asked for: the server pushes no snapshot of ended events, so
+  // a deleted one is learned by asking. The server's refusal drops it from the history, and
+  // nothing of it can be exported or opened again from there.
+  const historyBaseline = snapshot;
+  const historicCard = () => document.querySelector('.event-list-modal [data-event-id="historic"]');
+  const listedEvents = () => [...document.querySelectorAll('.event-list-modal [data-event-id]')].map(card => card.dataset.eventId).join();
+  const showHistory = async () => {
+    const toggle = document.querySelector('.event-list-modal [data-history]');
+    // What EVENT_GET answers for "historic" while it exists.
+    snapshot = { ...historyBaseline, events: [...historyBaseline.events, { ...event, id: 'historic', status: 'ended' }] };
+    if (toggle.checked) {
+      toggle.checked = false;
+      toggle.dispatchEvent(new Event('change', { bubbles: true }));
+      await until(() => !historicCard());
+    }
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => historicCard());
+    snapshot = historyBaseline;
+    emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+  };
+  await showHistory();
+  check(listedEvents() === 'card-c,card-d,historic',
+    'With the history on, a snapshot keeps the server order: current events first, then ended ones');
+  const historyApi = window.api;
+  const historyExports = [];
+  window.api = { ...(historyApi ?? {}), saveEventCalendar: async input => { historyExports.push(input); return { status: 'cancelled' }; } };
+  const exportFromHistory = () => {
+    historicCard().querySelector('[data-event-action=menu]').click();
+    menuItem(t('community.exportCalendar')).click();
+  };
+  try {
+    let readsBefore = historicReads();
+    exportFromHistory();
+    await until(() => historyExports.length === 1);
+    check(historicReads() === readsBefore + 1 && historyExports[0].event.id === 'historic',
+      'Exporting an event from the history confirms it with the server before writing anything');
+    readsBefore = historicReads();
+    const historicTitle = historicCard().querySelector('[data-event-action=detail]');
+    historicTitle.focus();
+    historicTitle.click();
+    check(detail() && historicReads() === readsBefore + 1,
+      'An event opened from the history is confirmed at once, even when no snapshot follows');
+    await flush();
+    deletedEvents.add('historic');
+    emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+    await until(() => !detail());
+    check(!historicCard() && listedEvents() === 'card-c,card-d'
+      && eventToast()?.querySelector('.chat-copy-toast-label')?.textContent === t('community.eventUnavailable'),
+    'A history event deleted while open closes its dialog, says why and leaves the history');
+    check(document.activeElement === document.querySelector('.event-list-modal .modal-title'),
+      'Focus falls back from the closed dialog to the list title, not to the body or another event');
+    document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+    feed.requestOpenEvent('historic');
+    const linkDialog = () => [...document.querySelectorAll('.modal-backdrop:not([data-ui-closing]) .community-modal')].at(-1);
+    await until(() => linkDialog() && document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])'));
+    check(!detail() && !linkDialog().querySelector('[data-event-id]'), 'A link to the deleted event does not bring its old copy back');
+    linkDialog().querySelector('[data-community-close]').click();
+    await flush();
+    // Deleted while nothing showed it: the history still lists it, but opening or exporting
+    // it asks the server first, and the refusal drops it.
+    deletedEvents.delete('historic');
+    await showHistory();
+    deletedEvents.add('historic');
+    historicCard().querySelector('.community-event-content > p').click();
+    await until(() => !detail() && !historicCard());
+    check(eventToast()?.querySelector('.chat-copy-toast-label')?.textContent === t('community.eventUnavailable'),
+      'Opening a history event deleted while nobody looked closes at its first confirmation and drops it from the history');
+    deletedEvents.delete('historic');
+    await showHistory();
+    historicCard().querySelector('.community-event-content > p').click();
+    await flush();
+    deletedEvents.add('historic');
+    detail().querySelector('[data-event-action=menu]').click();
+    menuItem(t('community.exportCalendar')).click();
+    await until(() => !detail() && !historicCard());
+    check(historyExports.length === 1
+      && eventToast()?.querySelector('.chat-copy-toast-label')?.textContent === t('community.eventUnavailable'),
+    'Exporting from the dialog of a deleted history event writes no file, closes the dialog and drops the event from the history');
+    deletedEvents.delete('historic');
+    await showHistory();
+    deletedEvents.add('historic');
+    exportFromHistory();
+    await until(() => !historicCard());
+    await flush();
+    check(historyExports.length === 1
+      && document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('community.eventUnavailable')),
+    'Exporting a history event deleted meanwhile writes no file, says why and drops it from the history');
+  } finally {
+    if (historyApi === undefined) delete window.api; else window.api = historyApi;
+    deletedEvents.delete('historic');
+    snapshot = historyBaseline;
+  }
+  document.querySelector('.event-list-modal [data-community-close]').click();
+  await flush();
+  root.querySelector('[data-community=actions]').click();
+  await flush();
+  const pollMenu = id => document.querySelector(`.live-action-list-modal [data-live-poll-card="${id}"] [data-live-action-menu]`);
+  pollMenu('poll-b').focus();
+  showCards(['card-c'], ['poll-b', 'poll-c']);
+  check(document.activeElement === pollMenu('poll-b'),
+    'When a live action above closes, keyboard focus stays on the same card');
+  // Votes rebuild the card of their poll only: a moderator's open menu elsewhere stays usable.
+  pollMenu('poll-b').click();
+  const openPollMenu = pollMenu('poll-b');
+  const votedCard = document.querySelector('.live-action-list-modal [data-live-poll-card="poll-c"]');
+  cardChanges['poll-c'] = { totalVotes: 41 };
+  showCards(['card-c'], ['poll-b', 'poll-c']);
+  check(listMenu()?.contains(document.activeElement) && pollMenu('poll-b') === openPollMenu
+    && document.querySelector('.live-action-list-modal [data-live-poll-card="poll-c"]') !== votedCard,
+  'A vote on another poll rebuilds only that card and leaves the open menu, with its focus, alone');
+  cardChanges['poll-b'] = { totalVotes: 42 };
+  showCards(['card-c'], ['poll-b', 'poll-c']);
+  check(!listMenu() && pollMenu('poll-b') !== openPollMenu && document.activeElement === pollMenu('poll-b'),
+    'A vote on the poll of the open menu closes it and returns focus to the ⋯ of the same card');
+  pollMenu('poll-b').click();
+  const staleClose = menuItem(t('community.closeLiveAction'));
+  showCards(['card-c'], ['poll-c', 'poll-d']);
+  check(document.activeElement === document.querySelector('.live-action-list-modal .modal-title') && !listMenu(),
+    'When the live action of an open menu closes, the menu closes and focus moves to the list title instead of the card now in its place');
+  staleClose.click();
+  await flush();
+  check(staleClose && !document.querySelector('.modal-backdrop:not([data-ui-closing]) [data-action=confirm]'),
+    'An item of that closed menu asks nothing about another live action');
+  document.querySelector('.live-action-list-modal [data-community-close]').click();
+  await flush();
+  snapshot = focusBaseline;
+  emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
   restored.destroy();
   feed.dispose();
   const pendingFeed = new CommunityFeed(client, server);
@@ -2155,6 +2973,18 @@ async function* regression(locale, inviteModule) {
   check(renameForm && renameForm.querySelectorAll('input').length === 1
     && !renameForm.querySelector('textarea, [data-post-emoji], [data-post-file]'),
   'Editing a thread opens a standard rename-only modal');
+  // A real submit, with the browser's own validation: the missing title is explained in the app's language.
+  const renameField = renameForm.querySelector('input');
+  const renameCalls = calls.length;
+  renameField.value = '';
+  renameForm.requestSubmit();
+  await flush();
+  const missingTitle = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+  check(renameForm.noValidate && missingTitle?.getAttribute('role') === 'alert'
+    && missingTitle.textContent.includes(t('validation.required', { field: t('forum.renameLabel') }))
+    && renameField.getAttribute('aria-invalid') === 'true' && document.activeElement === renameField && calls.length === renameCalls,
+  'An empty thread title is explained in the alert toast, in the app language, instead of the browser balloon');
+  missingTitle.querySelector('.chat-copy-toast-close').click();
   renameForm.querySelector('input').value = 'Renamed topic';
   renameForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await flush();
@@ -2223,12 +3053,265 @@ async function* regression(locale, inviteModule) {
   check(root.querySelector('[data-forum-loading]').hidden
     && root.querySelector('[data-forum-sentinel]').hidden,
   'Lazy loading appends every remaining thread and removes the sentinel at the end');
+  // R-CHAT-7: messages elsewhere on the server and logins leave the forum alone; activity
+  // in its posts reloads the pages on screen instead of going back to the first one.
+  const forumRequests = () => calls.filter(call => call.type === 'FORUM_LIST');
+  const rowCount = () => root.querySelectorAll('[data-forum-id]').length;
+  const requestsBefore = forumRequests().length;
+  emit('message.CHAT_MESSAGE', { id: 'elsewhere', channelId: 'text', userId: 'member', userNickname: 'Member', content: 'hi', createdAt: now });
+  emit('message.CHAT_REACTION_ADDED', { channelId: 'text', messageId: 'elsewhere', emoji: '👍', userId: 'member', userNickname: 'Member' });
+  emit('message.ROLES_LIST', {});
+  await new Promise(resolve => setTimeout(resolve, 400));
+  check(forumRequests().length === requestsBefore && rowCount() === 60,
+    'Messages in other channels and logins never reload the forum list');
+  emit('message.FORUM_POST_SAVED', { post: { ...forumPosts[50], title: 'Renamed deep thread' } });
+  emit('message.FORUM_POST_SAVED', { post: forumPosts[55], deleted: true });
+  forumPosts = forumPosts.filter((_, index) => index !== 55).map(entry =>
+    entry.channelId === 'lazy-post-50' ? { ...entry, title: 'Renamed deep thread' } : entry);
+  check(rowCount() === 59 && root.querySelector('[data-forum-id="lazy-post-50"] h3')?.textContent === 'Renamed deep thread'
+    && !root.querySelector('[data-forum-id="lazy-post-55"]'),
+  'Saved and deleted threads update their cards at once, even beyond the first page');
+  emit('message.CHAT_MESSAGE', { id: 'reply', channelId: 'event-thread', userId: 'member', userNickname: 'Member', content: 'reply', createdAt: now });
+  await until(() => forumRequests().length >= requestsBefore + 3);
+  await flush();
+  check(forumRequests().slice(requestsBefore).map(call => call.payload.offset).join() === '0,25,50' && rowCount() === 59
+    && root.querySelector('[data-forum-id="lazy-post-58"]') && root.querySelector('[data-forum-sentinel]').hidden,
+  'Activity in threads reloads the pages on screen once, without going back to the first page');
+  // R-CHAT-7: a thread that leaves the pages on screen, unpinned here, takes none of the following ones with it.
+  const threadIds = () => [...root.querySelectorAll('[data-forum-id]')].map(row => row.dataset.forumId).join();
+  const threads = count => Array.from({ length: count }, (_, index) => `q${index}`);
+  forumPosts = threads(81).map((channelId, index) => ({ ...post, channelId, title: `Thread ${index}`,
+    createdAt: now + index, updatedAt: now + index, pinned: index === 80 }));
+  // Read from the top, so only the scroll below asks for a second page.
+  forumScroller.scrollTop = 0;
+  await forum.load();
+  await flush();
+  forumScroller.scrollTop = forumScroller.scrollHeight;
+  await until(() => rowCount() === 50);
+  forumScroller.scrollTop = 0;
+  await flush();
+  check(threadIds() === ['q80', ...threads(49)].join(), `The pinned thread leads the first page: ${threadIds()}`);
+  const requestsBeforeUnpin = forumRequests().length;
+  forumPosts = forumPosts.map(entry => entry.channelId === 'q80' ? { ...entry, pinned: false } : entry);
+  emit('message.FORUM_POST_SAVED', { post: forumPosts[80] });
+  await until(() => forumRequests().length >= requestsBeforeUnpin + 2);
+  await flush();
+  const unpinned = { threads: threadIds(), offsets: forumRequests().slice(requestsBeforeUnpin).map(call => call.payload.offset).join() };
+  check(unpinned.threads === threads(50).join() && unpinned.offsets === '0,25',
+    `A thread unpinned out of the pages on screen leaves them in order, and the next one moves in: ${JSON.stringify(unpinned)}`);
+  forumScroller.scrollTop = forumScroller.scrollHeight;
+  await until(() => rowCount() === 75);
+  forumScroller.scrollTop = forumScroller.scrollHeight;
+  await until(() => rowCount() === 81);
+  check(threadIds() === threads(81).join(), 'Scrolling on lists every thread exactly once, in order');
+  // R-CHAT-7: a refresh asks for at most 3 pages however many are on screen, and keeps its distance
+  // from the previous one, so a long, busy forum stays within the server's forum budget. The rule does
+  // not depend on the language, so it runs once.
+  if (locale === 'pt-BR') {
+    document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+    // Toasts share one slot, each closing the one before: errors are counted as they appear.
+    let errorToastsShown = 0;
+    const toastWatch = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node instanceof HTMLElement && node.classList.contains('chat-copy-toast--danger')) errorToastsShown++;
+      }
+    });
+    toastWatch.observe(document.body, { childList: true });
+    const errorToasts = () => errorToastsShown;
+    const offsetsSince = start => forumRequests().slice(start).map(call => call.payload.offset).join();
+    const activity = () => emit('message.CHAT_MESSAGE', { id: crypto.randomUUID(), channelId: 'event-thread',
+      userId: 'member', userNickname: 'Member', content: 'reply', createdAt: now });
+    const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+    // Spacing is checked once below; elsewhere the previous refresh is taken as long gone.
+    const longAfterLastRefresh = () => { forum.lastRefreshAt = Number.NEGATIVE_INFINITY; };
+    forumPosts = threads(790).map((channelId, index) => ({ ...post, channelId, title: `Thread ${index}`,
+      createdAt: now + index, updatedAt: now + index }));
+    forumScroller.scrollTop = 0;
+    await forum.load();
+    while (forum.more) await forum.load('append');
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await flush();
+    const deepScroll = forumScroller.scrollTop;
+    check(rowCount() === 790 && forum.pages === 32 && deepScroll > 0, 'A long forum shows its 32 pages');
+    forumLimiter = { times: [] };
+    const beforeDeep = forumRequests().length;
+    // Long after the last refresh, nothing but the reader's place holds this one back.
+    longAfterLastRefresh();
+    for (let index = 0; index < 5; index++) activity();
+    await pause(600);
+    check(forumRequests().length === beforeDeep && rowCount() === 790 && forumScroller.scrollTop === deepScroll,
+      'Past the pages a refresh keeps, activity waits: nothing is asked and nothing moves under the reader');
+    longAfterLastRefresh();
+    forumScroller.scrollTop = 0;
+    await until(() => forumRequests().length >= beforeDeep + 3);
+    await flush();
+    check(offsetsSince(beforeDeep) === '0,25,50' && threadIds() === threads(75).join() && forum.more && !errorToasts(),
+      `Back within its pages, the refresh it put off asks for 3 of them and drops the rest: ${offsetsSince(beforeDeep)}`);
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await until(() => rowCount() === 100);
+    check(threadIds() === threads(100).join() && offsetsSince(beforeDeep) === '0,25,50,75',
+      'Scrolling on after the refresh continues where the server list is, without skipping or repeating a thread');
+    forumScroller.scrollTop = 0;
+    await flush();
+    const beforeBusy = forumRequests().length;
+    activity();
+    await pause(1000);
+    check(forumRequests().length === beforeBusy, 'Activity right after a refresh waits for its spacing');
+    await until(() => forumRequests().length >= beforeBusy + 3);
+    await until(() => forum.loading === null);
+    check(offsetsSince(beforeBusy) === '0,25,50' && rowCount() === 75 && !errorToasts(),
+      `Then the refresh asks for 3 pages again, with 4 on screen: ${offsetsSince(beforeBusy)}`);
+    const posted = await client.sendRequest('FORUM_CREATE_POST', { id: crypto.randomUUID(), channelId: 'forum', title: 'Still posting', content: 'x' });
+    check(posted.post.title === 'Still posting', 'Refreshes leave room in the forum budget to post');
+    // Another device spent the budget: the refresh it turns away comes back later, quietly, and the
+    // list asks for no page meanwhile, which the server would turn away too at every frame the reader
+    // is at its end. The server's 10 s window is shortened here.
+    const Forum = forum.constructor;
+    const serverWindow = Forum.REFRESH_RETRY_MS;
+    Forum.REFRESH_RETRY_MS = 2500;
+    forumLimiter.times = Array.from({ length: 30 }, () => performance.now());
+    longAfterLastRefresh();
+    const beforeLimited = forumRequests().length;
+    activity();
+    await until(() => forumRequests().length > beforeLimited);
+    await flush();
+    activity();
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await pause(800);
+    check(forumRequests().length === beforeLimited + 1 && rowCount() === 75 && !errorToasts() && forum.pendingLoad === 'refresh',
+      `A refresh the server turns away shows no error, keeps the list, asks for no page and waits: ${offsetsSince(beforeLimited)}`);
+    forumLimiter.times = [];
+    await until(() => rowCount() === 100);
+    await until(() => forum.loading === null);
+    check(!errorToasts(), 'After the window, the page the reader is at arrives without an error');
+    // The page the reader scrolls to is turned away: one error, and it is asked for again after the window.
+    forumLimiter.times = Array.from({ length: 30 }, () => performance.now());
+    const beforeAppend = forumRequests().length;
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await until(() => forumRequests().length > beforeAppend);
+    await pause(1000);
+    check(offsetsSince(beforeAppend) === '100' && errorToasts() === 1 && rowCount() === 100,
+      `A page the server turns away is asked for once, with one error, not again at every frame: ${offsetsSince(beforeAppend)}`);
+    forumLimiter.times = [];
+    await until(() => rowCount() === 125);
+    check(offsetsSince(beforeAppend) === '100,100' && errorToasts() === 1, 'After the window the page arrives, without another error');
+    // Any other failure waits too, twice as long at each one in a row, with one error each. Shortened here.
+    const firstRetry = Forum.APPEND_RETRY_MS;
+    Forum.APPEND_RETRY_MS = 300;
+    forumPageFailure = { error: new Error('The forum is not answering'), times: [] };
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await until(() => forumPageFailure.times.length === 3);
+    const failedAt = forumPageFailure.times;
+    forumPageFailure = null;
+    check(failedAt[1] - failedAt[0] >= 300 && failedAt[2] - failedAt[1] >= 600 && errorToasts() === 4,
+      `A page that keeps failing is asked for again later each time, with one error each: ${failedAt.map(time => Math.round(time - failedAt[0]))}`);
+    await until(() => rowCount() === 150);
+    check(errorToasts() === 4 && forum.appendFailures === 0, 'Once the server answers, the page arrives and the wait starts over');
+    Forum.APPEND_RETRY_MS = firstRetry;
+    Forum.REFRESH_RETRY_MS = serverWindow;
+    forumLimiter = null;
+    // With the refresh put off, threads on screen that move down or out of the list (unpinned, renamed
+    // out of the search, left without their newest reply) take none of the following ones with them
+    // as the reader scrolls on, even while that page is on its way.
+    const search = root.querySelector('[data-forum-search]');
+    const range = (from, to) => Array.from({ length: to - from }, (_, index) => `m${from + index}`);
+    const thread = id => forumPosts.find(entry => entry.channelId === id);
+    const change = (id, update) => { forumPosts = forumPosts.map(entry => entry.channelId === id ? { ...entry, ...update } : entry); };
+    const newestDeleted = (id, createdAt) => emit('message.CHAT_MESSAGE_UPDATED', { message: { id: `${id}-reply`, channelId: id,
+      userId: 'member', userNickname: 'Member', content: '', createdAt, deletedAt: now } });
+    forumSort.value = 'latest';
+    forumSort.dispatchEvent(new Event('change', { bubbles: true }));
+    search.value = 'Thread';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    forumPosts = Array.from({ length: 130 }, (_, index) => ({ ...post, channelId: `m${index}`, title: `Thread ${index}`,
+      createdAt: now + index, updatedAt: now + 1_000 - index, pinned: index === 129 }));
+    forumScroller.scrollTop = 0;
+    await forum.load();
+    for (let page = 1; page < 4; page++) await forum.load('append');
+    await flush();
+    check(forum.pages === 4 && threadIds() === ['m129', ...range(0, 99)].join(), `Four pages of the search, pinned first: ${threadIds()}`);
+    // Past the 75 threads a refresh keeps, far from the end of the list.
+    forumScroller.scrollTop += root.querySelectorAll('[data-forum-id]')[76].getBoundingClientRect().bottom
+      - forumScroller.getBoundingClientRect().bottom;
+    await flush();
+    const beforeMoves = forumRequests().length;
+    change('m129', { pinned: false });
+    emit('message.FORUM_POST_SAVED', { post: thread('m129') });
+    emit('message.FORUM_POST_SAVED', { post: { ...thread('m20'), title: 'Renamed' } });
+    forumPosts = forumPosts.filter(entry => entry.channelId !== 'm20');
+    const newestOfM10 = thread('m10').updatedAt;
+    change('m10', { updatedAt: now - 5_000 });
+    newestDeleted('m10', newestOfM10);
+    // An older reply deleted moves nothing.
+    newestDeleted('m30', now - 10_000);
+    await pause(600);
+    check(forumRequests().length === beforeMoves && rowCount() === 100,
+      'Threads moving away while the reader is past the pages a refresh keeps ask for nothing yet');
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await until(() => rowCount() === 125);
+    let ids = threadIds().split(',');
+    check(offsetsSince(beforeMoves) === '97' && new Set(ids).size === ids.length && ids.slice(100).join() === range(99, 124).join(),
+      `The next page starts as many threads earlier as moved away, skipping none: ${offsetsSince(beforeMoves)} ${ids.slice(100, 104)}`);
+    let releasePage;
+    forumListGate = new Promise(resolve => { releasePage = resolve; });
+    const beforeFlight = forumRequests().length;
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await until(() => forumRequests().length > beforeFlight);
+    const newestOfM50 = thread('m50').updatedAt;
+    change('m50', { updatedAt: now - 6_000 });
+    newestDeleted('m50', newestOfM50);
+    releasePage();
+    forumListGate = null;
+    await until(() => !forum.more && forum.loading === null);
+    ids = threadIds().split(',');
+    check(offsetsSince(beforeFlight) === '122,121' && new Set(ids).size === ids.length && ids.slice(125).join() === range(124, 129).join(),
+      `A page read while a thread moved away is asked for again where the next threads are: ${offsetsSince(beforeFlight)} ${ids.slice(125)}`);
+    // A thread losing its newest replies one after another, as when spam is cleared, may move down at
+    // each one: once the first is gone, the time on its card is no longer its own.
+    const spamRange = (from, to) => Array.from({ length: to - from }, (_, index) => `d${from + index}`);
+    forumPosts = Array.from({ length: 160 }, (_, index) => ({ ...post, channelId: `d${index}`, title: `Thread ${index}`,
+      createdAt: now + index, updatedAt: index ? now + 1_000 - index : now + 2_000 }));
+    forumScroller.scrollTop = 0;
+    await forum.load();
+    for (let page = 1; page < 4; page++) await forum.load('append');
+    await flush();
+    forumScroller.scrollTop += root.querySelectorAll('[data-forum-id]')[76].getBoundingClientRect().bottom
+      - forumScroller.getBoundingClientRect().bottom;
+    await flush();
+    const beforeSpam = forumRequests().length;
+    // Its newest reply goes, and the one before still keeps it first.
+    change('d0', { updatedAt: now + 1_500 });
+    newestDeleted('d0', now + 2_000);
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await until(() => rowCount() === 124);
+    // Then that one goes too, older than the time on the card, and the thread falls to the end.
+    change('d0', { updatedAt: now - 9_000 });
+    newestDeleted('d0', now + 1_500);
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await until(() => rowCount() === 149);
+    ids = threadIds().split(',');
+    check(offsetsSince(beforeSpam) === '99,123' && new Set(ids).size === ids.length && ids.slice(124).join() === spamRange(124, 149).join(),
+      `Every newest reply deleted from the same thread counts, so no thread is skipped: ${offsetsSince(beforeSpam)} ${ids.slice(124, 127)}`);
+    search.value = '';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    forumSort.value = 'oldest';
+    forumSort.dispatchEvent(new Event('change', { bubbles: true }));
+    toastWatch.disconnect();
+  }
   forumPosts = [];
   await forum.load();
   check(root.querySelector('.forum-empty-state strong')?.textContent === t('forum.emptyTitle')
     && root.querySelector('.forum-empty-state')?.textContent.includes('#Forum')
     && !root.querySelector('[data-forum-posts] button'),
   'Empty forums show the centered first-conversation state without example actions');
+  const forumChannel = server.getChannel('forum');
+  forumChannel.name = '<img src=x onerror="window.forumNameExecuted=true">';
+  await forum.load();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  check(root.querySelector('.forum-empty-state p')?.textContent.includes(`#${forumChannel.name}`)
+    && !root.querySelector('.forum-empty-state img') && !window.forumNameExecuted,
+  'A forum name carrying markup stays literal text in the empty state');
+  forumChannel.name = 'Forum';
   forumPosts = [post];
   await forum.load();
   root.querySelector('[data-forum-open]').click();
@@ -2270,6 +3353,18 @@ async function* regression(locale, inviteModule) {
     && root.querySelector('[data-post-emoji]').getBoundingClientRect().width <= 34,
   'Forum attachment actions use the compact toolbar geometry shared by the app');
   document.querySelector('textarea[name=content]').value = 'Initial message';
+  const composerTitle = document.querySelector('input[name=title]');
+  const composerCalls = calls.length;
+  composerTitle.value = '';
+  root.querySelector('.forum-composer form').requestSubmit();
+  await flush();
+  const missingPostTitle = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+  check(root.querySelector('.forum-composer form').noValidate
+    && missingPostTitle?.textContent.includes(t('validation.required', { field: t('forum.postTitle') }))
+    && composerTitle.getAttribute('aria-invalid') === 'true' && calls.length === composerCalls,
+  'A new topic without a title is explained in the alert toast, in the app language, and is not published');
+  missingPostTitle.querySelector('.chat-copy-toast-close').click();
+  composerTitle.value = 'New topic';
   yield 'forum-composer';
   root.querySelector('.forum-composer form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await flush();
@@ -2453,9 +3548,7 @@ async function* regression(locale, inviteModule) {
       'Search stays in the forum header instead of covering discussion controls');
     check(mainRoot.querySelector('[name=title]') === draftTitle && draftTitle.value === 'Keep this draft', 'Opening a discussion preserves the inline draft');
     check(calls.some(call => call.type === 'CHAT_LOAD_HISTORY' && call.payload.channelId === 'post'), 'Real discussion requests its own chat history');
-    const forumImage = color => `data:image/svg+xml,${encodeURIComponent(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="${color}"/></svg>`,
-    )}`;
+    const forumImage = color => `/attachments/forum-${color.slice(1)}.svg`;
     actualChatStore.setHistory('post', [{
       id: 'forum-media-message', channelId: 'post', userId: 'member', userNickname: 'Audience Member',
       content: 'Carousel topic', createdAt: Date.now(), updatedAt: Date.now(), isSystem: false,
@@ -2488,7 +3581,7 @@ async function* regression(locale, inviteModule) {
     'Opening the narrow discussion does not clip the draft composer actions');
     yield 'forum-chat-carousel';
     const carouselProbe = document.createElement('div');
-    carouselProbe.innerHTML = main.chatView.renderAttachments([
+    carouselProbe.innerHTML = renderAttachments([
       { id: 'image-a', kind: 'image', url: '/attachments/a.png', originalName: 'a.png', mimeType: 'image/png', sizeBytes: 1 },
       { id: 'video-b', kind: 'video', url: '/attachments/b.webm', originalName: 'b.webm', mimeType: 'video/webm', sizeBytes: 2 },
       { id: 'file-c', kind: 'file', url: '/attachments/c.pdf', originalName: 'c.pdf', mimeType: 'application/pdf', sizeBytes: 3 },
@@ -2514,18 +3607,18 @@ async function* regression(locale, inviteModule) {
       'The real chat composer sends replies to the post channel');
     const discussionChannel = chatServer.getChannel('post');
     discussionChannel.forumClosed = true;
-    main.chatView.syncComposerPermissionState();
+    main.chatView.composer.syncPermissionState();
     check(reply.readOnly && reply.placeholder === t('forum.closedPlaceholder')
       && getComputedStyle(pane.querySelector('#chat-send-permission-banner')).display === 'none',
     'An author-closed thread locks the composer with only a placeholder and no warning banner');
     discussionChannel.forumClosed = false;
     discussionChannel.forumLocked = true;
-    main.chatView.syncComposerPermissionState();
+    main.chatView.composer.syncPermissionState();
     check(reply.readOnly && reply.placeholder === t('forum.lockedPlaceholder')
       && getComputedStyle(pane.querySelector('#chat-send-permission-banner')).display === 'none',
     'An administratively locked thread uses its distinct placeholder without a warning banner');
     discussionChannel.forumLocked = false;
-    main.chatView.syncComposerPermissionState();
+    main.chatView.composer.syncPermissionState();
     yield 'forum-discussion';
     pane.querySelector('#chat-forum-back').click();
     check(pane.inert, 'Closing a discussion immediately disables its outgoing controls');
@@ -2543,6 +3636,8 @@ async function* regression(locale, inviteModule) {
     main.showSelectedChannel('text');
     check(!mainRoot.querySelector('.forum-layout') && mainRoot.querySelector('.channel-title')?.textContent === 'Text',
       'Switching to a regular channel restores a full-width chat');
+    // What the feed does from here on, for the reveal below to show if it fails.
+    const revealRecord = window.recordFeed(main.chatView.feed.list);
     const previousHistory = actualChatStore.getMessages('text');
     actualChatStore.setHistory('text', Array.from({ length: 200 }, (_, index) => ({
       id: `long-history-${index}`, channelId: 'text', userId: chatServer.currentUser.id,
@@ -2561,7 +3656,7 @@ async function* regression(locale, inviteModule) {
         top: Math.max(0, Math.min(options.top, max)), before: this.scrollTop, max });
       scrollTo.call(this, options);
     };
-    main.chatView.renderMessages({ forceScroll: true });
+    main.chatView.feed.render({ forceScroll: true });
     // The composer growing mid-reveal (a toolbar wrapping in a narrow window) shrinks
     // the feed without scrolling it; the reveal must still end on the newest message.
     const revealComposer = mainRoot.querySelector('.chat-input-container');
@@ -2575,19 +3670,20 @@ async function* regression(locale, inviteModule) {
       const start = performance.now();
       const settle = () => {
         if (Math.abs(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop) <= 1) resolve();
-        else if (performance.now() - start > 2000) reject(new Error('Short chat entry did not reach the latest message'));
-        else requestAnimationFrame(settle);
+        else if (performance.now() - start > 2000) {
+          reject(new Error(`Short chat entry did not reach the latest message: ${JSON.stringify({ feed: revealRecord.dump(), scrollCalls })}`));
+        } else requestAnimationFrame(settle);
       };
       requestAnimationFrame(settle);
     });
     revealComposer.style.paddingBottom = '';
     // Exercise a normal bottom pin too: a clamped no-op is not another viewport of travel.
-    main.chatView.scrollToBottom();
+    main.chatView.feed.list.scrollToEnd();
     check(scrollCalls.filter(call => call.behavior === 'smooth').every(call => Math.abs(call.top - call.before) <= 161),
       'Every smooth leg of the history reveal stays within the distance limit, including the layout frame: ' +
         JSON.stringify(scrollCalls));
     scrollCalls.length = 0;
-    main.chatView.renderMessages({ forceScroll: true });
+    main.chatView.feed.render({ forceScroll: true });
     await flush();
     check(Math.abs(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop) <= 1 &&
       scrollCalls.length > 0 && scrollCalls.every(call => Math.abs(call.top - call.before) <= 1),
@@ -2595,14 +3691,14 @@ async function* regression(locale, inviteModule) {
     yield 'chat-entry-reduced-motion';
     scrollTo.call(longFeed, { top: 0, behavior: 'instant' });
     scrollCalls.length = 0;
-    main.chatView.renderMessages({ forceScroll: true });
+    main.chatView.feed.render({ forceScroll: true });
     check(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop <= 1 &&
       scrollCalls.every(call => call.behavior === 'instant'),
     'Reduced motion opens long histories directly at the destination without animation');
     yield 'chat-entry-motion-enabled';
     longFeed.scrollTo = scrollTo;
     actualChatStore.setHistory('text', previousHistory);
-    main.chatView.renderMessages({ forceScroll: true });
+    main.chatView.feed.render({ forceScroll: true });
     const oldPermissions = chatServer.myPermissions;
     const oldOwner = chatServer.ownerId;
     const readableChannel = chatServer.getChannel('text');
@@ -2621,7 +3717,7 @@ async function* regression(locale, inviteModule) {
     let acknowledgeRetiredSend;
     client.sendRequest = (type, ...args) => type === 'CHAT_SEND'
       ? new Promise(resolve => { acknowledgeRetiredSend = resolve; }) : originalSendRequest.call(client, type, ...args);
-    const lateSend = main.chatView.transmitMessage(outgoing);
+    const lateSend = main.chatView.composer.transmitMessage(outgoing);
     chatServer.updateChannel({ ...readableChannel, categoryId: null, inheritCategoryPermissions: false,
       permissionOverwrites: [{ roleId: null, allow: 0, deny: 512 }] });
     check(actualChatStore.getMessages('text').length === 0 &&
@@ -2727,6 +3823,18 @@ async function* regression(locale, inviteModule) {
     await flush();
     check(Math.abs(voicePanel.getBoundingClientRect().width - resizedVoicePanelWidth) <= 1,
       'Reopening voice chat restores its persisted width');
+    {
+      // A window too small for the chosen width narrows the panel; growing again gives that width back.
+      const persisted = localStorage.getItem('monky_voice_chat_width');
+      main.clampVoiceChatWidth = () => 480;
+      window.dispatchEvent(new Event('resize'));
+      const narrowed = voicePanel.style.width;
+      delete main.clampVoiceChatWidth;
+      window.dispatchEvent(new Event('resize'));
+      check(narrowed === '480px' && Math.abs(voicePanel.getBoundingClientRect().width - resizedVoicePanelWidth) <= 1
+        && localStorage.getItem('monky_voice_chat_width') === persisted,
+      'The voice chat gets its chosen width back when the window grows again, and the window never rewrites it');
+    }
     mainRoot.querySelector('.voice-chat-close').click();
     check(main.voiceChatChannelId === null && voiceJoinRequests === 0,
       'Closing the panel never changes voice admission');
@@ -2746,6 +3854,53 @@ async function* regression(locale, inviteModule) {
     const sidebar = document.createElement('aside');
     check(main.clampSidebarWidth(100000) === Math.max(280, Math.floor(window.innerWidth * 0.175))
       && main.clampSidebarWidth(1) === 280, 'Sidebar halves its maximum width while preserving the readable minimum');
+    {
+      // The channel list's edge is a window splitter like the voice chat's: reachable and operable by
+      // keyboard. The width chosen survives the window shrinking and growing again, as on a 1920 px
+      // screen (17.5vw = 336 px) restored to a smaller window and maximized again.
+      const channelsSidebar = mainRoot.querySelector('.channels-sidebar');
+      const edge = document.createElement('div');
+      edge.id = 'channels-resizer';
+      edge.className = 'channels-resizer';
+      channelsSidebar.prepend(edge);
+      const savedWidth = localStorage.getItem('monky_channels_width');
+      localStorage.removeItem('monky_channels_width');
+      let widest = 336;
+      main.clampSidebarWidth = width => Math.min(widest, Math.max(280, width));
+      const press = key => edge.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+      const resizeWindowTo = width => {
+        widest = width;
+        window.dispatchEvent(new Event('resize'));
+      };
+      const shows = width => channelsSidebar.style.width === `${width}px` && edge.getAttribute('aria-valuenow') === String(width);
+      const stored = () => localStorage.getItem('monky_channels_width');
+      main.setupChannelsResizer();
+      try {
+        check(edge.getAttribute('role') === 'separator' && edge.getAttribute('aria-orientation') === 'vertical'
+          && edge.tabIndex === 0 && edge.getAttribute('aria-valuemin') === '280' && edge.getAttribute('aria-valuemax') === '336',
+        'The channel list edge is a focusable separator that announces its bounds');
+        press('End');
+        check(shows(336) && stored() === '336', 'End widens the channel list from the keyboard and keeps that width');
+        resizeWindowTo(280);
+        check(shows(280) && edge.getAttribute('aria-valuemax') === '280' && stored() === '336',
+          'A smaller window narrows the list within its bounds and never rewrites the width chosen');
+        press('ArrowRight');
+        check(shows(280) && stored() === '336', 'A key the bounds swallow changes nothing, the width chosen included');
+        resizeWindowTo(336);
+        check(shows(336) && edge.getAttribute('aria-valuemax') === '336' && stored() === '336',
+          'Growing the window again gives the chosen width back');
+        press('Home');
+        check(shows(280) && stored() === '280', 'Home narrows the list from the keyboard and keeps that width');
+      } finally {
+        main.channelsResizeCleanup?.();
+        main.channelsResizeCleanup = null;
+        delete main.clampSidebarWidth;
+        edge.remove();
+        channelsSidebar.style.removeProperty('width');
+        if (savedWidth === null) localStorage.removeItem('monky_channels_width');
+        else localStorage.setItem('monky_channels_width', savedWidth);
+      }
+    }
     sidebar.id = 'sidebar-layout-fixture';
     sidebar.style.cssText = 'width:280px;height:700px;display:flex;flex-direction:column;background:var(--bg-panel)';
     sidebar.innerHTML = `<div class="server-header"><button id="server-dropdown-toggle" class="server-dropdown-toggle" type="button"><span>Monky QA</span><span class="material-symbols-outlined server-dropdown-caret">expand_more</span></button>
@@ -3017,13 +4172,24 @@ async function* regression(locale, inviteModule) {
     onEvent: listener => { forumListeners.add(listener); return () => forumListeners.delete(listener); },
     sendRequest: () => new Promise(resolve => forumPending.push(resolve)),
   };
-  const staleForum = new ForumView(root, forumClient, server, 'forum', () => {});
+  // Moderating the forum (Permission.MANAGE_CHANNELS, 1 << 0) is part of its access; reading it stays allowed.
+  let moderates = true;
+  const forumServer = { ...server, hasPermission: permission => allowed && (permission !== 1 || moderates) };
+  const staleForum = new ForumView(root, forumClient, forumServer, 'forum', () => {});
   for (const listener of forumListeners) listener('message.ROLES_LIST', {});
   forumPending[0]({ channelId: 'forum', posts: [post], hasMore: false, nextOffset: 1 });
   await flush();
+  check(root.querySelectorAll('.forum-post-row').length === 1 && forumPending.length === 1,
+    'A role list resent by someone else logging in keeps the pending forum list and asks for nothing');
+  const reloading = staleForum.load();
+  moderates = false;
+  for (const listener of forumListeners) listener('message.ROLES_LIST', {});
+  forumPending[1]({ channelId: 'forum', posts: [post], hasMore: false, nextOffset: 1 });
+  await reloading;
+  await flush();
   check(root.querySelectorAll('.forum-post-row').length === 0, 'Permission invalidation rejects pending private forum results immediately');
-  await until(() => forumPending.length === 2);
-  forumPending[1]({ channelId: 'forum', posts: [], hasMore: false, nextOffset: 0 });
+  await until(() => forumPending.length === 3);
+  forumPending[2]({ channelId: 'forum', posts: [], hasMore: false, nextOffset: 0 });
   await flush();
   staleForum.destroy();
   check(forumListeners.size === 0, 'Pending forum listeners are removed on disposal');

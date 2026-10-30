@@ -1,18 +1,24 @@
 import { AttachmentKind } from '@monky/shared';
 import { networkClient } from '../core/NetworkClient';
 
+/** The only attachment address a server produces: `/attachments/<uuid>.<ext>` (#11). */
+const ATTACHMENT_PATH = /^\/attachments\/[A-Za-z0-9._-]+$/;
+
 /**
- * Resolves an attachment URL served by the host (e.g. "/attachments/<file>")
- * against the connected server's HTTP base URL, mirroring getAvatarUrl (#11).
- * Returns an empty string when there is no url (evicted) or no connection.
+ * Resolves an attachment path served by the host (e.g. "/attachments/<file>")
+ * against `baseUrl`, mirroring resolveAvatarUrl (#11). Returns an empty string
+ * when there is no url (evicted), no connection, or the value is not one of the
+ * server's own attachment paths: a hostile server cannot point the chat, the
+ * forward or the sticker download at another address, a local file or markup.
  */
+export function resolveAttachmentUrl(url: string | null | undefined, baseUrl: string): string {
+  if (!url || !baseUrl || !ATTACHMENT_PATH.test(url)) return '';
+  return `${baseUrl}${url}`;
+}
+
+/** Attachment address on the server on screen; see `resolveAttachmentUrl`. */
 export function getAttachmentUrl(url?: string | null): string {
-  if (!url || url.trim().length === 0) return '';
-  if (url.startsWith('/attachments/')) {
-    const base = networkClient.getHttpBaseUrl();
-    return base ? `${base}${url}` : '';
-  }
-  return url;
+  return resolveAttachmentUrl(url, networkClient.getHttpBaseUrl());
 }
 
 /** Human-readable file size, e.g. 1536 -> "1.5 KB". */

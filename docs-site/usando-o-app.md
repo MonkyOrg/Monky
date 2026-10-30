@@ -306,7 +306,7 @@ Ao passar o mouse sobre uma mensagem (ou chegar aos botões com `Tab`), uma barr
 
 Depois de apagar, **Desfazer** restaura a mesma mensagem, com seus blocos, anexos e reações, durante **60 segundos** por padrão. O prazo continua ao trocar de canal ou reconectar e é controlado pelo servidor. Só quem apagou pode desfazer; para mensagens de outra pessoa, essa pessoa ainda precisa ter permissão de moderação. O autor não pode reverter uma exclusão feita por um moderador. As referências de respostas voltam a mostrar a mensagem restaurada, sem enviar uma nova mensagem nem repetir notificações de menção.
 
-Configure **Configurações do servidor → Notificações → Prazo para desfazer exclusões (segundos)**, ou a chave `messageDeleteUndoSeconds` no CLI, entre **1 e 86.400 segundos**. Mudanças valem somente para novas exclusões. Ao vencer o prazo, não é mais possível restaurar. O conteúdo fica em um backup temporário privado do servidor durante a janela e é removido na próxima limpeza periódica após o vencimento. Este recurso requer cliente e servidor atualizados para o protocolo **27**; clientes anteriores não interpretam restaurações.
+Configure **Configurações do servidor → Notificações → Prazo para desfazer exclusões (segundos)**, ou a chave `messageDeleteUndoSeconds` no CLI, entre **1 e 86.400 segundos**. Mudanças valem somente para novas exclusões. Ao vencer o prazo, não é mais possível restaurar. O conteúdo fica em um backup temporário privado do servidor durante a janela e é removido na próxima limpeza periódica após o vencimento, junto com os arquivos anexados: o link antigo de um anexo deixa de funcionar. Este recurso requer cliente e servidor atualizados para o protocolo **27**; clientes anteriores não interpretam restaurações.
 
 `Ctrl+C` copia o texto selecionado com a formatação exibida; `Ctrl+Shift+C` copia o mesmo texto sem formatação. No macOS, use `Cmd` no lugar de `Ctrl`. Sem seleção, o atalho atua somente sobre a mensagem que está com foco, não sobre a conversa inteira. **Copiar mensagem**, tanto na barra quanto em **Mais opções**, copia com formatação por padrão, como `Ctrl+C`. Uma seleção dentro da mensagem é respeitada também por esses botões. No menu, clicar no texto, `Enter` ou `Espaço` executa essa cópia; passar o mouse, clicar na seta ou usar `→` abre as opções **Copiar com formatação**, **Copiar Markdown** e **Copiar sem formatação**. Use `←` ou `Escape` para voltar e `Tab` para sair.
 
@@ -353,6 +353,8 @@ servidor foi desligado, também fica visível e recebe o teclado: o primeiro
 ## Menções
 
 Digitar `@` no campo de mensagem lista somente membros que podem ler o canal atual, incluindo quem está offline: escolha alguém para inserir `@apelido`. A lista acompanha alterações de cargos e privacidade. Menções digitadas manualmente também são verificadas pelo servidor; quem não tem acesso não recebe uma menção pendente. Quem é mencionado recebe o destaque na mensagem, o badge no canal e o som de menção.
+
+A menção vale para o apelido inteiro: `@Lucas` não chama quem se chama "Lu", e um `@` dentro de um e-mail, de um endereço da web ou de um trecho de código não menciona ninguém.
 
 O primeiro item da lista é o `@todos` (ou `@everyone` — os dois tokens funcionam em qualquer idioma), que notifica todo mundo que enxerga aquele canal. Canais privados continuam privados: quem não tem acesso não é notificado.
 

@@ -321,13 +321,15 @@ test('interactive reconfiguration preserves the existing URL installation choice
     botName: 'Existing Bot',
     servePort: await unusedPort(t),
     publicHost: 'bot.example.test',
+    publicUrl: 'https://bot.example.test',
   });
   cliConfig.writeConfig(context, existing);
   const questions = interactiveAnswers(t, ['s', '', '', '', '', '', 'yes']);
-  captureLogs(t);
+  const lines = captureLogs(t);
   await runBotCli(f.bot, ['setup']);
   assert.equal(questions[1], 'Escolha o modo de operação:');
-  assert.deepEqual(cliConfig.readConfig(context), existing);
+  assert.deepEqual(cliConfig.readConfig(context), existing, 'Redoing setup keeps the TLS proxy URL');
+  assert.match(lines.join('\n'), /URL pública mantida: https:\/\/bot\.example\.test/);
 });
 
 test('closing interactive setup leaves the previous configuration untouched', async (t) => {
@@ -341,6 +343,47 @@ test('closing interactive setup leaves the previous configuration untouched', as
   await runBotCli(f.bot, ['setup']);
   assert.match(lines.join('\n'), /cancelada/);
   assert.deepEqual(cliConfig.readConfig(context), existing);
+});
+
+test('a config.json write that fails keeps the previous file whole, like every other profile file', (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  const context = cliConfig.createCliContext(f.bot);
+  const existing = cliConfig.manualConfig(context, { botToken: 'existing-token' });
+  cliConfig.writeConfig(context, existing);
+  const before = fs.readFileSync(context.configFile, 'utf8');
+  const rename = t.mock.method(fs, 'renameSync', () => {
+    throw Object.assign(new Error('fixture disk full'), { code: 'ENOSPC' });
+  });
+  assert.throws(() => cliConfig.writeConfig(context, cliConfig.manualConfig(context, { botToken: 'replacement-token' })),
+    /fixture disk full/);
+  assert.equal(rename.mock.callCount(), 1, 'the new content goes to a temporary file first');
+  assert.equal(fs.readFileSync(context.configFile, 'utf8'), before);
+  assert.deepEqual(fs.readdirSync(context.homeDir).filter((name) => name.endsWith('.pending')), []);
+  rename.mock.restore();
+  assert.deepEqual(cliConfig.readConfig(context), existing);
+});
+
+test('profile files are read without following links, so none is mistaken for another file', (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  const context = cliConfig.createCliContext(f.bot);
+  const outside = path.join(f.root, 'outside.json');
+  json(outside, { version: 1, values: { OUTSIDE: 'value' } });
+  fs.mkdirSync(context.homeDir, { recursive: true });
+  for (const name of ['config.json', 'environment.json']) {
+    try {
+      fs.symlinkSync(outside, path.join(context.homeDir, name), 'file');
+    } catch (error) {
+      if (error.code === 'EPERM') {
+        t.skip('this account cannot create file links');
+        return;
+      }
+      throw error;
+    }
+  }
+  assert.throws(() => cliConfig.readConfig(context), /not a file/);
+  assert.throws(() => environment.readProfileEnvironment(context.homeDir), /Could not read/);
 });
 
 test('interactive setup skips the mode chooser for manual-only projects', async (t) => {
@@ -367,6 +410,12 @@ test('non-interactive marketplace setup preserves the data directory when replac
     '--public-host', 'bot.example.test', '--serve-port', String(port), '--yes']);
   assert.deepEqual(cliConfig.readConfig(context), {
     mode: 'marketplace', botDir, botName: 'Existing Bot', publicHost: 'bot.example.test', servePort: port,
+  });
+  await runBotCli(f.bot, ['setup', '--non-interactive', '--mode', 'marketplace',
+    '--public-host', 'bot.example.test', '--serve-port', String(port), '--public-url', 'https://Bot.Example.test/', '--yes']);
+  assert.deepEqual(cliConfig.readConfig(context), {
+    mode: 'marketplace', botDir, botName: 'Existing Bot', publicHost: 'bot.example.test', servePort: port,
+    publicUrl: 'https://bot.example.test',
   });
 });
 
@@ -576,6 +625,7 @@ test('non-interactive setup rejects unsupported modes and missing or mixed mode-
     [['--mode', 'marketplace'], /requires --public-host/],
     [['--mode', 'marketplace', '--public-host', 'bot.example.test', '--token-env', 'TOKEN'], /require --mode manual/],
     [['--server-url', 'localhost:3000', '--serve-port', '7780'], /require --mode marketplace/],
+    [['--server-url', 'localhost:3000', '--public-url', 'https://bot.example.test'], /require --mode marketplace/],
     [['--mode', 'unknown'], /must be manual or marketplace/],
   ]) {
     await assert.rejects(runBotCli(f.bot, ['setup', '--non-interactive', ...args]), error);
@@ -829,6 +879,46 @@ test('marketplace runtime exposes a persistent registration file and clears manu
     cliConfig.manualConfig(context, { botToken: 'manual-token' }), 'public-key', {});
   assert.ok(manual.clear.includes('MONKY_BOT_REGISTRATION_FILE'));
   assert.ok(manual.clear.includes('MONKY_SERVE_HOST'));
+  assert.ok(manual.clear.includes('MONKY_SERVE_PUBLIC_URL'));
+  assert.equal('MONKY_SERVE_PUBLIC_URL' in plan.values, false);
+  assert.ok(plan.clear.includes('MONKY_SERVE_PUBLIC_URL'), 'A stale public URL from the shell never reaches serve()');
+  const proxied = require('../dist/cli/runner').createRuntimeEnvironment(
+    cliConfig.marketplaceConfig(context, { publicHost: 'bot.example.test', servePort: 7781, publicUrl: 'https://bot.example.test' }),
+    'public-key', { MONKY_SERVE_PUBLIC_URL: 'https://stale.example.test' });
+  assert.equal(proxied.values.MONKY_SERVE_PUBLIC_URL, 'https://bot.example.test');
+  assert.equal(proxied.clear.includes('MONKY_SERVE_PUBLIC_URL'), false);
+});
+
+test('config set publicUrl keeps an origin across marketplace changes and clear removes it', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  const context = cliConfig.createCliContext(f.bot);
+  const port = await unusedPort(t);
+  cliConfig.writeConfig(context, cliConfig.marketplaceConfig(context, { servePort: port, publicHost: 'bot.example.test' }));
+  const lines = captureLogs(t);
+  await runBotCli(f.bot, ['config', 'set', 'publicUrl', 'https://Bot.Example.test:443/']);
+  assert.equal(cliConfig.readConfig(context).publicUrl, 'https://bot.example.test');
+  await runBotCli(f.bot, ['config', 'set', 'publicHost', 'other.example.test']);
+  await runBotCli(f.bot, ['config', 'set', 'mode', 'marketplace']);
+  assert.equal(cliConfig.readConfig(context).publicUrl, 'https://bot.example.test', 'Other marketplace settings keep the URL');
+  await runBotCli(f.bot, ['config', 'show']);
+  assert.match(lines.join('\n'), /"publicUrl": "https:\/\/bot\.example\.test"/);
+  const before = fs.readFileSync(context.configFile);
+  for (const invalid of ['https://bot.example.test/monky', 'https://bot.example.test/?a', 'ftp://bot.example.test',
+    'https://user:secret@bot.example.test', 'bot.example.test']) {
+    await assert.rejects(runBotCli(f.bot, ['config', 'set', 'public-url', invalid]), /origem http\(s\)/, invalid);
+    assert.deepEqual(fs.readFileSync(context.configFile), before);
+  }
+  json(context.configFile, { ...JSON.parse(before.toString('utf8')), publicUrl: 'https://bot.example.test/path' });
+  assert.throws(() => cliConfig.readConfig(context), /http\(s\) origin/, 'A hand-edited path is rejected on read');
+  fs.writeFileSync(context.configFile, before);
+  await runBotCli(f.bot, ['config', 'set', 'publicUrl', 'clear']);
+  assert.equal('publicUrl' in cliConfig.readConfig(context), false);
+  await runBotCli(f.bot, ['config', 'set', 'publicUrl', 'https://bot.example.test']);
+  await runBotCli(f.bot, ['config', 'set', 'server-url', 'wss://monky.example.test']);
+  assert.equal('publicUrl' in cliConfig.readConfig(context), false, 'Manual mode has no manifest URL');
+  await runBotCli(f.bot, ['config', 'set', 'publicUrl', 'clear']);
+  assert.equal(cliConfig.readConfig(context).mode, 'manual', 'Clearing nothing does not switch modes');
 });
 
 test('saving a manual token fails before writing when POSIX private directory permissions cannot be applied', (t) => {
@@ -1112,6 +1202,41 @@ test('an installed but failing PM2 is not mistaken for a missing dependency', (t
     status: 1, signal: null, stdout: '', stderr: 'Permission denied',
   }));
   assert.throws(() => pm2.isPm2Available(context), /pm2 --version failed.*\nPermission denied/);
+});
+
+test('a command remembers only a confirmed PM2, so installing it during start is still detected', (t) => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state });
+  t.mock.method(processHelpers, 'pm2Command', () => ({ command: 'test-pm2', args: [] }));
+  let installed = false;
+  const version = t.mock.method(processHelpers, 'runCommand', () => installed
+    ? { status: 0, signal: null, stdout: '7.0.4', stderr: '' }
+    : { status: null, signal: null, stdout: '', stderr: '', error: Object.assign(new Error('spawn test-pm2 ENOENT'), { code: 'ENOENT' }) });
+  assert.equal(pm2.isPm2Available(context), false);
+  assert.equal(pm2.isPm2Available(context), false);
+  assert.equal(version.mock.callCount(), 2);
+  installed = true;
+  assert.equal(pm2.isPm2Available(context), true);
+  assert.equal(pm2.isPm2Available(context), true);
+  assert.equal(version.mock.callCount(), 3);
+  assert.equal(pm2.isPm2Available(cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state })), true);
+  assert.equal(version.mock.callCount(), 4, 'every command confirms PM2 for itself');
+});
+
+test('start, fresh restart and stop each run pm2 --version once, however many PM2 calls they make', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  const context = cliConfig.createCliContext(f.bot);
+  cliConfig.writeConfig(context, cliConfig.marketplaceConfig(context, { servePort: await unusedPort(t) }));
+  const commands = mockManagedProcess(t, context, () => {}, 'stopped');
+  t.mock.method(readiness, 'confirmRuntimeReady', async () => null);
+  captureLogs(t);
+  for (const args of [['start'], ['restart', '--fresh'], ['stop']]) {
+    commands.length = 0;
+    await runBotCli(f.bot, args);
+    assert.ok(commands.length > 2, `${args.join(' ')} makes several PM2 calls`);
+    assert.equal(commands.filter((command) => command[0] === '--version').length, 1, args.join(' '));
+  }
 });
 
 test('start and restart reject a missing token before consulting or installing PM2', async (t) => {

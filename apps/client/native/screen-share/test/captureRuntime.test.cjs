@@ -303,7 +303,7 @@ test('each profile runs beyond diagnostic packet limits with bounded framing and
     parser.push(notice(1, { kind: 'hello' }));
     for (let frame = 1; frame <= 20001; frame++) {
       parser.push(packet(frame + 1, frame, fps));
-      assert.equal(parser.pending.length, 0);
+      assert.equal(parser.bufferedBytes, 0);
     }
     parser.push(notice(20003, closed(20001), 3)); parser.end();
     assert.equal(parser.packets, 20001);
@@ -323,7 +323,7 @@ test('framing preserves exact compressed ownership across backpressure, fragment
   }, 60);
   const pending = Buffer.concat([packet(2, 1, 60), packet(3, 2, 60), notice(4, closed(2), 3)]);
   assert.equal(parser.push(Buffer.concat([notice(1, { kind: 'hello' }), pending])), false);
-  assert.deepEqual(parser.pending, pending);
+  assert.equal(parser.bufferedBytes, pending.length);
   assert.equal(parser.sequence, 1); assert.equal(parser.packets, 0);
   assert.equal(parser.drain(), false); assert.deepEqual(admitted, []);
   allowed = true; assert.equal(parser.drain(), true); parser.end();

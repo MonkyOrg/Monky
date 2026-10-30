@@ -24,6 +24,7 @@ struct Strings {
   const char* muteMicrophone;
   const char* deafen;
   const char* byServer;
+  const char* noPermissionToSpeak;
   const char* audioDevices;
   const char* input;
   const char* output;
@@ -53,6 +54,7 @@ inline constexpr Strings kEnglish{
     "Mute the microphone",
     "Deafen",
     "by the server",
+    "no permission to speak",
     "Audio devices",
     "Input",
     "Output",
@@ -82,6 +84,7 @@ inline constexpr Strings kPortuguese{
     "Microfone mudo",
     "Silenciar tudo",
     "pelo servidor",
+    "sem permissão para falar",
     "Dispositivos de áudio",
     "Entrada",
     "Saída",

@@ -1,4 +1,6 @@
 import { appEvents } from '../core/EventBus';
+import { isForegroundEvent } from '../core/sessionRouting';
+import { nextIndex } from '../utils/rovingFocus';
 import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/surfaceMotion';
 
 export interface ContextMenuItem {
@@ -28,7 +30,8 @@ export type ContextMenuEntry = ContextMenuItem | ContextMenuSubmenu;
 /**
  * Lightweight floating menu anchored at a screen position. Reused for
  * per-channel "more options" (#151) and designed to grow as more actions are
- * added. Dismisses on outside click, Escape, resize or network loss.
+ * added. Dismisses on outside click, Escape, resize or the server on screen
+ * dropping.
  */
 export class ContextMenu {
   private menuEl: HTMLElement | null = null;
@@ -195,11 +198,8 @@ export class ContextMenu {
         const activeMenu = this.submenuEl?.contains(document.activeElement) ? this.submenuEl : this.menuEl;
         if (activeMenu === this.menuEl) this.closeSubmenu();
         const buttons = Array.from(activeMenu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
-        if (!buttons.length) return;
-        const current = buttons.findIndex((button) => button === document.activeElement);
-        const next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
-          : (current + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
-        buttons[next]?.focus({ preventScroll: true });
+        const next = nextIndex(e.key, buttons.findIndex((button) => button === document.activeElement), buttons.length);
+        if (next !== null) buttons[next].focus({ preventScroll: true });
       }
     };
     const handleResize = () => this.close();
@@ -219,13 +219,21 @@ export class ContextMenu {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('scroll', handleResize, true);
     },
-    appEvents.on('network.disconnected', () => this.close()),
+    appEvents.on('network.disconnected', () => {
+      // A server in the background dropping changes nothing on screen.
+      if (isForegroundEvent()) this.close();
+    }),
     appEvents.on('voice.channel_changed', () => this.close()),
     appEvents.on('session.changed', () => this.close()));
   }
 
   public isOpenFor(anchor: HTMLElement): boolean {
     return this.menuEl !== null && this.returnFocus === anchor;
+  }
+
+  /** Whether the open menu was opened from inside `root`, e.g. a list about to be redrawn. */
+  public isOpenWithin(root: HTMLElement): boolean {
+    return this.menuEl !== null && this.returnFocus !== null && root.contains(this.returnFocus);
   }
 
   public isOpen(): boolean {

@@ -92,7 +92,7 @@ if(MONKY_LIGHT_WITH_RTC)
   set_target_properties(monky-light-audio-fixture-test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
-  add_library(monky_light_session STATIC src/protocol_session.cpp)
+  add_library(monky_light_session STATIC src/protocol_session.cpp src/protocol_reader.cpp)
   target_include_directories(monky_light_session PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(monky_light_session PUBLIC monky_light_contracts monky_light_json)
   add_executable(monky-light-session-test test/protocol_session_test.cpp)
@@ -168,6 +168,18 @@ target_link_libraries(monky-light-console-test PRIVATE monky_light_console monky
 set_target_properties(monky-light-console-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
+if(WIN32)
+  # Closes a console the way its window does, without ever showing one.
+  add_executable(monky-light-console-host test/console_host.cpp)
+  set_target_properties(monky-light-console-host PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
+  if(MSVC)
+    target_compile_options(monky-light-console-host PRIVATE /W4 /WX /EHsc /utf-8 /permissive-)
+  else()
+    target_compile_options(monky-light-console-host PRIVATE -Wall -Wextra -Werror)
+  endif()
+endif()
 add_executable(monky-light-loop-test test/application_loop_test.cpp)
 target_link_libraries(monky-light-loop-test PRIVATE monky_light_loop)
 set_target_properties(monky-light-loop-test PROPERTIES

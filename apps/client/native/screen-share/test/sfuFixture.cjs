@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const dgram = require('node:dgram');
 const path = require('node:path');
-const { within } = require('../runtime/nativeDeadline.cjs');
+const { within } = require('../runtime/asyncTools.cjs');
 const { MessageType, sfuCreateWebRtcTransportSchema, sfuMediaAppDataSchema } = require('@monky/shared');
 const { SfuManager } = require(path.resolve(__dirname, '..', '..', '..', '..',
   'server', 'dist', 'infrastructure', 'sfu', 'SfuManager.js'));

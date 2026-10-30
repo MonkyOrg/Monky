@@ -14,6 +14,30 @@ async function runQualitySettingsSmoke() {
     const tip = document.querySelector('.monky-tooltip');
     throw new Error(`Quality settings did not settle: ${description}; focused=${document.hasFocus()}; active=${document.activeElement?.id || document.activeElement?.tagName}; tooltipHidden=${tip?.hidden}`);
   };
+  // A panel's height animation applies its final size, and may start a smooth reveal, in its `finished`
+  // reaction, which Blink runs in a task posted after the frame that ends it: polling playState from a timer
+  // can still see the old layout. Await those reactions, then let scroll and size rest over consecutive frames.
+  const settleMotion = async (root, description) => {
+    let timer;
+    const timeout = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`Quality settings did not settle: ${description}; animations did not finish`)), 2000);
+    });
+    try {
+      await Promise.race([timeout, Promise.all(root.getAnimations({ subtree: true })
+        .filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime))
+        .map(animation => animation.finished.catch(() => {})))]);
+    } finally {
+      clearTimeout(timer);
+    }
+    let last = '', stable = 0;
+    for (let frames = 0; stable < 3; frames++) {
+      if (frames === 120) throw new Error(`Quality settings did not settle: ${description}; scroll did not rest`);
+      await new Promise(requestAnimationFrame);
+      const layout = `${root.scrollTop}/${root.scrollHeight}`;
+      stable = layout === last ? stable + 1 : 0;
+      last = layout;
+    }
+  };
   const settleHelpLayout = async button => {
     await document.fonts.ready;
     let previous, stableFrames = 0;
@@ -52,7 +76,6 @@ async function runQualitySettingsSmoke() {
     screenShareTelemetryEnabled: settingsStore.screenShareTelemetryEnabled,
     screenShareTelemetryPosition: settingsStore.screenShareTelemetryPosition,
     screenShareTelemetryMode: settingsStore.screenShareTelemetryMode,
-    preferredVideoCodec: settingsStore.preferredVideoCodec,
     preferredScreenCodec: settingsStore.preferredScreenCodec,
     screenEncodingMode: settingsStore.screenEncodingMode,
     screenEncodingStrategy: settingsStore.screenEncodingStrategy,
@@ -94,7 +117,13 @@ async function runQualitySettingsSmoke() {
       hardwareAvailable = true;
       let completeInitialProbe;
       const initialProbe = new Promise(resolve => { completeInitialProbe = resolve; });
+      const settingsCommands = [];
       window.api = { ...originalApi, platform, nativeScreenCommand: async command => {
+        settingsCommands.push(command.action);
+        // What Main reports where native capture exists; encoders are verified separately.
+        if (command.action === 'capabilities') return { kind: 'capabilities', capabilities: { capture: false,
+          captureAudio: true, receive: true, requiresSelectionProbe: true, captureKinds: ['window', 'monitor', 'game'],
+          backend: null, reason: null } };
         if (command.action === 'probe-encoding') await initialProbe;
         return encodingCommand(command);
       } };
@@ -105,7 +134,6 @@ async function runQualitySettingsSmoke() {
       settingsStore.screenShareTelemetryMode = 'simple';
       settingsStore.screenSharePreviewPauseWhenUnfocused = true;
       settingsStore.screenShareAutoPictureInPicture = true;
-      settingsStore.preferredVideoCodec = 'vp9';
       settingsStore.preferredScreenCodec = 'h264';
       settingsStore.screenEncodingMode = 'hardware';
       settingsStore.screenEncodingStrategy = 'automatic';
@@ -121,6 +149,9 @@ async function runQualitySettingsSmoke() {
       modal.aboutTab.loadAppVersion = async () => {};
       await modal.open();
       const root = document.querySelector('.modal-backdrop--settings');
+      await wait(50);
+      check(settingsCommands.length === 0,
+        `Opening Settings on another tab must not check the screen encoder: ${JSON.stringify(settingsCommands)}`);
       root.querySelector('[data-tab="quality"]').click();
       await settled(() => !!root.querySelector('[data-section-target="video-telemetry"]'), `${locale}/telemetry navigation`);
       const quality = root.querySelector('#tab-panel-quality');
@@ -496,15 +527,15 @@ async function runQualitySettingsSmoke() {
           video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } },
       });
       try {
-        const codec = quality.querySelector('#select-video-codec'), previousCodec = settingsStore.preferredVideoCodec;
+        const codec = quality.querySelector('#select-video-codec');
         const activeSource = videoService.getNativeScreenCapture(metadataOnly.id).source;
         codec.value = 'av1';
         codec.dispatchEvent(new Event('change', { bubbles: true }));
         await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/software AV1 preference`);
         settingsStore.load(false);
         check(settingsStore.preferredScreenCodec === 'av1' && codec.value === 'av1'
-          && settingsStore.preferredVideoCodec === previousCodec && settingsStore.screenEncodingMode === 'software',
-        'Software AV1 must persist independently of the existing camera codec preference.');
+          && settingsStore.screenEncodingMode === 'software',
+        'Software AV1 must persist as the screen codec and encoding mode.');
         check(videoService.getNativeScreenCapture(metadataOnly.id).source === activeSource
           && !document.querySelector('.dialog-card'),
         'A supported next-share codec preference must not replace active source metadata or report coming soon.');
@@ -746,7 +777,7 @@ async function runQualitySettingsSmoke() {
           `${locale}/game capture guide entrance`);
         const guideSearch = guide.querySelector('#game-capture-guide-search');
         const guideClose = guide.querySelector('#game-capture-guide-close');
-        const guideFirst = guide.querySelector('[data-game-guide-close]');
+        const guideFirst = guide.querySelector('[data-modal-close]');
         check(guideTrigger.textContent.includes(language.t('screenShare.gameGuideButton')) &&
           guideTrigger.getAttribute('aria-haspopup') === 'dialog' && guideTrigger.getAttribute('aria-expanded') === 'true',
         'The localized guide must open as an explicit informational dialog.');
@@ -808,13 +839,17 @@ async function runQualitySettingsSmoke() {
         sourceOpenSuccess = false;
         sourceLink.click();
         await settled(() => !sourceLink.hasAttribute('aria-busy'), `${locale}/guide source error`);
-        check(!guide.querySelector('#game-capture-guide-link-error').hidden &&
-          guide.querySelector('#game-capture-guide-link-error').textContent === language.t('screenShare.gameGuideSourceError'),
-        'A failed safe-link opening must remain an explicit localized error.');
+        const linkError = document.querySelector('.chat-copy-toast[role="alert"] .chat-copy-toast-label');
+        check(linkError?.textContent === language.t('screenShare.gameGuideSourceError')
+          && !guide.querySelector('[role="alert"]'),
+        'A failed safe-link opening is an explicit localized error, in the alert toast rather than the guide layout.');
+        linkError.closest('.chat-copy-toast').querySelector('.chat-copy-toast-close').click();
         sourceOpenSuccess = true;
         sourceLink.click();
         await settled(() => !sourceLink.hasAttribute('aria-busy'), `${locale}/guide source retry`);
-        check(guide.querySelector('#game-capture-guide-link-error').hidden, 'Source-link retry clears the obsolete error.');
+        check(sourceOpens.length === 3 && sourceOpens[2] === guideSource
+          && !document.querySelector('.chat-copy-toast[role="alert"]:not([data-ui-closing])'),
+        'A source-link retry opens the guide without another error.');
         guideSearch.focus();
         const guideEscape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
         guideSearch.dispatchEvent(guideEscape);
@@ -856,8 +891,7 @@ async function runQualitySettingsSmoke() {
         'Returning to Normal must keep the chosen window and its app-audio preference.');
         gameMethod.click();
         const savedQuality = JSON.stringify({ preset: settingsStore.qualityPreset, profile: settingsStore.customProfile,
-          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode,
-          cameraCodec: settingsStore.preferredVideoCodec });
+          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode });
         let resolveRefresh;
         const pendingRefresh = new Promise(resolve => { resolveRefresh = resolve; });
         enumerateSources = () => pendingRefresh;
@@ -885,8 +919,7 @@ async function runQualitySettingsSmoke() {
           !aspect.checked && !audio.checked && nativeCommands === 0,
         'Refresh must add newly opened windows while retaining the exact source, method, audio and aspect-ratio choice.');
         check(JSON.stringify({ preset: settingsStore.qualityPreset, profile: settingsStore.customProfile,
-          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode,
-          cameraCodec: settingsStore.preferredVideoCodec }) === savedQuality,
+          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode }) === savedQuality,
         'Refreshing a source list must never change media quality or codec preferences.');
         enumerateSources = async () => { throw new Error('Expected software-only refresh failure'); };
         refresh.click();
@@ -921,7 +954,11 @@ async function runQualitySettingsSmoke() {
             language.t('screenShare.previewUnavailable')) &&
           monitors.every(source => source.name === 'Generic PnP Monitor'),
         'Thumbnail accessibility uses the localized monitor label without modifying raw Main metadata or inventing previews.');
-        check(audio.checked && pickerRoot.querySelector('#share-window-methods').hidden &&
+        const methods = pickerRoot.querySelector('#share-window-methods');
+        check(methods.hidden || (methods.inert && methods.getAttribute('aria-hidden') === 'true'),
+          'Window capture methods leave the interaction and accessibility trees as soon as screens are selected.');
+        await settled(() => methods.hidden, `${locale}/window methods collapse`);
+        check(audio.checked && methods.hidden &&
           pickerRoot.querySelector('#share-audio-text').textContent === language.t('screenShare.shareAudio') && !aspect.checked,
         'Screens keep their separate system-audio choice and do not display window capture methods.');
         choose();
@@ -933,8 +970,21 @@ async function runQualitySettingsSmoke() {
           pickerRoot.querySelector('#share-sources-panel').getAttribute('aria-labelledby') === 'share-tab-window' &&
           picker.selectedSourceId === null && !audio.checked,
         'Keyboard source-type changes require a new source selection and restore that type of audio.');
-        choose();
-        windowMethod.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+        // A real keypress grants transient activation, so the methods it opens reveal themselves once unfolded.
+        // Synthetic events do not, and this evaluation's own activation lapses after five seconds: model the
+        // keypress instead of depending on how quickly this run got here.
+        Object.defineProperty(navigator, 'userActivation', { configurable: true, value: { isActive: true, hasBeenActive: true } });
+        try {
+          choose();
+          windowMethod.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+        } finally {
+          delete navigator.userActivation;
+        }
+        await settleMotion(pickerRoot, `${locale}/window methods expansion`);
+        const settledLayout = `${pickerRoot.scrollTop}/${pickerRoot.scrollHeight}`;
+        await wait(300);
+        check(`${pickerRoot.scrollTop}/${pickerRoot.scrollHeight}` === settledLayout,
+          'Settling must include the final size the expansion applies and the reveal it starts, so later measurements are stable.');
         gameMethod.scrollIntoView({ block: 'nearest', behavior: 'instant' });
         await wait();
         const bounds = pickerRoot.getBoundingClientRect();
@@ -996,7 +1046,8 @@ async function runQualitySettingsSmoke() {
         sources = sources.filter(source => source.id !== windowId);
         refresh.click();
         await settled(() => !refresh.disabled, `${locale}/removed source`);
-        check(picker.selectedSourceId === null && pickerRoot.querySelector('#share-window-methods').hidden &&
+        await settled(() => methods.hidden, `${locale}/removed source methods`);
+        check(picker.selectedSourceId === null && methods.hidden &&
           !pickerRoot.querySelector(`[data-source-id="${windowId}"]`) && confirmation.disabled && !audio.checked && !aspect.checked,
         'Refreshing away a closed window must clear selection/method controls without changing its audio preference.');
         picker.close();

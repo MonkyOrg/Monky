@@ -557,7 +557,7 @@ async function runReceiveRenderer(roster, humanId) {
       } });
       Object.defineProperty(rtc, 'voiceParticipants', { value: participants });
       Object.defineProperty(rtc, 'signalClient', { value: client });
-      rtc.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
+      rtc.p2p.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
       rtc.setCurrentSessionId(humanId);
       voiceStore.setChannel('room');
       settingsStore.save = () => {};
@@ -589,17 +589,12 @@ async function runReceiveRenderer(roster, humanId) {
           const video = canvas.captureStream(5);
           try {
             await rtc.setLocalCameraTrack(video.getVideoTracks()[0]);
-            await rtc.addLocalScreenTrack(video);
             check(pc.getTransceivers().length === 1 && pc.getSenders().every(sender => sender.track?.kind !== 'video'),
-              'Camera and screen sharing must never reach a listening bot');
+              'Camera must never reach a listening bot');
           } finally {
-            await rtc.removeLocalScreenTrack(video.id);
             await rtc.setLocalCameraTrack(null);
             for (const track of video.getTracks()) track.stop();
           }
-          await rtc.setLocalScreenAudioTrack(tones[1].track);
-          check(pc.getSenders().filter(sender => sender.track).length === 1, 'Screen audio must not be sent to the listening bot');
-          await rtc.setLocalScreenAudioTrack(null);
           await rtc.setLocalAudioTrack(tones[1].track);
           check(pc.getSenders()[0].track === tones[1].track, 'Microphone device replacement must reach authorized listening bots');
           await rtc.setLocalAudioTrack(null);
@@ -681,7 +676,7 @@ async function runRenderer(MessageType, roster, humanId) {
   Object.defineProperty(rtc, 'voiceServerStore', { value: store });
   Object.defineProperty(rtc, 'voiceParticipants', { value: participants });
   Object.defineProperty(rtc, 'signalClient', { value: client });
-  rtc.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
+  rtc.p2p.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
   rtc.setCurrentSessionId(humanId);
   voiceStore.setChannel('room');
   settingsStore.save = () => {};
@@ -954,9 +949,9 @@ async function runRenderer(MessageType, roster, humanId) {
     await request('fixture.prepare-sfu');
     check(!(await syncVoiceState()).voiceState.isSpeaking, 'Closing the SDK voice transport left stale activity');
     store.serverDetails.voiceMode = 'sfu';
-    check(await rtc.sfuEngine.join('room'), 'Browser SFU engine failed to join');
+    check(await rtc.sfu.engine.join('room'), 'Browser SFU engine failed to join');
     const sfuResult = await assertVoice('SFU', async () => {
-      const consumer = [...rtc.sfuEngine.consumers.values()][0];
+      const consumer = [...rtc.sfu.engine.consumers.values()][0];
       return consumer ? consumer.getStats() : new Map();
     }, 12000);
     await request('fixture.stop-media');

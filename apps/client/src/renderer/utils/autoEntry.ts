@@ -1,4 +1,4 @@
-import { savedServerFavoriteKey } from '../stores/favoritesStore';
+import { normalizeHost, serverAddressKey, toWsUrl } from './serverAddress';
 
 export interface AutoEntryServerAddress {
   host: string;
@@ -10,11 +10,11 @@ const MAX_LEGACY_AUTO_ENTRY_SERVERS = 15;
 export function autoEntryServerKey(server: AutoEntryServerAddress): string | null {
   if (typeof server.host !== 'string' || !Number.isSafeInteger(server.port)
     || server.port < 1 || server.port > 65535) return null;
-  const host = server.host.trim().replace(/^wss?:\/\//i, '').replace(/^\[(.+)\]$/, '$1').toLowerCase();
+  const host = normalizeHost(server.host);
   if (!host || host.length > 253 || /[\s/@?#\\]/.test(host)) return null;
   try {
-    new URL(`ws://${host.includes(':') ? `[${host}]` : host}:${server.port}`);
-    return savedServerFavoriteKey({ host, port: server.port });
+    new URL(toWsUrl({ host, port: server.port }));
+    return serverAddressKey({ host, port: server.port });
   } catch {
     return null;
   }

@@ -278,6 +278,21 @@ void RunCaptureClockChecks(Check check) {
           "Recoverable frame drops and terminal clock failures were conflated");
   }
   {
+    // Encoded video and screen audio share this policy: a status the mapper documents as a frame drop must
+    // never end a source (#702 fixed only kSampleUncertain).
+    using Action = CaptureClockAction;
+    check(CaptureClockActionFor(Status::kOk) == Action::kUse, "A valid clock mapping was not used");
+    for (const auto status : {Status::kSampleFailed, Status::kSampleUncertain, Status::kFutureCapture,
+                              Status::kStaleCapture, Status::kUntranslatable, Status::kNonMonotonicCapture,
+                              Status::kNonMonotonicTranslation})
+      check(CaptureClockActionFor(status) == Action::kDropFrame, "A transient clock status ended its source");
+    for (const auto status : {Status::kInvalidTimestamp, Status::kSourceDiscontinuity, Status::kSourceResetRequired,
+                              Status::kClockDiscontinuity, Status::kClockResetRequired, Status::kClosed,
+                              Status::kCount})
+      check(CaptureClockActionFor(status) == Action::kReset,
+            "A broken timestamp or clock discontinuity was treated as a frame drop");
+  }
+  {
     Policy policy;
     CaptureClockSourceState source;
     preserved(policy.Map(pair(1000000, 3000000), 900000, source), 100000);

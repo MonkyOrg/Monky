@@ -1,6 +1,5 @@
 #include "mf_h264_decoder.h"
 
-#include <d3dcompiler.h>
 #include <codecapi.h>
 #include <strmif.h>
 #include <mfapi.h>
@@ -70,19 +69,6 @@ double Milliseconds(Clock::duration value) {
   return std::chrono::duration<double, std::milli>(value).count();
 }
 
-winrt::com_ptr<ID3DBlob> Compile(const char* source, const char* entry, const char* target) {
-  winrt::com_ptr<ID3DBlob> shader, errors;
-  const auto hr = D3DCompile(source, std::strlen(source), nullptr, nullptr, nullptr, entry, target,
-                             D3DCOMPILE_ENABLE_STRICTNESS, 0, shader.put(), errors.put());
-  if (FAILED(hr)) {
-    const std::string message = errors
-        ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
-        : "Cannot compile diagnostic GPU shader";
-    throw DecoderError("ERR_DECODER_INSPECTION_SHADER", message, hr);
-  }
-  return shader;
-}
-
 }  // namespace
 
 struct MfH264Decoder::Impl {
@@ -122,6 +108,7 @@ struct MfH264Decoder::Impl {
   std::deque<QueuedInput> queue;
   std::map<std::int64_t, SubmittedInput> submitted;
   std::deque<PendingOutput> copies;
+  std::shared_ptr<DecodedSurfaces> surfaces;
   H264Bitstream bitstream;
   std::int64_t epochUs = -1, lastQueuedUs = -1;
   std::uint64_t nextFenceValue = 1, armedFence = 0;
@@ -131,13 +118,6 @@ struct MfH264Decoder::Impl {
   bool deviceLost = false, requireIdr = true;
   HMODULE mfModule = nullptr;
   Clock::time_point lastProgress = Clock::now();
-  winrt::com_ptr<ID3D11VertexShader> inspectVertex;
-  winrt::com_ptr<ID3D11PixelShader> inspectPixel;
-  winrt::com_ptr<ID3D11SamplerState> inspectSampler;
-  winrt::com_ptr<ID3D11RasterizerState> inspectRasterizer;
-  winrt::com_ptr<ID3D11Texture2D> inspectTarget, inspectReadback;
-  winrt::com_ptr<ID3D11RenderTargetView> inspectRtv;
-  winrt::com_ptr<ID3D11Buffer> inspectConstants;
 
   Impl(const DecoderConfig& config, FrameSink output, AcceptedSink input, RetainedFrames holders,
        DecoderNativeCallObserver observer)
@@ -326,6 +306,8 @@ struct MfH264Decoder::Impl {
         Fail("ERR_DECODER_LEVEL", "Declared H264 level cannot describe the requested geometry/rate/bitrate");
       }
     }
+    // CanOutput keeps at most maxInFlight private textures alive at once.
+    surfaces = std::make_shared<DecodedSurfaces>(config.maxInFlight);
     InitializeDevice();
     mfModule = LoadLibraryExW(L"mfplat.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!mfModule) Fail("ERR_DECODER_MF_PLATFORM", "Media Foundation / Media Feature Pack is unavailable", HRESULT_FROM_WIN32(GetLastError()));
@@ -514,7 +496,19 @@ struct MfH264Decoder::Impl {
         Fail("ERR_DECODER_APERTURE", "Decoded aperture contradicts the actual progressive SPS crop");
       }
     }
-    auto frame = std::make_shared<GpuDecodedFrame>();
+    desc.ArraySize = 1;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    desc.MiscFlags = 0;
+    const SurfaceSize size{desc.Width, desc.Height};
+    auto surface = surfaces->Take(size);
+    if (!surface) {
+      surface.emplace();
+      Require(Native(DecoderNativeOperation::TextureCreate, [&] {
+        return device->CreateTexture2D(&desc, nullptr, surface->texture.put());
+      }),
+              "ERR_DECODER_PRIVATE_TEXTURE", "Cannot allocate bounded immutable private NV12 output");
+    }
+    auto frame = RecycledFrame(surfaces, std::move(*surface), size);
     frame->frameId = nextDecodedFrameId.fetch_add(1);
     if (frame->frameId > 9007199254740991ull) Fail("ERR_DECODER_FRAME_ID", "Decoded frame IDs exhausted safe integers");
     frame->timestampUs = input->second.timestampUs;
@@ -526,13 +520,6 @@ struct MfH264Decoder::Impl {
     frame->originalSubresource = subresource;
     frame->readyFence = fence;
     frame->readyValue = nextFenceValue++;
-    desc.ArraySize = 1;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-    desc.MiscFlags = 0;
-    Require(Native(DecoderNativeOperation::TextureCreate, [&] {
-      return device->CreateTexture2D(&desc, nullptr, frame->texture.put());
-    }),
-            "ERR_DECODER_PRIVATE_TEXTURE", "Cannot allocate bounded immutable private NV12 output");
     // The original IMFSample, not merely its texture, prevents allocator slice reuse.
     copies.push_back({std::move(sample), frame, Clock::now(), input->second.submittedAt});
     submitted.erase(input);
@@ -566,7 +553,7 @@ struct MfH264Decoder::Impl {
       MFT_OUTPUT_DATA_BUFFER output{};
       output.dwStreamID = outputId;
       DWORD status = 0;
-      const auto hr = MeasureEncoderCall(stats.scheduling.processOutput, [&] {
+      const auto hr = MeasureCall(stats.scheduling.processOutput, [&] {
         return Native(DecoderNativeOperation::ProcessOutput, [&] {
           return transform->ProcessOutput(0, 1, &output, &status);
         });
@@ -592,7 +579,7 @@ struct MfH264Decoder::Impl {
       if (!sample || (output.dwStatus & MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE) == MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE) {
         Fail("ERR_DECODER_EMPTY_OUTPUT", "Decoder returned success without a real output sample");
       }
-      MeasureEncoderCall(stats.scheduling.copyOutput, [&] {
+      MeasureCall(stats.scheduling.copyOutput, [&] {
         Native(DecoderNativeOperation::OutputCopy, [&] { CopyOutput(std::move(sample), outputAt); });
       });
       lastProgress = Clock::now();
@@ -627,7 +614,7 @@ struct MfH264Decoder::Impl {
           ++stats.gpuFrames;
           if (stats.firstTimestampUs < 0) stats.firstTimestampUs = copy.frame->timestampUs;
           stats.lastTimestampUs = copy.frame->timestampUs;
-          if (!MeasureEncoderCall(stats.scheduling.frameSink, [&] {
+          if (!MeasureCall(stats.scheduling.frameSink, [&] {
                 return sink(std::move(copy.frame));
               })) Fail("ERR_DECODER_FRAME_QUEUE", "Cannot publish a real GPU output lease");
         } else {
@@ -706,7 +693,7 @@ struct MfH264Decoder::Impl {
         auto& input = queue.front();
         PrepareInput(input);
         input.timing.BeforeProcessInput(stats.scheduling, Clock::now());
-        const auto hr = MeasureEncoderCall(stats.scheduling.processInput, [&] {
+        const auto hr = MeasureCall(stats.scheduling.processInput, [&] {
           return Native(DecoderNativeOperation::ProcessInput, [&] {
             return transform->ProcessInput(inputId, input.sample.get(), 0);
           });
@@ -729,7 +716,7 @@ struct MfH264Decoder::Impl {
         stats.pendingPackets = queue.size();
         stats.awaitingOutput = submitted.size();
         stats.peakAwaitingOutput = std::max(stats.peakAwaitingOutput, stats.awaitingOutput);
-        MeasureEncoderCall(stats.scheduling.acceptedCallback, [&] { accepted(request); });
+        MeasureCall(stats.scheduling.acceptedCallback, [&] { accepted(request); });
         outputAvailable = true;
         lastProgress = Clock::now();
         continue;
@@ -806,7 +793,7 @@ struct MfH264Decoder::Impl {
       if (completed >= value) return;
       const auto wait = WaitForSingleObject(wake.Get(), 1000);
       if (wait != WAIT_OBJECT_0 && wait != WAIT_TIMEOUT) Fail("ERR_DECODER_WAIT", "Explicit GPU readback wait failed", HRESULT_FROM_WIN32(GetLastError()));
-      if (Clock::now() - start > progressTimeout) Fail("ERR_DECODER_GPU_TIMEOUT", "Explicit diagnostic/readback GPU work timed out");
+      if (Clock::now() - start > progressTimeout) Fail("ERR_DECODER_GPU_TIMEOUT", "Explicit readback GPU work timed out");
     }
   }
 
@@ -821,114 +808,6 @@ struct MfH264Decoder::Impl {
       throw DecoderError("ERR_DECODER_FRAME", "A completed immutable frame owned by this decoder is required");
     }
     CheckDevice();
-  }
-
-  void InitializeInspection() {
-    if (inspectTarget) return;
-    constexpr const char* source = R"(
-cbuffer Crop : register(b0) { float4 crop; };
-Texture2D<float> luma : register(t0);
-SamplerState sampleLuma : register(s0);
-struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; };
-Vertex VS(uint id : SV_VertexID) {
-  Vertex result;
-  result.uv = float2((id << 1) & 2, id & 2);
-  result.position = float4(result.uv * float2(2, -2) + float2(-1, 1), 0, 1);
-  return result;
-}
-float PS(Vertex input) : SV_Target {
-  return luma.SampleLevel(sampleLuma, crop.xy + input.uv * crop.zw, 0);
-})";
-    auto vs = Compile(source, "VS", "vs_5_0");
-    auto ps = Compile(source, "PS", "ps_5_0");
-    Require(device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, inspectVertex.put()), "ERR_DECODER_INSPECTION_SHADER", "Cannot create diagnostic vertex shader");
-    Require(device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, inspectPixel.put()), "ERR_DECODER_INSPECTION_SHADER", "Cannot create diagnostic luma shader");
-    D3D11_SAMPLER_DESC sampler{};
-    sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampler.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    sampler.MaxLOD = D3D11_FLOAT32_MAX;
-    Require(device->CreateSamplerState(&sampler, inspectSampler.put()), "ERR_DECODER_INSPECTION", "Cannot create diagnostic sampler");
-    D3D11_RASTERIZER_DESC raster{};
-    raster.FillMode = D3D11_FILL_SOLID;
-    raster.CullMode = D3D11_CULL_NONE;
-    raster.DepthClipEnable = TRUE;
-    Require(device->CreateRasterizerState(&raster, inspectRasterizer.put()), "ERR_DECODER_INSPECTION", "Cannot create diagnostic rasterizer");
-    D3D11_BUFFER_DESC constant{};
-    constant.ByteWidth = 16;
-    constant.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    Require(device->CreateBuffer(&constant, nullptr, inspectConstants.put()), "ERR_DECODER_INSPECTION", "Cannot create diagnostic crop constants");
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = FrameInspection::width;
-    desc.Height = FrameInspection::height;
-    desc.MipLevels = desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_R8_UNORM;
-    desc.SampleDesc.Count = 1;
-    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
-    Require(device->CreateTexture2D(&desc, nullptr, inspectTarget.put()), "ERR_DECODER_INSPECTION", "Cannot allocate small diagnostic target");
-    Require(device->CreateRenderTargetView(inspectTarget.get(), nullptr, inspectRtv.put()), "ERR_DECODER_INSPECTION", "Cannot create small diagnostic RTV");
-    desc.BindFlags = 0;
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    Require(device->CreateTexture2D(&desc, nullptr, inspectReadback.put()), "ERR_DECODER_INSPECTION", "Cannot allocate 24x24 diagnostic readback");
-  }
-
-  FrameInspection Inspect(const std::shared_ptr<const GpuDecodedFrame>& frame) {
-    ValidateFrame(frame);
-    InitializeInspection();
-    auto device3 = device.as<ID3D11Device3>();
-    D3D11_SHADER_RESOURCE_VIEW_DESC1 desc{};
-    desc.Format = DXGI_FORMAT_R8_UNORM;
-    desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    desc.Texture2D.MipLevels = 1;
-    desc.Texture2D.PlaneSlice = 0;
-    winrt::com_ptr<ID3D11ShaderResourceView1> luma;
-    Require(device3->CreateShaderResourceView1(frame->texture.get(), &desc, luma.put()), "ERR_DECODER_INSPECTION", "Cannot read private NV12 luma plane on GPU");
-    const float crop[]{
-        static_cast<float>(frame->visibleRect.x) / frame->codedWidth,
-        static_cast<float>(frame->visibleRect.y) / frame->codedHeight,
-        static_cast<float>(frame->visibleRect.width) / frame->codedWidth,
-        static_cast<float>(frame->visibleRect.height) / frame->codedHeight};
-    context->UpdateSubresource(inspectConstants.get(), 0, nullptr, crop, 0, 0);
-    auto constants = inspectConstants.get();
-    auto sampler = inspectSampler.get();
-    ID3D11ShaderResourceView* view = luma.get();
-    auto target = inspectRtv.get();
-    const D3D11_VIEWPORT viewport{0, 0, 24, 24, 0, 1};
-    context->IASetInputLayout(nullptr);
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context->VSSetShader(inspectVertex.get(), nullptr, 0);
-    context->PSSetShader(inspectPixel.get(), nullptr, 0);
-    context->PSSetConstantBuffers(0, 1, &constants);
-    context->PSSetSamplers(0, 1, &sampler);
-    context->PSSetShaderResources(0, 1, &view);
-    context->RSSetState(inspectRasterizer.get());
-    context->RSSetViewports(1, &viewport);
-    context->OMSetBlendState(nullptr, nullptr, UINT_MAX);
-    context->OMSetDepthStencilState(nullptr, 0);
-    context->OMSetRenderTargets(1, &target, nullptr);
-    context->Draw(3, 0);
-    ID3D11ShaderResourceView* empty = nullptr;
-    context->PSSetShaderResources(0, 1, &empty);
-    context->OMSetRenderTargets(0, nullptr, nullptr);
-    context->CopyResource(inspectReadback.get(), inspectTarget.get());
-    const auto value = nextFenceValue++;
-    Require(context->Signal(fence.get(), value), "ERR_DECODER_INSPECTION_FENCE", "Cannot fence diagnostic GPU reduction");
-    context->Flush();
-    WaitFence(value);
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    Require(context->Map(inspectReadback.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped),
-            "ERR_DECODER_INSPECTION_MAP", "Cannot read completed 24x24 diagnostic image");
-    FrameInspection result;
-    try {
-      if (!mapped.pData) throw DecoderError("ERR_DECODER_INSPECTION_MAP", "Completed diagnostic mapping returned no data");
-      result = InspectLuma({static_cast<const std::uint8_t*>(mapped.pData), static_cast<std::size_t>(mapped.RowPitch) * 24},
-                           mapped.RowPitch);
-    } catch (...) { context->Unmap(inspectReadback.get(), 0); throw; }
-    context->Unmap(inspectReadback.get(), 0);
-    ++stats.diagnosticReadbacks;
-    stats.diagnosticReadbackBytes += 24 * 24;
-    return result;
   }
 
   I420Image ReadI420(const std::shared_ptr<const GpuDecodedFrame>& frame) {
@@ -992,7 +871,6 @@ void MfH264Decoder::Abort() { impl_->Abort(); }
 bool MfH264Decoder::Finished() const { return impl_->completionValidated; }
 HANDLE MfH264Decoder::WakeEvent() const { return impl_->wake.Get(); }
 DecoderStats MfH264Decoder::GetStats() const { return impl_->stats; }
-FrameInspection MfH264Decoder::Inspect(const std::shared_ptr<const GpuDecodedFrame>& frame) { return impl_->Inspect(frame); }
 I420Image MfH264Decoder::ReadI420(const std::shared_ptr<const GpuDecodedFrame>& frame) { return impl_->ReadI420(frame); }
 
 }  // namespace monky::screen_video

@@ -1,6 +1,6 @@
 'use strict';
 
-const { boundedCleanup } = require('./frameSink.cjs');
+const { within, notifyObserver } = require('./asyncTools.cjs');
 const { NativeAudioOutputClock } = require('./nativeAudioOutputClock.cjs');
 const PLAYOUT_CAPACITY_FRAMES = 3840;
 const PLAYOUT_TARGET_FRAMES = 2880;
@@ -47,12 +47,17 @@ class NativePcmAudioSink {
     this.playout = null;
     this.sinkWork = null;
     this.switchingSink = false;
+    this.interruption = null;
     this.lastUnderrun = null;
     this.errors = [];
     this.onStateChange = () => {
-      if (!this.stopping && !this.switchingSink && (this.ready || this.preparingOutput) && this.context?.state !== 'running') {
+      if (this.stopping || this.switchingSink || !(this.ready || this.preparingOutput)) return;
+      if (this.context?.state === 'running') { this.endInterruption(); return; }
+      if (!this.ready || this.context?.state === 'closed') {
         this.fail(new Error('Native audio output stopped; a new playout epoch is required before resuming.'));
+        return;
       }
+      this.beginInterruption();
     };
     this.onSinkChange = () => {
       if (!this.stopping && (this.ready || this.preparingOutput)) {
@@ -64,6 +69,29 @@ class NativePcmAudioSink {
   invalidateOutputClock() {
     this.clock.invalidate('output-device-changed');
     this.notify(this.onFeedback, { available: false, epoch: this.epoch, reason: 'output-device-changed' });
+  }
+
+  // Losing its device suspends a running context. Keep this epoch while the app moves screen audio to
+  // another output, which resumes it, or the device recovers by itself; fail only if neither happens in time.
+  beginInterruption() {
+    if (this.interruption !== null) return;
+    this.invalidateOutputClock();
+    this.interruption = setTimeout(() => {
+      this.interruption = null;
+      if (!this.stopping && this.context?.state !== 'running')
+        this.fail(new Error('Native audio output stopped; a new playout epoch is required before resuming.'));
+    }, this.timeoutMs);
+  }
+
+  endInterruption() {
+    if (this.interruption === null) return;
+    this.clearInterruption();
+    this.invalidateOutputClock();
+  }
+
+  clearInterruption() {
+    clearTimeout(this.interruption);
+    this.interruption = null;
   }
 
   setSinkId(sinkId) {
@@ -96,7 +124,12 @@ class NativePcmAudioSink {
         throw error;
       } finally {
         this.switchingSink = false;
-        if (!this.stopping) this.invalidateOutputClock();
+        if (!this.stopping) {
+          // Moving off a lost device resumes the context; a context a switch left suspended gets the same grace.
+          if (this.context.state === 'running') this.clearInterruption();
+          else this.beginInterruption();
+          this.invalidateOutputClock();
+        }
       }
     };
     const work = (this.sinkWork ?? Promise.resolve()).then(execute, execute);
@@ -118,8 +151,7 @@ class NativePcmAudioSink {
     this.errors.push(error);
     if (this.stopping) return;
     this.stopping = true;
-    try { this.onError(error); }
-    catch (observerError) { console.error('Native audio error observer failed:', observerError); }
+    notifyObserver('Native audio error observer', this.onError, error);
     void this.stop().catch(cleanupError => {
       this.errors.push(cleanupError);
       console.error('Native audio cleanup failed:', cleanupError);
@@ -270,6 +302,7 @@ class NativePcmAudioSink {
 
   async stop() {
     this.stopping = true;
+    this.clearInterruption();
     this.startAbort.abort(new DOMException('Native audio output preparation was cancelled.', 'AbortError'));
     this.ready = false;
     if (!this.closeWork) {
@@ -284,8 +317,8 @@ class NativePcmAudioSink {
   async cleanup() {
     const failures = [];
     if (this.sinkWork) {
-      try { await boundedCleanup(Promise.allSettled([this.sinkWork]),
-        'Native output device change did not retire.', this.timeoutMs); }
+      try { await within(Promise.allSettled([this.sinkWork]),
+        this.timeoutMs, 'Native output device change did not retire.'); }
       catch (error) { failures.push(error); }
     }
     if (this.node && !this.portClosed) {
@@ -304,8 +337,8 @@ class NativePcmAudioSink {
       this.context.removeEventListener('statechange', this.onStateChange);
       this.context.removeEventListener('sinkchange', this.onSinkChange);
       try {
-        if (this.context.state !== 'closed') await boundedCleanup(this.context.close(),
-          'Native AudioContext close timed out; output ownership is retained.', this.timeoutMs);
+        if (this.context.state !== 'closed') await within(this.context.close(),
+          this.timeoutMs, 'Native AudioContext close timed out; output ownership is retained.');
         if (this.context.state !== 'closed') throw new Error('Native AudioContext did not prove closed output.');
         this.contextClosed = true;
       } catch (error) { failures.push(error); }

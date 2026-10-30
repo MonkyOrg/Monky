@@ -6,9 +6,11 @@ import test from 'node:test';
 import { WebSocket } from 'ws';
 import { MessageType, ProtocolErrorCode, type ProtocolMessage } from '@monky/shared';
 import { RecentSoundCacheService } from './application/services/RecentSoundCacheService';
+import { SERVER_SETTING_DEFAULTS } from './domain/serverSettings';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqliteServerRepository } from './infrastructure/database/SqliteRepositories';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import type { SignedInSession } from './infrastructure/websocket/ClientSession';
 import { RateLimiter } from './infrastructure/security/RateLimiter';
 
 async function fixture(maxTotalBytes = 1024) {
@@ -129,7 +131,7 @@ test('allows human members to list and download but denies bots', async () => {
   };
   server['serverRepo'] = {
     getServer: async () => ({
-      id: 'server', name: 'Server', passwordHash: '', createdAt: 1, maxUsers: 0,
+      ...SERVER_SETTING_DEFAULTS, id: 'server', name: 'Server', passwordHash: '', createdAt: 1, maxUsers: 0,
       recentSoundCacheEnabled: true, recentSoundCacheLimit: 20,
     }),
     createServer: async () => {},
@@ -144,8 +146,8 @@ test('allows human members to list and download but denies bots', async () => {
   } as unknown as RecentSoundCacheService });
   server['send'] = (_socket, message) => { messages.push(message); };
   Object.defineProperty(server, 'rateLimiter', { value: new RateLimiter() });
-  const session: Parameters<WebSocketServer['handleRecentSoundsList']>[0] = {
-    ws, sessionId: 'session', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+  const session: SignedInSession = {
+    ws, sessionId: 'session', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     protocol: { version: 34, minimumVersion: 31, features: ['recent-sounds'] },
     user: {
       id: 'user-1', clientId: 'client', sessionId: 'session',
@@ -153,29 +155,29 @@ test('allows human members to list and download but denies bots', async () => {
     },
   };
   server['sessions'] = new Map([[ws, session]]);
-  server['requirePermission'] = async () => true;
-  await server['handleRecentSoundRecord'](session, {
+  server['authorizer'].requirePermission = async () => true;
+  await server['soundboard']['recordRecent'](session, {
     soundName: 'Local preview',
     mimeType: 'audio/mpeg',
     audioBase64: Buffer.from('audio').toString('base64'),
   }, 'record-request');
   assert.equal(recorded, 1);
   assert.equal(messages.at(-1)?.type, MessageType.RECENT_SOUND_ADDED);
-  await server['handleRecentSoundsList'](session, 'list-request');
+  await server['soundboard']['listRecent'](session, 'list-request');
   assert.equal(messages.at(-1)?.type, MessageType.RECENT_SOUNDS_RESULT);
   assert.deepEqual((messages.at(-1)?.payload as { items: unknown[] }).items, [entry]);
-  await server['handleRecentSoundDownload'](session, { id: entry.id }, 'download-request');
+  await server['soundboard']['downloadRecent'](session, { id: entry.id }, 'download-request');
   assert.equal(messages.at(-1)?.type, MessageType.RECENT_SOUND_DATA);
   for (let index = 0; index < 9; index++) {
-    await server['handleRecentSoundDownload'](session, { id: entry.id }, `download-${index}`);
+    await server['soundboard']['downloadRecent'](session, { id: entry.id }, `download-${index}`);
     assert.equal(messages.at(-1)?.type, MessageType.RECENT_SOUND_DATA);
   }
-  await server['handleRecentSoundDownload'](session, { id: entry.id }, 'download-limited');
+  await server['soundboard']['downloadRecent'](session, { id: entry.id }, 'download-limited');
   assert.equal(messages.at(-1)?.type, MessageType.SERVER_ERROR);
   assert.equal((messages.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.RATE_LIMITED);
 
   session.isBot = true;
-  await server['handleRecentSoundsList'](session, 'bot-request');
+  await server['soundboard']['listRecent'](session, 'bot-request');
   assert.equal(messages.at(-1)?.type, MessageType.SERVER_ERROR);
   assert.equal((messages.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.PERMISSION_DENIED);
 });

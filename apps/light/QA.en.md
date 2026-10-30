@@ -40,6 +40,8 @@ repeat with three or more people. Run everything in **both P2P and SFU**.
 | 1.8 | A moderator kicks Light from the call | Light leaves and does not rejoin by itself after `reconnect` | | |
 | 1.9 | An administrator switches P2P ↔ SFU during the call | The call continues both ways, preserving moderation | | |
 | 1.10 | A call of at least 30 minutes | No dropouts, growing delay, or robotic audio | | |
+| 1.11 | A moderator moves Light twice in a row, into rooms it sees; repeat with rooms it cannot see | Either way, Light ends up in the last room, hearing and being heard | | |
+| 1.12 | An administrator denies `Speak` to everyone in the call's channel, then allows it | Light stays in the call listening, without sending (the full client does not hear it); once allowed, it sends again | | |
 
 ## 2. Physical devices
 
@@ -134,3 +136,5 @@ available, so the terminal shows what each click did.
 | 6.17 | System in Portuguese and in English | Menu and tooltip in the system language | | |
 | 6.18 | Screen reader (Narrator, VoiceOver) over the icon | Reads the current state, not just "icon" | | |
 | 6.19 | Measure the same phase with and without `--tray` | The tray does not measurably change idle resource use | | |
+| 6.20 | A channel without `Speak` | The mute row is marked and disabled, with the note that there is no permission to speak | | |
+| 6.21 | Close the console window during a call (Windows only) | The others see Light leave at once (logout), the icon disappears and no process is left | | |

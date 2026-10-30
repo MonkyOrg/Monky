@@ -2,10 +2,13 @@ import { z } from 'zod';
 
 const reference = z.string().min(1).max(128);
 
+/** How many members and roles a private audience names at most; a resource or a screen share refuses more. */
+export const AUDIENCE_LIMITS = Object.freeze({ users: 256, roles: 128 });
+
 export const privateAudienceSelectionSchema = z.object({
   visibility: z.literal('private'),
-  userIds: z.array(reference).max(256).refine(values => new Set(values).size === values.length),
-  roleIds: z.array(reference).max(128).refine(values => new Set(values).size === values.length),
+  userIds: z.array(reference).max(AUDIENCE_LIMITS.users).refine(values => new Set(values).size === values.length),
+  roleIds: z.array(reference).max(AUDIENCE_LIMITS.roles).refine(values => new Set(values).size === values.length),
 }).strict().refine(
   value => value.userIds.length + value.roleIds.length > 0,
   'A private audience requires at least one user or role.',
@@ -20,8 +23,8 @@ export const resourceAudienceProjectionSchema = z.union([
   z.object({ visibility: z.literal('public') }).strict(),
   z.object({
     visibility: z.literal('private'),
-    userIds: z.array(reference).max(256).refine(values => new Set(values).size === values.length).optional(),
-    roleIds: z.array(reference).max(128).refine(values => new Set(values).size === values.length).optional(),
+    userIds: z.array(reference).max(AUDIENCE_LIMITS.users).refine(values => new Set(values).size === values.length).optional(),
+    roleIds: z.array(reference).max(AUDIENCE_LIMITS.roles).refine(values => new Set(values).size === values.length).optional(),
   }).strict().superRefine((value, ctx) => {
     const hasUsers = value.userIds !== undefined;
     const hasRoles = value.roleIds !== undefined;

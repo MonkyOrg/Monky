@@ -508,10 +508,10 @@ test('a committed role revocation cannot leak through the gap before its WebSock
   const pending = viewer.peer.request(MessageType.SERVER_MONITOR_GET, { serverId: owner.serverId });
   try {
     await authorized.promise;
-    const broadcastVersion = wsServer['botSettingsPermissionVersion'];
+    const broadcastVersion = wsServer['epoch'].generation;
     const revoking = owner.peer.request(MessageType.ROLE_UPDATE, { roleId: text(role.id), permissions: 0 });
     await written.promise;
-    assert.equal(wsServer['botSettingsPermissionVersion'], broadcastVersion, 'the role broadcast has not happened yet');
+    assert.equal(wsServer['epoch'].generation, broadcastVersion, 'the role broadcast has not happened yet');
     assert.equal(wsServer['permissionService'].getRoleAccessVersion(), null, 'the actual role write is guarded');
     finishAuthorization.resolve();
     assert.equal(errorCode(await pending), ProtocolErrorCode.PERMISSION_DENIED, 'the previously allowed lookup is stale');

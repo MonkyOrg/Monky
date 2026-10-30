@@ -104,8 +104,8 @@ int main() {
       std::lock_guard lock(bridge.mutex);
       bridge.engines = {{"alpha:one", &a}, {"beta:two", &b}};
     }
-    const std::vector<Participant> roster{{"alpha", "alpha:one"},
-                                          {"beta", "beta:two"}};
+    const std::vector<Participant> roster{{"alpha", "alpha:one", false},
+                                          {"beta", "beta:two", false}};
     auto config_a = Configuration("alpha", "alpha:one", {roster.front()});
     a.join(config_a).get();
     Require(!device_a->Recording(), "Empty room opened an unused microphone");
@@ -182,6 +182,31 @@ int main() {
         },
         "Undeafen did not restore native duplex audio");
 
+    // A participant the room denies Speak is not played, whatever their
+    // client still sends: P2P has no server in the path to stop it.
+    a.update_roster({{"alpha", "alpha:one", false}, {"beta", "beta:two", true}});
+    WaitFor(
+        [&] {
+          const auto before = device_a->Snapshot().nonzero_playout_callbacks;
+          std::this_thread::sleep_for(100ms);
+          return device_a->Snapshot().nonzero_playout_callbacks == before;
+        },
+        "A participant without Speak was still played");
+    const auto silenced = device_a->Snapshot();
+    std::this_thread::sleep_for(200ms);
+    Require(device_a->Snapshot().nonzero_playout_callbacks ==
+                silenced.nonzero_playout_callbacks,
+            "A participant without Speak was played again");
+    Require(device_a->Recording(),
+            "Silencing a participant closed the local microphone");
+    a.update_roster(roster);
+    WaitFor(
+        [&] {
+          return device_a->Snapshot().nonzero_playout_callbacks >
+                 silenced.nonzero_playout_callbacks + 25;
+        },
+        "Granting Speak did not play the participant again");
+
     a.leave().get();
     b.leave().get();
     Require(!device_a->Snapshot().worker_running &&
@@ -195,6 +220,7 @@ int main() {
     std::cout
         << "Native P2P PCM loopback passed: bidirectional Opus decode, mute "
            "keeps receive, deafen stops both directions, unmute/undeafen, "
+           "a participant without Speak is not played, "
            "and device/thread teardown. RMS="
         << device_a->Snapshot().output_rms << '/'
         << device_b->Snapshot().output_rms << '\n';

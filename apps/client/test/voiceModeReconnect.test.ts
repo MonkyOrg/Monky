@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { VoiceModeReconnect, type VoiceReconnectCall } from '../src/renderer/core/VoiceModeReconnect';
-import { selectScreenVideoCodecs, ScreenCodecError } from '../src/renderer/core/webrtc/codecPreferences';
 import { type VoiceUserLeftPayload } from '@monky/shared';
 import { getLanguage, setLanguage, t as translate } from '../src/renderer/i18n';
 
@@ -141,33 +140,13 @@ test('a failed admission or missing settings completion surfaces one meaningful 
   assert.equal(denied.counts().joins, 1);
 });
 
-test('explicit screen selection preserves every chosen profile and only associated RTX; auto alone keeps fallback', () => {
-  const codecs = [
-    { mimeType: 'video/AV1', preferredPayloadType: 98 },
-    { mimeType: 'video/rtx', sdpFmtpLine: 'apt=98', preferredPayloadType: 99 },
-    { mimeType: 'video/H264', preferredPayloadType: 100, sdpFmtpLine: 'profile-level-id=42e01f' },
-    { mimeType: 'video/rtx', sdpFmtpLine: 'apt=100', preferredPayloadType: 101 },
-    { mimeType: 'video/H264', preferredPayloadType: 102, sdpFmtpLine: 'profile-level-id=42001f' },
-    { mimeType: 'video/rtx', sdpFmtpLine: 'apt=102', preferredPayloadType: 103 },
-    { mimeType: 'video/VP8', preferredPayloadType: 96 },
-  ];
-  assert.deepEqual(selectScreenVideoCodecs(codecs, 'h264').map((codec) => codec.preferredPayloadType), [100, 102, 101, 103]);
-  assert.equal(selectScreenVideoCodecs(codecs, 'auto').length, codecs.length);
-  assert.throws(() => selectScreenVideoCodecs(codecs, 'vp9'), ScreenCodecError);
-  assert.deepEqual(selectScreenVideoCodecs([
-    { mimeType: 'video/H264' }, { mimeType: 'video/rtx' }, { mimeType: 'video/AV1' },
-  ], 'h264').map((codec) => codec.mimeType), ['video/H264', 'video/rtx']);
-});
-
-test('mode change and explicit-codec failures use the selected app language', () => {
+test('mode change notices use the selected app language', () => {
   const language = getLanguage();
   try {
     setLanguage('en');
     assert.match(translate('voiceReconnect.notice'), /reconnect automatically/);
-    assert.match(new ScreenCodecError('h264', 'unsupported').message, /not supported/);
     setLanguage('pt-BR');
     assert.match(translate('voiceReconnect.notice'), /reconectada automaticamente/);
-    assert.match(new ScreenCodecError('h264', 'unsupported').message, /não é compatível/);
   } finally {
     setLanguage(language);
   }

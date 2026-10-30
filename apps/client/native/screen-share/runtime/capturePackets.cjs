@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const { TextDecoder } = require('node:util');
 const base = require('./captureProtocol.cjs');
+const { ByteQueue } = require('./byteQueue.cjs');
 const HEADER_BYTES = 96, MAGIC = 0x31484c4d;
 const MAX_BUFFER_BYTES = base.MAX_PACKET_BYTES + HEADER_BYTES + 65536;
 const utf8 = new TextDecoder('utf8', { fatal: true });
@@ -46,21 +47,23 @@ class LiveFrames {
     assert.equal(typeof onFrame, 'function');
     base.integer(fps, 1, 240);
     this.fps = fps;
-    this.onFrame = onFrame; this.pending = Buffer.alloc(0); this.sequence = 0; this.packets = 0;
+    this.onFrame = onFrame; this.queue = new ByteQueue(); this.header = null; this.sequence = 0; this.packets = 0;
   }
+  get bufferedBytes() { return this.queue.length; }
   push(chunk) {
     assert.ok(Buffer.isBuffer(chunk) && chunk.length <= 65536);
-    assert.ok(this.pending.length + chunk.length <= MAX_BUFFER_BYTES);
-    this.pending = this.pending.length ? Buffer.concat([this.pending, chunk]) : chunk;
+    assert.ok(this.queue.length + chunk.length <= MAX_BUFFER_BYTES);
+    this.queue.push(chunk);
     return this.drain();
   }
   drain() {
-    while (this.pending.length >= HEADER_BYTES) {
-      const header = parseHeader(this.pending.subarray(0, HEADER_BYTES), this.fps);
-      if (this.pending.length < HEADER_BYTES + header.payloadBytes) break;
+    while (this.queue.length >= HEADER_BYTES) {
+      // Parsed once per packet, not again for each chunk of its payload.
+      const header = this.header ??= parseHeader(this.queue.peek(HEADER_BYTES), this.fps);
+      if (this.queue.length < HEADER_BYTES + header.payloadBytes) break;
       assert.equal(header.sequence, this.sequence + 1, 'Live pipe sequence was lost or replayed.');
       assert.equal(this.closed, undefined, 'Live pipe emitted data after retirement.');
-      const body = this.pending.subarray(HEADER_BYTES, HEADER_BYTES + header.payloadBytes);
+      const body = this.queue.peek(header.payloadBytes, HEADER_BYTES);
       if (header.kind === 1) {
         assert.equal(header.frame.frameId, this.packets + 1);
         if (this.lastFrame) {
@@ -93,13 +96,14 @@ class LiveFrames {
         }
         this.onFrame({ type: header.kind === 3 ? 'closed' : 'notice', value });
       }
-      this.pending = this.pending.subarray(HEADER_BYTES + header.payloadBytes);
+      this.queue.skip(HEADER_BYTES + header.payloadBytes);
+      this.header = null;
       this.sequence++;
     }
     return true;
   }
   end() {
-    assert.equal(this.pending.length, 0, 'Live pipe ended with a split packet.');
+    assert.equal(this.queue.length, 0, 'Live pipe ended with a split packet.');
     assert.ok(this.closed, 'Live pipe ended before actual writer retirement.');
   }
 }

@@ -16,8 +16,11 @@ const MEDIA_VIEWER_SELECTOR = '.attachment-lightbox:not([data-ui-closing])';
 const follows = (earlier: Node, later: Node): boolean =>
   !!(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING);
 
-/** Keep one scrim while a child dialog replaces its parent's card. */
-export function enterModal(element: HTMLElement): void {
+/**
+ * Keep one scrim while a child dialog replaces its parent's card. `focus` is
+ * who gets the focus back when the modal closes: by default whoever has it now.
+ */
+export function enterModal(element: HTMLElement, focus: Element | null = document.activeElement): void {
   const ownCard = element.querySelector<HTMLElement>(':scope > .modal-card');
   if (ownCard) ownCard.dataset.uiMotion = '';
   // The media viewer is not a modal, but it covers the app and the modal that opened it.
@@ -30,7 +33,7 @@ export function enterModal(element: HTMLElement): void {
   // A modal beneath the viewer keeps its card: the viewer separates them, so they cannot share one scrim.
   const parent = candidate && aboveViewer && viewer && !follows(viewer, candidate) ? null : candidate;
   active.set(element, {
-    parent, focus: document.activeElement, background: element.style.background,
+    parent, focus, background: element.style.background,
     filter: element.style.backdropFilter,
   });
   if (parent) {

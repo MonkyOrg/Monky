@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import childProcess, { spawn } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { MakeDirectoryOptions, PathLike } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -14,7 +14,9 @@ import {
   type LocalTaskCacheOwner, type LocalToolPaths, type LocalToolsOptions,
 } from '../src/main/localExecution/LocalTools';
 import { LocalExecutionError } from '../src/main/localExecution/errors';
+import { readLocalToolFile } from '../src/main/localExecution/localToolsStorage';
 import { checkToolExtraction, extractLocalTool, localToolExtractionSupport } from '../src/main/localExecution/toolExtraction';
+import { createZip } from '../src/main/zipWriter';
 
 const versions: Record<LocalToolId, string> = {
   node: `v${MANAGED_NODE_VERSION}`, 'yt-dlp': '2026.09.15', ffmpeg: 'ffmpeg 6.1.1 (controlled libopus fixture)',
@@ -85,38 +87,6 @@ function tarFixture(member: string, contents: Buffer): Buffer {
   return Buffer.concat([header, contents, Buffer.alloc((512 - contents.length % 512) % 512 + 1024)]);
 }
 
-function zipFixture(member: string, contents: Buffer): Buffer {
-  const filename = Buffer.from(member);
-  let crc = 0xffffffff;
-  for (const byte of contents) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit++) crc = crc >>> 1 ^ (crc & 1 ? 0xedb88320 : 0);
-  }
-  crc = (crc ^ 0xffffffff) >>> 0;
-  const local = Buffer.alloc(30);
-  local.writeUInt32LE(0x04034b50);
-  local.writeUInt16LE(20, 4);
-  local.writeUInt32LE(crc, 14);
-  local.writeUInt32LE(contents.length, 18);
-  local.writeUInt32LE(contents.length, 22);
-  local.writeUInt16LE(filename.length, 26);
-  const central = Buffer.alloc(46);
-  central.writeUInt32LE(0x02014b50);
-  central.writeUInt16LE(20, 4);
-  central.writeUInt16LE(20, 6);
-  central.writeUInt32LE(crc, 16);
-  central.writeUInt32LE(contents.length, 20);
-  central.writeUInt32LE(contents.length, 24);
-  central.writeUInt16LE(filename.length, 28);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50);
-  end.writeUInt16LE(1, 8);
-  end.writeUInt16LE(1, 10);
-  end.writeUInt32LE(central.length + filename.length, 12);
-  end.writeUInt32LE(local.length + filename.length + contents.length, 16);
-  return Buffer.concat([local, filename, contents, central, filename, end]);
-}
-
 async function xzFixture(contents: Buffer): Promise<Buffer> {
   const child = spawn('/usr/bin/xz', ['--compress', '--stdout'], { stdio: ['pipe', 'pipe', 'pipe'] });
   const chunks: Buffer[] = [];
@@ -150,7 +120,7 @@ async function fixtureAssets(nodeContents?: Buffer): Promise<FixtureAsset[]> {
     : `ffmpeg-master-latest-${process.platform === 'win32' ? 'win' : 'linux'}${process.arch === 'arm64' ? 'arm64' : '64'}-gpl.${process.platform === 'win32' ? 'zip' : 'tar.xz'}`;
   const ffRepository = process.platform === 'darwin' ? 'eugeneware/ffmpeg-static' : 'yt-dlp/FFmpeg-Builds';
   const ffArchive = process.platform === 'darwin' ? ffBytes : process.platform === 'win32'
-    ? zipFixture(managedFfmpegArchiveEntry(ffName), ffBytes)
+    ? createZip([{ path: managedFfmpegArchiveEntry(ffName), data: ffBytes }])
     : await xzFixture(tarFixture(managedFfmpegArchiveEntry(ffName), ffBytes));
   return [
     {
@@ -265,6 +235,28 @@ function executable(paths: LocalToolPaths, tool: LocalToolId): string {
   return tool === 'yt-dlp' ? paths.ytDlp : paths[tool];
 }
 
+/** Executables plus the archives retained next to them on this platform. */
+async function toolFiles(paths: LocalToolPaths): Promise<string[]> {
+  const files = Object.values(paths);
+  for (const filename of Object.values(paths)) {
+    const archive = path.join(path.dirname(filename), 'artifact');
+    if (await fs.stat(archive).then(() => true, () => false)) files.push(archive);
+  }
+  return files;
+}
+
+/** Counts how many times each file is opened, which is how every digest starts. */
+function trackReads(t: TestContext, files: string[]): Map<string, number> {
+  const reads = new Map(files.map((filename) => [filename, 0]));
+  const open = fs.open.bind(fs);
+  t.mock.method(fs, 'open', (...args: Parameters<typeof fs.open>) => {
+    const count = reads.get(String(args[0]));
+    if (count !== undefined) reads.set(String(args[0]), count + 1);
+    return open(...args);
+  });
+  return reads;
+}
+
 test('inventory initialization is filesystem-only and never crosses the explicit preparation boundary', async (t) => {
   const { tools, root, requests, probes } = await fixture(t);
   await tools.initialize();
@@ -337,26 +329,132 @@ test('verified generations publish exact receipts and truthful inventory, withou
   } finally { await restarted.dispose(); }
 });
 
-test('warm preparation still hashes every executable but reuses successful native checks', async (t) => {
+test('a changed fingerprint is rehashed and natively checked again, even with identical bytes', async (t) => {
   const { tools, probes } = await fixture(t);
   const paths = await tools.prepare(signal());
-  const reads = new Set<string>();
-  const open = fs.open.bind(fs);
-  t.mock.method(fs, 'open', (...args: Parameters<typeof fs.open>) => {
-    const filename = String(args[0]);
-    if (Object.values(paths).includes(filename)) reads.add(filename);
-    return open(...args);
-  });
-  await tools.prepare(signal());
-  assert.deepEqual([...reads].sort(), Object.values(paths).sort(), 'Skipping native probes cannot skip integrity reads');
-  assert.deepEqual(probes, [...LOCAL_TOOL_IDS]);
+  const reads = trackReads(t, Object.values(paths));
   const original = await fs.readFile(paths.ytDlp);
   await fs.unlink(paths.ytDlp);
   await fs.writeFile(paths.ytDlp, original, { mode: 0o700 });
   await tools.prepare(signal());
+  assert.deepEqual(Object.fromEntries(reads), { [paths.node]: 0, [paths.ytDlp]: 1, [paths.ffmpeg]: 0 }, 'Only the replaced file is rehashed');
   assert.deepEqual(probes, [...LOCAL_TOOL_IDS, 'yt-dlp'], 'A replacement file must receive its own native check even with identical bytes');
+  const later = new Date(Date.now() + 60_000);
+  await fs.utimes(paths.node, later, later);
   await tools.prepare(signal());
-  assert.deepEqual(probes, [...LOCAL_TOOL_IDS, 'yt-dlp']);
+  assert.equal(reads.get(paths.node), 1, 'A new timestamp alone is a new fingerprint');
+  assert.deepEqual(probes, [...LOCAL_TOOL_IDS, 'yt-dlp', 'node']);
+  await tools.prepare(signal());
+  assert.deepEqual(Object.fromEntries(reads), { [paths.node]: 1, [paths.ytDlp]: 1, [paths.ffmpeg]: 0 });
+  assert.deepEqual(probes, [...LOCAL_TOOL_IDS, 'yt-dlp', 'node']);
+});
+
+test('within one run, unchanged fingerprints are trusted by tasks, the soundboard and the inventory', async (t) => {
+  const { tools, probes } = await fixture(t);
+  const paths = await tools.prepare(signal());
+  const files = await toolFiles(paths);
+  const reads = trackReads(t, files);
+  await tools.prepare(signal());
+  await tools.prepare(signal());
+  assert.equal(await tools.readyExecutable('ffmpeg'), paths.ffmpeg);
+  assert.ok((await tools.snapshot()).tools.every((tool) => tool.status === 'ready'));
+  assert.deepEqual([...reads.values()], files.map(() => 0), 'No digest is recomputed for an unchanged file');
+  assert.deepEqual(probes, [...LOCAL_TOOL_IDS]);
+});
+
+test('each app run rehashes every tool once and never restores verification from disk', async (t) => {
+  const { tools, root } = await fixture(t);
+  const paths = await tools.prepare(signal());
+  const files = await toolFiles(paths);
+  const reads = trackReads(t, files);
+  const probes: LocalToolId[] = [];
+  const restarted = new LocalTools({ root, probe: async (tool) => { probes.push(tool); return versions[tool]; } });
+  try {
+    await restarted.prepare(signal());
+    await restarted.prepare(signal());
+    assert.equal(await restarted.readyExecutable('ffmpeg'), paths.ffmpeg);
+    await restarted.snapshot();
+    assert.deepEqual([...reads.values()], files.map(() => 1), 'One full digest per file in this run');
+    assert.deepEqual(probes, [...LOCAL_TOOL_IDS]);
+  } finally { await restarted.dispose(); }
+});
+
+test('a preparation requesting full verification rehashes every executable despite unchanged fingerprints', async (t) => {
+  const { tools, probes } = await fixture(t);
+  const paths = await tools.prepare(signal());
+  const reads = trackReads(t, Object.values(paths));
+  await tools.prepare(signal(), { fullVerification: true });
+  assert.deepEqual([...reads.values()], [1, 1, 1]);
+  assert.deepEqual(probes, [...LOCAL_TOOL_IDS], 'An unchanged generation keeps its native check');
+  await tools.prepare(signal());
+  assert.deepEqual([...reads.values()], [1, 1, 1]);
+});
+
+test('a full verification waits for, and never joins, a preparation that trusts fingerprints', async (t) => {
+  const { tools, root } = await fixture(t);
+  const paths = await tools.prepare(signal());
+  const reads = trackReads(t, Object.values(paths));
+  const probing = deferred<void>();
+  const release = deferred<void>();
+  const restarted = new LocalTools({ root, probe: async (tool) => {
+    probing.resolve();
+    await release.promise;
+    return versions[tool];
+  } });
+  try {
+    const reuse = restarted.prepare(signal());
+    await probing.promise;
+    const verified = restarted.prepare(signal(), { fullVerification: true });
+    release.resolve();
+    assert.deepEqual(await reuse, paths);
+    assert.deepEqual(await verified, paths);
+    assert.deepEqual([...reads.values()], [2, 2, 2], 'The first digest of this run, then the explicit one');
+  } finally { await restarted.dispose(); }
+});
+
+test('reusing ready tools launches no archive tool; only an installation checks tar', async (t) => {
+  const { tools } = await fixture(t);
+  const support = await localToolExtractionSupport(process.platform, process.arch);
+  assert.ok(support);
+  const spawned = t.mock.method(childProcess, 'spawn');
+  await tools.prepare(signal());
+  assert.ok(spawned.mock.calls.some((call) => call.arguments[0] === support.tar), 'Installation extracts with the system tar');
+  spawned.mock.resetCalls();
+  await tools.prepare(signal());
+  await tools.prepare(signal(), { fullVerification: true });
+  assert.equal(spawned.mock.callCount(), 0);
+});
+
+test('the support check walks no inventory and reads no file', async (t) => {
+  const { tools } = await fixture(t);
+  await tools.prepare(signal());
+  const opened = t.mock.method(fs, 'open');
+  const listed = t.mock.method(fs, 'readdir');
+  assert.equal(await tools.supported(), true);
+  assert.equal(opened.mock.callCount(), 0);
+  assert.equal(listed.mock.callCount(), 0);
+});
+
+test('the C library version is read from the process report at most once per process', async (t) => {
+  const report = t.mock.method(process.report, 'getReport', () => ({ header: { glibcVersionRuntime: '2.35' } }));
+  for (let attempt = 0; attempt < 3; attempt++) await localToolExtractionSupport('linux', 'x64');
+  assert.ok(report.mock.callCount() <= 1, `The report was read ${report.mock.callCount()} times`);
+});
+
+test('tool digests stream across read-ahead chunk boundaries with exact size and contents', async (t) => {
+  const { root } = await fixture(t);
+  const directory = path.join(root, 'streamed');
+  await fs.mkdir(directory, { recursive: true });
+  for (const size of [1, 1024 * 1024, 1024 * 1024 + 1, 2.5 * 1024 * 1024 + 7]) {
+    const bytes = randomBytes(size);
+    const filename = path.join(directory, `file-${size}`);
+    await fs.writeFile(filename, bytes);
+    const read = await readLocalToolFile(root, filename, 4 * 1024 * 1024, signal(), true);
+    assert.equal(read.sha256, checksum(bytes));
+    assert.equal(read.size, size);
+    assert.ok(read.contents.equals(bytes), `Contents of ${size} bytes`);
+    await assert.rejects(readLocalToolFile(root, filename, size - 1), reason('integrity_failed'));
+  }
 });
 
 test('native verification is not restored from receipts across a manager restart or tool removal', async (t) => {
@@ -1007,12 +1105,12 @@ test('explicit preparation retry cleans a retained failed staging directory befo
   });
   await assert.rejects(tools.prepare(signal()), reason('storage_failed'));
   const requestsBeforeRetry = requests.length;
-  await assert.rejects(tools.prepare(signal(), true), reason('storage_failed'));
+  await assert.rejects(tools.prepare(signal(), { retryCleanup: true }), reason('storage_failed'));
   assert.equal(requests.length, requestsBeforeRetry, 'a persistent cleanup failure must remain fail-closed');
   locked = false;
   interrupt = false;
   await assert.rejects(tools.prepare(signal()), reason('storage_failed'), 'a bot request cannot silently authorize recovery');
-  await tools.prepare(signal(), true);
+  await tools.prepare(signal(), { retryCleanup: true });
   assert.ok((await tools.snapshot()).tools.every((tool) => tool.status === 'ready'));
   assert.ok((await fs.readdir(path.join(root, 'tools'))).every((name) => !name.startsWith('.stage-')));
   assert.equal(nodeDownloads, 1, 'recovery must preserve an already installed Node');
@@ -1050,14 +1148,14 @@ test('explicit retry recovers after a real Windows file-sharing lock is released
     return versions[tool];
   } });
   await assert.rejects(tools.prepare(signal()), reason('storage_failed'));
-  await assert.rejects(tools.prepare(signal(), true), reason('storage_failed'));
+  await assert.rejects(tools.prepare(signal(), { retryCleanup: true }), reason('storage_failed'));
   assert.ok((await fs.readdir(path.join(root, 'tools'))).some((name) => name.startsWith('.stage-yt-dlp-')),
     'a genuinely locked file must not be reported as cleaned up');
   assert.equal((await tools.snapshot()).tools[0]?.status, 'ready');
   assert.ok(release);
   await release();
   failProbe = false;
-  await tools.prepare(signal(), true);
+  await tools.prepare(signal(), { retryCleanup: true });
   assert.ok((await tools.snapshot()).tools.every((tool) => tool.status === 'ready'));
   assert.ok((await fs.readdir(path.join(root, 'tools'))).every((name) => !name.startsWith('.stage-')));
   await tools.remove('yt-dlp');
@@ -1081,7 +1179,7 @@ test('a failed initial storage scan is retryable after access is restored, witho
   inaccessible = false;
   await tools.initialize();
   assert.equal((await tools.snapshot()).toolsBytes, 0);
-  await tools.prepare(signal(), true);
+  await tools.prepare(signal(), { retryCleanup: true });
   assert.ok((await tools.snapshot()).tools.every((tool) => tool.status === 'ready'));
 });
 
@@ -1095,7 +1193,7 @@ test('modified executables become invalid before reuse and require explicit remo
   assert.equal(snapshot.tools[0]?.status, 'invalid');
   assert.equal(snapshot.tools[0]?.failure, 'integrity_failed');
   await assert.rejects(tools.prepare(signal()), reason('integrity_failed'));
-  await assert.rejects(tools.prepare(signal(), true), reason('integrity_failed'), 'explicit retry must not replace a tampered tool');
+  await assert.rejects(tools.prepare(signal(), { retryCleanup: true }), reason('integrity_failed'), 'explicit retry must not replace a tampered tool');
   assert.equal(probes.length, oldProbes);
   assert.equal(requests.length, oldRequests);
   await tools.remove('node');
@@ -1239,6 +1337,96 @@ test('a linked root is rejected before creating storage in the external target',
   await assert.rejects(tools.dispose(), reason('integrity_failed'));
   assert.deepEqual(await fs.readdir(external), []);
   await fs.unlink(linked);
+});
+
+test('a junction above the managed root is the user layout: tools install and publish canonical paths', async (t) => {
+  const { base } = await fixture(t);
+  const physical = path.join(base, 'physical-profile');
+  const linked = path.join(base, 'linked-profile');
+  await fs.mkdir(physical);
+  await fs.symlink(physical, linked, process.platform === 'win32' ? 'junction' : 'dir');
+  const root = path.join(physical, 'local-execution');
+  const tools = new LocalTools({ root: path.join(linked, 'local-execution'), probe: async (tool) => versions[tool] });
+  try {
+    await tools.initialize();
+    const paths = await tools.prepare(signal());
+    for (const filename of Object.values(paths)) {
+      assert.equal(path.relative(path.join(root, 'tools'), filename).startsWith('..'), false, filename);
+    }
+    const cache = await tools.allocateTaskCache();
+    assert.equal(path.dirname(cache), path.join(root, 'cache'));
+    await tools.removeTaskCache(cache);
+    assert.ok((await tools.snapshot()).tools.every((tool) => tool.status === 'ready'));
+    await tools.clearCache();
+  } finally {
+    await tools.dispose();
+    await fs.unlink(linked);
+  }
+});
+
+test('an abandoned task cache stays on disk for this run but no longer holds maintenance or disposal', async (t) => {
+  const { tools, root } = await fixture(t);
+  const abandoned = await tools.allocateTaskCache();
+  await fs.writeFile(path.join(abandoned, 'worker-output'), 'a descendant may still use this');
+  let closes = 0;
+  const owner = tools.registerTaskCacheOwner(abandoned, async () => { closes++; });
+  owner.abandon();
+  assert.throws(() => owner.abandon(), reason('invalid_request'));
+  assert.throws(() => owner.confirmNativeClosed(), reason('invalid_request'));
+  await assert.rejects(tools.removeTaskCache(abandoned), reason('invalid_request'));
+  const count = LOCAL_TOOLS_CACHE_MAX_BYTES / LOCAL_TASK_CACHE_MAX_BYTES;
+  for (let index = 2; index < count; index++) await fs.mkdir(path.join(root, 'cache', `task-${randomUUID()}`));
+  const last = await tools.allocateTaskCache();
+  await assert.rejects(tools.allocateTaskCache(), reason('storage_failed'), 'Kept files still count against the quota');
+  await tools.removeTaskCache(last);
+  await tools.clearCache();
+  await tools.remove('node');
+  await tools.dispose();
+  assert.equal(closes, 0, 'An abandoned owner is never asked to close again');
+  assert.equal(await fs.readFile(path.join(abandoned, 'worker-output'), 'utf8'), 'a descendant may still use this');
+  assert.deepEqual(await fs.readdir(path.join(root, 'cache')), [path.basename(abandoned)]);
+  const restarted = new LocalTools({ root, probe: async () => assert.fail('Startup must not probe') });
+  await restarted.initialize();
+  await restarted.clearCache();
+  assert.ok((await fs.stat(abandoned)).isDirectory(), 'This process never deletes a cache it abandoned');
+  await restarted.dispose();
+});
+
+test('startup removes task caches left by an earlier run, keeping other cache entries', async (t) => {
+  const { tools, root } = await fixture(t);
+  const leftover = path.join(root, 'cache', `task-${randomUUID()}`);
+  await fs.mkdir(path.join(leftover, 'nested'), { recursive: true });
+  await fs.writeFile(path.join(leftover, 'nested', 'stream'), Buffer.alloc(321));
+  const unknown = path.join(root, 'cache', 'unrecognized');
+  await fs.writeFile(unknown, 'kept');
+  await tools.initialize();
+  await assert.rejects(fs.stat(leftover), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(unknown, 'utf8'), 'kept');
+  assert.equal((await tools.snapshot()).cacheBytes, Buffer.byteLength('kept'));
+});
+
+test('a cache an earlier run cannot release yet does not stop startup', async (t) => {
+  const { tools, root } = await fixture(t);
+  const leftover = path.join(root, 'cache', `task-${randomUUID()}`);
+  const filename = path.join(leftover, 'held-by-a-descendant');
+  await fs.mkdir(leftover, { recursive: true });
+  await fs.writeFile(filename, 'locked');
+  const original = fs.unlink.bind(fs);
+  let attempts = 0;
+  const unlink = t.mock.method(fs, 'unlink', async (...args: Parameters<typeof fs.unlink>): Promise<void> => {
+    if (String(args[0]) === filename) {
+      attempts++;
+      throw Object.assign(new Error('Controlled sharing violation'), { code: 'EBUSY' });
+    }
+    await original(...args);
+  });
+  await tools.initialize();
+  assert.ok(attempts >= 1);
+  assert.equal(await fs.readFile(filename, 'utf8'), 'locked');
+  assert.equal((await tools.snapshot()).supported, true);
+  unlink.mock.restore();
+  await tools.clearCache();
+  await assert.rejects(fs.stat(leftover), { code: 'ENOENT' });
 });
 
 test('task cache allocation, real inventory, isolated removal and clearing preserve other parent-owned data', async (t) => {

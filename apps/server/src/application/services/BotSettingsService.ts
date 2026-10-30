@@ -8,10 +8,9 @@ import {
 import type { BotSettingsRecord } from '../../domain/entities';
 import type { IBotSettingsRepository } from '../../domain/repositories';
 import type { BotPermissionService } from './BotPermissionService';
+import { ServiceError } from '../errors';
 
-export class BotSettingsError extends Error {
-  constructor(readonly code: ProtocolErrorCode, message: string) { super(message); }
-}
+export class BotSettingsError extends ServiceError {}
 
 export class BotSettingsService {
   constructor(private repository: IBotSettingsRepository, private permissions?: BotPermissionService) {}

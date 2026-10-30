@@ -3,11 +3,10 @@ import {
   LIMITS, commandAudioPreviewResultSchema, localTaskResultSchema,
   type AudioPreviewFailureReason, type AudioPreviewResult, type LocalPreviewReference, type LocalTaskResult,
 } from '@monky/shared';
-import { appEvents } from './EventBus';
-import { settingsStore } from '../stores/settingsStore';
 import { t, type TranslationKey } from '../i18n';
 import { formatMediaTime } from '../utils/videoPlayer';
 import { setAudioOutputSink } from './AudioOutputSink';
+import { effectiveAudioOutput, registerAudioOutputConsumer } from './audioOutputRouting';
 import { LocalExecutionError } from './localExecutionSupport';
 
 const DEFAULT_PREVIEW_VOLUME = 60;
@@ -29,7 +28,7 @@ interface ActivePreview {
   sinkTarget?: string;
   sinkQueue: Promise<void>;
   unbindAudio: () => void;
-  unbindSettings: () => void;
+  unbindOutput: () => void;
   deniedReason?: () => string | undefined;
 }
 
@@ -200,15 +199,11 @@ export class AudioPreviewService {
       key, volumeScope, requestId, controls, controller: new AbortController(),
       maxDurationMs: resourceId ? LIMITS.BOT_AUDIO_PREVIEW_MAX_DURATION_MS : undefined,
       loading: true, wantsPlayback: true, sinkQueue: Promise.resolve(),
-      unbindAudio: () => {}, unbindSettings: () => {},
+      unbindAudio: () => {}, unbindOutput: () => {},
       deniedReason: deniedReason ? () => deniedReason(controls) : undefined,
     };
     this.active = active;
-    active.unbindSettings = appEvents.on('settings.updated', () => {
-      if (!this.isCurrent(active) || !active.audio || active.sinkTarget === settingsStore.getAudioOutputDeviceId('media')) return;
-      active.audio.pause();
-      void this.playActive(active);
-    });
+    active.unbindOutput = registerAudioOutputConsumer(() => this.followOutput(active));
     this.setControlsState(controls, 'loading', t('botChat.audioPreviewLoading'));
     try {
       let result: AudioPreviewResult | undefined;
@@ -355,15 +350,27 @@ export class AudioPreviewService {
   }
 
   private routeActiveAudio(active: ActivePreview, audio: HTMLAudioElement): Promise<void> {
-    active.sinkTarget = settingsStore.getAudioOutputDeviceId('media');
+    active.sinkTarget = effectiveAudioOutput('media');
     const route = async () => {
       if (!this.isCurrent(active)) return;
-      await setAudioOutputSink(audio, settingsStore.getAudioOutputDeviceId('media'));
+      await setAudioOutputSink(audio, effectiveAudioOutput('media'));
     };
     // Older sink changes must finish before a newer one can select the output.
     const routing = active.sinkQueue.then(route, route);
     active.sinkQueue = routing;
     return routing;
+  }
+
+  /**
+   * The media output changed: playback pauses while the preview moves and only the
+   * newest route resumes it. Resolves once the preview is on the new device and
+   * rejects when that device refuses, so a selection in progress is undone.
+   */
+  private followOutput(active: ActivePreview): Promise<void> {
+    if (!this.isCurrent(active) || !active.audio || active.sinkTarget === effectiveAudioOutput('media')) return Promise.resolve();
+    active.audio.pause();
+    void this.playActive(active);
+    return active.sinkQueue;
   }
 
   private stopActive(cancelRequest: boolean, resetControls = true): void {
@@ -372,7 +379,7 @@ export class AudioPreviewService {
     this.active = null;
     active.controller.abort();
     clearTimeout(active.stopTimer);
-    active.unbindSettings();
+    active.unbindOutput();
     active.unbindAudio();
     if (active.loading && cancelRequest) {
       const cancellation = window.api?.cancelAudioPreview?.({ requestId: active.requestId });

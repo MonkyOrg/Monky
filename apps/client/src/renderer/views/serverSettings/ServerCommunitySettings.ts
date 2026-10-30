@@ -3,6 +3,7 @@ import type { CommunityFeed } from '../../core/CommunityFeed';
 import type { ServerSettingsContext } from './ServerSettingsContext';
 import { t } from '../../i18n';
 import { escapeHtml } from '../../utils/html';
+import { resolveAvatarUrl } from '../../utils/avatar';
 import { pickAndCropImage } from '../ImageCropModal';
 import '../../styles/community.css';
 
@@ -30,7 +31,7 @@ export class ServerCommunitySettings {
     return `<div class="form-group" data-settings-section="server-banner" data-settings-label="${escapeHtml(t('community.banner'))}" style="margin: 16px 0 0;">
         <label for="community-choose-banner">${t('community.banner')}</label>
         <img id="community-server-banner" class="community-cover" alt="${escapeHtml(t('community.banner'))}"
-          ${snapshot?.settings.bannerUrl ? `src="${escapeHtml(this.feed.client.getHttpBaseUrl() + snapshot.settings.bannerUrl)}"` : 'hidden'}>
+          ${snapshot?.settings.bannerUrl ? `src="${escapeHtml(resolveAvatarUrl(snapshot.settings.bannerUrl, this.feed.client.getHttpBaseUrl()))}"` : 'hidden'}>
         <div class="community-actions">
           <button id="community-choose-banner" class="btn btn-secondary" type="button" data-community-setting="image" ${this.feed.server.hasPermission(Permission.MANAGE_SERVER) ? '' : 'disabled'}>${t('community.chooseImage')}</button>
           <button class="btn btn-secondary" type="button" data-community-setting="remove" ${this.feed.server.hasPermission(Permission.MANAGE_SERVER) && snapshot?.settings.bannerUrl ? '' : 'disabled'}>${t('community.removeImage')}</button>
@@ -44,7 +45,7 @@ export class ServerCommunitySettings {
     toggle?.addEventListener('change', () => {
       const enabled = toggle.checked;
       void context.operations.run('community-events', t('community.eventsAndLiveActions'), Permission.MANAGE_SERVER, async () => {
-        await context.request(MessageType.COMMUNITY_UPDATE_SETTINGS, { eventsEnabled: enabled }, Permission.MANAGE_SERVER);
+        await context.request([MessageType.COMMUNITY_UPDATE_SETTINGS, { eventsEnabled: enabled }], Permission.MANAGE_SERVER);
       }).then(() => { if (!abort.signal.aborted) sync(); });
     }, { signal: abort.signal });
     root.addEventListener('click', (event) => {
@@ -57,7 +58,7 @@ export class ServerCommunitySettings {
         const image = action === 'image' && button ? await pickAndCropImage(button, 'banner') : null;
         if (action === 'image' && image === null) return;
         context.assertAllowed(Permission.MANAGE_SERVER);
-        await context.request(MessageType.COMMUNITY_UPDATE_SETTINGS, { bannerBase64: image }, Permission.MANAGE_SERVER);
+        await context.request([MessageType.COMMUNITY_UPDATE_SETTINGS, { bannerBase64: image }], Permission.MANAGE_SERVER);
       }).then(() => { if (!abort.signal.aborted) sync(); });
     }, { signal: abort.signal });
     const sync = () => this.refreshState(root, context);
@@ -76,7 +77,7 @@ export class ServerCommunitySettings {
     if (image) {
       const url = this.feed.snapshot?.settings.bannerUrl;
       image.hidden = !url;
-      if (url) image.src = this.feed.client.getHttpBaseUrl() + url;
+      if (url) image.src = resolveAvatarUrl(url, this.feed.client.getHttpBaseUrl());
       else image.removeAttribute('src');
     }
     for (const button of root.querySelectorAll<HTMLButtonElement>('[data-community-setting]')) {

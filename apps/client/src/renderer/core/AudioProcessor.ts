@@ -1,10 +1,11 @@
 import { appEvents } from './EventBus';
-import { settingsStore } from '../stores/settingsStore';
+import { settingsChanged, settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { soundEffects } from './SoundEffects';
 import { clientLog } from './ClientLogService';
 import { createNoiseSuppressor, destroyNoiseSuppressor, type NoiseSuppressorNode } from './NoiseSuppression';
-import type { NoiseSuppressionMode } from '../utils/audioPreferences';
+import { microphoneConstraints, type NoiseSuppressionMode } from '../utils/audioPreferences';
+import { isVoiceActive, speechLevel } from '../audio/voiceActivity';
 
 export class AudioProcessor {
   private rawMicStream: MediaStream | null = null;
@@ -20,7 +21,6 @@ export class AudioProcessor {
 
   private vadInterval: ReturnType<typeof setInterval> | null = null;
   private isSpeaking: boolean = false;
-  private vadThreshold: number = settingsStore.vadSensitivity !== undefined ? settingsStore.vadSensitivity : 14;
   private isMuted: boolean = voiceStore.getEffectiveMuted();
   private isDeafened: boolean = voiceStore.getEffectiveDeafened();
 
@@ -35,8 +35,15 @@ export class AudioProcessor {
   private deviceSwitchTask: Promise<void> | null = null;
   private graphReady = false;
   private microphonePublicationPending = false;
+  private initialized = false;
 
-  constructor() {
+  /**
+   * Starts push-to-talk and the microphone gate's listeners. Importing the
+   * module has no side effects: only the main window calls this (R-MEDIA-3).
+   */
+  public init(): void {
+    if (this.initialized) return;
+    this.initialized = true;
     this.initPtt();
   }
 
@@ -46,33 +53,19 @@ export class AudioProcessor {
 
     const targetDeviceId = deviceId ?? settingsStore.selectedMicrophoneId;
     clientLog.info('AUDIO', 'Starting microphone', { deviceId: targetDeviceId || 'default' });
-    const constraints: MediaStreamConstraints = {
-      audio: {
-        deviceId: targetDeviceId ? { exact: targetDeviceId } : undefined,
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: settingsStore.noiseSuppressionMode === 'browser',
-        autoGainControl: true,
-      },
-      video: false,
-    };
 
     let rawStream: MediaStream;
     try {
-      rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+      rawStream = await navigator.mediaDevices.getUserMedia({
+        audio: microphoneConstraints(targetDeviceId, settingsStore.noiseSuppressionMode), video: false,
+      });
     } catch (err: unknown) {
       if (generation !== this.captureGeneration) throw new DOMException('Microphone startup was cancelled', 'AbortError');
       if (targetDeviceId) {
         clientLog.warn('AUDIO', 'Could not open specific mic, falling back to default', { error: err instanceof Error ? err.message : String(err) });
         console.warn('[AudioProcessor] Could not open specific mic, falling back to default mic:', err);
         rawStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            echoCancellation: true,
-            noiseSuppression: settingsStore.noiseSuppressionMode === 'browser',
-            autoGainControl: true,
-          },
-          video: false,
+          audio: microphoneConstraints('', settingsStore.noiseSuppressionMode), video: false,
         });
       } else {
         throw err;
@@ -238,14 +231,7 @@ export class AudioProcessor {
       if (signal.aborted) { cancel(); return; }
       signal.addEventListener('abort', cancel, { once: true });
       void navigator.mediaDevices.getUserMedia({
-        audio: {
-          deviceId: deviceId ? { exact: deviceId } : undefined,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: settingsStore.noiseSuppressionMode === 'browser',
-          autoGainControl: true,
-        },
-        video: false,
+        audio: microphoneConstraints(deviceId, settingsStore.noiseSuppressionMode), video: false,
       }).then((stream) => {
         signal.removeEventListener('abort', cancel);
         if (signal.aborted) stream.getTracks().forEach((track) => track.stop());
@@ -318,7 +304,9 @@ export class AudioProcessor {
       this.unbindPttEvents.push(unbind);
     }
 
-    const unbindSettings = appEvents.on('settings.updated', () => {
+    const unbindSettings = appEvents.on('settings.updated', (update) => {
+      // Only the input mode and the key reach the global hook: a volume slider or a mute must not.
+      if (!settingsChanged(update, 'inputMode', 'pttKey')) return;
       this.syncPttConfig();
       this.applyTrackEnabled();
     });
@@ -597,9 +585,7 @@ export class AudioProcessor {
 
     if (!this.analyser) return;
 
-    const bufferLength = this.analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-    const speechBins = Math.min(36, bufferLength);
+    const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
     let silenceCounter = 0;
 
     this.vadInterval = setInterval(() => {
@@ -617,14 +603,6 @@ export class AudioProcessor {
       }
 
       this.analyser.getByteFrequencyData(dataArray);
-      let sum = 0;
-      let peak = 0;
-      for (let i = 0; i < speechBins; i++) {
-        const val = dataArray[i];
-        sum += val;
-        if (val > peak) peak = val;
-      }
-      const average = sum / speechBins;
 
       // In PTT mode, speaking state is controlled by PTT key activation
       if (isPtt) {
@@ -636,12 +614,7 @@ export class AudioProcessor {
         return;
       }
 
-      // Calibrated threshold: filters background mic hiss while activating reliably when talking
-      const targetAvg = Math.max(16, this.vadThreshold * 0.8);
-      const targetPeak = Math.max(42, this.vadThreshold * 1.8);
-      const isVoiceActive = (average > targetAvg && peak > targetPeak) || average > (targetAvg * 1.4);
-
-      if (isVoiceActive) {
+      if (isVoiceActive(speechLevel(dataArray), settingsStore.vadSensitivity)) {
         silenceCounter = 0;
         if (!this.isSpeaking) {
           this.setSpeaking(true);
@@ -685,10 +658,6 @@ export class AudioProcessor {
     appEvents.emit('local.deafened', deafened);
   }
 
-  public setVadThreshold(threshold: number): void {
-    this.vadThreshold = Math.max(0, Math.min(160, threshold));
-  }
-
   public getLocalAudioStream(): MediaStream | null {
     return this.localStream || this.rawMicStream;
   }
@@ -703,13 +672,9 @@ export class AudioProcessor {
    */
   public getInputLevel(): number {
     if (!this.analyser || !this.canActivateMicrophone() || !voiceStore.microphoneOpen) return -1;
-    const bufferLength = this.analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
+    const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
     this.analyser.getByteFrequencyData(dataArray);
-    const speechBins = Math.min(36, bufferLength);
-    let sum = 0;
-    for (let i = 0; i < speechBins; i++) sum += dataArray[i];
-    return sum / speechBins;
+    return speechLevel(dataArray).average;
   }
 
   public stopMicrophone(): void {
@@ -783,6 +748,7 @@ export class AudioProcessor {
     }
     this.unbindPttEvents.forEach((unbind) => unbind());
     this.unbindPttEvents = [];
+    this.initialized = false;
   }
 }
 

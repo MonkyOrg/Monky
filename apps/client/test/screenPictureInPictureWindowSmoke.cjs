@@ -23,13 +23,15 @@ if (!process.versions.electron) {
   });
 } else {
   const { app, BrowserWindow, ipcMain, screen } = require('electron');
-  const ts = require('typescript');
-  const vm = require('node:vm');
   const { ScreenPictureInPictureWindows, handleScreenPictureInPictureOpen } =
     require(path.join(root, 'dist-electron', 'main', 'screenPictureInPictureWindow.js'));
+  const { IpcRegistry, windowContents } = require(path.join(root, 'dist-electron', 'main', 'ipc', 'registry.js'));
+  const { registerWindowIpc } = require(path.join(root, 'dist-electron', 'main', 'ipc', 'windowIpc.js'));
   app.setPath('userData', process.env.MONKY_PIP_TEST_PROFILE);
   app.disableHardwareAcceleration();
   app.on('window-all-closed', () => {});
+  // As in main.ts: every WebContents, the PiP popup included, starts with the default guards.
+  require(path.join(root, 'dist-electron', 'main', 'webContentsPolicy.js')).installWebContentsPolicy(app);
   let mainWindow, other, deadline;
   // The runner's real cursor is outside the test's control, so the PiP reads this one.
   let pipCursor = { x: -100000, y: -100000 };
@@ -47,15 +49,10 @@ if (!process.versions.electron) {
     contents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     // Same order as main.ts: the PiP popup first, everything else denied.
     contents.setWindowOpenHandler(details => handleScreenPictureInPictureOpen(contents, details) ?? { action: 'deny' });
-    const file = fs.readFileSync(path.join(root, 'src', 'main', 'ipcHandlers.ts'), 'utf8');
-    const start = file.indexOf('const isWindowAway =');
-    const end = file.indexOf("ipcMain.handle('window:minimize'", start);
-    assert.ok(start >= 0 && end > start);
-    vm.runInNewContext(ts.transpileModule(file.slice(start, end), {
-      compilerOptions: { target: ts.ScriptTarget.ES2022 },
-    }).outputText, { mainWindow, ipcMain, ScreenPictureInPictureWindows: class extends ScreenPictureInPictureWindows {
-      constructor(owner) { super(owner, Date.now, () => pipCursor); }
-    } });
+    // The window module of main.ts, behind the same registry; the PiP reads the modeled cursor.
+    const registry = new IpcRegistry(ipcMain, { main: () => windowContents(mainWindow), overlay: () => null });
+    registerWindowIpc(registry, { window: mainWindow,
+      pipWindows: new ScreenPictureInPictureWindows(mainWindow, Date.now, () => pipCursor) });
     const page = path.join(process.env.MONKY_PIP_TEST_PROFILE, 'pip.html');
     fs.writeFileSync(page, '<!doctype html><body style="background:#22252d;color:white">Monky QA: PiP<canvas width="160" height="90"></canvas><video muted autoplay></video></body>');
     await mainWindow.loadFile(page);

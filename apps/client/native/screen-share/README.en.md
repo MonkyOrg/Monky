@@ -98,8 +98,9 @@ node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
 ```
 
 Use `--arch=x64` on both builds to produce Intel artifacts on Apple Silicon with
-Rosetta. The build runs the helper's self-test and queries the actual target
-library; it never fabricates capabilities from arm64. CI also builds on Intel
+Rosetta. The build runs the helper's self-test and the engine's device-free
+contracts (all of them except the Media Foundation ones, which exist only on
+Windows) and queries the actual target library; it never fabricates capabilities from arm64. CI also builds on Intel
 and Apple Silicon runners. `macNativeHostSmoke.cjs` is device-free, not media proof.
 For actual media, `nativeCaptureSmoke.cjs`, `nativeAvSmoke.cjs` and
 `screen-audio/test/macPacketAudioSmoke.cjs` use owned synthetic sources and require
@@ -230,10 +231,8 @@ before another MFT processing/shutdown call. Pending reads yield to the existing
 including abort/shutdown: the private presentation budget does not guarantee
 decoder-internal pool capacity. `sampleRetirementDeferrals` counts these waits
 without imposing FPS, sleeps, or an arbitrary new surface budget.
-Screen publication uses compressed AUs, not texture loans. For legacy NV12
-`submitFrame`, child death without the input reader/fence receipt does **not**
-authorize producer texture reuse: that guard is retained and full-close proof
-is rejected rather than inventing GPU retirement.
+Screen publication uses compressed AUs only: no input texture enters the RTC
+process, and Media Foundation is limited to H.264 decoding.
 
 IPC has count/byte budgets and correlated acknowledgements. Video awaits the
 real native-copy ACK with one AU retained by the bounded capture pipe, never a
@@ -332,11 +331,20 @@ start and when Windows reports a display change (`WM_DISPLAYCHANGE`,
 `WM_DEVICECHANGE` or a changed monitor list), never per frame: that read queries
 the registry while holding the system display lock, and repeating it while
 another program writes to the registry froze every screen. Each capture tick
-checks only the GDI name and bounds, which come from cached metadata. The main
+checks only the GDI name and bounds, which come from cached metadata. Thumbnails
+follow the same rule with the same code (`src/win/monitorIdentity.h`): they read
+the interface once, when they start. The main
 process follows Electron's screen events for the same read. Minimizing or hiding a window/game is treated as a pause,
-not an identity loss. Restoring it allows frames to resume. The title is not
+not an identity loss: a minimized window can also be selected, and its preview
+stays paused until it is restored. The title is not
 part of the identity either: browsers, editors and players rename their window
-for every page or file, and sharing continues. A changed window class or
+for every page or file, and sharing continues. Another open window's title never prevents sharing. The
+selected window's title does not either, as long as it fits the stock OBS window list: title, class and
+executable form one entry of at most 4096 UTF-8 bytes, where `:` and `#` take 3 bytes each. In practice,
+that is about 4,000 ASCII characters or 1,300 Chinese characters. A longer title fails sharing with
+`ERR_SCREEN_CAPTURE_SOURCE_IDENTITY`, because the window is not found in the list. Half an emoji in the
+title (an unpaired UTF-16 surrogate, which a page can leave when it cuts its own title) becomes `�`, as in
+the OBS list, and does not prevent sharing either. A changed window class or
 executable ends the source. Closing or
 replacing the window/process withdraws its announcement even without viewers.
 
@@ -351,6 +359,10 @@ sharing that child.
 Availability distinguishes files, encoders and sources:
 
 1. `loadCaptureRuntime()` verifies files and hashes without opening the GPU.
+   In the app, Main calls `loadRuntimeAsync()`: the same checks, RTC included,
+   reading and hashing in slices without stalling the process. The synchronous
+   `loadRuntime()` remains for scripts, packaging and tests. A file named by both
+   manifests is verified once.
    `captureKinds` declares implementation, **not hardware qualification**.
    Main reports `requiresSelectionProbe: true`; the picker shows preparation
    as pending, without testing an arbitrary source in the background.
@@ -381,6 +393,11 @@ before the decoder closes the writer while frames are still arriving.
 Its owner blocks new frames, closes the decoder and drains the writer before
 stopping the track; a timeout retains resources for a subsequent retry.
 
+Preload loads only `@monky/screen-share/renderer` (presentation and audio), and
+only when its window watches the first native screen. Capture, transport and
+processes stay in Main, behind the main entry; `afterPack` compares both
+entries byte for byte with the packaged copy.
+
 Stopping a source or receiver may return `retired-with-errors` when the original
 owners prove retirement but report a cleanup error. The renderer logs the warning
 and releases only that instance's state, allowing a fresh share or Watch in the
@@ -390,6 +407,11 @@ preserves its owners for retry.
 
 A QPC/RTC observation exceeding 2 ms drops its frame and fences dependent
 pictures, requesting a real IDR through the existing bounded recovery (1.5 s).
+The same applies to every result the capture clock classifies as a frame drop
+(a stale, early or out-of-order frame, or one an offset correction would move
+back in RTC time): the recovery reports reason `clock-frame-dropped` with the
+code in `clockStatus`, and sharing continues. Only an invalid timestamp, a
+discontinuity or a closed clock ends the source.
 It neither widens clock tolerance nor invents timestamps or treats clock
 discontinuities as success. Connection notices use an 8-second toast instead
 of leaving a modal over the game after recovery.
@@ -433,6 +455,11 @@ PCM and output epoch; only physical clock measurement is withdrawn until a valid
 non-regressing anchor is available. Selections are serialized; a rejection is
 reported to the selector and restores the previous selection without closing
 video. Stopping the output drains pending selections before closing the context.
+A chosen device that is not connected does not fail the Watch: screens play on
+the system default output, with a notice, and return to the chosen device when it
+reappears, through the same hot switch. Losing the output during playback
+suspends the context; the epoch is kept for up to 5 s while audio moves to another
+output or the device recovers by itself, and only then does the output fail.
 Mute, deafen and volume do not recreate reception. On the stage, participant
 indicator-only updates also preserve video elements and fullscreen.
 
@@ -588,11 +615,13 @@ remain explicit and terminal. The RTC diagnostic timer stops before native
 close begins, so it cannot inspect dismantled state while resources still drain.
 
 A paired QPC/RTC sample that takes longer than 2 ms does not, by itself,
-invalidate continuous PCM. Only in this case, the block continues without an
+invalidate continuous PCM. In that case, and for every result the capture clock
+classifies as a frame drop (including two blocks in the same RTC millisecond
+after an offset correction), the block continues without an
 absolute timestamp and increments the source's `clockObservationsUnavailable`
 diagnostic. The next valid observation resumes timestamps without restarting
 the epoch. Clock limits are not widened, timestamps are not invented and PCM
-is not discarded; discontinuities, regressions and other errors remain explicit.
+is not discarded; invalid timestamps, discontinuities and other errors remain explicit.
 
 For playout, `currentFrame` observes the graph clock, not the speaker clock.
 Chromium 152.0.7977.130 [advances the graph before updating the
@@ -751,6 +780,11 @@ builds `screen-share` RTC and capture, and collects licenses; **it does not
 build `screen-audio`**. It does not use experimental directories or execute
 `gclient` build hooks. Modified or incomplete source checkouts stop preparation;
 they are not silently reset or replaced.
+
+The venv gets httplib2 and six only from the wheels pinned in
+`scripts/native-rtc/pins.json`, on Windows and on macOS (`prepareMacRtc.cjs`):
+pip refuses a file whose SHA-256 differs. On Windows, if that install fails,
+the venv is removed so the next run provisions it again.
 
 Archive downloads allow up to three attempts for transient network/server
 failures, including aborted Windows connections (`ECONNABORTED`), with backoff
@@ -1025,7 +1059,10 @@ WinUI/ApplicationFrameWindow windows. It verifies real WGC capture with
 same-process children and distinguishes both windows with duplicate titles,
 while rejecting remapping to another process's child and changed process
 identity. It also renames the window while it is captured (a new title, one
-over 512 characters and an empty one) and requires frames to keep flowing. It does not capture personal
+over 512 characters and an empty one) and requires frames to keep flowing. Before that, it admits a
+minimized window, one with a long title, one with half an emoji in its title, and one while another
+restored window has a long title; each probe isolates one of those reasons. These windows never appear
+on screen (the restored ones sit past every monitor), and `--offscreen-only` runs only those probes. It does not capture personal
 windows or record video; `--contracts=<absolute_executable>` allows a different
 build directory.
 

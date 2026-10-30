@@ -8,6 +8,7 @@ import type { CommandCallerContext, LocalCommandPreparation } from './localExecu
 import type { ServerShutdownReason } from './serverLifecycle.js';
 import type { BotCapability, BotPermissions } from './botPermissions.js';
 import type { NativeScreenSource } from './screenSharing.js';
+import type { SfuDtlsParameters, SfuMediaAppData } from './validators.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -389,7 +390,8 @@ export enum MessageType {
   PONG = 'PONG',
 }
 
-export interface ProtocolMessage<T = any> {
+/** A message as it travels. The maps in protocolPayloads.ts name the payload of each type. */
+export interface ProtocolMessage<T = unknown> {
   type: MessageType;
   requestId?: string;
   payload: T;
@@ -1085,13 +1087,16 @@ export interface ServerInviteInfoPayload {
 }
 
 // SFU Payloads (#515)
+// mediasoup structures travel as `unknown`: the server validates what clients
+// send with the schemas in validators.ts, and each side gives what it receives
+// its own library's types at that boundary.
 export interface SfuGetRouterRtpCapabilitiesPayload {
   channelId: string;
 }
 
 export interface SfuRouterRtpCapabilitiesPayload {
   channelId: string;
-  rtpCapabilities: any;
+  rtpCapabilities: unknown;
 }
 
 export interface SfuCreateWebRtcTransportPayload {
@@ -1110,17 +1115,17 @@ export interface SfuWebRtcTransportCreatedPayload {
   screenSessionId?: string;
   transportOptions: {
     id: string;
-    iceParameters: any;
-    iceCandidates: any[];
-    dtlsParameters: any;
-    sctpParameters?: any;
+    iceParameters: unknown;
+    iceCandidates: unknown[];
+    dtlsParameters: unknown;
+    sctpParameters?: unknown;
   };
 }
 
 export interface SfuConnectWebRtcTransportPayload {
   channelId: string;
   transportId: string;
-  dtlsParameters: any;
+  dtlsParameters: SfuDtlsParameters;
 }
 
 export interface SfuCloseWebRtcTransportPayload {
@@ -1133,8 +1138,8 @@ export interface SfuProducePayload {
   channelId: string;
   transportId: string;
   kind: 'audio' | 'video';
-  rtpParameters: any;
-  appData?: Record<string, any>;
+  rtpParameters: unknown;
+  appData?: unknown;
 }
 
 export interface SfuProducedPayload {
@@ -1146,7 +1151,7 @@ export interface SfuConsumePayload {
   channelId: string;
   transportId: string;
   producerId: string;
-  rtpCapabilities: any;
+  rtpCapabilities: unknown;
 }
 
 export interface SfuConsumedPayload {
@@ -1154,9 +1159,9 @@ export interface SfuConsumedPayload {
   id: string;
   producerId: string;
   kind: 'audio' | 'video';
-  rtpParameters: any;
+  rtpParameters: unknown;
   producerSessionId: string;
-  appData: Record<string, any>;
+  appData: SfuMediaAppData;
 }
 
 export interface SfuProducerClosedPayload {
@@ -1186,7 +1191,7 @@ export interface SfuNewProducerPayload {
   producerId: string;
   producerSessionId: string;
   kind: 'audio' | 'video';
-  appData: Record<string, any>;
+  appData: SfuMediaAppData;
 }
 
 export interface SfuGetProducersPayload {

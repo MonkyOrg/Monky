@@ -4,7 +4,6 @@ import { gamePresence } from './GamePresenceController';
 import { gameSessionKey, shouldSuggestGameShare } from './gameShareEligibility';
 import { gameShareRequests, type PendingGameShareRequest } from './GameShareRequests';
 import { startGameShare } from './gameShareStart';
-import { screenAudioService } from './ScreenAudioService';
 import { stopLocalScreenShares } from './screenShareControls';
 import { videoService } from './VideoService';
 import { voiceStore } from '../stores/voiceStore';
@@ -14,6 +13,7 @@ import { showConfirm } from '../views/Dialog';
 import { activityIconSrc } from '../utils/activityIcon';
 import { setButtonLoading } from '../utils/buttonLoading';
 import { escapeHtml } from '../utils/html';
+import { screenShareFailureMessage } from '../utils/screenShareFailure';
 import { cancelSurfaceMotion } from '../utils/surfaceMotion';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { t } from '../i18n';
@@ -48,7 +48,7 @@ export class GameShareSuggestion {
   public start(): void {
     this.activity = gamePresence.current;
     this.unbind.push(
-      appEvents.on<UserActivity | null>('game_presence.changed', (activity) => {
+      appEvents.on('game_presence.changed', (activity) => {
         this.activity = activity;
         this.render();
       }),
@@ -263,7 +263,7 @@ export class GameShareSuggestion {
       await startGameShare(sourceId, shareId => this.claimShare(shareId));
     } catch (error: unknown) {
       console.warn('[GameShare] Could not stream the game', error);
-      showErrorToast(t('gameShare.failed', { error: error instanceof Error ? error.message : String(error) }), 7000);
+      showErrorToast(screenShareFailureMessage(error, 'game-start'), 7000);
     }
   }
 
@@ -271,10 +271,10 @@ export class GameShareSuggestion {
     const shareId = this.liveShareId;
     if (!shareId) return;
     try {
-      await stopLocalScreenShares(screenAudioService, { shareIds: [shareId] });
+      await stopLocalScreenShares({ shareIds: [shareId] });
     } catch (error: unknown) {
       console.warn('[GameShare] Could not stop the game stream', error);
-      showErrorToast(t('gameShare.stopFailed', { error: error instanceof Error ? error.message : String(error) }), 7000);
+      showErrorToast(screenShareFailureMessage(error, 'game-stop'), 7000);
     }
   }
 

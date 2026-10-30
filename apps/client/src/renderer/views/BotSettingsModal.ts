@@ -3,6 +3,7 @@ import {
   normalizeBotLocale, resolveBotLocale, resolveBotSettingsValues, type BotLocale,
   botPermissionsSnapshotSchema, isBotStorageCapability, unreviewedBotPermissions, type BotCapability,
   type BotForm, type BotFormValues, type BotSettingsDefinition, type BotSettingsPatch, type BotSettingsSnapshot, type BotSettingsSummary,
+  type ClientMessageArgs,
 } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
 import { appEvents } from '../core/EventBus';
@@ -13,10 +14,10 @@ import { getActiveServerStore, type ServerStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { getLanguage, SUPPORTED_LANGUAGES, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { openModal, type ModalShell } from '../utils/modalShell';
+import { reportError } from '../utils/feedback';
 import { renderLoadingIndicator } from '../utils/loadingIndicator';
 import { getAvatarUrl } from '../utils/avatar';
-import { enableBackdropClose } from '../utils/modal';
 import { botPreferenceScope } from '../utils/botPreferenceScope';
 import { botPreferenceScopeFor } from '../utils/botSettingsContext';
 import { botInputError, botRequestError, convertBotInputValues, initialBotInputValues } from '../utils/botInputs';
@@ -69,7 +70,8 @@ function sameValue(a: BotFormValues[string] | undefined, b: BotFormValues[string
 export class BotSettingsModal {
   private root: HTMLElement | null = null;
   private session: SettingsSession | null = null;
-  private returnFocus: HTMLElement | null = null;
+  private shell: ModalShell | null = null;
+  private card: HTMLElement | null = null;
   private unbind: Array<() => void> = [];
   private pending = new Set<string>();
   private generation = 0;
@@ -115,22 +117,29 @@ export class BotSettingsModal {
     this.session = session;
     this.initialScope = initialScope ?? null;
     this.openedFromCatalog = !botId;
-    this.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    this.root = document.createElement('div');
-    this.root.className = 'modal-backdrop bot-settings-modal';
-    document.body.appendChild(this.root);
-    enableBackdropClose(this.root, () => this.close());
-    this.root.addEventListener('click', this.onClick);
-    this.root.addEventListener('input', this.onInput);
-    this.root.addEventListener('change', this.onInput);
-    this.root.addEventListener('submit', this.onSubmit);
-    window.addEventListener('keydown', this.onKeyDown);
-    this.unbind.push(() => window.removeEventListener('keydown', this.onKeyDown), audioPreviewService.bind(this.root));
-    this.unbind.push(appEvents.on('session.changed', () => this.close()));
-    for (const event of ['network.disconnected', 'network.status', 'server.updated', 'server.roles_updated', 'user.updated']) {
+    // Renders replace the card's content, never the card: a dialog opened above it keeps covering it.
+    // The card enters empty, so its fixed id is what makes a reopened modal supersede the old one's exit.
+    const shell = openModal({
+      backdropClass: 'bot-settings-modal',
+      card: `<div class="modal-card settings-modal-card bot-settings-card" id="bot-settings-card" aria-labelledby="bot-settings-title" tabindex="-1"></div>`,
+      initialFocus: false,
+      onClose: () => { if (this.shell === shell) this.teardown(); },
+    });
+    this.shell = shell;
+    this.root = shell.element;
+    this.card = shell.card;
+    const options = { signal: shell.signal };
+    this.root.addEventListener('click', this.onClick, options);
+    this.root.addEventListener('input', this.onInput, options);
+    this.root.addEventListener('change', this.onInput, options);
+    this.root.addEventListener('submit', this.onSubmit, options);
+    this.root.addEventListener('keydown', this.onKeyDown, options);
+    this.unbind.push(audioPreviewService.bind(this.root));
+    this.unbind.push(appEvents.on('session.changed', () => this.revoke()));
+    for (const event of ['network.disconnected', 'network.status', 'server.updated', 'server.roles_updated', 'user.updated'] as const) {
       this.unbind.push(appEvents.on(event, () => {
         if (!this.isOrigin(session)) return;
-        if (!this.isCurrent(session)) { this.close(); return; }
+        if (!this.isCurrent(session)) { this.revoke(); return; }
         this.refreshAuthorization();
       }));
     }
@@ -167,11 +176,11 @@ export class BotSettingsModal {
     return this.session === session && !!this.root?.isConnected && validSession(session);
   }
 
-  private async request(session: SettingsSession, type: MessageType, payload: unknown): Promise<unknown> {
+  private async request(session: SettingsSession, ...message: ClientMessageArgs): Promise<unknown> {
     if (!this.isCurrent(session)) throw new DOMException('Settings closed', 'AbortError');
     const id = uuidv4();
     this.pending.add(id);
-    try { return await session.client.sendRequest<unknown>(type, payload, id); }
+    try { return await session.client.sendRequest<unknown>(...message, id); }
     finally { this.pending.delete(id); }
   }
 
@@ -386,8 +395,7 @@ export class BotSettingsModal {
   }
 
   private render(): void {
-    if (!this.root || !this.session) return;
-    const opening = this.root.childElementCount === 0;
+    if (!this.root || !this.card || !this.session) return;
     const focused = document.activeElement instanceof HTMLElement && this.root.contains(document.activeElement)
       ? document.activeElement : null;
     const selection = focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement
@@ -412,7 +420,7 @@ export class BotSettingsModal {
       ? 1 + Number(snapshot.bot.capabilities.downloadsSound) + Number(!!form) : 0;
     const section = (key: string, label: string): string => sectionCount > 1
       ? `data-settings-section="${key}" data-settings-label="${escapeHtml(label)}"` : '';
-    this.root.innerHTML = `<div class="modal-card settings-modal-card bot-settings-card" role="dialog" aria-modal="true" aria-labelledby="bot-settings-title" tabindex="-1">
+    this.card.innerHTML = `
       <div class="settings-sidebar">
         <div class="bot-settings-sidebar-title">${t('botSettings.title')}</div>
         <div role="tablist" aria-orientation="vertical" aria-label="${t('botSettings.title')}">
@@ -428,7 +436,7 @@ export class BotSettingsModal {
       <div class="settings-content-header">
         <div><h2 class="modal-title" id="bot-settings-title">${t(this.selectedBotId ? 'botSettings.title' : 'botSettings.listTitle')}</h2>
           <div class="bot-settings-server">${escapeHtml(this.session.server.serverDetails?.name ?? '')}</div></div>
-        <button type="button" class="settings-back-btn" data-settings-close aria-label="${t('common.close')}"><span class="material-symbols-outlined">close</span><span class="esc-hint">ESC</span></button>
+        <button type="button" class="settings-back-btn" data-settings-close data-modal-close aria-label="${t('common.close')}"><span class="material-symbols-outlined">close</span><span class="esc-hint">ESC</span></button>
       </div>
       <div class="settings-content-body bot-settings-body" aria-busy="${this.loading}">
       <div class="settings-tab-panel" id="tab-panel-${snapshot ? this.scope : 'catalog'}"
@@ -501,9 +509,7 @@ export class BotSettingsModal {
           <button type="submit" form="bot-settings-form" class="btn btn-primary" data-settings-save ${this.blocked() ? 'disabled' : ''} ${this.saving ? 'data-loading="1" aria-busy="true"' : ''}>
             ${t(this.saving ? 'botSettings.saving' : 'common.save')}</button>` : ''}
       </div>
-      </div>
-    </div>`;
-    if (opening) enterModal(this.root);
+      </div>`;
     const storageRoot = this.root.querySelector<HTMLElement>('[data-bot-storage-root]');
     if (storageRoot && snapshot) {
       const session = this.session;
@@ -513,7 +519,7 @@ export class BotSettingsModal {
         botName: () => this.snapshot?.bot.botId === botId ? this.snapshot.bot.name : botId,
         canManage: () => this.canManage(),
         isCurrent: () => this.isCurrent(session) && this.snapshot?.bot.botId === botId,
-        request: (type, payload) => this.request(session, type, payload),
+        request: (...message) => this.request(session, ...message),
       });
       this.storageSettings.mount(storageRoot);
     }
@@ -526,9 +532,14 @@ export class BotSettingsModal {
           (restored instanceof HTMLInputElement || restored instanceof HTMLTextAreaElement)) {
         restored.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined);
       }
-    } else if (!this.root.contains(document.activeElement)) this.root.querySelector<HTMLElement>('[role="dialog"]')?.focus({ preventScroll: true });
+    } else if (!this.root.contains(document.activeElement)) this.card.focus({ preventScroll: true });
     const body = this.root.querySelector('.bot-settings-body');
     if (body) body.scrollTop = scrollTop;
+  }
+
+  /** A refused action is explained in the shared toast; the status line keeps describing the state. */
+  private fail(message: string): void {
+    if (this.root) reportError(message);
   }
 
   private setMessage(message: string, error: boolean): void {
@@ -559,7 +570,7 @@ export class BotSettingsModal {
     if (this.scope === 'user' && event.target instanceof HTMLSelectElement && event.target.hasAttribute('data-settings-locale')) {
       if (event.type !== 'change') return;
       const locale = event.target.value === 'auto' ? 'auto' : normalizeBotLocale(event.target.value);
-      if (!locale) { this.setMessage(t('botSettings.invalidResponse'), true); return; }
+      if (!locale) { this.fail(t('botSettings.invalidResponse')); return; }
       this.localePreference = locale;
       draft.dirty = true;
       this.setMessage('', false);
@@ -581,8 +592,7 @@ export class BotSettingsModal {
   private onClick = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return;
     const target = event.target;
-    if (target.closest('[data-settings-close]')) { this.close(); return; }
-    if (!this.session || !this.isCurrent(this.session)) { this.close(); return; }
+    if (!this.session || !this.isCurrent(this.session)) { this.revoke(); return; }
     if (target.closest('[data-settings-copy-manifest]')) { void this.copyManifestUrl(this.session); return; }
     if (this.loading || this.saving) return;
     if (this.scope === 'user' && target.closest('[data-settings-local-tools]')) {
@@ -620,7 +630,7 @@ export class BotSettingsModal {
     if (!draft) return;
     if (target.closest('[data-settings-defaults]')) {
       const defaults = resolveBotSettingsValues(form, {});
-      if (!defaults.success) { this.setMessage(t('botSettings.invalidResponse'), true); return; }
+      if (!defaults.success) { this.fail(t('botSettings.invalidResponse')); return; }
       draft.values = defaults.values;
       draft.reset = true;
       draft.dirty = true;
@@ -687,20 +697,20 @@ export class BotSettingsModal {
     const scope = this.scope;
     const draft = this.drafts[scope];
     if (!session || !snapshot || !draft || this.blocked()) return;
-    if (!this.isCurrent(session)) { this.close(); return; }
-    if (scope === 'server' && !this.canConfigure()) { this.setMessage(t('botSettings.permissionDenied'), true); return; }
+    if (!this.isCurrent(session)) { this.revoke(); return; }
+    if (scope === 'server' && !this.canConfigure()) { this.fail(t('botSettings.permissionDenied')); return; }
     const form = this.form();
     const inputs = convertBotInputValues(form?.fields ?? [], draft.values);
     const resolved = resolveBotSettingsValues(form, inputs);
     if (!resolved.success) {
-      this.setMessage(botInputError(form?.fields ?? [], resolved.field, resolved.reason), true);
+      this.fail(botInputError(form?.fields ?? [], resolved.field, resolved.reason));
       const field = [...(this.root?.querySelectorAll<HTMLElement>('[data-field-name]') ?? [])].find((entry) => entry.dataset.fieldName === resolved.field);
       field?.setAttribute('aria-invalid', 'true');
       field?.querySelector<HTMLElement>('input, select, textarea, [tabindex]')?.focus();
       return;
     }
     const defaults = resolveBotSettingsValues(form, {});
-    if (!defaults.success) { this.setMessage(t('botSettings.invalidResponse'), true); return; }
+    if (!defaults.success) { this.fail(t('botSettings.invalidResponse')); return; }
     const patch: BotSettingsPatch = {};
     const overrides: BotFormValues = draft.reset ? {} : structuredClone(draft.overrides);
     // Untouched defaults stay implicit; resetting removes overrides instead of pinning today's defaults.
@@ -733,8 +743,8 @@ export class BotSettingsModal {
         this.setMessage(t('botSettings.savedServer'), false);
       }
     } catch (error) {
-      if (this.isCurrent(session)) this.setMessage(scope === 'user' || !(error instanceof Error)
-        ? t('botSettings.saveFailed') : botRequestError(error), true);
+      if (this.isCurrent(session)) this.fail(scope === 'user' || !(error instanceof Error)
+        ? t('botSettings.saveFailed') : botRequestError(error));
     } finally {
       if (this.isCurrent(session)) { this.saving = false; this.render(); }
     }
@@ -764,16 +774,15 @@ export class BotSettingsModal {
       this.message = t('botPermissions.saved');
       this.error = false;
     } catch (error) {
-      if (this.isCurrent(session)) this.setMessage(botRequestError(error), true);
+      if (this.isCurrent(session)) this.fail(botRequestError(error));
     } finally {
       if (this.isCurrent(session)) { this.saving = false; this.render(); }
     }
   }
 
+  /** Arrow keys move between the tabs and between the choices of a field; Escape and Tab belong to the shell. */
   private onKeyDown = (event: KeyboardEvent): void => {
     if (!this.root || event.defaultPrevented) return;
-    if (!handlesModalKey(this.root, event)) return;
-    if (event.key === 'Escape') { event.preventDefault(); this.close(); return; }
     const target = event.target instanceof Element ? event.target : null;
     const tab = target?.closest<HTMLButtonElement>('button[data-settings-scope]');
     if (tab && !this.saving && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
@@ -794,20 +803,20 @@ export class BotSettingsModal {
         options[(index + (event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1) + options.length) % options.length]?.focus();
       } else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choice.click(); }
     }
-    if (event.key !== 'Tab') return;
-    const focusable = [...this.root.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')]
-      .filter((element) => element.tabIndex >= 0 && !element.closest('fieldset:disabled') && element.getClientRects().length);
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    if (event.shiftKey && (active === first || !active || !focusable.includes(active))) {
-      event.preventDefault(); last?.focus();
-    } else if (!event.shiftKey && (active === last || !active || !focusable.includes(active))) {
-      event.preventDefault(); first?.focus();
-    }
   };
 
   public close(): void {
+    if (this.shell) this.shell.close('api');
+    else this.teardown();
+  }
+
+  /** The settings of a server the person left or can no longer reach go away at once, with no exit animation. */
+  private revoke(): void {
+    if (this.shell) this.shell.close('session', true);
+    else this.teardown();
+  }
+
+  private teardown(): void {
     this.generation++;
     this.sectionNavigation?.destroy();
     this.sectionNavigation = null;
@@ -818,8 +827,10 @@ export class BotSettingsModal {
     this.pending.clear();
     this.unbind.forEach((unbind) => unbind());
     this.unbind = [];
-    if (this.root) { audioPreviewService.release(this.root); exitModal(this.root); }
+    if (this.root) audioPreviewService.release(this.root);
+    this.shell = null;
     this.root = null;
+    this.card = null;
     this.session = null;
     this.snapshot = null;
     this.selectedBotId = null;
@@ -832,8 +843,6 @@ export class BotSettingsModal {
     this.loading = this.loadFailed = this.saving = this.schemaStale = this.serverStale = this.userStale = false;
     this.message = '';
     this.error = false;
-    if (this.returnFocus?.isConnected) this.returnFocus.focus({ preventScroll: true });
-    this.returnFocus = null;
   }
 }
 

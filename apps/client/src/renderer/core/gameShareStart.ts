@@ -1,6 +1,4 @@
-import { screenAudioService } from './ScreenAudioService';
-import { captureScreenShareCall, notifyScreenShareState, stopLocalScreenShares } from './screenShareControls';
-import { videoService } from './VideoService';
+import { captureScreenShareCall, discardUnpublishedScreen, notifyScreenShareState } from './screenShareControls';
 import { webRtcManager } from './WebRtcManager';
 import { voiceStore } from '../stores/voiceStore';
 
@@ -11,8 +9,8 @@ import { voiceStore } from '../stores/voiceStore';
  * call as audience. It is only offered while nothing is shared, so there is
  * never a previous share or audio owner to retire.
  *
- * Mirrors the native branch of ScreenSharePickerModal.startSharing; any error
- * is thrown to the caller after the half-started capture is cleaned up.
+ * Mirrors the native start of core/screenShareStart; any error is thrown to
+ * the caller after the half-started capture is cleaned up.
  * `claim` learns the share id right before it is published, so the game strip
  * owns the "live" status from the first voice update on.
  */
@@ -21,8 +19,7 @@ export async function startGameShare(sourceId: string, claim: (shareId: string) 
   const call = captureScreenShareCall();
   const capabilities = await webRtcManager.getNativeScreenCapabilities();
   // Better a silent stream than none: audio is dropped, never the share.
-  const shareAudio = !voiceStore.permissionMuted && capabilities.captureAudio === true
-    && !screenAudioService.getIsTestTone() && !screenAudioService.getIsCapturing();
+  const shareAudio = !voiceStore.permissionMuted && capabilities.captureAudio === true;
   let stream: MediaStream | null = null;
   let published = false;
   const isWanted = () => call.isCurrent() && !voiceStore.isScreenSharing;
@@ -32,23 +29,13 @@ export async function startGameShare(sourceId: string, claim: (shareId: string) 
     if (!isWanted()) return;
     stream = await webRtcManager.startNativeScreenShare(sourceId, shareAudio, isWanted, 'window', true);
     if (!isWanted()) throw new DOMException('Screen share was cancelled', 'AbortError');
-    if (shareAudio) {
-      await screenAudioService.stop();
-      voiceStore.addScreenAudioShare(stream.id);
-    }
+    if (shareAudio) voiceStore.addScreenAudioShare(stream.id);
     claim(stream.id);
     voiceStore.addScreenShare(stream.id);
     notifyScreenShareState(call);
     published = true;
   } catch (error) {
-    if (stream && !published && videoService.getScreenStream(stream.id) === stream) {
-      try {
-        if (call.isCurrent()) await stopLocalScreenShares(screenAudioService, { shareIds: [stream.id] });
-        else videoService.stopScreenShare(stream.id);
-      } catch (cleanupError) {
-        console.warn('[GameShare] Failed to clean up the cancelled game share', cleanupError);
-      }
-    }
+    if (stream && !published) await discardUnpublishedScreen(call, stream);
     if (error instanceof Error && error.name === 'AbortError') return;
     throw error;
   }

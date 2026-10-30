@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Ao trocar de servidor, diálogos com dados do servidor anterior (convite, Configurações de bots, Monitor) fecham na hora, sem deixar nada visível por cima do novo.",
+  "en": "When you switch servers, dialogs with the previous server's data (invite, bot settings, Monitor) close at once, leaving nothing visible over the new server."
+}

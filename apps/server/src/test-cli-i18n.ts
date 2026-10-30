@@ -18,7 +18,6 @@ import { cliLanguageCommand } from './cli/commands/cliSettings';
 import { listMembers, showMemberInfo } from './cli/commands/members';
 import { listRoles } from './cli/commands/roles';
 import { printServerTable, restartServerCommand, startServerCommand, statusServerCommand } from './cli/commands/serverLifecycle';
-import * as update from './cli/commands/update';
 import {
   configKeyLabel,
   describeSfuPortProblem,
@@ -37,6 +36,7 @@ import {
   printVoiceModeComparisonTable,
   sfuPreflightSummary,
 } from './cli/formatters';
+import * as autoUpdate from './cli/autoUpdate';
 import * as health from './cli/health';
 import {
   detectCliLanguage,
@@ -137,6 +137,7 @@ function lifecycleFixture(context: TestContext) {
   context.mock.method(target, 'knownServers', () => [server]);
   context.mock.method(pm2, 'ensurePm2', () => {});
   context.mock.method(pm2, 'requirePm2', () => true);
+  context.mock.method(pm2, 'listPm2Processes', () => []);
   context.mock.method(pm2, 'isMonkyServerRegistered', () => true);
   context.mock.method(pm2, 'findPm2Process', () => state.entry);
   context.mock.method(pm2, 'findLegacyProcessFor', () => null);
@@ -593,17 +594,21 @@ test('TURN port failures expose structured diagnostics without changing legacy c
 
 test('confirmation hints use Y/N or S/N while accepting the same boolean answers', async (context) => {
   fixture(context);
-  const createInterface = readline.createInterface;
+  const written: string[] = [];
+  context.mock.method(process.stdout, 'write', (chunk: string | Uint8Array) => {
+    written.push(String(chunk));
+    return true;
+  });
+  const originalInput = Object.getOwnPropertyDescriptor(process, 'stdin');
+  assert.ok(originalInput);
+  context.after(() => Object.defineProperty(process, 'stdin', originalInput));
   for (const language of ['en', 'pt-BR'] as const) {
     setCliLanguage(language);
     for (const defaultYes of [true, false]) {
-      const output = new PassThrough();
-      const mocked = context.mock.method(readline, 'createInterface', () =>
-        createInterface({ input: Readable.from(['y\n']), output, terminal: false })
-      );
+      written.length = 0;
+      Object.defineProperty(process, 'stdin', { configurable: true, value: Readable.from(['y\n']) });
       assert.equal(await prompts.confirm(t('create.confirm'), defaultYes), true);
-      assert.ok(String(output.read()).includes(t(defaultYes ? 'prompt.confirmDefaultYes' : 'prompt.confirmDefaultNo')));
-      mocked.mock.restore();
+      assert.ok(written.join('').includes(t(defaultYes ? 'prompt.confirmDefaultYes' : 'prompt.confirmDefaultNo')));
     }
   }
 });
@@ -649,7 +654,7 @@ test('create prompts, default server name, summary and existing-server errors ar
 test('members, roles and config display translated labels while retaining canonical keys and data', async (context) => {
   const { root } = fixture(context);
   const output = captureConsole(context);
-  context.mock.method(update, 'isAutoUpdateEnabled', () => false);
+  context.mock.method(autoUpdate, 'isAutoUpdateEnabled', () => false);
   context.mock.method(CoturnManager, 'describeAvailability', () => ({ supported: true }));
   await withContext(path.join(root, 'server-data'), async (ctx) => {
     await ctx.userRepo.create({
@@ -704,6 +709,7 @@ test('server selection and listings translate human copy without altering proces
   }
   const first = registerServer(path.join(root, 'first'), { name: 'Friends', port: 3000 });
   const second = registerServer(path.join(root, 'second'), { name: 'Work', port: 3100 });
+  context.mock.method(pm2, 'listPm2Processes', () => []);
   context.mock.method(pm2, 'findPm2Process', () => ({ pid: 0, pm2_env: { status: 'stopped' } }));
   context.mock.method(pm2, 'findLegacyProcessFor', () => null);
   context.mock.method(prompts, 'askChoice', async (question: string, choices: string[]) => {
@@ -762,6 +768,7 @@ test('start, restart and post-update restart retry while the server preview is s
         if (++attempts === 1) return null;
         return readPreview(port);
       });
+      if (command === 'after-update') f.state.entry = { pid: 24680, pm2_env: { status: 'online' } };
       if (command === 'start') await startServerCommand(commandArgs(['start'], f.dataDir), ['--port', '4100']);
       else await restartServerCommand(commandArgs(['restart'], f.dataDir), command === 'after-update' ? ['--after-update'] : []);
       const expectedPort = command === 'start' ? 4100 : 3200;
@@ -944,7 +951,10 @@ test('arrow choice restores raw/flow state and releases its timer/listeners on s
     context.mock.timers.tick(1000);
     assert.deepEqual(rawChanges, [true, wasRaw]);
     assert.equal(input.readableFlowing, wasFlowing);
-    for (const event of ['data', 'end', 'close', 'error']) assert.equal(input.listenerCount(event), 0, `${outcome}: ${event}`);
+    for (const event of ['keypress', 'end', 'close', 'error']) assert.equal(input.listenerCount(event), 0, `${outcome}: ${event}`);
+    // Node's keypress decoder lets go of the stream on its next chunk once no prompt listens.
+    input.emit('data', 'x');
+    assert.equal(input.listenerCount('data'), 0, `${outcome}: data`);
     input.destroy();
   }
 });

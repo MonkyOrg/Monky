@@ -1,6 +1,7 @@
 import { serverStore } from '../../../stores/serverStore';
 import { t, tCount } from '../../../i18n';
-import { escapeHtml } from '../../../utils/html';
+import { escapeHtml, html } from '../../../utils/html';
+import { renderSwitch } from '../../../utils/formControls';
 import { afkChannelIdOf } from '../../../utils/voiceRooms';
 import { AFK_TIMEOUT_OPTIONS_SECONDS, LIMITS } from '@monky/shared';
 
@@ -75,10 +76,7 @@ export class ServerVoiceVideoTab {
             ${t('serverSettings.allowSoundboardDesc')}
           </div>
         </div>
-        <label class="toggle-switch" aria-label="${t('serverSettings.allowSoundboard')}">
-          <input id="checkbox-allow-soundboard" type="checkbox" ${s.allowSoundboard !== false ? 'checked' : ''}>
-          <span class="toggle-slider"></span>
-        </label>
+        ${renderSwitch({ id: 'checkbox-allow-soundboard', label: t('serverSettings.allowSoundboard'), checked: s.allowSoundboard !== false })}
       </div>
 
       ${supportsRecentSounds ? `
@@ -91,17 +89,14 @@ export class ServerVoiceVideoTab {
             </label>
             <div style="font-size: 11px; color: var(--text-muted);">${t('serverSettings.recentSoundsDesc')}</div>
           </div>
-          <label class="toggle-switch" aria-label="${t('serverSettings.recentSounds')}">
-            <input id="checkbox-recent-sounds" type="checkbox" ${s.recentSoundCacheEnabled ? 'checked' : ''}${s.allowSoundboard === false ? ' disabled' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'checkbox-recent-sounds', label: t('serverSettings.recentSounds'), checked: !!s.recentSoundCacheEnabled, disabled: s.allowSoundboard === false })}
         </div>
         <label for="input-recent-sounds-limit" style="display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; font-size: 12px; color: var(--text-secondary);">
           <span>${t('serverSettings.recentSoundsLimit')}</span>
-          <input id="input-recent-sounds-limit" class="input-field" type="number"
+          ${html`<input id="input-recent-sounds-limit" class="input-field" type="number"
             min="${LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT}" max="${LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT}" step="1"
             value="${s.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT}"
-            style="width: 84px;" ${s.allowSoundboard === false || !s.recentSoundCacheEnabled ? 'disabled' : ''}>
+            style="width: 84px;" ${s.allowSoundboard === false || !s.recentSoundCacheEnabled ? 'disabled' : ''}>`}
         </label>
         <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">${t('serverSettings.recentSoundsClearHint')}</div>
       </div>` : ''}
@@ -115,10 +110,7 @@ export class ServerVoiceVideoTab {
           </label>
           <div style="font-size: 11px; color: var(--text-muted);">${t('serverSettings.dmRelayEnabledDesc')}</div>
         </div>
-        <label class="toggle-switch" aria-label="${t('serverSettings.dmRelayEnabled')}">
-          <input id="checkbox-dm-relay-enabled" type="checkbox" ${s.dmRelayEnabled !== false ? 'checked' : ''}>
-          <span class="toggle-slider"></span>
-        </label>
+        ${renderSwitch({ id: 'checkbox-dm-relay-enabled', label: t('serverSettings.dmRelayEnabled'), checked: s.dmRelayEnabled !== false })}
       </div>` : ''}
 
       ${supportsAfk ? `
@@ -131,10 +123,7 @@ export class ServerVoiceVideoTab {
             </label>
             <div style="font-size: 11px; color: var(--text-muted);">${t('serverSettings.afkChannelDesc')}</div>
           </div>
-          <label class="toggle-switch" aria-label="${t('serverSettings.afkChannel')}">
-            <input id="checkbox-afk-channel" type="checkbox" ${afkEnabled ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'checkbox-afk-channel', label: t('serverSettings.afkChannel'), checked: afkEnabled })}
         </div>
         <div id="server-afk-options" ${afkEnabled ? '' : 'hidden'}>
           <label for="input-afk-channel-name" class="server-afk-field">
@@ -163,10 +152,8 @@ export class ServerVoiceVideoTab {
           </div>
           <div id="server-turn-notice" style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;" ${turnBlocked || turnNotice ? '' : 'hidden'}>${turnBlocked ?? turnNotice ?? ''}</div>
         </div>
-        <label class="toggle-switch" aria-label="${t('serverSettings.turnEnabled')}"${turnBlocked ? ` title="${turnBlocked}"` : ''}>
-          <input id="checkbox-turn-enabled" type="checkbox" ${s.turnEnabled ? 'checked' : ''}${turnBlocked ? ' disabled' : ''}>
-          <span class="toggle-slider"></span>
-        </label>
+        ${renderSwitch({ id: 'checkbox-turn-enabled', label: t('serverSettings.turnEnabled'), describedBy: 'server-turn-notice',
+    checked: !!s.turnEnabled, disabled: !!turnBlocked })}
       </div>
     `;
   }

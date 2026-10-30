@@ -7,6 +7,15 @@ const { root, execute, write, digest, fingerprint, regularFiles } = require('./b
 const { workspace, checkSpace } = require('./prepareMacRtc.cjs');
 const pins = require('./native-rtc/pins.json');
 
+// Every device-free engine contract group except the Windows Media Foundation ones (contract_probe.cc).
+const MAC_CONTRACT_GROUPS = [
+  'signalingAndResources', 'presentationLease', 'operationCompletion', 'receiveMids', 'receiveRoutes',
+  'receiverLifecycle', 'receiveFramePolicy', 'captureClock', 'externalH264', 'softwareAV1', 'peerStartupBitrate',
+  'peerScreenCongestionRecovery', 'peerVideoPlayout', 'sfuVideoStartupBitrate', 'nodeEventQueue',
+  'audioFoundations', 'audioOperationalPolicies', 'rtcSendDrops', 'rtcReceiveDiagnostics', 'rtcReceiveSdk',
+  'surfaceRecycler', 'binaryLayout',
+];
+
 // Copies the owned inputs and generates the GN graph; notices only need this graph, not compiled objects.
 function configure({ arch = process.arch } = {}) {
   assert.equal(process.platform, 'darwin');
@@ -85,9 +94,14 @@ function build({ arch = process.arch, jobs = 4 } = {}) {
   const lock = path.join(localBuild, 'compile.lock'), handle = fs.openSync(lock, 'wx');
   try {
     const { sdk, python, revision, source, output, sourceFiles, env } = configure({ arch });
-    execute(path.join(sdk, 'third_party', 'ninja', 'ninja'), ['-C', output, `-j${jobs}`, 'monky_screen_rtc', 'monky_av1'],
-      { cwd: sdk, env });
+    execute(path.join(sdk, 'third_party', 'ninja', 'ninja'), ['-C', output, `-j${jobs}`, 'monky_screen_rtc', 'monky_av1',
+      'monky_rtc_engine_contract_probe'], { cwd: sdk, env });
     checkSpace();
+    // The shared engine code is checked on macOS too, not only on Windows. x64 runs under Rosetta.
+    const contracts = JSON.parse(execute(path.join(output, 'monky_rtc_engine_contract_probe'), [], { capture: true }));
+    const missing = MAC_CONTRACT_GROUPS.filter(name => !(contracts.groups?.[name] > 0));
+    assert.ok(contracts.checks > 90000 && contracts.devicesOpened === false && !missing.length,
+      `Native device-free contract checks did not complete: ${missing.join(', ')}`);
     const library = path.join(output, 'libmonky_screen_rtc.dylib');
     const addonDirectory = path.join(localBuild, 'node');
     write(path.join(addonDirectory, 'binding.gyp'), JSON.stringify({ targets: [{
@@ -134,14 +148,14 @@ function build({ arch = process.arch, jobs = 4 } = {}) {
       assert.equal(digest(fs.readFileSync(path.join(source, file.path))), file.sha256,
         `Native input changed during compilation: ${file.path}`);
     const manifest = { schemaVersion: 1, platform: 'darwin', arch, minimumMacOS: '14.0',
-      webrtcRevision: revision, sourceFiles, sourceRecipe: fingerprint(__filename), binaries, capabilities };
+      webrtcRevision: revision, sourceFiles, sourceRecipe: fingerprint(__filename), binaries, capabilities, contracts };
     write(path.join(destination, 'rtc-build.json'), JSON.stringify(manifest, null, 2) + '\n');
-    console.log(JSON.stringify({ macRtcBuilt: true, arch, binaries, capabilities }));
+    console.log(JSON.stringify({ macRtcBuilt: true, arch, binaries, capabilities, contractChecks: contracts.checks }));
     return manifest;
   } finally { fs.closeSync(handle); fs.unlinkSync(lock); }
 }
 
-module.exports = { build, configure };
+module.exports = { build, configure, MAC_CONTRACT_GROUPS };
 if (require.main === module) {
   try {
     const args = process.argv.slice(2);

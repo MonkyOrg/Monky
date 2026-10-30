@@ -1,12 +1,14 @@
 import { escapeHtml } from '../utils/html';
+import { resolveImageUrl } from '../utils/avatar';
 import { t } from '../i18n';
 import {
   resolveBotCarouselPresentation,
   type BotCarouselPresentation,
 } from '@monky/shared';
 
+/** A slide: an image the server stores, resolved against it, or a preview the app already holds. */
 function source(url: string, baseUrl: string): string {
-  return /^(?:data:|blob:|https?:)/.test(url) ? url : `${baseUrl}${url}`;
+  return resolveImageUrl(url, baseUrl) ?? '';
 }
 
 function renderCarousel(
@@ -109,6 +111,55 @@ export function imageCarouselNavigationButton(target: EventTarget | null): HTMLB
   return target instanceof Element
     ? target.closest<HTMLButtonElement>('button[data-carousel-move],button[data-carousel-index]:not([data-carousel-edit])')
     : null;
+}
+
+/**
+ * Applies an editor's remove, back or forward to the images it shows, at `index`.
+ * Returns the image to show next, or null when nothing moved.
+ */
+export function editCarouselList<T>(images: T[], index: number, action: string | undefined): number | null {
+  if (action === 'remove') {
+    images.splice(index, 1);
+    return Math.min(index, Math.max(0, images.length - 1));
+  }
+  const target = index + (action === 'back' ? -1 : action === 'forward' ? 1 : 0);
+  if (target === index || target < 0 || target >= images.length) return null;
+  [images[index], images[target]] = [images[target], images[index]];
+  return target;
+}
+
+/**
+ * Lets image files be dropped on the drop zones inside `root`: a drag over one is
+ * highlighted, and a drop hands its files to `drop` instead of the browser.
+ */
+export function bindImageDropzone(
+  root: HTMLElement,
+  signal: AbortSignal,
+  options: { disabled?: () => boolean; drop: (files: FileList) => void },
+): void {
+  const dropzone = (event: Event): HTMLElement | null => event.target instanceof Element
+    ? event.target.closest<HTMLElement>('[data-carousel-dropzone]') : null;
+  root.addEventListener('dragover', event => {
+    const zone = dropzone(event);
+    if (!zone || options.disabled?.()) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    zone.classList.add('is-dragging');
+  }, { signal });
+  root.addEventListener('dragleave', event => {
+    const zone = dropzone(event);
+    if (zone && !(event.relatedTarget instanceof Node && zone.contains(event.relatedTarget))) {
+      zone.classList.remove('is-dragging');
+    }
+  }, { signal });
+  root.addEventListener('drop', event => {
+    const zone = dropzone(event);
+    if (!zone || options.disabled?.()) return;
+    event.preventDefault();
+    zone.classList.remove('is-dragging');
+    const files = event.dataTransfer?.files;
+    if (files?.length) options.drop(files);
+  }, { signal });
 }
 
 export function moveImageCarousel(button: HTMLButtonElement): boolean {

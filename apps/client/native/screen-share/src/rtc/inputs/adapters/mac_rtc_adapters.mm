@@ -472,10 +472,3 @@ std::shared_ptr<const PixelFrame> UploadCpuFrame(const webrtc::VideoFrame& input
   return std::make_shared<PixelFrame>(pixel);
 }
 }
-
-namespace monky::native_rtc::engine {
-std::shared_ptr<VideoSource> CreateGpuSource(
-    Host&, std::uint64_t, const Json&, const std::shared_ptr<Cancellation>&) {
-  throw Error("ERR_RTC_INPUT_MODE", "Native macOS publication requires encoded capture", MONKY_ENGINE_UNSUPPORTED);
-}
-}

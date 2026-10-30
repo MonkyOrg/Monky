@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import {
   getScreenShareProfile, getScreenShareQualities, getScreenH264ProfileLevelId, nativeScreenP2pControlSchema,
   nativeScreenSignalSchema, nativeScreenSourcesSchema, nativeScreenVideoProfileSchema,
-  nativeScreenCommandSchema, nativeScreenPreviewPacketSchema,
-  getScreenAv1MinimumLevelIndex, SCREEN_SHARE_LIMITS,
+  nativeScreenCommandSchema, nativeScreenPreviewPacketSchema, nativeScreenFailureReason,
+  getScreenAv1MinimumLevelIndex, SCREEN_SHARE_LIMITS, type NativeScreenFailure,
 } from '../src/index.js';
 
 const video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 };
@@ -217,4 +217,36 @@ test('capture status is publisher-owned, bounded and explicitly distinguishes pr
     { ...status, capture: { mode: 'normal', ready: 'true' } },
     { ...status, capture: { mode: 'normal', ready: true, hwnd: 123 } },
   ]) assert.equal(nativeScreenSignalSchema.safeParse(value).success, false);
+});
+
+test('publisher and viewers name a native failure the same way, through cleanup wrappers', () => {
+  const failure = (code: string) => Object.assign(new Error(code), { code });
+  const cases: Array<[unknown, NativeScreenFailure]> = [
+    [failure('ERR_SCREEN_CAPACITY'), 'capacity-exceeded'],
+    [failure('ERR_RTC_ENCODED_FORMAT'), 'unsupported'],
+    [failure('ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED'), 'unsupported'],
+    [failure('ERR_MAC_VIDEO_PROFILE_UNSUPPORTED'), 'unsupported'],
+    [failure('ERR_MAC_VIDEO_ENCODER_UNSUPPORTED'), 'unsupported'],
+    [failure('ERR_SCREEN_CAPTURE_SOURCE_LOST'), 'source-unavailable'],
+    [failure('ERR_MAC_SOURCE_LOST'), 'source-unavailable'],
+    [failure('ERR_MAC_SOURCE_CHANGED'), 'source-unavailable'],
+    [failure('ERR_MAC_SOURCE_IDENTITY'), 'source-unavailable'],
+    [failure('ERR_MAC_CAPTURE_SOURCE_CHANGED'), 'source-unavailable'],
+    [failure('ERR_AUDIO_TARGET'), 'source-unavailable'],
+    [failure('ERR_SCREEN_CAPTURE_SOURCE_INITIALIZATION'), 'capture-failed'],
+    [failure('ERR_NATIVE_SFU_TRANSPORT_FAILED'), 'connection-failed'],
+    [new Error('No code at all.'), 'connection-failed'],
+    ['A thrown string.', 'connection-failed'],
+    [null, 'connection-failed'],
+    [new AggregateError([new Error('cleanup'), failure('ERR_MAC_SOURCE_LOST')], 'Retirement failed.'), 'source-unavailable'],
+    [new AggregateError([failure('ERR_MAC_VIDEO_PROFILE_UNSUPPORTED')], 'Setup failed.'), 'unsupported'],
+    [new Error('Wrapped.', { cause: failure('ERR_SCREEN_CAPACITY') }), 'capacity-exceeded'],
+    [new Error('Wrapped twice.', { cause: new AggregateError([failure('ERR_AUDIO_TARGET')], 'Inner.') }), 'source-unavailable'],
+    // Only the failure itself names a capture fault; a capture cleanup error does not reclassify it.
+    [new AggregateError([failure('ERR_SCREEN_CAPTURE_RETIREMENT')], 'Retirement failed.'), 'connection-failed'],
+  ];
+  for (const [error, reason] of cases) assert.equal(nativeScreenFailureReason(error), reason, String(error));
+  const cycle = Object.assign(new Error('Cyclic.'), { code: 'ERR_UNKNOWN' });
+  cycle.cause = new AggregateError([cycle], 'Cycle.');
+  assert.equal(nativeScreenFailureReason(cycle), 'connection-failed');
 });

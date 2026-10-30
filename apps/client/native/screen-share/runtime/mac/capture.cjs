@@ -4,6 +4,7 @@ const { failure } = require('./host.cjs');
 const { acquireMacHost } = require('./hostPool.cjs');
 const { validateMacTarget } = require('./target.cjs');
 const { normalizedVideo } = require('../captureProtocol.cjs');
+const { notifyObserver } = require('../asyncTools.cjs');
 
 class MacVideoCapture {
   constructor({ target, video, mode, codec = 'h264', onPacket, onError, directory }, dependencies = {}) {
@@ -30,7 +31,7 @@ class MacVideoCapture {
       onError: error => {
         this.firstFailed(error);
         if (this.errors.length < 16) this.errors.push(error);
-        try { onError(error); } catch (observerError) { console.error('[MacVideoCapture] Error observer failed:', observerError); }
+        notifyObserver('[MacVideoCapture] Error observer', onError, error);
       },
     };
     this.host = (dependencies.hostFactory ?? acquireMacHost)(
@@ -96,8 +97,7 @@ class MacVideoCapture {
         if (!this.host.exited || this.host.pending.size) throw error;
         if (!this.errors.includes(error)) {
           this.errors.push(error);
-          try { this.onError(error); }
-          catch (observerError) { console.error('[MacVideoCapture] Error observer failed:', observerError); }
+          notifyObserver('[MacVideoCapture] Error observer', this.onError, error);
         }
       }
       assert.ok(this.host.nativeClosed === true || this.host.exited === true);

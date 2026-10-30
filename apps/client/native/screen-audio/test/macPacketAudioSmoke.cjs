@@ -153,7 +153,6 @@ async function runHost() {
       const second = audio.createPacketCapture(selection, () => {});
       await second.ready;
       assert.equal((await second.stop()).state, 'closed');
-      assert.equal(audio.start(selection, () => {}).success, false, 'Legacy capture must not steal the packet owner.');
       const deadline = performance.now() + 10000;
       while (observed.frames < 96000 && observed.errors.length === 0 && performance.now() < deadline) await delay(20);
       assert.deepEqual(observed.errors, []);

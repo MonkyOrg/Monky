@@ -1,7 +1,6 @@
 import type { ParticipantManager } from '../ParticipantManager';
-import type { PeerSession } from '../WebRtcManager';
 
-interface AudioLevelReceiver {
+export interface AudioLevelReceiver {
   readonly track: Pick<MediaStreamTrack, 'readyState'>;
   getStats(): Promise<RTCStatsReport>;
 }
@@ -17,16 +16,6 @@ export class RemoteVadMonitor {
     private getVoiceParticipants: () => ParticipantManager,
     private getDecodedAudioLevel?: (peerSessionId: string) => number | null,
   ) {}
-
-  public setupRemoteVad(peerSessionId: string, getSession: () => PeerSession | undefined): void {
-    this.setupRemoteReceiverVad(peerSessionId, () => {
-      const session = getSession();
-      if (!session || !session.pc || session.pc.connectionState === 'closed') {
-        return null;
-      }
-      return session.pc.getReceivers().find((r) => r.track?.kind === 'audio');
-    });
-  }
 
   public setupRemoteReceiverVad(
     peerSessionId: string,

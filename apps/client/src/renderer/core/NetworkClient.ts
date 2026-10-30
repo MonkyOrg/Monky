@@ -4,7 +4,10 @@ import {
   AuthConnectPayload,
   AuthFailedPayload,
   AuthSuccessPayload,
+  type ClientMessageArgs,
+  type ClientMessageType,
   MessageType,
+  type NativeScreenRpcMethod,
   ProtocolMessage,
   PROTOCOL_VERSION,
   ProtocolErrorCode,
@@ -15,13 +18,15 @@ import {
   ServerShutdownPayload,
   serverShutdownSchema,
 } from '@monky/shared';
-import { appEvents } from './EventBus';
+import { appEvents, type EventArgs, type EventName } from './EventBus';
+import type { AppEvents } from './appEventMap';
 import { createActiveProxy } from './activeProxy';
 import { emitOutsideRouting, routeSessionEvent } from './sessionRouting';
 import { clientLog } from './ClientLogService';
 import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
 import { settingsStore } from '../stores/settingsStore';
+import { normalizeHost, toWsUrl } from '../utils/serverAddress';
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';
 
@@ -54,7 +59,7 @@ export class RequestTimeoutError extends Error {
   }
 }
 
-/** A request the server answered with a protocol error; keeps the code callers branch on. */
+/** A request, the sign-in included, that the server answered with a protocol error; keeps the code callers branch on. */
 export class ProtocolRequestError extends Error {
   constructor(message: string, public readonly code: ProtocolErrorCode) {
     super(message);
@@ -63,9 +68,24 @@ export class ProtocolRequestError extends Error {
 }
 
 export interface PendingRequest {
-  resolve: (value: any) => void;
-  reject: (reason: any) => void;
-  timer: any;
+  /** Settles with the reply's payload; `sendRequest` hands it to its caller. */
+  resolve: (payload: unknown) => void;
+  reject: (reason: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/** `[type, payload]` of a message, then its request id: the payload is checked against the type. */
+export type OutgoingMessage = [...ClientMessageArgs, requestId?: string];
+/** A request: a message, then how long to wait for the answer. */
+export type OutgoingRequest = [...ClientMessageArgs, requestId?: string, timeoutMs?: number];
+
+/**
+ * `send` as `request` calls it, with a type and a payload it already holds
+ * apart. Every message leaves through `send`, which is where tests and
+ * observers watch the wire.
+ */
+interface MessageWriter {
+  send(type: ClientMessageType, payload: unknown, requestId?: string): void;
 }
 
 interface ClientIdentity {
@@ -134,6 +154,8 @@ export class NetworkClient {
   private lastConnectPayload: ConnectState | null = null;
   private manualDisconnect: boolean = false;
   private hasEverConnected: boolean = false;
+  /** Whether a sign-in ever succeeded, over the client's whole life: `hasEverConnected` starts over with each connection. */
+  private connectedOnce = false;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private lastPongAt: number = 0;
   private static readonly HEARTBEAT_INTERVAL_MS = 5000;
@@ -154,14 +176,27 @@ export class NetworkClient {
     this.reconnectNow();
   };
 
-  /** Releases everything the client holds outside itself, for good. */
-  public dispose(): void {
-    this.disconnect();
+  /**
+   * Releases everything the client holds outside itself, for good.
+   *
+   * `quiet` is for a client nobody is looking at: if it never signed in, it
+   * goes without `network.disconnected`. Its connect() call already told its
+   * caller how the attempt ended, and the event would make the app tear down,
+   * for a server it never had, what it tears down for one it lost: menus,
+   * dialogs, the microphone test, the queue of automatic entry.
+   */
+  public dispose(options: { quiet?: boolean } = {}): void {
+    this.end('local', !options.quiet || this.connectedOnce);
     this.emitScoped('network.disposed');
     this.eventListeners.clear();
     if (typeof window !== 'undefined') {
       window.removeEventListener('online', this.onBrowserOnline);
     }
+  }
+
+  /** Whether this client ever signed in to its server, even if it is down now. */
+  public hasConnectedOnce(): boolean {
+    return this.connectedOnce;
   }
 
   private reconnectNow(): void {
@@ -174,12 +209,13 @@ export class NetworkClient {
 
   private async diagnoseConnectionFailure(host: string, port: number): Promise<Error> {
     clientLog.warn('NETWORK', `Diagnosing connection failure to ${host}:${port}`);
-    const probe = (window as any).api?.probeServer;
+    // Outside Electron (tests, a page opened without the preload) there is no probe.
+    const probe = window.api?.probeServer;
     if (typeof probe !== 'function') {
       return new Error(t('network.genericConnectError'));
     }
     try {
-      const result: { reachable: boolean; reason: string } = await probe(host, port);
+      const result = await probe(host, port);
       switch (result.reason) {
         case 'online':
           return new Error(t('network.notMonkyServer', { host, port }));
@@ -198,6 +234,18 @@ export class NetworkClient {
 
   public getStatus(): ConnectionStatus {
     return this.status;
+  }
+
+  /**
+   * The identity this computer uses was replaced (an import, #490). The open
+   * session stays signed in as before, but reconnecting must claim the new
+   * key: the main process signs the challenge with it, so the old one would
+   * fail every attempt from then on.
+   */
+  public adoptIdentity(identity: ClientIdentity): void {
+    if (!this.lastConnectPayload) return;
+    this.lastConnectPayload.clientId = identity.clientId;
+    this.lastConnectPayload.publicKey = identity.publicKey;
   }
 
   public getConnectionId(): string { return this.connectionId; }
@@ -238,14 +286,25 @@ export class NetworkClient {
    * session manager can point the stores at the right bundle before handlers
    * run (#400).
    */
-  private emitScoped(event: string, data?: unknown, requestId?: string): void {
-    if (event === 'network.status') this.notifyEventListeners(event, data, requestId);
+  private emitScoped<K extends EventName<AppEvents>>(event: K, ...args: EventArgs<AppEvents[K]>): void {
+    const [data] = args;
+    if (event === 'network.status') this.notifyEventListeners(event, data);
     if (event === 'network.server_shutdown') {
-      emitOutsideRouting(() => appEvents.emit(event, data));
+      emitOutsideRouting(() => appEvents.emit(event, ...args));
     } else {
-      routeSessionEvent(this.sessionKey, event, () => appEvents.emit(event, data));
+      routeSessionEvent(this.sessionKey, event, () => appEvents.emit(event, ...args));
     }
-    if (event !== 'network.status') this.notifyEventListeners(event, data, requestId);
+    if (event !== 'network.status') this.notifyEventListeners(event, data);
+  }
+
+  /**
+   * A server message on the app bus, as `message.<TYPE>`, routed like any other
+   * event of this server. `onEvent` listeners also get its request id.
+   */
+  private emitServerMessage(type: MessageType, payload: unknown, requestId?: string): void {
+    const event = `message.${type}` as const;
+    routeSessionEvent(this.sessionKey, event, () => appEvents.emit(event, payload));
+    this.notifyEventListeners(event, payload, requestId);
   }
 
   private notifyEventListeners(event: string, data: unknown, requestId?: string): void {
@@ -284,8 +343,9 @@ export class NetworkClient {
       this.hasEverConnected = false;
     }
 
-    const cleanHost = host.trim().replace(/^ws:\/\//, '').replace(/^wss:\/\//, '');
-    this.currentServerUrl = `ws://${cleanHost}:${port}`;
+    // IPv6 needs its brackets in the URL; the TCP probe of a failure needs them gone.
+    const probeHost = normalizeHost(host);
+    this.currentServerUrl = toWsUrl({ host, port });
     this.serverName = '';
     if (!this.sessionKey) this.sessionKey = this.currentServerUrl;
     this.lastConnectPayload = {
@@ -312,7 +372,7 @@ export class NetworkClient {
           if (this.pendingConnect === attempt) this.pendingConnect = null;
           reject(reason);
         };
-        if (diagnose) void this.diagnoseConnectionFailure(cleanHost, port).then(finish);
+        if (diagnose) void this.diagnoseConnectionFailure(probeHost, port).then(finish);
         else finish(error);
       };
 
@@ -350,6 +410,7 @@ export class NetworkClient {
             this.iceServers = (res.iceServers ?? []).map((server) => ({ ...server }));
             this.reconnectAttempt = 0;
             this.hasEverConnected = true;
+            this.connectedOnce = true;
             this.setStatus('CONNECTED');
             if (isStale()) return;
             this.startHeartbeat();
@@ -406,6 +467,10 @@ export class NetworkClient {
   }
 
   public disconnect(cause: DisconnectCause = 'local'): void {
+    this.end(cause, true);
+  }
+
+  private end(cause: DisconnectCause, announce: boolean): void {
     clientLog.info('NETWORK', 'Disconnecting from server', { cause });
     // Emitting again after the socket already died would run the whole teardown
     // twice — and, with one client per server (#400), would ask the session
@@ -435,7 +500,7 @@ export class NetworkClient {
     // here instead of lingering until their own 8s timeout.
     this.rejectPendingRequests();
     this.setStatus('DISCONNECTED');
-    if (wasLive) this.emitScoped('network.disconnected', { cause } satisfies NetworkDisconnectedPayload);
+    if (wasLive && announce) this.emitScoped('network.disconnected', { cause } satisfies NetworkDisconnectedPayload);
   }
 
   private rejectPendingRequests(): void {
@@ -468,7 +533,7 @@ export class NetworkClient {
     }
   }
 
-  public send(type: MessageType, payload: any, requestId?: string): void {
+  public send(...[type, payload, requestId]: OutgoingMessage): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn(`Cannot send message ${type}, socket is not open.`);
       return;
@@ -482,10 +547,9 @@ export class NetworkClient {
     };
 
     this.ws.send(JSON.stringify(message));
-    const leave: unknown = payload;
-    if (type === MessageType.VOICE_LEAVE && leave !== null && typeof leave === 'object'
-      && 'channelId' in leave && typeof leave.channelId === 'string') {
-      this.localVoiceLeaves.set(id, leave.channelId);
+    if (type === MessageType.VOICE_LEAVE && payload !== null && typeof payload === 'object'
+      && 'channelId' in payload && typeof payload.channelId === 'string') {
+      this.localVoiceLeaves.set(id, payload.channelId);
       if (this.localVoiceLeaves.size > 256) {
         const first = this.localVoiceLeaves.keys().next().value;
         if (first !== undefined) this.localVoiceLeaves.delete(first);
@@ -493,14 +557,31 @@ export class NetworkClient {
     }
   }
 
-  public sendRequest<T = any>(type: MessageType, payload: any, customRequestId?: string, timeoutMs: number = 8000): Promise<T> {
+  /**
+   * Sends a message and settles with the payload of the server's answer. `T`
+   * names what the caller expects back; the answer is not validated here, so
+   * a caller that trusts its shape less parses it with the schema it knows.
+   */
+  public sendRequest<T = unknown>(...[type, payload, requestId, timeoutMs]: OutgoingRequest): Promise<T> {
+    return this.request<T>(type, payload, requestId, timeoutMs);
+  }
+
+  /**
+   * Forwards an SFU request the native screen runtime built: this app neither
+   * writes nor reads its payload, which the server validates like any other.
+   */
+  public relayRequest<T = unknown>(type: NativeScreenRpcMethod, payload: Readonly<Record<string, unknown>>): Promise<T> {
+    return this.request<T>(type, payload);
+  }
+
+  private request<T>(type: ClientMessageType, payload: unknown, customRequestId?: string, timeoutMs = 8000): Promise<T> {
     if (this.getStatus() !== 'CONNECTED' || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       clientLog.warn('NETWORK', `Cannot request ${type}: server is not connected`);
       return Promise.reject(new Error(t('network.connectionClosed')));
     }
     const requestId = customRequestId || uuidv4();
 
-    return new Promise((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pendingRequests.has(requestId)) {
           this.pendingRequests.delete(requestId);
@@ -509,9 +590,11 @@ export class NetworkClient {
         }
       }, timeoutMs);
 
-      this.pendingRequests.set(requestId, { resolve, reject, timer });
+      // The one place an answer becomes the type its caller asked for.
+      this.pendingRequests.set(requestId, { resolve: reply => resolve(reply as T), reject, timer });
+      const writer: MessageWriter = this;
       try {
-        this.send(type, payload, requestId);
+        writer.send(type, payload, requestId);
       } catch (error) {
         clearTimeout(timer);
         this.pendingRequests.delete(requestId);
@@ -571,7 +654,9 @@ export class NetworkClient {
       if (type === MessageType.AUTH_FAILED) {
         const authFailed = payload as AuthFailedPayload;
         clientLog.error('NETWORK', 'Authentication failed', { message: authFailed.message });
-        this.pendingAuth.reject(new Error(authFailed.message || t('network.genericConnectError')));
+        // The code tells whether trying again could ever help; servers that send none refuse the identity.
+        this.pendingAuth.reject(new ProtocolRequestError(authFailed.message || t('network.genericConnectError'),
+          authFailed.code ?? ProtocolErrorCode.UNAUTHORIZED));
         return;
       }
 
@@ -591,11 +676,10 @@ export class NetworkClient {
           }, requestId);
           return;
         }
-        this.pendingAuth.reject(
-          new Error(
-            translateProtocolError(errorPayload.code, errorPayload.message, errorPayload.serverProtocolVersion)
-          )
-        );
+        this.pendingAuth.reject(new ProtocolRequestError(
+          translateProtocolError(errorPayload.code, errorPayload.message, errorPayload.serverProtocolVersion),
+          errorPayload.code,
+        ));
         return;
       }
     }
@@ -614,7 +698,7 @@ export class NetworkClient {
       pending.resolve(payload);
     }
 
-    this.emitScoped(`message.${type}`, payload, requestId);
+    this.emitServerMessage(type, payload, requestId);
   }
 
   private captureServerName(value: unknown): void {
@@ -664,7 +748,10 @@ export class NetworkClient {
     const connectionId = this.connectionId;
     this.setStatus('RECONNECTING');
     if (this.manualDisconnect || this.connectionId !== connectionId) return;
-    const delay = RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+    const step = RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+    // A restarting server drops every client in the same instant. Drawn around
+    // each step, their retries arrive spread out instead of all at once.
+    const delay = Math.round(step * (0.5 + Math.random()));
     this.reconnectAttempt++;
 
     this.emitScoped('network.reconnecting', { attempt: this.reconnectAttempt, delay });

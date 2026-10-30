@@ -7,8 +7,8 @@ import { getAvatarUrl } from '../utils/avatar';
 import { escapeHtml } from '../utils/html';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
 import { nicknameError } from '../utils/nickname';
+import { reportError, validateForm } from '../utils/feedback';
 import { pickAndCropImage } from './ImageCropModal';
-import { showAlert } from './Dialog';
 
 export function hasValidLocalProfile(): boolean {
   return getNicknameIssue(connectionStore.savedNickname) === null;
@@ -66,13 +66,16 @@ export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
         const preview = container.querySelector<HTMLImageElement>('#identity-profile-avatar-preview');
         if (preview) preview.src = cropped;
       });
-      container.querySelector<HTMLFormElement>('#identity-profile-form')?.addEventListener('submit', async (event) => {
+      const form = container.querySelector<HTMLFormElement>('#identity-profile-form');
+      // The browser's own balloon would speak the system's language, not the app's.
+      if (form) form.noValidate = true;
+      form?.addEventListener('submit', (event) => {
         event.preventDefault();
+        if (!validateForm(form)) return;
         const nickname = normalizeNickname(input?.value ?? '');
         const error = nicknameError(nickname);
         if (error) {
-          await showAlert({ title: t('common.error'), message: error, variant: 'danger' });
-          input?.focus();
+          reportError(error, { field: input, focus: true });
           return;
         }
         connectionStore.saveUserProfile(nickname, avatar);

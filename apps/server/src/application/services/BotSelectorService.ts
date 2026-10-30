@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import {
   BOT_SELECTOR_MAX_DURATION_MS,
+  ProtocolErrorCode,
   botSelectorCreateSchema,
   botSelectorPatchSchema,
   type BotSelector,
@@ -8,6 +9,12 @@ import {
   type BotSelectorPatch,
 } from '@monky/shared';
 import type { IBotSelectorRepository } from '../../domain/repositories';
+import { ServiceError } from '../errors';
+
+/** A selector request the service refuses; it reaches the bot or person as BOT_INTERACTION_INVALID, as always. */
+export class BotSelectorError extends ServiceError {
+  constructor(message: string, code: ProtocolErrorCode = ProtocolErrorCode.BOT_INTERACTION_INVALID) { super(code, message); }
+}
 
 /**
  * Mutations contain no await: each vote, threshold and expiry is one repository
@@ -32,11 +39,11 @@ export class BotSelectorService {
     return this.repository.transaction(() => {
       const existing = this.get(id);
       if (existing) {
-        if (existing.botId !== botId || existing.channelId !== parsed.channelId) throw new Error('Selector id is already in use.');
+        if (existing.botId !== botId || existing.channelId !== parsed.channelId) throw new BotSelectorError('Selector id is already in use.');
         return existing;
       }
       this.validateDeadline(parsed.expiresAt, now);
-      if (this.repository.countOpen(botId) >= 100) throw new Error('Too many open selectors.');
+      if (this.repository.countOpen(botId) >= 100) throw new BotSelectorError('Too many open selectors.');
       const selector: BotSelector = {
         ...definition, id, botId, messageId: randomUUID(), createdAt: now,
         closedAt: null, responses: {}, resultMessageId: null,
@@ -52,12 +59,12 @@ export class BotSelectorService {
       const selector = this.require(id);
       if (selector.closedAt !== null || this.isDue(selector, now)) {
         this.closeIfDue(selector, now);
-        throw new Error('This selector is closed.');
+        throw new BotSelectorError('This selector is closed.');
       }
-      if (selector.responder === 'invoker' && selector.invokerId !== userId) throw new Error('Only the invoker may respond.');
-      if (!selector.choices.some((choice) => choice.value === value)) throw new Error('Invalid selector choice.');
+      if (selector.responder === 'invoker' && selector.invokerId !== userId) throw new BotSelectorError('Only the invoker may respond.');
+      if (!selector.choices.some((choice) => choice.value === value)) throw new BotSelectorError('Invalid selector choice.');
       if (Object.hasOwn(selector.responses, userId) && !selector.allowChange && selector.responses[userId] !== value) {
-        throw new Error('This selector does not allow changing a response.');
+        throw new BotSelectorError('This selector does not allow changing a response.');
       }
       selector.responses = { ...selector.responses, [userId]: value };
       if (this.isDue(selector, now)) selector.closedAt = now;
@@ -70,7 +77,7 @@ export class BotSelectorService {
     const parsed = botSelectorPatchSchema.parse(patch);
     return this.repository.transaction(() => {
       const selector = this.requireOwned(id, botId);
-      if (selector.closedAt !== null || this.isDue(selector, now)) throw new Error('This selector is closed.');
+      if (selector.closedAt !== null || this.isDue(selector, now)) throw new BotSelectorError('This selector is closed.');
       this.validateDeadline(parsed.expiresAt, now);
       Object.assign(selector, parsed);
       if (this.isDue(selector, now)) selector.closedAt = now;
@@ -91,8 +98,12 @@ export class BotSelectorService {
   }
 
   expire(now = Date.now()): BotSelector[] {
+    // Polled every second: most ticks find nothing due and open no transaction.
+    // The repository is synchronous, so nothing changes the rows read here before it runs.
+    const expired = this.repository.listExpired(now);
+    if (expired.length === 0) return [];
     return this.repository.transaction(() => {
-      return this.repository.listExpired(now).map((selector) => {
+      return expired.map((selector) => {
         this.closeIfDue(selector, now);
         return selector;
       });
@@ -102,7 +113,7 @@ export class BotSelectorService {
   markFinalized(id: string, botId: string, messageId: string): BotSelector {
     return this.repository.transaction(() => {
       const selector = this.requireOwned(id, botId);
-      if (selector.closedAt === null) throw new Error('Close the selector before publishing results.');
+      if (selector.closedAt === null) throw new BotSelectorError('Close the selector before publishing results.');
       selector.resultMessageId ??= messageId;
       this.save(selector);
       return selector;
@@ -118,19 +129,19 @@ export class BotSelectorService {
 
   private require(id: string): BotSelector {
     const selector = this.get(id);
-    if (!selector) throw new Error('Selector not found.');
+    if (!selector) throw new BotSelectorError('Selector not found.');
     return selector;
   }
 
   private requireOwned(id: string, botId: string): BotSelector {
     const selector = this.require(id);
-    if (selector.botId !== botId) throw new Error('Selector belongs to another bot.');
+    if (selector.botId !== botId) throw new BotSelectorError('Selector belongs to another bot.');
     return selector;
   }
 
   private validateDeadline(expiresAt: number | undefined, now: number): void {
     if (expiresAt !== undefined && (expiresAt <= now || expiresAt > now + BOT_SELECTOR_MAX_DURATION_MS)) {
-      throw new Error('Selector deadline must be in the next 30 days.');
+      throw new BotSelectorError('Selector deadline must be in the next 30 days.');
     }
   }
 

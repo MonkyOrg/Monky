@@ -1,13 +1,20 @@
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import os from 'node:os';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
-import { MessageType, ProtocolErrorCode, type ProtocolMessage, type ServerSettingsUpdatedPayload } from '@monky/shared';
+import { MessageType, PROTOCOL_VERSION, ProtocolErrorCode, createProtocolOffer, type ProtocolMessage, type ServerSettingsUpdatedPayload } from '@monky/shared';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
-import { AuthService } from './application/services/AuthService';
+import type { ClientSession } from './infrastructure/websocket/ClientSession';
+import { AuthService, serverSettingsPayload } from './application/services/AuthService';
 import { BotLocalExecutionService } from './application/services/BotLocalExecutionService';
 import { CoturnManager } from './infrastructure/turn/CoturnManager';
+import { Logger } from './infrastructure/logger/Logger';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { ServerRecord } from './domain/entities';
+import { SERVER_SETTING_DEFAULTS } from './domain/serverSettings';
+import { createFixture, identity, record as asRecord } from './testFixtures/bots';
 
 function deferred() {
   let resolve!: () => void;
@@ -20,13 +27,13 @@ function fixture() {
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   const ws = Object.create(WebSocket.prototype) as WebSocket;
   Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
-  const session: Parameters<WebSocketServer['handleServerUpdateSettings']>[0] = {
-    ws, sessionId: 'admin-session', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+  const session: ClientSession = {
+    ws, sessionId: 'admin-session', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     protocol: { version: 36, minimumVersion: 35, features: ['dm-relay'] },
     user: { id: 'admin', clientId: 'admin-key', sessionId: 'admin-session', nickname: 'Admin', status: 'ONLINE', joinedAt: 1 },
   };
   const record: ServerRecord = {
-    id: 'server', name: 'Server', createdAt: 1, maxUsers: 0, passwordHash: '',
+    ...SERVER_SETTING_DEFAULTS, id: 'server', name: 'Server', createdAt: 1, maxUsers: 0, passwordHash: '',
     voiceMode: 'p2p', turnEnabled: false, turnSecret: 'test-secret', dmRelayEnabled: true,
   };
   let allowed = true;
@@ -36,10 +43,6 @@ function fixture() {
   const messages: ProtocolMessage[] = [];
   server['sessions'] = new Map([[ws, session]]);
   server['sessionSockets'] = new Map([['admin-session', ws]]);
-  server['settingsUpdateQueue'] = Promise.resolve();
-  server['voiceReconnectGrants'] = new Map();
-  server['localAccessVersion'] = 0;
-  server['pendingLocalAccessMutations'] = 0;
   server['botLocalExecution'] = Object.create(BotLocalExecutionService.prototype) as typeof server['botLocalExecution'];
   server['botLocalExecution'].voiceModeChanged = () => { localModeChanges++; };
   server['serverRepo'] = {
@@ -54,7 +57,7 @@ function fixture() {
     if (patch.turnEnabled !== undefined) record.turnEnabled = patch.turnEnabled;
     if (patch.dmRelayEnabled !== undefined) record.dmRelayEnabled = patch.dmRelayEnabled;
     if (record.voiceMode === 'sfu') record.turnEnabled = false;
-    return { success: true, name: record.name, hasPassword: false, voiceMode: record.voiceMode, turnEnabled: record.turnEnabled, dmRelayEnabled: record.dmRelayEnabled };
+    return { success: true, settings: serverSettingsPayload(record, { usedBytes: 0, maxTotalBytes: 1, maxFileBytes: 1 }) };
   };
   server['authService'] = auth;
   server['channelService'] = { getAfkChannelId: async () => null } as unknown as WebSocketServer['channelService'];
@@ -63,12 +66,12 @@ function fixture() {
   turn.stop = async () => { running = false; };
   turn.isRunning = () => running;
   server['coturnManager'] = turn;
-  server['ensureRelayCanRun'] = async () => null;
+  server['serverSettings']['ensureRelayCanRun'] = async () => null;
   const sfu = new SfuManager();
   sfu.checkPortAvailability = async () => null;
   sfu.init = async () => true;
   server['sfuManager'] = sfu;
-  server['requirePermission'] = async (_session, _permission, requestId) => {
+  server['authorizer'].requirePermission = async (_session, _permission, requestId) => {
     if (!allowed) server['sendError'](ws, ProtocolErrorCode.PERMISSION_DENIED, 'Permission revoked', requestId);
     return allowed;
   };
@@ -84,9 +87,9 @@ test('settings acknowledgement waits for TURN installation and actual activation
   const f = fixture();
   const installation = deferred();
   const activation = deferred();
-  f.server['ensureRelayCanRun'] = async () => { await installation.promise; return null; };
-  f.server['applyTurnState'] = async () => { await activation.promise; };
-  const pending = f.server['handleServerUpdateSettings'](f.session, { turnEnabled: true }, 'turn-request');
+  f.server['serverSettings']['ensureRelayCanRun'] = async () => { await installation.promise; return null; };
+  f.server['serverSettings']['applyTurnState'] = async () => { await activation.promise; };
+  const pending = f.server['serverSettings'].update(f.session, { turnEnabled: true }, 'turn-request');
   await flush();
   assert.equal(f.writes(), 0);
   assert.equal(f.messages.length, 0);
@@ -104,7 +107,7 @@ test('failed TURN startup publishes persisted false before a correlated error, a
   const f = fixture();
   f.turn.start = async () => false;
   t.mock.method(CoturnManager, 'checkPortReachability', async () => null);
-  await f.server['handleServerUpdateSettings'](f.session, { turnEnabled: true }, 'failed-start');
+  await f.server['serverSettings'].update(f.session, { turnEnabled: true }, 'failed-start');
   assert.equal(f.record.turnEnabled, false);
   assert.equal(f.messages[0]?.type, MessageType.SERVER_SETTINGS_UPDATED);
   assert.equal(f.messages[0]?.requestId, undefined);
@@ -113,7 +116,7 @@ test('failed TURN startup publishes persisted false before a correlated error, a
   assert.equal(f.messages.at(-1)?.requestId, 'failed-start');
   f.turn.start = async () => true;
   f.turn.isRunning = () => true;
-  await f.server['handleServerUpdateSettings'](f.session, { turnEnabled: true }, 'retry-start');
+  await f.server['serverSettings'].update(f.session, { turnEnabled: true }, 'retry-start');
   assert.equal(f.record.turnEnabled, true);
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_SETTINGS_UPDATED);
   assert.equal(f.messages.at(-1)?.requestId, 'retry-start');
@@ -123,7 +126,7 @@ test('a spawned relay that died before acknowledgement cannot report success', a
   const f = fixture();
   f.turn.start = async () => true;
   f.turn.isRunning = () => false;
-  await f.server['handleServerUpdateSettings'](f.session, { turnEnabled: true }, 'dead-process');
+  await f.server['serverSettings'].update(f.session, { turnEnabled: true }, 'dead-process');
   assert.equal(f.record.turnEnabled, false);
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_ERROR);
   assert.equal(f.messages.at(-1)?.requestId, 'dead-process');
@@ -131,14 +134,14 @@ test('a spawned relay that died before acknowledgement cannot report success', a
 
 test('DM relay setting persists, broadcasts, and requires negotiated support', async () => {
   const f = fixture();
-  await f.server['handleServerUpdateSettings'](f.session, { dmRelayEnabled: false }, 'dm-off');
+  await f.server['serverSettings'].update(f.session, { dmRelayEnabled: false }, 'dm-off');
   assert.equal(f.record.dmRelayEnabled, false);
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_SETTINGS_UPDATED);
   assert.equal(f.messages.at(-1)?.requestId, 'dm-off');
   assert.equal((f.messages.at(-1)?.payload as ServerSettingsUpdatedPayload).dmRelayEnabled, false);
   const legacy = fixture();
   legacy.session.protocol = { version: 35, minimumVersion: 35, features: [] };
-  await legacy.server['handleServerUpdateSettings'](legacy.session, { dmRelayEnabled: false }, 'legacy-dm');
+  await legacy.server['serverSettings'].update(legacy.session, { dmRelayEnabled: false }, 'legacy-dm');
   assert.equal(legacy.record.dmRelayEnabled, true);
   assert.equal(legacy.messages.at(-1)?.type, MessageType.SERVER_ERROR);
   assert.equal(legacy.messages.at(-1)?.requestId, 'legacy-dm');
@@ -149,13 +152,13 @@ test('AFK settings require negotiated support and reach no write when refused', 
   const legacy = fixture();
   legacy.session.protocol = { version: 38, minimumVersion: 35, features: ['dm-relay'] };
   for (const patch of [{ afkChannelEnabled: true }, { afkChannelName: 'AFK' }, { afkTimeoutSeconds: 300 }]) {
-    await legacy.server['handleServerUpdateSettings'](legacy.session, patch, 'legacy-afk');
+    await legacy.server['serverSettings'].update(legacy.session, patch, 'legacy-afk');
     assert.equal(legacy.messages.at(-1)?.type, MessageType.SERVER_ERROR);
     assert.equal((legacy.messages.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
   }
   const current = fixture();
   current.session.protocol = { version: 38, minimumVersion: 35, features: ['afk-channel'] };
-  await current.server['handleServerUpdateSettings'](current.session, { afkTimeoutSeconds: 45 }, 'invalid-afk');
+  await current.server['serverSettings'].update(current.session, { afkTimeoutSeconds: 45 }, 'invalid-afk');
   assert.equal((current.messages.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.BAD_REQUEST);
   assert.equal(legacy.writes() + current.writes(), 0);
 });
@@ -164,14 +167,14 @@ test('SFU initialization failures reject the request before mode persistence and
   const f = fixture();
   f.sfu.init = async () => false;
   f.sfu.getLastError = () => 'Worker unavailable';
-  await f.server['handleServerUpdateSettings'](f.session, { voiceMode: 'sfu' }, 'sfu-failed');
+  await f.server['serverSettings'].update(f.session, { voiceMode: 'sfu' }, 'sfu-failed');
   assert.equal(f.record.voiceMode, 'p2p');
   assert.equal(f.writes(), 0);
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_ERROR);
   assert.equal(f.messages.at(-1)?.requestId, 'sfu-failed');
   assert.equal(f.localModeChanges(), 0);
   f.sfu.init = async () => true;
-  await f.server['handleServerUpdateSettings'](f.session, { voiceMode: 'sfu' }, 'sfu-retry');
+  await f.server['serverSettings'].update(f.session, { voiceMode: 'sfu' }, 'sfu-retry');
   assert.equal(f.record.voiceMode, 'sfu');
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_SETTINGS_UPDATED);
   assert.equal(f.messages.at(-1)?.requestId, 'sfu-retry');
@@ -182,8 +185,8 @@ test('permission loss and replaced sessions during installation cannot commit a 
   for (const invalidation of ['permission', 'session']) {
     const f = fixture();
     const installation = deferred();
-    f.server['ensureRelayCanRun'] = async () => { await installation.promise; return null; };
-    const pending = f.server['handleServerUpdateSettings'](f.session, { turnEnabled: true }, 'stale');
+    f.server['serverSettings']['ensureRelayCanRun'] = async () => { await installation.promise; return null; };
+    const pending = f.server['serverSettings'].update(f.session, { turnEnabled: true }, 'stale');
     await flush();
     if (invalidation === 'permission') f.revoke();
     else f.session.replaced = true;
@@ -199,8 +202,8 @@ test('TURN in already-persisted SFU mode is refused before attempting an install
   const f = fixture();
   f.record.voiceMode = 'sfu';
   let installs = 0;
-  f.server['ensureRelayCanRun'] = async () => { installs++; return null; };
-  await f.server['handleServerUpdateSettings'](f.session, { turnEnabled: true }, 'incompatible');
+  f.server['serverSettings']['ensureRelayCanRun'] = async () => { installs++; return null; };
+  await f.server['serverSettings'].update(f.session, { turnEnabled: true }, 'incompatible');
   assert.equal(installs, 0);
   assert.equal(f.writes(), 0);
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_ERROR);
@@ -210,7 +213,7 @@ test('TURN in already-persisted SFU mode is refused before attempting an install
 test('application heartbeat bypasses a long activation without reordering queued configuration changes', async () => {
   const f = fixture();
   const activation = deferred();
-  f.server['applyTurnState'] = async () => { await activation.promise; };
+  f.server['serverSettings']['applyTurnState'] = async () => { await activation.promise; };
   const receive = (type: MessageType, payload: object, requestId: string) =>
     f.server['receiveMessage'](f.session, Buffer.from(JSON.stringify({ type, payload, requestId })));
   receive(MessageType.SERVER_UPDATE_SETTINGS, { turnEnabled: true }, 'activation');
@@ -245,4 +248,85 @@ test('unexpected asynchronous handler failure sends a correlated error and does 
   assert.equal(f.record.name, 'Retry');
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_SETTINGS_UPDATED);
   assert.equal(f.messages.at(-1)?.requestId, 'retried-write');
+});
+
+test('the TURN relay refuses TCP relays and every internal network, and writes only real addresses', () => {
+  const manager = new CoturnManager('unused-data-dir');
+  const lines = manager['buildConfig']('secret', '198.51.100.20', '10.0.0.5').split('\n');
+  for (const expected of [
+    'no-tcp-relay', 'no-multicast-peers', 'external-ip=198.51.100.20/10.0.0.5',
+    'denied-peer-ip=127.0.0.0-127.255.255.255', 'denied-peer-ip=10.0.0.0-10.255.255.255',
+    // Tailscale's carrier-grade NAT range, and IPv4 written as IPv6 (CVE-2026-27624).
+    'denied-peer-ip=100.64.0.0-100.127.255.255', 'denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255',
+    'denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', 'denied-peer-ip=2002::-2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+  ]) assert.ok(lines.includes(expected), expected);
+  assert.equal(lines.some((line) => line.startsWith('allowed-peer-ip')), false);
+
+  // An address from an external service that carries a line break never becomes a directive.
+  const injected = manager['buildConfig']('secret', '198.51.100.20\nallowed-peer-ip=10.0.0.1', '10.0.0.5\nno-auth');
+  assert.equal(injected.includes('allowed-peer-ip'), false);
+  assert.equal(injected.includes('no-auth'), false);
+  assert.equal(injected.split('\n').some((line) => line.startsWith('external-ip')), false);
+  // A mapping only pairs addresses of the same family.
+  assert.ok(manager['buildConfig']('secret', '2001:db8::1', '10.0.0.5').split('\n').includes('external-ip=2001:db8::1'));
+});
+
+test('relay availability is probed off the event loop once for every sign-in, and again after an installation or a start (S-VOICE-6)', async (t) => {
+  CoturnManager.invalidateAvailability();
+  t.after(() => CoturnManager.invalidateAvailability());
+  t.mock.method(Logger, 'warn', () => {});
+  t.mock.method(os, 'platform', () => 'linux');
+  // A host without coturn and without sudo, as far as any synchronous probe can tell.
+  const blocking = t.mock.method(childProcess, 'spawnSync', () => ({ status: 1, stdout: '' }));
+  let installed = false;
+  const probes: string[] = [];
+  t.mock.method(childProcess, 'execFile',
+    (command: string, args: string[], _options: unknown, done: (error: Error | null, stdout: string) => void) => {
+      probes.push([command, ...args].join(' '));
+      if (command === 'which') done(installed ? null : new Error('not found'), installed ? '/usr/bin/turnserver\n' : '');
+      else done(null, '');
+    });
+  const lookups = () => probes.filter((probe) => probe === 'which turnserver').length;
+
+  const signIns = await Promise.all([CoturnManager.availability(), CoturnManager.availability(), CoturnManager.availability()]);
+  for (const availability of signIns) {
+    assert.deepEqual(availability, { supported: false, reason: 'not-installed', autoInstallable: true });
+  }
+  assert.equal(lookups(), 1, 'every sign-in shares one probe');
+  assert.equal(blocking.mock.callCount(), 0, 'and none of them waits on a process');
+
+  installed = true;
+  await CoturnManager.ensureInstalled();
+  assert.deepEqual(await CoturnManager.availability(), { supported: true }, 'an installation is told at once');
+  assert.equal(lookups(), 2);
+
+  installed = false;
+  assert.equal(await new CoturnManager(os.tmpdir()).start('secret'), false);
+  assert.deepEqual(await CoturnManager.availability(), { supported: false, reason: 'not-installed', autoInstallable: true },
+    'turning the relay on probes the host again');
+  assert.equal(lookups(), 3);
+});
+
+test('a settings change and the next login describe the server in the same words (S-APP-10)', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const offer = createProtocolOffer('client');
+  const owner = await f.human('Settings owner', identity(), randomUUID(), false, PROTOCOL_VERSION, offer);
+  const before = asRecord(owner.auth.payload.server);
+  assert.equal(before.allowSoundboard, true);
+  assert.equal(before.messageDeleteUndoSeconds, SERVER_SETTING_DEFAULTS.messageDeleteUndoSeconds, 'defaults reach the snapshot');
+
+  const changed = await owner.peer.request(MessageType.SERVER_UPDATE_SETTINGS, {
+    name: 'Renamed server', maxUsers: 40, allowSoundboard: false, allowMessageEdit: false, allowEveryoneMention: false,
+    showRoleBadgesToEveryone: false, messageDeleteUndoSeconds: 120, maxMessageLength: 500, dmRelayEnabled: false,
+  });
+  assert.equal(changed.type, MessageType.SERVER_SETTINGS_UPDATED);
+  const member = await f.human('Late member', identity(), randomUUID(), false, PROTOCOL_VERSION, offer);
+  const snapshot = asRecord(member.auth.payload.server);
+  const keys = Object.keys(serverSettingsPayload({ ...SERVER_SETTING_DEFAULTS, id: '', name: '', passwordHash: '', createdAt: 0, maxUsers: 0 },
+    { usedBytes: 0, maxTotalBytes: 0, maxFileBytes: 0 }));
+  for (const key of keys) assert.deepEqual(snapshot[key], changed.payload[key], key);
+  assert.equal(snapshot.name, 'Renamed server');
+  assert.equal(snapshot.allowSoundboard, false);
+  assert.equal(snapshot.messageDeleteUndoSeconds, 120);
 });

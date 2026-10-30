@@ -1,20 +1,12 @@
 #include "mf_rtc_internal.h"
+#include "annex_b.h"
 
-#include <algorithm>
-#include <cmath>
 #include <limits>
 
 namespace monky::native_rtc::mf::detail {
 namespace {
 
 constexpr std::uint64_t kMaximumTimestampUs = 9007199254740991ull;
-
-std::size_t StartCode(std::span<const std::uint8_t> bytes, std::size_t at) {
-  if (bytes.size() - at < 3 || bytes[at] || bytes[at + 1]) return 0;
-  if (bytes[at + 2] == 1) return 3;
-  return bytes.size() - at >= 4 && bytes[at + 2] == 0 && bytes[at + 3] == 1
-      ? 4 : 0;
-}
 
 bool SameSpsMode(const sv::H264Sps& a, const sv::H264Sps& b) {
   return a.ProfileLevelId() == b.ProfileLevelId() &&
@@ -41,75 +33,6 @@ void ValidateOptions(const AdapterOptions& options) {
       options.operation_timeout > std::chrono::seconds(60)) {
     throw AdapterError("ERR_RTC_OPTIONS", "Invalid bounded MF adapter options");
   }
-}
-
-EncoderSetup MakeEncoderSetup(const webrtc::VideoCodec& codec,
-                             const webrtc::VideoEncoder::Settings& settings,
-                             NegotiatedH264 negotiated,
-                             const AdapterOptions& options) {
-  return codec_policy::MakeEncoderSetup(codec, settings, negotiated, options.maximum_in_flight);
-}
-
-EncoderRates ValidateRates(
-    const webrtc::VideoEncoder::RateControlParameters& parameters,
-    const EncoderSetup& setup) {
-  for (std::size_t spatial = 0; spatial < webrtc::kMaxSpatialLayers; ++spatial) {
-    for (std::size_t temporal = 0; temporal < webrtc::kMaxTemporalStreams; ++temporal) {
-      if ((spatial || temporal) &&
-          (parameters.bitrate.GetBitrate(spatial, temporal) ||
-           parameters.target_bitrate.GetBitrate(spatial, temporal))) {
-        throw AdapterError("ERR_RTC_RATE_LAYERS", "Only L1T1 bitrate allocation is supported",
-                           WEBRTC_VIDEO_CODEC_ERR_SIMULCAST_PARAMETERS_NOT_SUPPORTED);
-      }
-    }
-  }
-  const auto bitrate = parameters.bitrate.get_sum_bps();
-  if ((bitrate && bitrate < 64000) || bitrate > setup.maximum_bitrate ||
-      bitrate > sv::H264LevelMaxBitrate(setup.core.level)) {
-    throw AdapterError("ERR_RTC_RATE_REQUIRES_INIT",
-                       "Nonzero rates must be >=64000 and fit the initialized H264 rate range");
-  }
-  if (!std::isfinite(parameters.framerate_fps)) {
-    throw AdapterError("ERR_RTC_FRAMERATE", "Framerate must be finite");
-  }
-  // M140 derives this target from input cadence; bursts may exceed InitEncode's
-  // ceiling. Limit admission, not the reported cadence or the original PTS.
-  const double fps = parameters.framerate_fps <= 0
-      ? setup.core.fps : (std::min)(parameters.framerate_fps, static_cast<double>(setup.core.fps));
-  constexpr long double maximum_interval_us = static_cast<long double>(kMaximumTimestampUs);
-  if (!(fps > 0) || fps < 1000000.0L / maximum_interval_us) {
-    throw AdapterError("ERR_RTC_FRAMERATE",
-                       "Framerate must be positive and timestamp-representable");
-  }
-  return {bitrate, fps};
-}
-
-void SourceRateLimiter::SetFps(double fps) {
-  interval_us_ = 1000000.0L / fps;
-  next_due_us_ = last_accepted_us_
-      ? std::optional<long double>(*last_accepted_us_ + interval_us_) : std::nullopt;
-}
-
-void SourceRateLimiter::Reset() {
-  next_due_us_.reset();
-  last_accepted_us_.reset();
-}
-
-bool SourceRateLimiter::Accept(std::int64_t timestamp_us) {
-  if (timestamp_us < 0 || static_cast<std::uint64_t>(timestamp_us) > kMaximumTimestampUs ||
-      (last_seen_us_ && timestamp_us <= *last_seen_us_)) {
-    throw AdapterError("ERR_RTC_SOURCE_TIMESTAMP",
-                       "Source GPU timestamps must be bounded, nonnegative, and strictly increasing");
-  }
-  last_seen_us_ = timestamp_us;
-  const long double now = timestamp_us;
-  // One frame of bounded scheduling credit absorbs source timestamp jitter.
-  // Deadlines still accumulate; neither an early frame nor a drop resets them.
-  if (next_due_us_ && now + interval_us_ + 1 < *next_due_us_) return false;
-  const auto due = next_due_us_.value_or(now);
-  next_due_us_ = (now > due + interval_us_ ? now : due) + interval_us_;
-  last_accepted_us_ = timestamp_us;
-  return true;
 }
 
 std::int64_t RtpTimeline::Push(std::uint32_t timestamp) {
@@ -166,25 +89,15 @@ bool FenceNotification::ReportArmFailure() {
 }
 
 AccessUnitInfo InspectAccessUnit(std::span<const std::uint8_t> bytes) {
-  if (bytes.empty() || bytes.size() > kMaximumAccessUnitBytes || !StartCode(bytes, 0)) {
+  if (bytes.empty() || bytes.size() > kMaximumAccessUnitBytes || !sv::AnnexBStartCode(bytes, 0)) {
     throw AdapterError("ERR_RTC_ANNEX_B", "A bounded, complete Annex B access unit is required");
   }
   AccessUnitInfo result;
-  std::size_t position = 0, count = 0;
-  while (position < bytes.size()) {
-    const auto prefix = StartCode(bytes, position);
-    if (!prefix || ++count > 4096) {
-      throw AdapterError("ERR_RTC_ANNEX_B", "Malformed or excessive Annex B NAL units");
-    }
-    const auto begin = position + prefix;
-    position = begin;
-    while (position < bytes.size() && !StartCode(bytes, position)) ++position;
-    auto end = position;
-    while (end > begin && bytes[end - 1] == 0) --end;
-    if (end == begin || (bytes[begin] & 0x80)) {
+  const auto walked = sv::ForEachAnnexBNal(bytes, 4096, [&](std::span<const std::uint8_t> nal) {
+    if (nal[0] & 0x80) {
       throw AdapterError("ERR_RTC_ANNEX_B", "Invalid elementary H264 NAL header");
     }
-    const auto type = bytes[begin] & 31;
+    const auto type = nal[0] & 31;
     if (type == 1 || type == 5) {
       if (result.has_picture && result.keyframe != (type == 5)) {
         throw AdapterError("ERR_RTC_ANNEX_B", "Mixed IDR/non-IDR access unit");
@@ -192,7 +105,7 @@ AccessUnitInfo InspectAccessUnit(std::span<const std::uint8_t> bytes) {
       result.has_picture = true;
       result.keyframe = type == 5;
     } else if (type == 7) {
-      auto sps = sv::ParseH264Sps(bytes.subspan(begin, end - begin));
+      auto sps = sv::ParseH264Sps(nal);
       if (result.sps && !SameSpsMode(*result.sps, sps)) {
         throw AdapterError("ERR_RTC_SPS", "Conflicting SPS modes in one access unit");
       }
@@ -202,6 +115,12 @@ AccessUnitInfo InspectAccessUnit(std::span<const std::uint8_t> bytes) {
       throw AdapterError("ERR_RTC_NAL_MODE",
                          "SVC/MVC, partitioned slices, and RTP fragments are unsupported");
     }
+  });
+  if (walked == sv::AnnexBError::kEmptyNal) {
+    throw AdapterError("ERR_RTC_ANNEX_B", "Invalid elementary H264 NAL header");
+  }
+  if (walked != sv::AnnexBError::kNone) {
+    throw AdapterError("ERR_RTC_ANNEX_B", "Malformed or excessive Annex B NAL units");
   }
   if (!result.has_picture) {
     throw AdapterError("ERR_RTC_EMPTY_PICTURE", "An access unit must contain a real picture");

@@ -1,13 +1,11 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import type { BotLocale } from '@monky/shared';
 import { isRecord, type BotMode, type BotPackageDefinition } from '../tooling/config';
 import {
   localizedText, parseBotRequirements, requirementsFingerprint, type BotRequirements,
 } from '../tooling/requirements';
 import type { BotConfig, CliContext } from './config';
-import { readJsonFile, writePrivateJson } from './fs';
+import { readOptionalPrivateJson, writePrivateJsonAtomic } from './fs';
 import { keyPaths } from './keys';
 import { CliError, cliText } from './locale';
 import { askCliChoice } from './prompts';
@@ -71,13 +69,12 @@ export function readHostConsent(homeDir: string): HostConsentRecord | null {
   const file = consentFile(homeDir);
   let stored: unknown;
   try {
-    if (!fs.lstatSync(file).isFile()) throw new Error('Not a regular file.');
-    stored = readJsonFile(file, 'Host consent', 16_384);
-  } catch (error: unknown) {
-    if (isRecord(error) && error.code === 'ENOENT') return null;
+    stored = readOptionalPrivateJson(file, 'Host consent', 16_384);
+  } catch {
     throw new CliError(`Não foi possível ler ${file}. Remova o arquivo e confirme novamente com consent.`,
       `Could not read ${file}. Remove it and confirm again with consent.`);
   }
+  if (stored === undefined) return null;
   if (!isRecord(stored) || stored.version !== 1 ||
       (stored.state !== 'accepted' && stored.state !== 'inherited' && stored.state !== 'pending') ||
       typeof stored.fingerprint !== 'string' || !/^[0-9a-f]{12}$/.test(stored.fingerprint) ||
@@ -90,14 +87,11 @@ export function readHostConsent(homeDir: string): HostConsentRecord | null {
 }
 
 export function writeHostConsent(homeDir: string, state: HostConsentState, fingerprint: string, botDir: string): void {
-  const pending = path.join(homeDir, `.host-consent-${randomUUID()}.pending`);
   try {
-    writePrivateJson(pending, { version: 1, state, fingerprint, botDir: path.resolve(botDir), updatedAt: Date.now() });
-    fs.renameSync(pending, consentFile(homeDir));
+    writePrivateJsonAtomic(consentFile(homeDir),
+      { version: 1, state, fingerprint, botDir: path.resolve(botDir), updatedAt: Date.now() });
   } catch {
     throw new CliError('Não foi possível salvar o consentimento.', 'Could not save the consent.');
-  } finally {
-    fs.rmSync(pending, { force: true });
   }
 }
 

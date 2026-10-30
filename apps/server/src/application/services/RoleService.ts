@@ -1,7 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
-import { EVERYONE_ROLE_ID, Permission, ProtocolErrorCode, Role, RoleAssignPayload, RoleCreatePayload, RoleUpdatePayload, UserRoleSummary, RoleModel, legacyRoleGrants, roleAssignmentSchema, roleCreateSchema, roleUpdateSchema, stripAdministrator } from '@monky/shared';
+import { EVERYONE_ROLE_ID, Permission, ProtocolErrorCode, Role, RoleAssignPayload, RoleCreatePayload, RoleUpdatePayload, UserRoleSummary, RoleModel, legacyRoleGrants, roleAssignmentSchema, roleUpdateSchema, stripAdministrator } from '@monky/shared';
 import { RoleRecord } from '../../domain/entities';
 import { IRoleRepository, IUserRepository } from '../../domain/repositories';
+import { customRoleRecord, parseNewRole, usesReservedAdminName } from '../../domain/roles';
 import { PermissionService } from './PermissionService';
 
 interface RoleResult {
@@ -16,9 +17,6 @@ interface RoleStateResult {
   roles: Role[];
   userRoles: UserRoleSummary[];
 }
-
-/** Name of the built-in role that grants admin rights; not usable by custom roles (#277). */
-const RESERVED_ADMIN_ROLE_NAME = 'admin';
 
 export class RoleService {
   constructor(
@@ -71,12 +69,21 @@ export class RoleService {
     };
   }
 
-  public async ensureDefaultRolesAssigned(userId: string): Promise<void> {
-    const defaultRoles = await this.roleRepo.getDefaultRoles();
-    for (const role of defaultRoles) {
+  /**
+   * Gives a member the default roles they lack and reports whether any was
+   * given. Runs on every sign-in, so a role already held is left alone: each
+   * write is a role mutation that every connection has to hear about (S-WS-4).
+   */
+  public async ensureDefaultRolesAssigned(userId: string): Promise<boolean> {
+    const held = new Set((await this.roleRepo.listRolesForUser(userId)).map((role) => role.id));
+    let assigned = false;
+    for (const role of await this.roleRepo.getDefaultRoles()) {
+      if (held.has(role.id)) continue;
       if ((role.permissions & Permission.ADMINISTRATOR) !== 0 || await this.isBuiltInAdminRole(role.id)) continue;
       await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, role.id), false);
+      assigned = true;
     }
+    return assigned;
   }
 
   public async assignAdminRole(userId: string): Promise<void> {
@@ -96,33 +103,21 @@ export class RoleService {
     return !!adminRole && adminRole.id === roleId;
   }
 
-  private usesReservedAdminName(name: string): boolean {
-    return name.trim().toLowerCase() === RESERVED_ADMIN_ROLE_NAME;
-  }
-
   public async createRole(actorUserId: string, payload: RoleCreatePayload, model: RoleModel = 'grants'): Promise<RoleResult> {
     if (!(await this.permissionService.checkPermission(actorUserId, Permission.MANAGE_ROLES))) {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Você não pode gerenciar cargos.' };
     }
 
-    const parsed = roleCreateSchema.safeParse(payload);
-    if (!parsed.success) {
-      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: parsed.error.errors[0]?.message || 'Cargo inválido' };
+    const parsed = parseNewRole(payload);
+    if (!parsed.ok) {
+      return {
+        success: false,
+        errorCode: ProtocolErrorCode.BAD_REQUEST,
+        errorMessage: parsed.problem.code === 'reserved-name' ? 'Esse nome de cargo é reservado.' : parsed.problem.message,
+      };
     }
 
-    if (this.usesReservedAdminName(parsed.data.name)) {
-      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Esse nome de cargo é reservado.' };
-    }
-
-    const roleRecord: RoleRecord = {
-      id: uuidv4(),
-      name: parsed.data.name,
-      color: parsed.data.color ?? null,
-      permissions: stripAdministrator(await this.toGrants(parsed.data.permissions, model)),
-      position: parsed.data.position ?? Date.now(),
-      isDefault: parsed.data.isDefault ?? false,
-      createdAt: Date.now(),
-    };
+    const roleRecord = customRoleRecord(parsed.role, await this.toGrants(parsed.role.permissions, model), uuidv4(), Date.now());
     await this.permissionService.withRoleMutation(() => this.roleRepo.create(roleRecord), false);
     return { success: true, role: this.toRole(roleRecord) };
   }
@@ -160,7 +155,7 @@ export class RoleService {
     }
     if (parsed.data.name !== undefined && parsed.data.name !== existing.name) {
       // Renaming either direction would move the ADMINISTRATOR exemption around.
-      if (isBuiltInAdmin || this.usesReservedAdminName(parsed.data.name)) {
+      if (isBuiltInAdmin || usesReservedAdminName(parsed.data.name)) {
         return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Esse nome de cargo é reservado.' };
       }
     }

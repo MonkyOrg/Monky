@@ -1,29 +1,67 @@
 import fs from 'fs';
 import path from 'path';
 import { LIMITS } from '@monky/shared';
+import type { ServerRecord } from '../../domain/entities';
+import {
+  normalizeServerName,
+  planServerSettingsUpdate,
+  type ServerSettingsPatch,
+  type ServerSettingsProblem,
+} from '../../domain/serverSettings';
 import { PasswordService } from '../../infrastructure/security/PasswordService';
 import {
   ANSI,
   color,
   CONFIG_KEYS,
   ConfigKey,
-  DEFAULT_SERVER_NAME,
 } from '../constants';
-import { CliContext, readLocalConfig, writeLocalConfig } from '../context';
+import { CliContext, GlobalArgs, readLocalConfig, withWritableContext, writeLocalConfig } from '../context';
 import { estimateHostCapacity, printCapacityEstimate } from '../capacity';
-import { configKeyLabel, describeSfuPortProblem, describeTurnPortProblem, describeTurnUnavailability, formatBool, formatDate, parseBoolean, parseMemberLimit, parsePositiveInt, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
+import { configKeyLabel, describeSfuPortProblem, describeTurnPortProblem, describeTurnUnavailability, formatBool, formatDate, parseBoolean, parseMemberLimit, parsePort, parsePositiveInt, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
 import { t } from '../i18n/index';
-import {
-  getPm2ProcessName,
-  isMonkyServerRunning,
-  writeEcosystem,
-} from '../pm2';
-import { runSync } from '../process';
-import { registerServer } from '../registry';
+import { RegisteredServer, registerServer } from '../registry';
 import { ask, askChoice, confirm, promptPassword } from '../prompts';
-import { disableAutoUpdate, enableAutoUpdate, isAutoUpdateEnabled, AutoUpdateSchedule } from './update';
+import { askAutoUpdateSchedule, disableAutoUpdate, enableAutoUpdate, isAutoUpdateEnabled } from '../autoUpdate';
+import { findOnlinePm2Process } from '../runningServer';
+import { resolveTargetServer } from '../target';
+import { restartServerCommand } from './serverLifecycle';
 import { CoturnManager } from '../../infrastructure/turn/CoturnManager';
 import { checkSfuPreflight } from '../../infrastructure/sfu/SfuPreflight';
+
+/** Settings kept outside `server.db`, so changing them never conflicts with a running server. */
+type DatabaseConfigKey = Exclude<ConfigKey, 'port' | 'autoUpdate'>;
+
+function isDatabaseConfigKey(key: ConfigKey): key is DatabaseConfigKey {
+  return key !== 'port' && key !== 'autoUpdate';
+}
+
+function parseConfigKey(value: string): ConfigKey {
+  const key = CONFIG_KEYS.find((candidate) => candidate === value);
+  if (!key) throw new Error(t('config.unsupportedKey', { key: value }));
+  return key;
+}
+
+/** The CLI's words for a change the server rules refuse (`planServerSettingsUpdate`). */
+function describeSettingsProblem(problem: ServerSettingsProblem, key: DatabaseConfigKey, value: string): string {
+  switch (problem.code) {
+    case 'delete-undo-seconds':
+      return t('config.invalidDeleteUndo');
+    case 'max-message-length':
+      return t('config.invalidMessageLimit');
+    case 'attachment-file-over-total':
+      return t('config.attachmentFileOverTotal', { file: problem.fileBytes, total: problem.totalBytes });
+    case 'max-users':
+      return t('validation.memberLimit', { key, value });
+    case 'members-over-limit':
+      return t('config.tooManyMembers', { count: problem.memberCount });
+    case 'turn-in-sfu':
+      return t('config.turnBlockedBySfu');
+    case 'afk-timeout':
+    case 'attachment-limits':
+    case 'recent-sound-cache-limit':
+      return t('validation.positiveInt', { key, value });
+  }
+}
 
 /**
  * Warns, right where the value is shown, when the relay cannot actually run on
@@ -61,19 +99,19 @@ export async function showConfig(ctx: CliContext): Promise<void> {
   console.log(`${configKeyLabel('port')}: ${localConfig.port || LIMITS.DEFAULT_PORT}`);
   console.log(`${t('label.hasPassword')}: ${formatBool(Boolean(server.passwordHash))}`);
   console.log(`${configKeyLabel('maxUsers')}: ${server.maxUsers > LIMITS.MAX_USERS_UNLIMITED ? server.maxUsers : t('config.noLimit')}`);
-  console.log(`${configKeyLabel('maxMessageLength')}: ${server.maxMessageLength === 0 ? t('config.noLimit') : server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH}`);
-  console.log(`${configKeyLabel('messageDeleteUndoSeconds')}: ${server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS}`);
+  console.log(`${configKeyLabel('maxMessageLength')}: ${server.maxMessageLength === 0 ? t('config.noLimit') : server.maxMessageLength}`);
+  console.log(`${configKeyLabel('messageDeleteUndoSeconds')}: ${server.messageDeleteUndoSeconds}`);
   console.log(`${t('label.ownerUserId')}: ${server.ownerUserId ?? '-'}`);
   console.log(`${t('label.ownerNickname')}: ${owner?.nickname ?? '-'}`);
-  console.log(`${configKeyLabel('allowSoundboard')}: ${formatBool(server.allowSoundboard !== false)}`);
-  console.log(`${configKeyLabel('allowEveryoneMention')}: ${formatBool(server.allowEveryoneMention !== false)}`);
-  console.log(`${configKeyLabel('showRoleBadgesToEveryone')}: ${formatBool(server.showRoleBadgesToEveryone !== false)}`);
-  console.log(`${configKeyLabel('voiceMode')}: ${server.voiceMode || 'p2p'}${voiceModeStatusSuffix(server.voiceMode || 'p2p')}`);
-  console.log(`${configKeyLabel('turn')}: ${formatBool(Boolean(server.turnEnabled))}${turnStatusSuffix()}`);
+  console.log(`${configKeyLabel('allowSoundboard')}: ${formatBool(server.allowSoundboard)}`);
+  console.log(`${configKeyLabel('allowEveryoneMention')}: ${formatBool(server.allowEveryoneMention)}`);
+  console.log(`${configKeyLabel('showRoleBadgesToEveryone')}: ${formatBool(server.showRoleBadgesToEveryone)}`);
+  console.log(`${configKeyLabel('voiceMode')}: ${server.voiceMode}${voiceModeStatusSuffix(server.voiceMode)}`);
+  console.log(`${configKeyLabel('turn')}: ${formatBool(server.turnEnabled)}${turnStatusSuffix()}`);
   console.log(`${t('label.iconPath')}: ${server.iconPath ?? '-'}`);
   console.log(`${configKeyLabel('maxAttachmentFileBytes')}: ${server.maxAttachmentFileBytes ?? '-'}`);
   console.log(`${configKeyLabel('maxAttachmentStorageBytes')}: ${server.maxAttachmentStorageBytes ?? '-'}`);
-  console.log(`${configKeyLabel('autoUpdate')}: ${formatBool(isAutoUpdateEnabled(ctx.dataDir))}`);
+  console.log(`${configKeyLabel('autoUpdate')}: ${formatBool(isAutoUpdateEnabled())}`);
   console.log(`${t('label.createdAt')}: ${formatDate(server.createdAt)}`);
 }
 
@@ -86,6 +124,72 @@ export async function askConfigKey(): Promise<ConfigKey> {
 }
 
 /**
+ * `monky config set`. Settings stored in `server.db` need the server stopped
+ * (see `withWritableContext`); the port and the auto-updater live outside the
+ * database and can change while it runs.
+ */
+export async function setConfigCommand(globalArgs: GlobalArgs, rawKey: string, value?: string): Promise<void> {
+  const requestedKey = rawKey.trim() ? parseConfigKey(rawKey.trim()) : null;
+  // The updater is shared by every server on this machine, so it targets none.
+  if (requestedKey === 'autoUpdate') {
+    await setAutoUpdateCommand(value);
+    return;
+  }
+  const target = await resolveTargetServer(globalArgs, t('action.manage'));
+  const key = requestedKey ?? (await askConfigKey());
+  if (key === 'autoUpdate') {
+    await setAutoUpdateCommand(value);
+    return;
+  }
+  if (key === 'port') {
+    await setPortCommand(target, value);
+    return;
+  }
+  await withWritableContext(target.dataDir, (ctx) => setConfig(ctx, key, value));
+}
+
+/**
+ * Applies a new port through the regular restart, which warns people in
+ * voice, repairs a stale PM2 registration and runs `pm2 save`. Restarting
+ * PM2 directly skipped all of that: a reboot brought the old port back, and a
+ * failed restart was still reported as done.
+ */
+async function setPortCommand(target: RegisteredServer, value?: string): Promise<void> {
+  const config = readLocalConfig(target.dataDir);
+  const runningPort = target.port ?? config.port ?? LIMITS.DEFAULT_PORT;
+  const port = parsePort(value ?? (await ask(t('config.askPort'), String(config.port || LIMITS.DEFAULT_PORT))));
+  writeLocalConfig(target.dataDir, { ...config, port });
+  console.log(color(t('config.updated', { key: 'port' }), ANSI.green));
+
+  if (!findOnlinePm2Process(target.dataDir)) {
+    registerServer(target.dataDir, { port });
+    console.log(color(t('config.portNextStart'), ANSI.dim));
+    return;
+  }
+  // The registry keeps the port the server runs on until the restart
+  // registers the new one, so the voice warning probes the live server.
+  if (target.port === undefined) registerServer(target.dataDir, { port: runningPort });
+  if (await confirm(t('config.restartForPort'), true) &&
+      await restartServerCommand({ args: [], dataDir: target.dataDir, dataDirSpecified: true })) {
+    return;
+  }
+  console.log(color(t('config.portNextStartOrRestart'), ANSI.dim));
+}
+
+async function setAutoUpdateCommand(value?: string): Promise<void> {
+  const enabled = parseBoolean(value ?? (await askChoice(t('config.askBoolean'), ['true', 'false'])));
+  if (enabled) {
+    await enableAutoUpdate(await askAutoUpdateSchedule());
+  } else {
+    await disableAutoUpdate();
+  }
+  console.log(color(t('config.updated', { key: 'autoUpdate' }), ANSI.green));
+}
+
+/**
+ * Changes one setting stored in `server.db`, through a context the caller
+ * opened for writing.
+ *
  * `skipSfuDiagnostics` is set by `monky create`, which already probed the
  * ports, printed the capacity report and ran the preflight before the operator
  * confirmed. Without it the SFU branch below would repeat all three — asking
@@ -99,32 +203,29 @@ export async function setConfig(
   value?: string,
   options: { skipSfuDiagnostics?: boolean } = {}
 ): Promise<void> {
-  const requestedKey = key.trim() || (await askConfigKey());
-  const normalizedKey = CONFIG_KEYS.find((candidate) => candidate === requestedKey);
-  if (!normalizedKey) throw new Error(t('config.unsupportedKey', { key: requestedKey }));
+  const requestedKey = key.trim();
+  const configKey = CONFIG_KEYS.find((candidate) => candidate === requestedKey);
+  if (!configKey || !isDatabaseConfigKey(configKey)) throw new Error(t('config.unsupportedKey', { key: requestedKey }));
+  const normalizedKey: DatabaseConfigKey = configKey;
   const server = await ctx.serverRepo.getServer();
   if (!server) {
     throw new Error(t('create.serverNotFound'));
   }
 
-  const localConfig = readLocalConfig(ctx.dataDir);
-
-  const currentValues: Record<ConfigKey, string> = {
+  const currentValues: Record<DatabaseConfigKey, string> = {
     name: server.name,
     password: '',
-    port: String(localConfig.port || LIMITS.DEFAULT_PORT),
     icon: server.iconPath ?? '',
     maxUsers: String(server.maxUsers),
-    maxMessageLength: String(server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH),
-    messageDeleteUndoSeconds: String(server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS),
-    allowSoundboard: String(server.allowSoundboard !== false),
-    allowEveryoneMention: String(server.allowEveryoneMention !== false),
-    showRoleBadgesToEveryone: String(server.showRoleBadgesToEveryone !== false),
-    voiceMode: server.voiceMode || 'p2p',
+    maxMessageLength: String(server.maxMessageLength),
+    messageDeleteUndoSeconds: String(server.messageDeleteUndoSeconds),
+    allowSoundboard: String(server.allowSoundboard),
+    allowEveryoneMention: String(server.allowEveryoneMention),
+    showRoleBadgesToEveryone: String(server.showRoleBadgesToEveryone),
+    voiceMode: server.voiceMode,
     maxAttachmentFileBytes: String(server.maxAttachmentFileBytes ?? ''),
     maxAttachmentStorageBytes: String(server.maxAttachmentStorageBytes ?? ''),
-    autoUpdate: String(isAutoUpdateEnabled(ctx.dataDir)),
-    turn: String(Boolean(server.turnEnabled)),
+    turn: String(server.turnEnabled),
   };
 
   let nextValue = value;
@@ -136,16 +237,12 @@ export async function setConfig(
       case 'password':
         nextValue = await promptPassword(t('config.askPassword'));
         break;
-      case 'port':
-        nextValue = await ask(t('config.askPort'), currentValues.port);
-        break;
       case 'icon':
         nextValue = await ask(t('config.askIcon'));
         break;
       case 'allowSoundboard':
       case 'allowEveryoneMention':
       case 'showRoleBadgesToEveryone':
-      case 'autoUpdate':
       case 'turn':
         nextValue = await askChoice(t('config.askBoolean'), ['true', 'false']);
         break;
@@ -162,18 +259,26 @@ export async function setConfig(
       case 'maxAttachmentStorageBytes':
         nextValue = await ask(t('config.askValue', { key: configKeyLabel(normalizedKey) }), currentValues[normalizedKey]);
         break;
-      default:
-        nextValue = await ask(t('config.askValue', { key: normalizedKey }));
     }
   }
 
+  // Validated by the server's own rules before anything is written; see
+  // `planServerSettingsUpdate`.
+  const answer = nextValue;
+  const apply = async (patch: ServerSettingsPatch): Promise<Partial<ServerRecord>> => {
+    const plan = planServerSettingsUpdate(server, patch, await ctx.userRepo.count());
+    if (!plan.ok) throw new Error(describeSettingsProblem(plan.problem, normalizedKey, answer));
+    await ctx.serverRepo.updateServer(plan.updates);
+    return plan.updates;
+  };
+
   switch (normalizedKey) {
     case 'name': {
-      const nextName = nextValue.trim();
-      if (nextName.length < 2) {
+      const nextName = normalizeServerName(nextValue);
+      if (!nextName) {
         throw new Error(t('config.nameTooShort'));
       }
-      await ctx.serverRepo.updateServer({ name: nextName });
+      await apply({ name: nextName });
       registerServer(ctx.dataDir, { name: nextName });
       break;
     }
@@ -183,32 +288,6 @@ export async function setConfig(
       await ctx.serverRepo.updateServer({
         passwordHash: shouldClear ? '' : PasswordService.hashPassword(nextValue),
       });
-      break;
-    }
-    case 'port': {
-      const portNum = parsePositiveInt('port', nextValue);
-      const config = readLocalConfig(ctx.dataDir);
-      config.port = portNum;
-      writeLocalConfig(ctx.dataDir, config);
-
-      const processName = getPm2ProcessName(ctx.dataDir);
-      if (isMonkyServerRunning(processName)) {
-        const shouldRestart = await confirm(t('config.restartForPort'), true);
-        if (shouldRestart) {
-          const ecosystemPath = writeEcosystem({
-            dataDir: ctx.dataDir,
-            port: portNum,
-            serverName: (await ctx.serverRepo.getServer())?.name || DEFAULT_SERVER_NAME,
-          });
-          runSync('pm2', ['startOrRestart', ecosystemPath], { stdio: 'inherit' });
-          console.log(color(t('config.portRestarted'), ANSI.green));
-        } else {
-          console.log(color(t('config.portNextStartOrRestart'), ANSI.dim));
-        }
-      } else {
-        console.log(color(t('config.portNextStart'), ANSI.dim));
-      }
-      registerServer(ctx.dataDir, { port: portNum });
       break;
     }
     case 'icon': {
@@ -230,42 +309,31 @@ export async function setConfig(
       }
       break;
     }
-    case 'maxUsers': {
-      const nextMax = parseMemberLimit(normalizedKey, nextValue);
-      // Mirrors the rule enforced over the wire (#403): never leave the server
-      // above its own cap, since the only way out would be kicking members.
-      if (nextMax > LIMITS.MAX_USERS_UNLIMITED) {
-        const memberCount = await ctx.userRepo.count();
-        if (nextMax < memberCount) {
-          throw new Error(t('config.tooManyMembers', { count: memberCount }));
-        }
-      }
-      await ctx.serverRepo.updateServer({ maxUsers: nextMax });
+    case 'maxUsers':
+      await apply({ maxUsers: parseMemberLimit(normalizedKey, nextValue) });
       break;
-    }
     case 'maxMessageLength': {
-      if (!/^\d+$/.test(nextValue.trim()) || !Number.isSafeInteger(Number(nextValue))) {
+      if (!/^\d+$/.test(nextValue.trim())) {
         throw new Error(t('config.invalidMessageLimit'));
       }
-      await ctx.serverRepo.updateServer({ maxMessageLength: Number(nextValue) });
+      await apply({ maxMessageLength: Number(nextValue) });
       break;
     }
     case 'messageDeleteUndoSeconds': {
-      const seconds = Number(nextValue);
-      if (!/^\d+$/.test(nextValue.trim()) || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS) {
+      if (!/^\d+$/.test(nextValue.trim())) {
         throw new Error(t('config.invalidDeleteUndo'));
       }
-      await ctx.serverRepo.updateServer({ messageDeleteUndoSeconds: seconds });
+      await apply({ messageDeleteUndoSeconds: Number(nextValue) });
       break;
     }
     case 'allowSoundboard':
-      await ctx.serverRepo.updateServer({ allowSoundboard: parseBoolean(nextValue) });
+      await apply({ allowSoundboard: parseBoolean(nextValue) });
       break;
     case 'allowEveryoneMention':
-      await ctx.serverRepo.updateServer({ allowEveryoneMention: parseBoolean(nextValue) });
+      await apply({ allowEveryoneMention: parseBoolean(nextValue) });
       break;
     case 'showRoleBadgesToEveryone':
-      await ctx.serverRepo.updateServer({ showRoleBadgesToEveryone: parseBoolean(nextValue) });
+      await apply({ showRoleBadgesToEveryone: parseBoolean(nextValue) });
       break;
     case 'voiceMode': {
       const mode = parseVoiceMode(nextValue);
@@ -282,12 +350,10 @@ export async function setConfig(
         console.log(color(t('config.sfuPortOk'), ANSI.green));
       }
 
-      await ctx.serverRepo.updateServer({ voiceMode: mode });
-
       // The SFU is the relay in this mode, so coturn is turned off rather than
       // left running and unused (#515).
-      if (mode === 'sfu' && server.turnEnabled) {
-        await ctx.serverRepo.updateServer({ turnEnabled: false });
+      const updates = await apply({ voiceMode: mode });
+      if (updates.turnEnabled === false && server.turnEnabled) {
         console.log(color(t('config.turnDisabledBySfu'), ANSI.yellow));
       }
 
@@ -296,23 +362,16 @@ export async function setConfig(
         printCapacityEstimate(report);
         printSfuPreflight(checkSfuPreflight());
       }
-
-      // Same caveat as `turn`: the running process decided its voice mode at
-      // startup, so the new value only takes effect after a reload. Without
-      // this the operator sees `voiceMode: sfu` in `monky config` while the
-      // server keeps serving P2P (#515).
-      if (isMonkyServerRunning(getPm2ProcessName(ctx.dataDir))) {
-        console.log(color(t('config.voiceModeRestartNeeded'), ANSI.yellow));
-      }
       break;
     }
     case 'turn': {
       const enabled = parseBoolean(nextValue);
       // The SFU already relays every stream, so a second relay would only add
-      // cost and fight it for UDP ports. Refused here as well as on the server
-      // so neither entry point can produce the combination (#515).
-      if (enabled && (server.voiceMode || 'p2p') === 'sfu') {
-        throw new Error(t('config.turnBlockedBySfu'));
+      // cost and fight it for UDP ports. Refused before coturn is installed,
+      // by the same rule as the server (#515).
+      const plan = planServerSettingsUpdate(server, { turnEnabled: enabled }, await ctx.userRepo.count());
+      if (!plan.ok) {
+        throw new Error(describeSettingsProblem(plan.problem, normalizedKey, answer));
       }
       if (enabled && !CoturnManager.isInstalled()) {
         // Same intent as the desktop toggle: asking is enough, the server does
@@ -336,7 +395,7 @@ export async function setConfig(
           console.log(color(t('config.coturnInstalled'), ANSI.green));
         }
       }
-      const updates: { turnEnabled: boolean; turnSecret?: string } = { turnEnabled: enabled };
+      const updates = plan.updates;
       // Minted once and kept: rotating the secret would invalidate every
       // credential already issued and drop the calls being relayed (#425).
       if (enabled && !server.turnSecret) {
@@ -344,11 +403,6 @@ export async function setConfig(
       }
       await ctx.serverRepo.updateServer(updates);
 
-      // The running process holds its own copy of this setting, so the change
-      // only takes effect once it reloads.
-      if (isMonkyServerRunning(getPm2ProcessName(ctx.dataDir))) {
-        console.log(color(t('config.turnRestartNeeded'), ANSI.yellow));
-      }
       if (enabled) {
         // Run a real port check instead of a static reminder.
         const portProblem = await CoturnManager.checkPortReachability(describeTurnPortProblem);
@@ -361,39 +415,11 @@ export async function setConfig(
       break;
     }
     case 'maxAttachmentFileBytes':
-      await ctx.serverRepo.updateServer({ maxAttachmentFileBytes: parsePositiveInt(normalizedKey, nextValue) });
+      await apply({ maxAttachmentFileBytes: parsePositiveInt(normalizedKey, nextValue) });
       break;
     case 'maxAttachmentStorageBytes':
-      await ctx.serverRepo.updateServer({ maxAttachmentStorageBytes: parsePositiveInt(normalizedKey, nextValue) });
+      await apply({ maxAttachmentStorageBytes: parsePositiveInt(normalizedKey, nextValue) });
       break;
-    case 'autoUpdate': {
-      const enabled = parseBoolean(nextValue);
-      if (enabled) {
-        let schedule: AutoUpdateSchedule = { type: 'daily', value: '04:00' };
-        if (process.stdin.isTTY) {
-          const dailyOption = t('config.autoUpdateDaily');
-          const intervalOption = t('config.autoUpdateInterval');
-          const scheduleMode = await askChoice(t('config.autoUpdateScheduleType'), [
-            dailyOption,
-            intervalOption,
-          ]);
-          if (scheduleMode === intervalOption) {
-            const hoursStr = await ask(t('config.autoUpdateHoursInterval'), '2');
-            const hours = Math.max(1, parseInt(hoursStr, 10) || 2);
-            schedule = { type: 'interval', value: hours };
-          } else {
-            const timeStr = await ask(t('config.autoUpdateDailyTime'), '04:00');
-            schedule = { type: 'daily', value: timeStr.trim() || '04:00' };
-          }
-        }
-        await enableAutoUpdate(ctx.dataDir, schedule);
-      } else {
-        await disableAutoUpdate(ctx.dataDir);
-      }
-      break;
-    }
-    default:
-      throw new Error(t('config.unsupportedKey', { key }));
   }
 
   console.log(color(t('config.updated', { key: normalizedKey }), ANSI.green));

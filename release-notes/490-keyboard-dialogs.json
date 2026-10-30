@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Diálogos seguem as mesmas teclas: Tab circula dentro do diálogo, Esc fecha só o de cima e o foco volta a quem o abriu. Os switches têm foco visível e nome para leitores de tela.",
+  "en": "Dialogs share the same keys: Tab stays inside the dialog, Esc closes only the top one and focus returns to what opened it. Switches show focus and have a name for screen readers."
+}

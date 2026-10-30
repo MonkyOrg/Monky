@@ -11,7 +11,15 @@ export class SqliteBotPermissionRepository implements IBotPermissionRepository {
       LEFT JOIN bot_permissions p ON p.bot_id = b.id WHERE b.id = ?
     `).get(botId);
     if (!row) return undefined;
-    return row.permissions === null ? unreviewedBotPermissions() : botPermissionsSchema.parse(JSON.parse(row.permissions));
+    return parsePermissions(row.permissions);
+  }
+
+  listAll(): Map<string, BotPermissions> {
+    const rows: Array<{ botId: string; permissions: string | null }> = this.db.prepare(`
+      SELECT b.id AS botId, p.permissions_json AS permissions FROM bots b
+      LEFT JOIN bot_permissions p ON p.bot_id = b.id
+    `).all();
+    return new Map(rows.map((row) => [row.botId, parsePermissions(row.permissions)]));
   }
 
   save(botId: string, permissions: BotPermissions): void {
@@ -23,4 +31,9 @@ export class SqliteBotPermissionRepository implements IBotPermissionRepository {
   }
 
   transaction<T>(operation: () => T): T { return this.db.transaction(operation)(); }
+}
+
+/** A bot without a stored row has declared nothing yet. */
+function parsePermissions(json: string | null): BotPermissions {
+  return json === null ? unreviewedBotPermissions() : botPermissionsSchema.parse(JSON.parse(json));
 }

@@ -99,7 +99,7 @@ template <typename Outcome>
 struct DecoderCallDiagnostics {
   std::uint64_t calls = 0, in_progress = 0;
   std::array<std::uint64_t, static_cast<std::size_t>(Outcome::Count)> outcomes{};
-  screen_video::EncoderTimingAggregate duration;
+  screen_video::TimingAggregate duration;
 };
 
 struct DecoderInputStageDiagnostics {
@@ -110,7 +110,7 @@ struct DecoderInputStageDiagnostics {
 struct DecoderOperationDiagnostics {
   std::uint64_t calls = 0, in_progress = 0, returned = 0, exceptions = 0;
   std::optional<std::int64_t> last_start_steady_us, last_completion_steady_us;
-  screen_video::EncoderTimingAggregate duration;
+  screen_video::TimingAggregate duration;
 };
 
 struct DecoderDiagnosticSnapshot {
@@ -118,19 +118,19 @@ struct DecoderDiagnosticSnapshot {
   DecoderCallDiagnostics<DecoderOutputOutcome> output;
   std::array<DecoderInputStageDiagnostics, static_cast<std::size_t>(DecoderInputStage::Count)> inputs{};
   std::array<DecoderOperationDiagnostics, static_cast<std::size_t>(DecoderOperation::Count)> operations{};
-  std::array<screen_video::EncoderTimingAggregate, static_cast<std::size_t>(DecoderInterval::Count)> intervals{};
+  std::array<screen_video::TimingAggregate, static_cast<std::size_t>(DecoderInterval::Count)> intervals{};
   std::uint64_t current_loss_epoch = 0, recovery_requests = 0, epoch_advances = 0;
   std::uint64_t recoveries_begun = 0, recoveries_finished = 0, session_switches = 0;
   std::uint64_t accepted_callbacks = 0, accepted_unknown = 0, accepted_duplicate = 0;
   std::optional<std::uint64_t> last_accepted_loss_epoch, last_output_loss_epoch;
-  screen_video::EncoderTimingAggregate bookkeeping;
+  screen_video::TimingAggregate bookkeeping;
   std::optional<std::int64_t> observed_at_steady_us;
   std::optional<double> snapshot_copy_ms;
 };
 
 namespace detail {
 
-using DecoderDiagnosticClock = screen_video::EncoderTimingAggregate::Clock;
+using DecoderDiagnosticClock = screen_video::TimingAggregate::Clock;
 inline std::int64_t DecoderSteadyUs(DecoderDiagnosticClock::time_point value) noexcept {
   return std::chrono::duration_cast<std::chrono::microseconds>(value.time_since_epoch()).count();
 }

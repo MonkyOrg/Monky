@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Escolher uma saída de áudio aplica a mesma rota a todos os sons, e cancelar devolve tudo ao anterior. O teste de microfone toca na saída de voz e não corta mais ao usar o push-to-talk ou mutar.",
+  "en": "Choosing an audio output applies the same route to every sound, and cancelling restores everything. The microphone test plays on the voice output and no longer cuts out with push-to-talk or mute."
+}

@@ -8,6 +8,117 @@ const { root, digest, regularFiles, verify } = require('./buildTools.cjs');
 const { verifiedFile } = require('../runtime/runtimeFiles.cjs');
 const { copyMonkyLicenses } = require('../../../../../scripts/legal.cjs');
 
+// Vite bundles these into dist; their licenses travel in dist/THIRD_PARTY_NOTICES.txt.
+const RENDERER_ONLY_PACKAGES = [
+  '@codemirror/commands', '@codemirror/lang-markdown', '@codemirror/language', '@codemirror/state',
+  '@codemirror/view', '@lezer/markdown', '@sapphi-red/web-noise-suppressor', '@tensorflow/tfjs-backend-cpu',
+  '@tensorflow/tfjs-backend-webgl', '@tensorflow/tfjs-converter', '@tensorflow/tfjs-core', 'highlight.js',
+  'jsqr', 'material-symbols', 'mediasoup-client', 'qrcode',
+];
+
+/**
+ * node-gyp addons the application loads, by package: screen-audio requires build/Release/screen_audio.node
+ * by name, and uiohook-napi loads it through node-gyp-build, which takes the first .node in build/Release.
+ */
+const NODE_GYP_ADDONS = Object.freeze({ '@monky/screen-audio': 'screen_audio.node', 'uiohook-napi': 'uiohook_napi.node' });
+
+function requiredApplicationFiles(platform) {
+  return [
+    // The hosted server's database engine and SFU worker.
+    'node_modules/sql.js/dist/sql-wasm.js',
+    'node_modules/sql.js/dist/sql-wasm.wasm',
+    `node_modules/mediasoup/worker/out/Release/mediasoup-worker${platform === 'win32' ? '.exe' : ''}`,
+    // Fonts the main process embeds in the crash and local-execution pages.
+    'node_modules/@fontsource/inter/package.json',
+    ...[400, 500, 600, 700].map(weight => `node_modules/@fontsource/inter/files/inter-latin-${weight}-normal.woff2`),
+    'node_modules/@fontsource/jetbrains-mono/package.json',
+    'node_modules/@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2',
+    // Notices build.files must keep while it prunes these packages; the worker's
+    // are extensionless, which is why its exclusions only match names with a dot.
+    'node_modules/sql.js/LICENSE',
+    'node_modules/sql.js/AUTHORS',
+    'node_modules/mediasoup/LICENSE',
+    'node_modules/mediasoup/worker/deps/libwebrtc/LICENSE',
+    'node_modules/mediasoup/worker/deps/libwebrtc/PATENTS',
+    'node_modules/mediasoup/worker/src/RTC/SCTP/LICENSE',
+    'node_modules/mediasoup/worker/src/Utils/README_BASE64_UTILS',
+    'node_modules/@fontsource/inter/LICENSE',
+    'node_modules/@fontsource/jetbrains-mono/LICENSE',
+    ...Object.entries(NODE_GYP_ADDONS).map(([name, addon]) => `node_modules/${name}/build/Release/${addon}`),
+    'dist/THIRD_PARTY_NOTICES.txt',
+  ];
+}
+
+/**
+ * The build folder of a node-gyp addon may hold only the addon. This is a list of what is allowed, not of
+ * known leftovers: nothing else there is ever loaded, while MSBuild and make each leave their own,
+ * changing intermediates (link-time code generation data, program databases, import libraries, logs,
+ * makefiles, the node-gyp Python link) that would otherwise ship in every update.
+ */
+function verifyNativeAddonBuilds(app) {
+  for (const [name, addon] of Object.entries(NODE_GYP_ADDONS)) {
+    const build = path.join(app, 'node_modules', ...name.split('/'), 'build');
+    const leftovers = fs.readdirSync(build, { recursive: true }).map(String).filter(relative =>
+      relative !== path.join('Release', addon) && !fs.lstatSync(path.join(build, relative)).isDirectory());
+    assert.deepEqual(leftovers, [], `node_modules/${name}/build must hold only Release/${addon}; build.files let through `
+      + leftovers.slice(0, 6).map(relative => relative.split(path.sep).join('/')).join(', ')
+      + (leftovers.length > 6 ? ` and ${leftovers.length - 6} more` : ''));
+  }
+}
+
+/** Fails when renderer-only weight returns to the package or a runtime file or notice goes missing. */
+function verifyApplicationContents(app, platform) {
+  for (const name of RENDERER_ONLY_PACKAGES)
+    assert.ok(!fs.existsSync(path.join(app, 'node_modules', name)),
+      `${name} is bundled into the renderer; keep it in devDependencies instead of packaging it.`);
+  for (const relative of requiredApplicationFiles(platform))
+    assert.ok(fs.statSync(path.join(app, relative), { throwIfNoEntry: false })?.isFile(), `Missing packaged file: ${relative}`);
+  verifyNativeAddonBuilds(app);
+  const notices = fs.readFileSync(path.join(app, 'dist', 'THIRD_PARTY_NOTICES.txt'), 'utf8');
+  for (const name of RENDERER_ONLY_PACKAGES)
+    assert.match(notices, new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} `, 'm'),
+      `The renderer third-party notices omit ${name}.`);
+}
+
+/** Libraries a Windows PE image needs at load time, from its import directory. */
+function windowsImportedLibraries(image) {
+  const header = image.readUInt32LE(0x3c);
+  assert.equal(image.readUInt32LE(header), 0x4550, 'Not a Windows PE image.');
+  const sectionCount = image.readUInt16LE(header + 6);
+  const optional = header + 24;
+  const imports = image.readUInt32LE(optional + (image.readUInt16LE(optional) === 0x20b ? 112 : 96) + 8);
+  const sections = optional + image.readUInt16LE(header + 20);
+  const offset = rva => {
+    for (let index = 0; index < sectionCount; index++) {
+      const section = sections + index * 40;
+      const start = image.readUInt32LE(section + 12);
+      if (rva >= start && rva < start + Math.max(image.readUInt32LE(section + 8), image.readUInt32LE(section + 16)))
+        return rva - start + image.readUInt32LE(section + 20);
+    }
+    throw new Error('A PE import points outside every section.');
+  };
+  const names = [];
+  if (!imports) return names;
+  for (let entry = offset(imports); image.readUInt32LE(entry + 12); entry += 20) {
+    const start = offset(image.readUInt32LE(entry + 12));
+    names.push(image.toString('latin1', start, image.indexOf(0, start)));
+  }
+  return names;
+}
+
+/**
+ * The audio addon loads into the main process at startup and also lists windows and monitors. Electron
+ * ships no Visual C++ runtime, so the addon links it statically instead of failing on systems without
+ * the redistributable.
+ */
+function verifyScreenAudioAddon(app) {
+  const addon = path.join(app, 'node_modules', '@monky', 'screen-audio', 'build', 'Release', 'screen_audio.node');
+  const runtime = windowsImportedLibraries(fs.readFileSync(addon))
+    .filter(name => /^(?:msvcp|vcruntime|concrt|vccorlib)\d/iu.test(name));
+  assert.deepEqual(runtime, [], `The screen-audio addon must link the Visual C++ runtime statically: ${runtime.join(', ')}. `
+    + 'A build from before binding.gyp switched to /MT is stale: rebuild apps/client/native/screen-audio with node-gyp.');
+}
+
 function verifySourceInputs() {
   const bin = path.join(root, 'bin', 'win32-x64');
   const rtc = JSON.parse(fs.readFileSync(path.join(bin, 'rtc-build.json'), 'utf8'));
@@ -21,6 +132,9 @@ function verifySourceInputs() {
     [path.join(root, 'src', 'rtc'), rtc.sourceFiles],
     [path.join(root, 'src', 'capture'), capture.sourceFiles],
     [path.join(root, 'src', 'thumbnail'), thumbnails.sourceFiles],
+    // Both Windows helpers compile the shared identity helpers.
+    [path.join(root, 'src', 'win'), capture.sharedSourceFiles],
+    [path.join(root, 'src', 'win'), thumbnails.sharedSourceFiles],
   ]) {
     assert.ok(Array.isArray(records) && records.length > 0, 'Rebuild native screen sharing before packaging.');
     assert.deepEqual(records.map(file => file.path).sort(), regularFiles(directory),
@@ -104,6 +218,22 @@ function detachPackagedHardLinks(directory) {
   }
 }
 
+/**
+ * Runtime files the package must carry unchanged. Type declarations are left
+ * out: nothing executes them, and build.files drops them along with the other
+ * TypeScript (electron-builder always drops *.d.ts).
+ */
+function runtimeSourceFiles() {
+  return ['index.cjs', 'renderer.cjs', ...regularFiles(path.join(root, 'runtime')).map(file => path.join('runtime', file))]
+    .filter(relative => !/\.d\.[cm]?ts$/.test(relative));
+}
+
+function verifyPackagedRuntimeSources(directory) {
+  for (const relative of runtimeSourceFiles())
+    assert.deepEqual(fs.readFileSync(path.join(directory, relative)), fs.readFileSync(path.join(root, relative)),
+      `Packaged native runtime differs from the verified source: ${relative}`);
+}
+
 async function afterPack(context) {
   const platform = context.electronPlatformName;
   const contents = platform === 'darwin'
@@ -112,8 +242,10 @@ async function afterPack(context) {
   const licenseDirectory = platform === 'darwin' ? path.join(contents, 'Resources') : contents;
   assert.deepEqual(fs.readFileSync(path.join(licenseDirectory, 'LICENSE')),
     fs.readFileSync(path.resolve(root, '..', '..', '..', '..', 'LICENSE')), 'Missing packaged Monky GPL notice.');
-  const modules = path.join(contents, platform === 'darwin' ? 'Resources' : 'resources',
-    'app', 'node_modules', '@monky');
+  const app = path.join(contents, platform === 'darwin' ? 'Resources' : 'resources', 'app');
+  verifyApplicationContents(app, platform);
+  if (platform === 'win32') verifyScreenAudioAddon(app);
+  const modules = path.join(app, 'node_modules', '@monky');
   assert.ok(!fs.existsSync(path.join(modules, 'server', 'data')), 'Server user data must never be packaged.');
   const directory = path.join(modules, 'screen-share');
   assert.ok(fs.lstatSync(directory).isDirectory(), 'The packaged native screen module must be a real directory.');
@@ -140,9 +272,7 @@ async function afterPack(context) {
   fs.cpSync(path.join(root, 'licenses'), path.join(directory, 'licenses'), { recursive: true });
   for (const name of ['README.md', 'README.en.md', 'THIRD_PARTY_NOTICES'])
     fs.copyFileSync(path.join(root, name), path.join(directory, name));
-  for (const relative of ['index.cjs', ...regularFiles(path.join(root, 'runtime')).map(file => path.join('runtime', file))])
-    assert.deepEqual(fs.readFileSync(path.join(directory, relative)), fs.readFileSync(path.join(root, relative)),
-      `Packaged native runtime differs from the verified source: ${relative}`);
+  verifyPackagedRuntimeSources(directory);
   verifyLegalFiles(directory, platform);
   for (const other of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
     if (other === `${platform}-${arch}`) continue;
@@ -159,6 +289,15 @@ async function afterPack(context) {
 }
 
 module.exports = afterPack;
+module.exports.RENDERER_ONLY_PACKAGES = RENDERER_ONLY_PACKAGES;
+module.exports.NODE_GYP_ADDONS = NODE_GYP_ADDONS;
+module.exports.requiredApplicationFiles = requiredApplicationFiles;
+module.exports.verifyApplicationContents = verifyApplicationContents;
+module.exports.verifyNativeAddonBuilds = verifyNativeAddonBuilds;
+module.exports.windowsImportedLibraries = windowsImportedLibraries;
+module.exports.verifyScreenAudioAddon = verifyScreenAudioAddon;
+module.exports.runtimeSourceFiles = runtimeSourceFiles;
+module.exports.verifyPackagedRuntimeSources = verifyPackagedRuntimeSources;
 module.exports.verifySourceInputs = verifySourceInputs;
 module.exports.verifyLegalFiles = verifyLegalFiles;
 module.exports.verifyMacSourceInputs = verifyMacSourceInputs;

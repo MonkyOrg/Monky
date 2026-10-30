@@ -1,11 +1,11 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bumpVersion, determineBumpType, calculateNextVersion, promoteBetaTag, BETA_SUFFIX, parseVersionTag, compareVersionTags, getLatestReleaseTag, getLatestSemverTag, splitCommitEntries, bumpTypeForEntry, collectBumps, applyBumps, isReleasableCommit, getGitCommitsSinceTag } from './calculate-version.js';
+import { bumpVersion, determineBumpType, calculateNextVersion, promoteBetaTag, validatePromotionTag, PUBLISHED_VERSION, BETA_SUFFIX, parseVersionTag, compareVersionTags, getLatestReleaseTag, getLatestSemverTag, splitCommitEntries, bumpTypeForEntry, collectBumps, applyBumps, isReleasableCommit, getGitCommitsSinceTag } from './calculate-version.js';
 import { requiresClientNote } from './check-client-release-notes.js';
-import { isClientNoteFile } from './generate-changelog.js';
+import { isClientNoteFile, extractEntries } from './generate-changelog.js';
 
 console.log('=== Início dos Testes de Versionamento SemVer (#122) ===');
 
@@ -125,6 +125,33 @@ console.assert(
   promoteBetaTag('v1.8.0-beta.3') === '1.8.0',
   'promoteBetaTag deve aceitar o formato antigo'
 );
+
+// A promoção manual recebe a tag digitada no formulário do workflow. Só passa o
+// nome exato de uma tag beta que existe: um erro de digitação ou um valor
+// forjado para no cálculo da versão, antes de virar checkout, arquivo ou comando.
+const tagsExistentes = new Set(['v1.8.0-beta', 'v1.8.0-beta003', 'v1.8.0-beta.3', 'v1.7.0']);
+const existe = (tag) => tagsExistentes.has(tag);
+console.assert(validatePromotionTag('v1.8.0-beta', { exists: existe }) === '1.8.0', 'promove a beta existente');
+console.assert(validatePromotionTag('v1.8.0-beta003', { exists: existe }) === '1.8.0', 'promove a beta com contador');
+console.assert(validatePromotionTag('v1.8.0-beta.3', { exists: existe }) === '1.8.0', 'promove a beta no formato antigo');
+const promocaoRecusada = (tag) => {
+  try {
+    validatePromotionTag(tag, { exists: existe });
+    return false;
+  } catch {
+    return true;
+  }
+};
+for (const tag of ['v1.7.0', '1.8.0-beta', 'v9.9.9-beta', ' v1.8.0-beta', 'v1.8.0-beta ', 'v1.8.0-beta\n',
+  'v1.8.0-beta; touch pwned', 'v1.8.0-beta$(id)', 'v1.8.0-beta\nrelease=false', 'beta', '', undefined, null]) {
+  console.assert(promocaoRecusada(tag), `a promoção recusa ${JSON.stringify(tag)}`);
+}
+for (const versao of ['1.8.0', '40.7.14-beta']) {
+  console.assert(PUBLISHED_VERSION.test(versao), `${versao} é uma versão publicável`);
+}
+for (const versao of ['v1.8.0', '1.8.0-beta003', '1.8.0\nrelease=false', '1.8', '']) {
+  console.assert(!PUBLISHED_VERSION.test(versao), `${JSON.stringify(versao)} nunca sai como versão`);
+}
 console.log('✔ Canal beta e promoção validados com sucesso!');
 
 // 5. Numeração a partir da última release, betas incluídas (#378)
@@ -366,6 +393,18 @@ for (const header of ['feat!(chat)', 'feat(chat)!']) {
   }
 }
 
+// Versionamento e changelog leem o cabeçalho com a mesma regra
+// (conventional-commits.js): todo item que o squash conta, o changelog esconde
+// das descrições, inclusive com o ! antes do escopo (#715).
+for (const header of ['feat', 'feat(chat)', 'feat!', 'feat(chat)!', 'feat!(chat)', 'fix!(ui)', 'chore(ci)']) {
+  const message = `chore: titulo\n\n* ${header}: item\n- descricao`;
+  console.assert(splitCommitEntries(message).length === 1, `${header}: o squash conta o item`);
+  console.assert(
+    JSON.stringify(extractEntries(message)) === JSON.stringify(['descricao']),
+    `${header}: o changelog nao mostra o item do squash como descricao`
+  );
+}
+
 // Prosa no corpo não pode virar commit. Só listas com um tipo conhecido contam.
 const comProsa = [
   'fix: uma correcao (#472)',
@@ -497,6 +536,38 @@ try {
     lidos.map((lido) => (isReleasableCommit(lido) ? 'sim' : 'não')).join(',') === 'não,não,sim,sim,sim,sim,não',
     `quais commits geram versão: ${lidos.map((lido) => isReleasableCommit(lido)).join(',')}`
   );
+
+  // A promoção confere a tag no git de verdade, e o CLI para antes de escrever
+  // qualquer saída quando a tag digitada não é uma beta existente.
+  git('tag', 'v1.1.0-beta');
+  console.assert(validatePromotionTag('v1.1.0-beta', { cwd: repo }) === '1.1.0', 'a beta existente é promovida');
+  for (const tag of ['v1.2.0-beta', 'v1.0.0']) {
+    let recusada = false;
+    try { validatePromotionTag(tag, { cwd: repo }); } catch { recusada = true; }
+    console.assert(recusada, `${tag} não é uma beta existente para promover`);
+  }
+  const calcular = (promoteTag) => {
+    const saida = join(repo, `saida-${Math.random().toString(16).slice(2)}.txt`);
+    writeFileSync(saida, '');
+    const resultado = spawnSync(process.execPath, [fileURLToPath(new URL('./calculate-version.js', import.meta.url))], {
+      cwd: repo, encoding: 'utf8',
+      env: { ...process.env, PROMOTE_TAG: promoteTag, RELEASE_CHANNEL: 'beta', GITHUB_OUTPUT: saida },
+    });
+    const escrito = readFileSync(saida, 'utf8');
+    rmSync(saida);
+    return { ...resultado, escrito };
+  };
+  const promovida = calcular('v1.1.0-beta');
+  console.assert(promovida.status === 0, `a promoção válida passa: ${promovida.stderr}`);
+  console.assert(
+    promovida.escrito === 'version=1.1.0\nprev_tag=v1.0.0\nbump_type=promote\nchannel=stable\nprerelease=false\nrelease=true\n',
+    `saída da promoção: ${JSON.stringify(promovida.escrito)}`
+  );
+  for (const tag of ['1.1.0-beta', 'v1.1.0-beta"; touch pwned; "', 'v1.1.0-beta\nrelease=false']) {
+    const recusada = calcular(tag);
+    console.assert(recusada.status === 1 && recusada.stderr.includes('::error::'), `o CLI recusa ${JSON.stringify(tag)}`);
+    console.assert(recusada.escrito === '', `nada vai para o GITHUB_OUTPUT com ${JSON.stringify(tag)}`);
+  }
 } finally {
   rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }

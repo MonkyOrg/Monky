@@ -41,6 +41,13 @@ export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
 export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
+/**
+ * What a bot is offered, listed rather than subtracted: a new feature is only
+ * for people until someone decides a bot needs it too.
+ */
+export const BOT_PROTOCOL_FEATURES = [
+  'message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage',
+] as const satisfies readonly ProtocolFeature[];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),
   features: z.array(z.string().min(1).max(80)).max(64),
@@ -48,16 +55,9 @@ export const protocolOfferSchema = z.object({
 export interface ProtocolOffer { minimumVersion: number; features: string[] }
 export interface ProtocolAgreement extends ProtocolOffer { version: number }
 export function createProtocolOffer(kind: 'client' | 'bot'): ProtocolOffer {
-  return { minimumVersion: kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL,
-    features: PROTOCOL_FEATURES.filter(feature => kind !== 'bot' || (feature !== 'chat-blocks' &&
-      feature !== 'chat-delivery' && feature !== 'message-delete-undo' && feature !== 'screen-viewers' &&
-      feature !== 'message-search' && feature !== 'forums' && feature !== 'native-polls' &&
-      feature !== 'native-live-forms' && feature !== 'recent-sounds' && feature !== 'dm-relay' &&
-      feature !== 'role-deny' && feature !== 'role-grants' && feature !== 'game-activity' && feature !== 'game-share-request' &&
-      feature !== 'channel-tree-order' && feature !== 'poll-voters' && feature !== 'poll-edit' &&
-      feature !== 'server-audit' && feature !== 'bot-manifest-url' && feature !== 'screen-shares-8' &&
-      feature !== 'voice-user-limit' && feature !== 'afk-channel' && feature !== 'message-forward' && feature !== 'user-brb' &&
-      feature !== 'custom-status')) };
+  return kind === 'bot'
+    ? { minimumVersion: MIN_BOT_PROTOCOL, features: [...BOT_PROTOCOL_FEATURES] }
+    : { minimumVersion: MIN_CLIENT_PROTOCOL, features: [...PROTOCOL_FEATURES] };
 }
 export function negotiateProtocol(version: unknown, offer: unknown, kind: 'client' | 'bot'): ProtocolAgreement | null {
   const minimumVersion = kind === 'bot' ? MIN_BOT_PROTOCOL : MIN_CLIENT_PROTOCOL;

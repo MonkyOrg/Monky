@@ -63,6 +63,7 @@ import { contextMenu } from './ContextMenu';
 import { showErrorToast } from './CopyToast';
 import { currentEventOrigin } from '../core/sessionRouting';
 import { commandVoiceContextKey, commandVoiceError } from '../utils/botVoice';
+import { reportError } from '../utils/feedback';
 import { smoothScrollIntoView } from '../utils/scroll';
 import { translateProtocolError } from '../i18n/protocolErrors';
 
@@ -100,7 +101,6 @@ export function renderBotInvocation(
       <h3>${escapeHtml(state.form.title)}</h3>
       ${state.form.description ? `<p class="bot-field-description">${escapeHtml(state.form.description)}</p>` : ''}
       ${renderBotFields(state.form.fields, state.values, { prefix: `${invocation.invocationId}-${state.interactionId}`, disabled: !editable, volumeScope })}
-      <p class="bot-error" role="alert" ${state.error ? '' : 'hidden'}>${escapeHtml(state.error)}</p>
       ${state.status === 'submitted' ? `<p class="bot-status">${t('botChat.submitted')}</p>` :
         state.status === 'closed' || !active ? `<p class="bot-status">${t('botChat.stepClosed')}</p>` :
           buttonsOnly ? state.status === 'submitting'
@@ -133,7 +133,6 @@ export function renderBotInvocation(
     </div>` : ''}
     ${waiting ? `<p class="bot-status" role="status" aria-busy="true">${renderLoadingIndicator(t('botChat.waiting'))}</p>` : ''}
     ${invocation.status !== 'active' && !download ? `<p class="bot-status" role="status">${t(FINISH_KEYS[invocation.status])}</p>` : ''}
-    <p class="bot-error" role="alert" ${invocation.error ? '' : 'hidden'}>${escapeHtml(invocation.error)}</p>
     ${active ? `<button type="button" class="btn btn-secondary bot-cancel-interaction" data-bot-action="cancel-invocation"
       ${invocation.cancelPending ? 'disabled data-loading="1" aria-busy="true"' : ''}>${t(invocation.cancelPending ? 'botChat.cancelling' : 'botChat.cancelInvocation')}</button>` : ''}
   </section>`;
@@ -1275,8 +1274,6 @@ export class BotChatView {
       this.store.setCommandQuery(this.channelId, name, event.target.value);
       this.updateArgumentMeasure(event.target);
       this.updateParameterValidation();
-      const error = event.target.closest('form')?.querySelector<HTMLElement>('.bot-error');
-      if (error) { error.textContent = ''; error.hidden = true; }
       this.updateCommandSubmitState();
       if (!this.composing) this.openAutocomplete(name);
       return;
@@ -1289,8 +1286,6 @@ export class BotChatView {
       this.updateParameterValidation();
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) this.updateArgumentMeasure(event.target);
     } else event.target.removeAttribute('aria-invalid');
-    const error = event.target.closest('form')?.querySelector<HTMLElement>('.bot-error');
-    if (error) { error.textContent = ''; error.hidden = true; }
   };
 
   private onClick = (event: Event): void => {
@@ -1331,22 +1326,16 @@ export class BotChatView {
     } else if (button.dataset.fieldAction || button.dataset.carouselEdit) {
       const binding = this.fieldBinding(button);
       if (!binding) return;
-      const error = button.closest('form')?.querySelector<HTMLElement>('.bot-error');
       if (button.dataset.carouselEdit === 'add' || button.dataset.fieldAction === 'image-add') {
         button.disabled = true;
         void addBotFieldImage(button, binding.fields, binding.values, binding.context)
           .then(values => { if (values) binding.save(values); })
-          .catch(failure => {
-            if (error) { error.textContent = failure instanceof Error ? failure.message : t('poll.imageUploadFailed'); error.hidden = false; }
-          })
+          .catch(failure => this.reportFailure(failure instanceof Error ? failure.message : t('poll.imageUploadFailed')))
           .finally(() => { if (button.isConnected) button.disabled = false; });
         return;
       }
       const values = applyBotFieldAction(button, binding.fields, binding.values, binding.context);
-      if (values) {
-        binding.save(values);
-        if (error) { error.textContent = ''; error.hidden = true; }
-      }
+      if (values) binding.save(values);
     } else if (button.dataset.botAction === 'cancel-command') this.cancelCommand();
     else if (button.dataset.botAction === 'cancel-invocation') {
       const id = button.closest<HTMLElement>('[data-invocation-id]')?.dataset.invocationId;
@@ -1390,13 +1379,7 @@ export class BotChatView {
     void prepare
       .then(images => addBotFieldImage(dropzone, binding.fields, binding.values, binding.context, images))
       .then(values => { if (values) binding.save(values); })
-      .catch(failure => {
-        const error = dropzone.closest('form')?.querySelector<HTMLElement>('.bot-error');
-        if (error) {
-          error.textContent = failure instanceof Error ? failure.message : t('poll.imageUploadFailed');
-          error.hidden = false;
-        }
-      })
+      .catch(failure => this.reportFailure(failure instanceof Error ? failure.message : t('poll.imageUploadFailed')))
       .finally(() => { if (dropzone.isConnected) dropzone.disabled = false; });
   };
 
@@ -1713,7 +1696,9 @@ export class BotChatView {
     if (!invocation || !form || form.status !== 'editing' || !this.canSend() || this.voiceError(invocation)) return;
     const result = formValuesFromInputs(form.form, form.values);
     if (!result.success) {
-      this.store.failFormSubmit(invocationId, interactionId, botInputError(form.form.fields, result.field, result.reason));
+      const error = botInputError(form.form.fields, result.field, result.reason);
+      this.store.failFormSubmit(invocationId, interactionId, error);
+      this.reportFailure(error);
       this.focusInvalidField(`${invocationId}-${interactionId}`, result.field);
       return;
     }
@@ -1724,7 +1709,9 @@ export class BotChatView {
       if (this.store.getInvocation(invocationId) === invocation) this.store.acknowledgeForm(ack);
     } catch (error) {
       if (this.store.getInvocation(invocationId) === invocation) {
-        this.store.failFormSubmit(invocationId, interactionId, botRequestError(error));
+        const message = botRequestError(error);
+        this.store.failFormSubmit(invocationId, interactionId, message);
+        this.reportFailure(message);
       }
     }
   }
@@ -1738,9 +1725,16 @@ export class BotChatView {
       if (this.store.getInvocation(invocationId) === invocation) this.store.finishInvocation(ack);
     } catch (error) {
       if (this.store.getInvocation(invocationId) === invocation) {
-        this.store.setCancelPending(invocationId, false, botRequestError(error));
+        const message = botRequestError(error);
+        this.store.setCancelPending(invocationId, false, message);
+        this.reportFailure(message);
       }
     }
+  }
+
+  /** A bot card's step that failed stays open for another try; why it failed goes to the alert toast (#490). */
+  private reportFailure(message: string): void {
+    if (this.isCurrent()) reportError(message);
   }
 
   private focusInvalidField(prefix: string, name: string): void {

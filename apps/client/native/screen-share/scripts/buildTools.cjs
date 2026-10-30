@@ -57,6 +57,66 @@ function write(filename, bytes) {
   fs.writeFileSync(filename, bytes);
 }
 
+function processRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+// A lock without an owner is either one this script is writing right now or one left by an older script.
+const UNOWNED_LOCK_GRACE_MS = 10_000;
+
+function lockOwner(filename, io) {
+  let text;
+  try { text = io.readFileSync(filename, 'utf8'); }
+  catch (error) {
+    if (error.code === 'ENOENT') return { released: true };
+    throw error;
+  }
+  let pid = null;
+  try { pid = JSON.parse(text).pid; } catch { /* Unowned lock. */ }
+  return Number.isSafeInteger(pid) && pid > 0 ? { text, pid } : { text, pid: null, modifiedMs: io.statSync(filename).mtimeMs };
+}
+
+/**
+ * Runs a synchronous build while it holds `filename`. The lock records its owner's PID, so a lock
+ * left by an interrupted build (Ctrl+C during a long spawnSync skips `finally`) is replaced instead
+ * of failing every later build with EEXIST. A lock whose owner still runs is never taken over.
+ */
+function withBuildLock(filename, build, { io = fs, isRunning = processRunning, now = Date.now, log = console.warn } = {}) {
+  let handle;
+  for (let attempt = 1; handle === undefined; attempt++) {
+    try {
+      handle = io.openSync(filename, 'wx');
+    } catch (error) {
+      if (error.code !== 'EEXIST' || attempt > 3) throw error;
+      const owner = lockOwner(filename, io);
+      if (owner.released) continue;
+      if (owner.pid !== null ? isRunning(owner.pid) : now() - owner.modifiedMs < UNOWNED_LOCK_GRACE_MS) {
+        throw new Error(`Another native build${owner.pid === null ? '' : ` (PID ${owner.pid})`} holds ${filename}. `
+          + 'Wait for it to finish, or delete the lock if that process is not a build.');
+      }
+      // Re-read right before removing it, so a lock another build just took over is kept.
+      if (lockOwner(filename, io).text !== owner.text) continue;
+      try { io.unlinkSync(filename); }
+      catch (unlinkError) { if (unlinkError.code !== 'ENOENT') throw unlinkError; }
+      log(`Removed the stale build lock ${filename}${owner.pid === null ? '' : ` of the finished PID ${owner.pid}`}.`);
+    }
+  }
+  try {
+    io.writeSync(handle, `${JSON.stringify({ pid: process.pid, startedAt: new Date(now()).toISOString() })}\n`);
+    const result = build();
+    assert.ok(typeof result?.then !== 'function', 'A build lock only guards a synchronous build.');
+    return result;
+  } finally {
+    io.closeSync(handle);
+    io.unlinkSync(filename);
+  }
+}
+
 function fingerprint(filename) {
   assert.ok(fs.lstatSync(filename).isFile(), 'Native input must be a regular file.');
   const bytes = fs.readFileSync(filename);
@@ -92,4 +152,4 @@ function regularFiles(directory, base = directory) {
 }
 
 module.exports = { root, execute, write, digest, fingerprint, verify, redistributableCrt, regularFiles,
-  transientNetworkFailure, withNetworkRetries };
+  transientNetworkFailure, withNetworkRetries, withBuildLock };

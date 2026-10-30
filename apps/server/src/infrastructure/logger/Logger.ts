@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { LIMITS, LogCategory, LogEntry, LogLevel } from '@monky/shared';
+import { formatLogMeta, truncateLogText } from './logFormat';
 import { ServerLogScope } from './ServerLogScope';
 
 export type { LogCategory } from '@monky/shared';
@@ -69,10 +70,7 @@ export class Logger {
   }
 
   public static log(category: LogCategory, message: string, meta?: unknown): void {
-    const timestamp = new Date().toISOString();
-    const metaStr = meta ? ` | ${JSON.stringify(meta)}` : '';
-    console.log(`[${timestamp}] [${category}] ${message}${metaStr}`);
-    this.record('INFO', category, `${message}${metaStr}`, message);
+    this.write('INFO', category, message, meta);
   }
 
   public static info(category: LogCategory, message: string, meta?: unknown): void {
@@ -80,20 +78,24 @@ export class Logger {
   }
 
   public static warn(category: LogCategory, message: string, meta?: unknown): void {
-    const timestamp = new Date().toISOString();
-    const metaStr = meta ? ` | ${JSON.stringify(meta)}` : '';
-    console.warn(`[${timestamp}] [WARN:${category}] ${message}${metaStr}`);
-    this.record('WARN', category, `${message}${metaStr}`, message);
+    this.write('WARN', category, message, meta);
   }
 
   public static error(category: LogCategory, message: string, error?: unknown): void {
-    const timestamp = new Date().toISOString();
-    const errStr = error ? ` | ${error instanceof Error ? error.stack : JSON.stringify(error)}` : '';
-    console.error(`[${timestamp}] [ERROR:${category}] ${message}${errStr}`);
-    this.record('ERROR', category, `${message}${errStr}`, message);
+    this.write('ERROR', category, message, error);
   }
 
   public static security(message: string, meta?: unknown): void {
     this.log('SECURITY', message, meta);
+  }
+
+  /** Every level renders its metadata the same way, and bounds the whole entry. */
+  private static write(level: LogLevel, category: LogCategory, message: string, meta: unknown): void {
+    const text = truncateLogText(meta === undefined || meta === null ? message : `${message} | ${formatLogMeta(meta)}`);
+    const line = `[${new Date().toISOString()}] [${level === 'INFO' ? category : `${level}:${category}`}] ${text}`;
+    if (level === 'ERROR') console.error(line);
+    else if (level === 'WARN') console.warn(line);
+    else console.log(line);
+    this.record(level, category, text, message);
   }
 }

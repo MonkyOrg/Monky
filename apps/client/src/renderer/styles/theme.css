@@ -526,6 +526,14 @@ input:focus, textarea:focus, select:focus {
   letter-spacing: 0.5px;
 }
 
+.form-group input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.form-group .dialog-option-hint {
+  margin: 0;
+}
+
 .form-row {
   display: flex;
   gap: 12px;
@@ -725,9 +733,15 @@ input:focus, textarea:focus, select:focus {
   background: transparent;
 }
 
-.channels-resizer:hover {
+.channels-resizer:hover,
+.channels-resizer:focus-visible,
+.channels-resizer.is-resizing {
   background: var(--primary, #5865f2);
   opacity: 0.4;
+}
+
+.channels-resizer:focus-visible {
+  outline: 0;
 }
 
 /* Server rail: vertical bar of saved servers + home (#29) */
@@ -1372,6 +1386,11 @@ input:focus, textarea:focus, select:focus {
   padding: 12px;
   font-size: 12px;
   line-height: 1.4;
+}
+
+/* Direct messages still opening: placeholder rows instead of the empty notice. */
+.home-dm-list .loading-skeleton {
+  padding: 8px 12px;
 }
 
 .home-main-content {
@@ -2149,29 +2168,6 @@ input:focus, textarea:focus, select:focus {
   font-weight: 700;
 }
 
-.add-server-choice-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.add-server-choice-row .voice-mode-card {
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-secondary);
-  color: var(--text-primary);
-  padding: 12px;
-  display: grid;
-  gap: 5px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.add-server-choice-row .voice-mode-card.selected {
-  border-color: var(--accent-primary);
-  background: rgba(88, 101, 242, 0.1);
-}
-
 .server-rail-folder-children[hidden] {
   display: none;
 }
@@ -2284,6 +2280,8 @@ input:focus, textarea:focus, select:focus {
 .channels-list-container {
   flex: 1;
   overflow-y: auto;
+  /* Rows are updated in place (R-SHELL-11): the offset stays put, as when the list was redrawn whole, with no scroll event to close an open menu. */
+  overflow-anchor: none;
   min-height: 0;
   padding: 12px 8px;
   display: flex;
@@ -2345,6 +2343,14 @@ input:focus, textarea:focus, select:focus {
 .category-reorder-handle:active,
 .channel-reorder-handle:active {
   cursor: grabbing;
+}
+
+/* The list holds the pointer while one of its rows is dragged, so all of it shows the grip, as the server rail does. */
+.channel-reorder-active,
+.channel-reorder-active *,
+.category-reorder-active,
+.category-reorder-active * {
+  cursor: grabbing !important;
 }
 
 .category-dragging {
@@ -6114,7 +6120,6 @@ input:focus, textarea:focus, select:focus {
 .public-bot-selector-audio [data-selector-confirm] {
   justify-self: start;
 }
-.bot-inline-argument .toggle-switch:has(input:focus-visible),
 .bot-add-parameters:focus-visible,
 .bot-remove-argument:focus-visible,
 .bot-command-close:focus-visible {
@@ -6354,10 +6359,29 @@ input:focus, textarea:focus, select:focus {
   margin-top: 10px;
   font-size: 11px;
 }
-.bot-field .toggle-switch:has(input:focus-visible),
 .bot-field-clear:focus-visible {
   outline: 2px solid var(--accent-primary);
   outline-offset: 3px;
+}
+.local-tools-disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.local-tools-disclosure:hover {
+  color: var(--text-secondary);
+}
+.local-tools-disclosure:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 .bot-settings-card .modal-footer {
   flex-shrink: 0;
@@ -6367,6 +6391,7 @@ input:focus, textarea:focus, select:focus {
   margin: 0;
   background: var(--bg-secondary);
 }
+.settings-sidebar-title,
 .bot-settings-sidebar-title {
   padding: 4px 10px 8px;
   color: var(--text-muted);
@@ -6375,6 +6400,21 @@ input:focus, textarea:focus, select:focus {
   letter-spacing: 0.6px;
   text-transform: uppercase;
 }
+.settings-sidebar-divider {
+  flex-shrink: 0;
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--border-color);
+}
+.settings-tab-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 700;
+}
+.settings-tab-title .material-symbols-outlined { color: var(--accent-primary); }
 .bot-settings-card .settings-sidebar [role="tablist"] {
   display: flex;
   flex-direction: column;
@@ -6400,10 +6440,6 @@ input:focus, textarea:focus, select:focus {
 }
 .bot-permission-row .toggle-switch {
   flex-shrink: 0;
-}
-.bot-permission-row .toggle-switch:has(input:focus-visible) {
-  outline: 2px solid var(--accent-primary);
-  outline-offset: 3px;
 }
 .bot-permission-row p {
   margin: 6px 0 0;
@@ -6925,30 +6961,20 @@ input:focus, textarea:focus, select:focus {
 }
 .chat-create-menu button:disabled { opacity: 0.45; cursor: not-allowed; }
 
-.native-poll-wizard-shell {
+.native-poll-wizard > [data-community-content] {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  flex-shrink: 0;
   min-height: 520px;
 }
 .native-poll-stepper {
   margin: 0 0 18px;
 }
+/* The dialog scrolls as a whole; the viewport only keeps a sliding step inside it. */
 .native-poll-step-viewport {
   min-height: 0;
-  overflow: auto;
+  overflow: clip;
   padding: 1px 2px 14px;
-}
-.native-poll-step-viewport--forward > .native-poll-step {
-  animation: native-poll-step-forward var(--motion-duration-panel, 220ms) ease both;
-}
-.native-poll-step-viewport--back > .native-poll-step {
-  animation: native-poll-step-back var(--motion-duration-panel, 220ms) ease both;
-}
-@keyframes native-poll-step-forward {
-  from { opacity: 0; transform: translateX(18px); }
-}
-@keyframes native-poll-step-back {
-  from { opacity: 0; transform: translateX(-18px); }
 }
 .native-poll-wizard .native-poll-step { display: grid; gap: 16px; }
 .native-poll-step-heading {
@@ -6989,7 +7015,7 @@ input:focus, textarea:focus, select:focus {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background: var(--bg-input);
-  transition: border-color var(--motion-duration-menu, 140ms) ease;
+  transition: border-color var(--motion-popover-duration) ease;
 }
 .native-poll-option-row:focus-within { border-color: var(--accent-primary); }
 .native-poll-wizard .native-poll-option-row > input {
@@ -7054,7 +7080,7 @@ input:focus, textarea:focus, select:focus {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background: var(--bg-input);
-  transition: border-color var(--motion-duration-menu, 140ms) ease;
+  transition: border-color var(--motion-popover-duration) ease;
 }
 .native-poll-number-control:focus-within { border-color: var(--accent-primary); }
 .native-poll-wizard .native-poll-number-control > .native-poll-number-input {
@@ -7167,10 +7193,10 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-secondary);
   font: inherit;
   cursor: pointer;
-  transition: border-color var(--motion-duration-control, 140ms) ease,
-    background-color var(--motion-duration-control, 140ms) ease,
-    color var(--motion-duration-control, 140ms) ease,
-    transform var(--motion-duration-control, 140ms) ease;
+  transition: border-color var(--motion-popover-duration) ease,
+    background-color var(--motion-popover-duration) ease,
+    color var(--motion-popover-duration) ease,
+    transform var(--motion-popover-duration) ease;
 }
 .image-carousel-dropzone > .material-symbols-outlined { font-size: 28px; color: var(--accent-primary); }
 .image-carousel-dropzone strong { color: var(--text-primary); font-size: 12px; }
@@ -8760,18 +8786,6 @@ input:focus, textarea:focus, select:focus {
   font-size: 11px;
 }
 
-/* The volume reuses the screen share control (.stage-volume-*). A miniapp's also
-   opens from the keyboard, and Escape or mute keep it closed. */
-.stage-bot-screen-card .stage-volume-wrapper.keyboard .stage-volume-popup {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.stage-bot-screen-card .stage-volume-wrapper:is(.screen-audio-muted, .dismissed) .stage-volume-popup {
-  display: none;
-}
-
 .stage-bot-screen-card:fullscreen {
   width: 100vw;
   height: 100vh;
@@ -9765,9 +9779,16 @@ input:focus, textarea:focus, select:focus {
   transform: translate(-50%, -50%);
 }
 
-/* When the screen audio is muted, keep the slider popup hidden (even on hover)
-   so it doesn't linger on top of the video. It returns on unmute (#159). */
-.stage-volume-wrapper.screen-audio-muted:hover .stage-volume-popup {
+/* A tile's volume (StageVolumeControl) also opens from the keyboard. */
+.stage-volume-wrapper.keyboard .stage-volume-popup {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Muted audio keeps the slider hidden, even on hover, so it doesn't linger on top of
+   the video until unmuted (#159); Escape keeps it closed until the pointer returns. */
+.stage-volume-wrapper:is(.screen-audio-muted, .dismissed) .stage-volume-popup {
   display: none;
 }
 
@@ -10062,6 +10083,8 @@ input:focus, textarea:focus, select:focus {
 .members-list {
   flex: 1;
   overflow-y: auto;
+  /* Rows are updated in place (R-SHELL-11): the offset stays put, as when the list was redrawn whole, with no scroll event to close an open menu. */
+  overflow-anchor: none;
   padding: 12px 8px;
   display: flex;
   flex-direction: column;
@@ -11678,53 +11701,6 @@ button.member-live-badge:focus-visible {
   }
 }
 
-.permission-switch {
-  position: relative;
-  display: inline-block;
-  width: 40px;
-  height: 22px;
-  flex-shrink: 0;
-}
-
-.permission-switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.permission-switch .slider {
-  position: absolute;
-  cursor: pointer;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: var(--bg-tertiary);
-  border-radius: 22px;
-  transition: background-color 0.2s;
-}
-
-.permission-switch .slider::before {
-  content: '';
-  position: absolute;
-  height: 16px;
-  width: 16px;
-  left: 3px;
-  bottom: 3px;
-  background-color: var(--text-muted);
-  border-radius: 50%;
-  transition: transform 0.2s, background-color 0.2s;
-}
-
-.permission-switch input:checked + .slider {
-  background-color: var(--accent-primary);
-}
-
-.permission-switch input:checked + .slider::before {
-  transform: translateX(18px);
-  background-color: #ffffff;
-}
-
 .modal-header {
   display: flex;
   align-items: center;
@@ -12019,14 +11995,6 @@ button.member-live-badge:focus-visible {
   margin: 0;
 }
 
-.screen-share-picker-card .toggle-switch input:focus-visible + .toggle-slider,
-.overlay-aspect-option .toggle-switch input:focus-visible + .toggle-slider,
-.overlay-visibility-option .toggle-switch input:focus-visible + .toggle-slider,
-#checkbox-screen-preview-focus:focus-visible + .toggle-slider {
-  outline: 2px solid var(--accent-primary);
-  outline-offset: 3px;
-}
-
 .share-source-toolbar {
   display: flex;
   align-items: center;
@@ -12077,14 +12045,14 @@ button.member-live-badge:focus-visible {
   cursor: pointer;
 }
 
-#share-audience-summary, .share-audience-summary, .share-audience-identity, .share-audience-chip {
+.share-audience-summary, .share-audience-identity, .share-audience-chip {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
 }
 
-#share-audience-summary, .share-audience-summary { flex: 1; overflow: hidden; }
+.share-audience-summary { flex: 1; overflow: hidden; }
 .share-audience-identity { flex: 1; }
 .share-audience-chip { padding: 2px 6px; border-radius: 5px; background: var(--bg-tertiary); }
 .share-audience-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -12165,7 +12133,6 @@ button.member-live-badge:focus-visible {
 .share-audience-role { width: 12px; height: 12px; margin: 6px; flex-shrink: 0; border-radius: 50%; background: var(--role-color); }
 .share-audience-chip .share-audience-avatar { width: 20px; height: 20px; }
 .share-audience-chip .share-audience-role { margin: 4px; }
-#share-audience-no-results,
 [data-audience-no-results] {
   padding: 16px 12px;
   margin: 0;
@@ -12284,8 +12251,7 @@ button.member-live-badge:focus-visible {
   white-space: normal;
 }
 
-.game-capture-guide-trigger[hidden],
-.game-capture-guide-error[hidden] {
+.game-capture-guide-trigger[hidden] {
   display: none;
 }
 
@@ -12369,11 +12335,6 @@ button.member-live-badge:focus-visible {
 .game-capture-guide-empty {
   font-size: 13px;
   line-height: 1.5;
-}
-
-.game-capture-guide-error {
-  color: var(--danger);
-  font-size: 12px;
 }
 
 .game-capture-guide-card .modal-footer {
@@ -13137,7 +13098,6 @@ button:hover .role-option-check:not(.checked) {
   font-size: 12px;
 }
 
-.sb-limiter-controls .toggle-switch:has(input:focus-visible),
 .sb-limiter-controls .sb-slider:focus-visible {
   outline: 2px solid var(--accent-primary);
   outline-offset: 4px;
@@ -13449,6 +13409,15 @@ button:hover .role-option-check:not(.checked) {
   background: rgba(88, 101, 242, 0.18);
   border-color: rgba(88, 101, 242, 0.4);
   color: var(--accent-primary);
+}
+
+.role-editor-tab-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.role-editor-tab-panel[hidden] {
+  display: none;
 }
 
 .settings-action-menu-wrap {
@@ -13837,6 +13806,11 @@ button:hover .role-option-check:not(.checked) {
 .toggle-switch input:checked + .toggle-slider::before {
   transform: translateX(16px);
   background: #ffffff;
+}
+/* The input is invisible, so the keyboard focus is drawn on the track, wherever the switch is (#490). */
+.toggle-switch:has(input:focus-visible) .toggle-slider {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 3px;
 }
 /* A switch the host cannot honour has to look inert, not merely refuse the
    click silently (#429). */
@@ -14795,10 +14769,16 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
 
 /* ── Modal de Configuração de Sobreposição ───────────────────────────────── */
 .overlay-option-card {
+  width: 100%;
+  min-width: 0;
   padding: 12px;
   background: rgba(0, 0, 0, 0.2);
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
   cursor: pointer;
   transition: all 0.15s ease;
   display: flex;
@@ -14814,6 +14794,16 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
   background: rgba(88, 101, 242, 0.12);
   border-color: var(--primary);
   color: var(--text-primary);
+}
+
+.overlay-option-card:focus-visible,
+.overlay-pos-btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.overlay-option-card:disabled {
+  cursor: not-allowed;
 }
 
 .overlay-pos-btn {
@@ -15343,7 +15333,7 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
   display: flex;
   width: 100%;
   height: 100%;
-  transition: transform var(--motion-duration-panel, 220ms) cubic-bezier(.2, .8, .2, 1);
+  transition: transform var(--motion-panel-duration) cubic-bezier(.2, .8, .2, 1);
   will-change: transform;
 }
 .image-carousel-slide {
@@ -15396,7 +15386,7 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
   background: #fff7;
   box-shadow: 0 1px 3px #0008;
   cursor: pointer;
-  transition: width var(--motion-duration-control, 140ms) ease, background-color var(--motion-duration-control, 140ms) ease;
+  transition: width var(--motion-popover-duration) ease, background-color var(--motion-popover-duration) ease;
 }
 .image-carousel-dot.is-active { width: 16px; border-radius: 999px; background: #fff; }
 .image-carousel-dot:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
@@ -15432,8 +15422,8 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
   font-weight: 600;
   cursor: pointer;
   backdrop-filter: blur(8px);
-  transition: background-color var(--motion-duration-control, 140ms) ease,
-    opacity var(--motion-duration-control, 140ms) ease;
+  transition: background-color var(--motion-popover-duration) ease,
+    opacity var(--motion-popover-duration) ease;
 }
 .image-carousel-editor-toolbar button:not(:disabled):hover,
 .image-carousel-editor-toolbar button:not(:disabled):focus-visible {
@@ -15476,7 +15466,6 @@ body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.
   object-fit: cover;
 }
 @media (prefers-reduced-motion: reduce) {
-  .native-poll-step-viewport > .native-poll-step { animation: none; }
   .image-carousel-track { transition: none; }
 }
 

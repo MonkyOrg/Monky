@@ -1,8 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
-const { LiveSenderFlow } = require('../runtime/encodedSender.cjs');
+const { LiveSenderFlow, RECOVERY_REASONS } = require('../runtime/encodedSender.cjs');
 
 function model() {
   const submitted = [], errors = [], calls = [];
@@ -431,7 +433,7 @@ test('Watch resume can bootstrap a new codec from a real IDR after the previous 
   await m.flow.close();
 });
 
-for (const reason of ['rtc-unconsumed', 'clock-sample-uncertain']) {
+for (const reason of ['rtc-unconsumed', 'clock-sample-uncertain', 'clock-frame-dropped', 'dispatch-delayed']) {
 test(`${reason}: native dependency recovery consumes no rejected copy and waits for a real new IDR`, async () => {
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
   m.flow.packet(m.frame(1, true));
@@ -470,4 +472,19 @@ test('persistent recovery rejection is bounded and unknown errors never become r
   assert.throws(() => m.flow.packet(m.frame(3, true)), /terminal recovery/);
   assert.equal(m.flow.snapshot().retainedNativeCopies, 0);
   await m.flow.close();
+});
+
+test('every recovery reason the native encoded source sends is accepted by the addon and the sender', () => {
+  // #762 added dispatch-delayed on the native side only: the addon refused it as a contract violation.
+  const engine = path.join(__dirname, '..', 'src', 'rtc', 'inputs', 'engine');
+  // The production encoded source; its device-free checks live in encoded_video_checks.h.
+  const production = ['encoded_video.cc', 'encoded_video_internal.h']
+    .map(file => fs.readFileSync(path.join(engine, file), 'utf8')).join('\n');
+  const sent = new Set();
+  for (const [, call] of production.matchAll(/\bRecover\(([^;]*)\)/gsu))
+    for (const [, reason] of call.matchAll(/"([a-z]+(?:-[a-z]+)+)"/gu)) sent.add(reason);
+  const addon = fs.readFileSync(path.join(engine, 'node', 'napi_event_dispatch.h'), 'utf8');
+  const accepted = /"rtc-unconsumed", "input-expired",[^}]*\}/u.exec(addon)?.[0] ?? '';
+  for (const reason of sent) assert.ok(accepted.includes(`"${reason}"`), `The addon refuses ${reason}`);
+  assert.deepEqual([...sent].sort(), [...RECOVERY_REASONS].sort());
 });

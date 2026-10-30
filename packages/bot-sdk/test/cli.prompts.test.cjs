@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { PassThrough, Writable } = require('node:stream');
 const { test } = require('node:test');
-const { askCliChoice, askCliText, CliPromptCancelled } = require('../dist/cli/prompts');
+const { askCliChoice, askCliConfirm, askCliText, CliPromptCancelled } = require('../dist/cli/prompts');
 
 function terminal() {
   const input = new PassThrough();
@@ -40,6 +40,26 @@ for (const cancel of ['\x1b', '\x03', 'end']) test(`choice cancellation releases
   if (cancel === 'end') io.input.end();
   else io.input.write(cancel);
   await rejected;
+  assert.equal(io.input.isRaw, false);
+  assert.equal(io.input.listenerCount('keypress'), 0);
+  io.input.destroy();
+  io.output.end();
+});
+
+test('yes/no questions use the same arrow menu, start on the given default and restore the terminal', async () => {
+  const io = terminal();
+  const declined = askCliConfirm('en', 'Install?', false, io);
+  io.input.write('\r');
+  assert.equal(await declined, false);
+  const accepted = askCliConfirm('en', 'Install?', true, io);
+  io.input.write('\r');
+  assert.equal(await accepted, true);
+  const changed = askCliConfirm('pt-BR', 'Instalar?', false, io);
+  io.input.write('\x1b[B');
+  io.input.write('\r');
+  assert.equal(await changed, true);
+  assert.match(io.text(), /No[\s\S]*Yes/);
+  assert.match(io.text(), /Não[\s\S]*Sim/);
   assert.equal(io.input.isRaw, false);
   assert.equal(io.input.listenerCount('keypress'), 0);
   io.input.destroy();

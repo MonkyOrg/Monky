@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Se o fone ou a caixa escolhidos forem desconectados, o áudio da tela passa para a saída padrão sem derrubar o vídeo e volta quando o dispositivo reaparece. O aviso de erro da tela mostra o motivo certo.",
+  "en": "If the chosen headphones or speakers are unplugged, the screen's audio moves to the default output without dropping the video and returns when the device is back. Screen error notices show the right reason."
+}

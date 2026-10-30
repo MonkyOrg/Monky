@@ -383,24 +383,36 @@ async function runMicrophoneTestSmoke() {
     voice.pttPressed = false;
     raw = source.stream.clone();
     raw.getAudioTracks()[0].enabled = false;
+    const capturesBeforeCall = captures.length;
     button.click();
     await wait();
-    check(plays.at(-1).srcObject !== raw && plays.at(-1).srcObject?.getAudioTracks()[0].enabled, 'muted call uses independent local test capture');
+    const callPreview = contexts.at(-1);
+    const clone = () => callPreview.previewStream?.getAudioTracks()[0];
+    check(captures.length === capturesBeforeCall && clone() && clone() !== raw.getAudioTracks()[0] && clone().enabled
+      && plays.at(-1).srcObject === callPreview.previewOutput, 'muted call tests a clone of the call microphone without reopening it');
     check(!raw.getAudioTracks()[0].enabled && voice.isMuted && voice.isDeafened && voice.serverMuted && voice.serverDeafened
       && !voice.pttPressed && settings.inputMode === 'push_to_talk', 'test preserves personal/admin/deafen/PTT state');
     button.click();
     check(raw.getAudioTracks()[0].readyState === 'live' && !raw.getAudioTracks()[0].enabled, 'stopping independent test preserves muted call track');
-    const capturesBeforeBorrow = captures.length;
     raw.getAudioTracks()[0].enabled = true;
     button.click();
     await wait();
-    check(captures.length === capturesBeforeBorrow && plays.at(-1).srcObject === raw, 'enabled call microphone is borrowed without capture duplication');
+    check(captures.length === capturesBeforeCall && plays.at(-1).srcObject === contexts.at(-1).previewOutput,
+      'enabled call microphone is tested through the same clone, without capture duplication');
     const oldPlayback = plays.at(-1);
-    raw.getAudioTracks()[0].enabled = false;
-    appEvents.emit('voice.microphone_updated');
-    await wait();
-    check(oldPlayback.srcObject === null && plays.at(-1).srcObject !== raw, 'muting active raw track safely retargets an already-requested test');
-    check(!raw.getAudioTracks()[0].enabled && voice.serverMuted, 'retarget never unmutes call');
+    const testedContext = contexts.at(-1);
+    // Push-to-talk presses and releases, and muting, change only the call's gate.
+    for (const enabled of [false, true, false, true, false]) {
+      raw.getAudioTracks()[0].enabled = enabled;
+      appEvents.emit('voice.microphone_updated');
+      await wait();
+    }
+    check(plays.at(-1) === oldPlayback && oldPlayback.srcObject === testedContext.previewOutput && contexts.at(-1) === testedContext
+      && testedContext.state === 'running' && captures.length === capturesBeforeCall,
+    'pressing and releasing push-to-talk restarts neither the meter nor the loopback');
+    check(status.textContent === t('settings.microphoneTestPlaying') && Number(meter.getAttribute('aria-valuenow')) > 0,
+      'the test keeps playing and measuring while the call gate closes');
+    check(!raw.getAudioTracks()[0].enabled && voice.serverMuted, 'the test never unmutes the call');
     appEvents.emit('voice.channel_changed', null);
     await wait();
     stopped('call connection change stops local test');

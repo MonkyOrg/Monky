@@ -7,11 +7,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { OggOpusParser, terminate } from '@monky/bot-sdk/dist/localRuntime';
-import { LOCAL_EXECUTION_RUNTIME_LIMITS } from '@monky/shared';
+import { LOCAL_EXECUTION_RUNTIME_LIMITS, type LocalExecutionSubject, type LocalTaskFailureEvent } from '@monky/shared';
 import {
   LOCAL_TASK_CACHE_MAX_BYTES, LOCAL_TOOLS_CACHE_MAX_BYTES, LocalTools, type LocalToolPaths,
 } from '../src/main/localExecution/LocalTools';
-import { createLocalRuntimeTask, localWorkerEnvironment, probeLocalTool } from '../src/main/localExecution/workerClient';
+import { LocalPermissions } from '../src/main/localExecution/LocalPermissions';
+import { LocalExecutionService } from '../src/main/localExecution/service';
+import { createLocalRuntimeTask, probeLocalTool } from '../src/main/localExecution/workerClient';
+import { localWorkerEnvironment } from '../src/main/localExecution/workerEnvironment';
+import { TASK_CACHE_SCAN } from '../src/main/localExecution/taskCacheLease';
 import { workerDeferred, WORKER_LIMITS } from '../src/main/localExecution/workerProtocol';
 import { LocalExecutionError } from '../src/main/localExecution/errors';
 import { missingLocalToolFile } from '../src/main/localExecution/localToolsStorage';
@@ -85,7 +89,7 @@ function generatedSource(mode: 'complete' | 'recover' | 'blocked'): string {
       });
     });
     sources.YouTubeSource=class extends Original {
-      constructor(paths) {
+      constructor(paths,options) {
         ffmpeg=paths.ffmpeg;
         const filename=path.join(process.cwd(),'generated.ogg');
         let generating, interrupted=false;
@@ -154,7 +158,7 @@ function generatedSource(mode: 'complete' | 'recover' | 'blocked'): string {
           if(signal.aborted) abort();
           return response;
         };
-        super(paths,{capture,captureBytes,request});
+        super(paths,{...options,capture,captureBytes,request});
         fs.writeFileSync('advanced','0');
       }
       async open(track,signal,options) {
@@ -187,7 +191,7 @@ async function fixture(t: TestContext, script?: string, preload?: string, realTo
   };
   const rows: Array<{ child: ChildProcess; command: string; args: readonly string[]; options: SpawnOptions; closed: boolean }> = [];
   const live = new Set<string>();
-  const owners = new Map<string, { close: () => Promise<void>; confirmed: boolean; confirmations: number }>();
+  const owners = new Map<string, { close: () => Promise<void>; confirmed: boolean; abandoned: boolean; confirmations: number }>();
   const allocated: string[] = [];
   const removed: string[] = [];
   const removalAttempts: string[] = [];
@@ -212,7 +216,7 @@ async function fixture(t: TestContext, script?: string, preload?: string, realTo
       assert.ok(live.has(directory), 'Only an allocated cache can acquire a native owner.');
       assert.equal(owners.has(directory), false, 'A cache cannot acquire a second owner.');
       const native = manager?.registerTaskCacheOwner(directory, close);
-      const owner = { close, confirmed: false, confirmations: 0 };
+      const owner = { close, confirmed: false, abandoned: false, confirmations: 0 };
       owners.set(directory, owner);
       return {
         confirmNativeClosed: (): void => {
@@ -221,11 +225,18 @@ async function fixture(t: TestContext, script?: string, preload?: string, realTo
           owner.confirmed = true;
           owner.confirmations++;
         },
+        abandon: (): void => {
+          assert.equal(owners.get(directory), owner);
+          assert.equal(owner.confirmed, false, 'A confirmed owner cannot be abandoned.');
+          native?.abandon();
+          owner.abandoned = true;
+        },
       };
     },
     removeTaskCache: async (directory: string): Promise<void> => {
       assert.ok(live.has(directory), 'Only a specifically allocated directory may be deleted.');
       const registered = owners.get(directory);
+      assert.equal(registered?.abandoned ?? false, false, 'An abandoned cache is kept until the next start.');
       if (registered && !registered.confirmed) throw new LocalExecutionError('worker_failed');
       removalAttempts.push(directory);
       const owner = rows.find(row => row.options.cwd === directory);
@@ -725,6 +736,32 @@ for (const operation of ['youtube.search', 'youtube.resolve', 'youtube.preview']
   });
 }
 
+test('a preview in the private worker reuses the tools Main verified instead of relaunching their checks', async t => {
+  const checks = require.resolve('@monky/bot-sdk/dist/localRuntime/toolChecks');
+  const sources = require.resolve('@monky/bot-sdk/dist/localRuntime/source');
+  const errors = require.resolve('@monky/bot-sdk/dist/localRuntime/errors');
+  const f = await fixture(t, undefined, `
+    const fs=require('node:fs');
+    const sources=require(${JSON.stringify(sources)});
+    const {MediaError}=require(${JSON.stringify(errors)});
+    require(${JSON.stringify(checks)}).checkMediaTools=async()=>{fs.writeFileSync('checked','');};
+    const Original=sources.YouTubeSource;
+    sources.YouTubeSource=class extends Original {
+      resolve=async()=>{fs.writeFileSync('resolved','');throw new MediaError('unavailable','Controlled end after readiness');};
+    };
+  `);
+  const files: string[][] = [];
+  f.setOnRemove(async directory => { files.push(await fs.readdir(directory)); });
+  const task = await createLocalRuntimeTask({
+    id: randomUUID(), paths: f.paths, signal: new AbortController().signal,
+    spec: { operation: 'youtube.preview', url: track.url },
+  }, f.tools, f.logError);
+  await assert.rejects(task.result, { reason: 'provider_unavailable' });
+  await until(() => f.removed.length === 1);
+  assert.ok(files[0]?.includes('resolved'), 'The preview reached its provider request');
+  assert.equal(files[0]?.includes('checked'), false, 'Node, yt-dlp and FFmpeg are not launched again before each preview');
+});
+
 test('private probe rejection preserves the SDK tool code and completes owned-cache release', async t => {
   const checks = require.resolve('@monky/bot-sdk/dist/localRuntime/toolChecks');
   const errors = require.resolve('@monky/bot-sdk/dist/localRuntime/errors');
@@ -1000,7 +1037,7 @@ test('bounded scans do not overlap and cache removal joins an in-flight scan', {
     return original(filename);
   });
   await until(() => scanning);
-  await wait(WORKER_LIMITS.cachePollMs * 2 + 20);
+  await wait(TASK_CACHE_SCAN.pollMs * 2 + 20);
   assert.equal(rootReads, 1);
   const closing = task.close();
   await until(() => f.rows[0].closed);
@@ -1126,40 +1163,33 @@ for (const scenario of [
   { name: 'probe exit 0 without confirmation', probe: true, ready: true, code: 0 },
   { name: 'pre-ready factory exit 7', probe: false, ready: false, code: 7 },
 ]) {
-  test(`${scenario.name} retains its independent owner and blocks real LocalTools destructive operations`, async t => {
+  test(`${scenario.name} keeps its cache for this run without blocking real LocalTools management or disposal`, async t => {
     const f = await fixture(t, program(`process.exit(${scenario.code});`, '', scenario.ready), undefined, true);
     const manager = f.manager;
     assert.ok(manager);
-    const stage = path.join(f.root, 'tools', `.stage-node-${randomUUID()}`);
-    const candidate = path.join(stage, 'node.exe');
-    await fs.mkdir(stage);
-    await fs.writeFile(candidate, 'controlled staging artifact');
     if (scenario.probe) {
       await assert.rejects(probeLocalTool('node', f.paths, new AbortController().signal, f.tools, f.logError), reason('worker_failed'));
     } else await assert.rejects(f.start(), reason('worker_failed'));
     assert.equal(f.rows.length, 1);
     assert.equal(f.rows[0].closed, true);
-    assert.equal(f.owners.get(f.allocated[0])?.confirmed, false);
-    assert.deepEqual(f.removalAttempts, []);
-    for (const action of [
-      () => manager.removeTaskCache(f.allocated[0]),
-      () => manager.clearCache(),
-      () => manager.remove('node'),
-      () => manager.dispose(),
-      () => manager.dispose(),
-    ]) {
-      await assert.rejects(action());
-      assert.ok((await fs.stat(f.allocated[0])).isDirectory());
-      assert.equal(await fs.readFile(candidate, 'utf8'), 'controlled staging artifact');
-    }
+    const owner = f.owners.get(f.allocated[0]);
+    assert.equal(owner?.confirmed, false);
+    assert.equal(owner?.abandoned, true);
+    assert.match(f.logs.map(entry => String(entry.error)).join('\n'), /retained until the next start/);
+    await assert.rejects(manager.removeTaskCache(f.allocated[0]), reason('invalid_request'));
+    await manager.clearCache();
+    await manager.remove('node');
+    const replacement = await manager.allocateTaskCache();
+    await manager.removeTaskCache(replacement);
+    await manager.dispose();
+    assert.ok((await fs.stat(f.allocated[0])).isDirectory());
     assert.equal(f.rows.length, 1);
     assert.deepEqual(f.removalAttempts, []);
     assert.deepEqual(f.removed, []);
-    assert.equal(f.owners.size, 1);
   });
 }
 
-test('unexpected worker exit rejects closed and retains cache when native cleanup was not confirmed', async t => {
+test('unexpected worker exit rejects closed, keeps the unconfirmed cache and still lets its owner close', async t => {
   const f = await fixture(t, program(`
     await send({type:'result',id:start.id,result:{operation:'youtube.stream',track}});
     setTimeout(()=>process.exit(7),30);
@@ -1167,8 +1197,12 @@ test('unexpected worker exit rejects closed and retains cache when native cleanu
   const task = await f.start();
   await task.result;
   await assert.rejects(task.closed, reason('worker_failed'));
-  await assert.rejects(task.close(), reason('worker_failed'));
+  await task.close();
+  await task.close();
+  assert.equal(f.owners.get(f.allocated[0])?.abandoned, true);
+  assert.deepEqual(f.removalAttempts, []);
   assert.deepEqual(f.removed, []);
+  assert.ok((await fs.stat(f.allocated[0])).isDirectory());
   assert.ok(f.rows.every(row => row.closed));
   assert.match(f.logs.map(entry => String(entry.error)).join('\n'), /retained/);
 });
@@ -1176,9 +1210,66 @@ test('unexpected worker exit rejects closed and retains cache when native cleanu
 test('even an unconfirmed pre-ready exit cannot imply successful native cleanup', async t => {
   const f = await fixture(t, `process.on('message',()=>process.exit(7));`);
   await assert.rejects(f.start(), reason('worker_failed'));
+  assert.equal(f.owners.get(f.allocated[0])?.abandoned, true);
   assert.deepEqual(f.removed, []);
   assert.ok(f.rows.every(row => row.closed));
   assert.match(f.logs.map(entry => String(entry.error)).join('\n'), /retained/);
+});
+
+test('a worker killed mid-stream ends its task instead of pinning the service, LocalTools and quitting', { timeout: 15000 }, async t => {
+  const f = await fixture(t, program(`await send({type:'result',id:start.id,result:{operation:'youtube.stream',track}});`),
+    undefined, true);
+  const manager = f.manager;
+  assert.ok(manager);
+  const subject: LocalExecutionSubject = {
+    connectionId: 'connection', serverOrigin: 'wss://example.test', serverId: 'server', serverName: 'Server',
+    botId: 'bot', botName: 'Bot', botPublicKey: `302a300506032b6570032100${'ab'.repeat(32)}`,
+  };
+  const failures: LocalTaskFailureEvent[] = [];
+  const service = new LocalExecutionService({
+    owner: 1,
+    permissions: new LocalPermissions(path.join(f.root, 'permissions.json')),
+    tools: {
+      initialize: () => manager.initialize(),
+      supported: () => manager.supported(),
+      snapshot: () => manager.snapshot(),
+      prepare: async () => f.paths,
+      remove: tool => manager.remove(tool),
+      clearCache: () => manager.clearCache(),
+      dispose: () => manager.dispose(),
+    },
+    dialogs: {
+      consent: async (_bot, _capability, signal, prepareTools) => { await prepareTools(signal); return 'always'; },
+      enable: async () => assert.fail('The scenario never enables a capability from settings'),
+      removeTool: async (_tool, _count, signal, perform) => { await perform(signal); return true; },
+      clearCache: async (_count, signal, perform) => { await perform(signal); return true; },
+    },
+    createRuntime: input => createLocalRuntimeTask(input, f.tools, f.logError),
+    changed: () => undefined,
+    failed: failure => { failures.push(failure); },
+    logError: f.logError,
+  });
+  t.after(() => service.dispose().catch(() => undefined));
+  await service.setConnection({ connectionId: subject.connectionId, connected: true, voiceChannelId: 'voice' });
+  const prepared = await service.prepare({ requestId: 'prepare', subject, capability: 'youtube-audio' });
+  assert.equal(prepared.status, 'prepared');
+  if (prepared.status !== 'prepared') return;
+  const started = await service.startTask({
+    requestId: 'stream', permit: prepared.permit, voiceChannelId: 'voice', spec: { operation: 'youtube.stream', url: track.url },
+  });
+  assert.equal(started.status, 'started');
+  // Ended from the Task Manager, by an antivirus or by the OS: no closing handshake ever arrives.
+  f.rows[0].child.kill('SIGKILL');
+  const deadline = performance.now() + 5000;
+  while ((await service.snapshot()).tasks.length) {
+    assert.ok(performance.now() < deadline, 'The killed task must leave the task list instead of staying "cancelling".');
+    await wait(10);
+  }
+  assert.deepEqual(failures.map(failure => failure.reason), ['worker_failed']);
+  assert.deepEqual((await service.clearCache()).status, 'completed');
+  await service.dispose();
+  assert.ok((await fs.stat(f.allocated[0])).isDirectory(), 'Files a surviving descendant may use are never deleted now.');
+  assert.deepEqual(f.removalAttempts, []);
 });
 
 test('failure to spawn the explicit managed executable releases the unused cache', async t => {
@@ -1231,7 +1322,7 @@ test('SDK recovery failure data survives the child-to-host boundary without beco
   assert.deepEqual(f.removed, f.allocated);
 });
 
-test('graceful-stop deadline terminates only the owned unresponsive worker and rejects unconfirmed cleanup', { timeout: 10000 }, async t => {
+test('graceful-stop deadline terminates only the owned unresponsive worker and keeps its unconfirmed cache', { timeout: 10000 }, async t => {
   const f = await fixture(t, `
     process.on('message',message=>{
       if(message.type==='start') {
@@ -1245,10 +1336,11 @@ test('graceful-stop deadline terminates only the owned unresponsive worker and r
   const original = setTimeout;
   t.mock.method(globalThis, 'setTimeout', (callback: () => void, milliseconds?: number) =>
     original(callback, milliseconds === WORKER_LIMITS.stopMs ? 25 : milliseconds));
-  await assert.rejects(task.close(), reason('worker_failed'));
+  await task.close();
   await assert.rejects(task.closed, reason('worker_failed'));
   assert.ok(f.rows.every(row => row.closed));
   assert.equal(f.rows.length, 1);
+  assert.equal(f.owners.get(f.allocated[0])?.abandoned, true);
   assert.deepEqual(f.removed, []);
 });
 

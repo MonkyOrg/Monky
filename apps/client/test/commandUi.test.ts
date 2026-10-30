@@ -590,7 +590,7 @@ test('unrelated registry refreshes retain the selected draft without rebuilding 
   }
 });
 
-test('bot user parameters include the human caller and exclude bot accounts without changing mentions', () => {
+test('bot user parameters include the human caller and exclude bot accounts, and mentions offer the other humans only', () => {
   const server = createServerStore();
   server.bus = new EventBus();
   const other = { ...member, id: 'other-member', clientId: 'other-client', nickname: 'Bob' };
@@ -609,7 +609,8 @@ test('bot user parameters include the human caller and exclude bot accounts with
   assert.ok(commandParameterChoices(field, candidates).some((choice) => choice.value === member.id));
   assert.deepEqual(candidates.map((candidate) => candidate.id), [member.id, other.id]);
   assert.equal(server.getMentionableUsers('chat').some((candidate) => candidate.id === member.id), false);
-  assert.equal(server.getMentionableUsers('chat').some((candidate) => candidate.id === bot.id), true);
+  // Bots are never mentionable: picking one would write a name that mentions a member.
+  assert.deepEqual(server.getMentionableUsers('chat').map((candidate) => candidate.id), [other.id]);
   assert.deepEqual(commandValuesFromInputs(command, { song: 'A song', count: '0', member: member.id }, candidates), {
     success: true, values: { song: 'A song', count: 0, member: member.id },
   });

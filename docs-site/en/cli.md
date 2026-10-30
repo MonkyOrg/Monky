@@ -57,6 +57,11 @@ automatically. Every other command only warns about it:
 npm install -g pm2
 ```
 
+The CLI looks for PM2 the way the terminal would, through `PATH`, so it also
+finds one installed by pnpm, Yarn or Volta. A PM2 that is found but fails
+`pm2 --version` is never installed over: the CLI warns instead, and it should be
+fixed with the tool that installed it.
+
 ## Quick start
 
 ```bash
@@ -153,7 +158,8 @@ such as `true`, `false`, `p2p` and `sfu` are not translated.
 | `monky.json` | Server port. |
 | `ecosystem.config.cjs` | PM2 configuration, rewritten on every `start`/`restart`. |
 | `attachments/`, `avatars/`, `icons/` | Uploaded files. |
-| `auto-update.cjs` | Only created when auto-update is enabled. |
+| `server.lock` | Exists while the server is running. See [Changes while the server is running](#changes-while-the-server-is-running). |
+| `backups/` | Copies of `server.db` made by `monky update` before restarting onto the new version. The 3 most recent are kept. |
 
 ## Exit codes
 
@@ -161,6 +167,41 @@ such as `true`, `false`, `p2p` and `sfu` are not translated.
 |---|---|
 | `0` | Success. |
 | `1` | Failure. The message is printed to `stderr`. |
+
+## Changes while the server is running
+
+The server keeps the whole database in memory and rewrites `server.db` from
+that copy. A change written from outside while it runs disappears within
+seconds, even after a `monky restart`. That is why the commands that change
+data require the server to be stopped:
+
+- `monky admin add` and `monky admin remove`;
+- `monky roles create`, `assign`, `unassign` and `delete`;
+- `monky config set`, except the `port` and `autoUpdate` keys, which live outside the database.
+
+With the server running, whether under PM2, hosted by the app or started by
+hand, the command is refused without writing anything and explains how to
+proceed:
+
+```bash
+monky stop
+monky admin add Someone
+monky start
+```
+
+While the server runs, the change can also be made in the app. If the server
+is started while an interactive command waits for an answer, the command ends
+with an error and saves nothing. A command that fails also saves nothing
+halfway.
+
+Queries (`monky members`, `monky roles` and `monky config show`) read a copy
+of the database and work while the server runs, without rewriting it. After
+the CLI is updated, they ask for a `monky restart` while the running server
+has not loaded the new version yet.
+
+While it runs, the server marks the data directory with the `server.lock`
+file. If it is killed, the file is left behind and ignored: the CLI checks
+whether the process it names still exists on this machine.
 
 ---
 
@@ -179,10 +220,18 @@ After the initial language choice, when needed, the command asks:
 
 1. **Where to store the data** — suggests `./data`, but any path works. If the
    chosen folder already holds a server, it asks for another one.
-2. **Owner identity code** (`MONKY-ID:...`) — export it from the Monky app under
+2. **Owner identity code** (`MONKY-ID2:...`) — export it from the Monky app under
    *Settings → My Profile → Identity*. Treat the backup and password as
    credentials: use them only on a trusted administration machine.
-3. **Identity password** — the one you set when exporting.
+   Codes starting with `MONKY-ID2:` need an up-to-date CLI; a CLI from before
+   them answers "Invalid identity code". If the CLI was already installed, run
+   `monky update` before `monky create` (or `monky update --beta` if the app is
+   on the beta channel). `MONKY-ID:` codes, exported by earlier app versions,
+   are still accepted.
+3. **Identity password** — the one you set when exporting. The code and the
+   password are checked before any data is written: a wrong password does not
+   leave a half-created server behind. If the command says the code came from a
+   newer version of Monky, update the CLI with `monky update` and run it again.
 4. **Server name**
 5. **Server port** (default: `3000`)
 6. **Server password** — leave empty for an open server.
@@ -199,7 +248,7 @@ It then prints a summary, asks for confirmation and offers to start the server.
 |---|---|---|
 | `--identity <code>` | Owner identity code | asked |
 | `--name <name>` | Server name | `Friends Server` |
-| `--port <n>` | Server port | `3000` |
+| `--port <n>` | Server port, from 1024 to 65535 | `3000` |
 | `--password <password>` | Server password (empty = no password) | asked |
 | `--max-users <n>` | Registered member limit (`0` = no limit) | asked |
 | `--voice-mode <p2p|sfu>` | Voice and media mode (`p2p` or `sfu`) | `p2p` |
@@ -218,7 +267,7 @@ monky create --data /srv/monky-friends
 
 # Non-interactive, except for the identity password
 monky create --data /srv/monky-friends \
-  --identity "MONKY-ID:..." \
+  --identity "MONKY-ID2:..." \
   --name "Friends Server" --port 3000 --password "serverPassword"
 ```
 
@@ -513,7 +562,9 @@ monky admin add [nickname|clientId]
 monky admin remove [nickname|clientId]
 ```
 
-Without an argument, the command lists the members for you to pick from.
+Without an argument, the command lists the members for you to pick from. It
+requires the server to be stopped; see
+[Changes while the server is running](#changes-while-the-server-is-running).
 
 ---
 
@@ -531,7 +582,12 @@ monky roles delete [role]
 
 Without arguments, each subcommand is interactive. Permissions can be passed by
 name, comma separated. Colors use the `#RRGGBB` format. The server's default
-role cannot be removed from a member.
+role cannot be removed from a member. Creating, assigning, removing and
+deleting roles requires the server to be stopped; listing them does not.
+
+A new role follows the same rules as the app: its name has 1 to 32 characters
+and cannot be `Admin`, which is reserved for the administrator role. Roles do
+not grant the administrator permission; use `monky admin add` for that.
 
 ---
 
@@ -554,21 +610,25 @@ monky config set <key> [value]     # change it directly
 |---|---|---|
 | `name` | Server name (at least 2 characters) | `Servidor dos Amigos` |
 | `password` | Join password. Empty, `none` or `clear` removes it | no password |
-| `port` | TCP port | `3000` |
+| `port` | TCP port, from 1024 to 65535 | `3000` |
 | `icon` | Path to an image, copied into the data directory. Empty or `clear` removes it | no icon |
 | `maxUsers` | Maximum registered members. `0` removes the limit | `20` |
 | `maxMessageLength` | Characters per message. `0` removes the character limit; the 8 MiB packet limit still applies | `16000` |
-| `allowSoundboard` | Allows the soundboard (`true`/`false`) | `true` |
+| `allowSoundboard` | Allows the soundboard (`true`/`false`). Turning it off also turns off the recent sounds cache | `true` |
 | `allowEveryoneMention` | Allows `@everyone`/`@todos` in chat (`true`/`false`) | `true` |
-| `maxAttachmentFileBytes` | Maximum size per attachment, in bytes | no limit |
+| `maxAttachmentFileBytes` | Maximum size per attachment, in bytes. Cannot exceed the total storage | no limit |
 | `maxAttachmentStorageBytes` | Total attachment storage, in bytes | no limit |
 | `voiceMode` | Voice mode: `p2p` (direct mesh) or `sfu` (Selective Forwarding Unit) | `p2p` |
-| `autoUpdate` | Enables the daily automatic update (`true`/`false`) | `false` |
+| `autoUpdate` | Enables the machine's automatic updates (`true`/`false`). See [Automatic updates](#automatic-updates) | `false` |
 | `turn` | Enables the TURN media relay (`true`/`false`). Linux only, requires coturn installed | `false` |
 
-Changing `port` with the server running offers to restart right away.
-Changing `turn` requires a manual `monky restart`.
-Changing `voiceMode` applies dynamically and notifies all connected clients.
+`port` and `autoUpdate` can change while the server runs. Changing `port`
+with the server running offers to restart right away, through the same path
+as `monky restart`: it warns people in a call, rewrites the PM2 registration
+and runs `pm2 save`, so the new port survives a reboot. The other keys live in
+the database and require the server to be stopped (see
+[Changes while the server is running](#changes-while-the-server-is-running));
+they take effect on the next `monky start`.
 
 ### Examples
 
@@ -600,8 +660,9 @@ troubleshooting.
 ### Enabling it
 
 ```bash
+monky stop
 monky config set turn true
-monky restart
+monky start
 ```
 
 coturn is installed **automatically** from your distro. If the server does not
@@ -623,11 +684,16 @@ Cloud, AWS, etc.).
 monky status    # should show ✔ accessible
 ```
 
+In the `monky status --watch` dashboard, the TURN setting is read again only
+when the database changes (at most every 30 s), and the ports are checked
+every 60 s or as soon as TURN is turned on.
+
 ### Disabling it
 
 ```bash
+monky stop
 monky config set turn false
-monky restart
+monky start
 ```
 
 ---
@@ -641,7 +707,9 @@ By default, Monky operates in **P2P Mesh**: each participant broadcasts audio an
 ### Enabling via CLI
 
 ```bash
+monky stop
 monky config set voiceMode sfu
+monky start
 ```
 
 The CLI automatically computes and displays a **capacity estimate** based on available CPU cores, RAM, and upload speed.
@@ -675,7 +743,29 @@ monky update [--beta] [--check] [--yes]
 The command downloads and installs the new package with `npm install -g` from
 the GitHub release artifacts.
 
-At the end the server is restarted (with confirmation, except with `--yes`).
+At the end the running servers are restarted (with confirmation, except with
+`--yes`): all of them on this machine, or only the `--data` one. Stopped
+servers stay stopped and use the new version on the next `monky start`.
+
+So that a broken version cannot leave the server down:
+
+- **Before restarting**, the new CLI is run once. If it does not run on this
+  machine (old Node, missing module), the previous version is reinstalled and
+  no server is restarted.
+- **Each server** has its `server.db` copied to `backups/` before the restart
+  (the 3 most recent copies are kept) and must answer again within 60
+  seconds.
+- **If the first server restarted onto the new version does not answer**, the
+  update is undone: the previous version is reinstalled, the database is
+  restored from the copy when the new version had already migrated it, and
+  the server comes back up. The command ends with an error to flag it, and
+  `monky logs` shows why.
+
+`monky update` never installs a version older than the current one. For
+example, someone on a beta newer than the latest stable does not get the
+stable one installed over it. Forcing a reinstall is only offered for the same
+version. Two updates on the same machine never run at once: the second waits
+for the first to finish.
 
 Before disconnecting participants for that restart, the server reports that
 it is updating. Clients show a dedicated notice in their selected language
@@ -699,9 +789,19 @@ monky update --beta            # updates to the latest, betas included
 monky config set autoUpdate true
 ```
 
-Registers a daily PM2 task, at 4am, running `monky update --yes` for that
-server. The channel follows the installed version: if you are on a beta, the
-auto-updater follows the beta channel.
+Registers a single PM2 schedule for the machine (`monky-auto-updater`) that
+runs `monky update --yes`: it installs the update once and restarts the
+servers that are running. A server stopped on purpose is not started. If a
+run finds a server still on the previous code (after a declined restart, for
+example), it restarts it with the same database copy and the same rollback on
+failure.
+
+In a terminal, the CLI asks for the schedule: daily at an `HH:MM` time
+(default `04:00`) or every 1 to 168 hours. Scripts get the daily 04:00
+schedule. The channel follows the installed version: if you are on a beta,
+the auto-updater follows the beta channel. The script lives at
+`~/.monky/auto-update.cjs` (or in the `MONKY_HOME` folder). Enabling
+auto-update replaces the per-server schedules created by older versions.
 
 It works on Linux, macOS and Windows. To turn it off:
 
@@ -723,6 +823,11 @@ Removes the database, attachments, avatars and configuration, kills the PM2
 process and drops the server from the registry. It asks for two confirmations:
 typing `DESTROY` and a final "yes". It only accepts folders that actually hold a
 Monky server.
+
+Without a PM2 the CLI can use, the server's PM2 processes cannot be removed and
+would keep restarting the deleted server. In that case the warning names them,
+and a third confirmation asks whether to delete the data anyway; declining
+leaves everything as it was.
 
 If anyone is connected, the warning shows up before the confirmations, saying
 how many people will be disconnected.

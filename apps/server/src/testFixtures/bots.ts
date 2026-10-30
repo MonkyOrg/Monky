@@ -174,6 +174,9 @@ export async function createFixture(options: {
   const dataDir = path.join(__dirname, '..', '..', `.bot-test-data-${process.pid}-${randomUUID()}`);
   const database = await DatabaseConnection.create(path.join(dataDir, 'server.db'));
   const db = database.getDb();
+  // Production saves within seconds of its first write, and sql.js reopens the
+  // connection on every save: tests run from that state, not the pristine one (S-APP-1).
+  db.flush();
   const serverRepo = new SqliteServerRepository(db);
   const userRepo = new SqliteUserRepository(db);
   const channelRepo = new SqliteChannelRepository(db);
@@ -192,7 +195,8 @@ export async function createFixture(options: {
   );
   const permissions = new PermissionService(serverRepo, roleRepo);
   const roleService = new RoleService(roleRepo, userRepo, permissions);
-  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions, botPermissions, userRepo, channelRepo.categories);
+  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions, botPermissions, userRepo,
+    channelRepo.categories, attachmentService);
   const pollService = new NativePollService(new SqliteNativePollRepository(db), {
     consume: (refs, userId, channelId) => communityService.consumeImageAssets(refs, userId, channelId)
       .map(url => url.split('/').pop()!),
@@ -218,6 +222,7 @@ export async function createFixture(options: {
     messageRepo, channelRepo, userRepo, mentionRepo, avatars, rateLimiter, attachmentService, serverRepo,
     (userId, channelId, permission) => channelService.canUserAccessChannel(userId, channelId, permission),
     (userId, channelId) => channelService.canUserAccessChannel(userId, channelId, Permission.READ_MESSAGES),
+    (channelId, userIds) => channelService.membersWithAccess(channelId, userIds, [Permission.VIEW_CHANNEL, Permission.READ_MESSAGES]),
     pollService,
   );
   const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
@@ -240,7 +245,7 @@ export async function createFixture(options: {
     new SqliteMessageSearchRepository(db), messageRepo, channelService, permissions, chatService,
     () => wsServer.getChannelAccessVersion(),
   );
-  const wsServer: WebSocketServer = new WebSocketServer(
+  const wsServer: WebSocketServer = new WebSocketServer({
     httpServer,
     authService,
     userService,
@@ -249,17 +254,21 @@ export async function createFixture(options: {
     signalingService,
     serverRepo,
     attachmentService,
-    permissions,
+    permissionService: permissions,
     roleService,
     coturnManager,
     rateLimiter,
-    new SfuManager(),
+    sfuManager: new SfuManager(),
     botService,
-    registry,
+    commandRegistry: registry,
     selectorService,
-    new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()), botPermissions),
-    undefined, null, communityService, searchService, forumService, pollService, undefined, undefined, botStorage,
-  );
+    botSettings: new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()), botPermissions),
+    communityService,
+    messageSearchService: searchService,
+    forumService,
+    pollService,
+    botStorageService: botStorage,
+  });
   online = () => wsServer.getOnlineUsersMap();
   httpServer.listen(0, '127.0.0.1');
   await once(httpServer, 'listening');

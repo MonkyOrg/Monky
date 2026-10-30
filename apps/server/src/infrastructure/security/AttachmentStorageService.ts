@@ -161,9 +161,11 @@ export class AttachmentStorageService {
 
   /**
    * Resolves an attachment filename to an on-disk file for the HTTP handler,
-   * guarding against path traversal. Returns null if it does not exist.
+   * guarding against path traversal. Returns null unless it is a regular file:
+   * the upload `tmp` folder lives here too, and serving a folder used to crash
+   * the server (S-WS-1).
    */
-  public getFile(filename: string): { filePath: string; size: number; mimeType: string } | null {
+  public getFile(filename: string): { filePath: string; mimeType: string } | null {
     if (!filename) return null;
     const safeFilename = path.basename(filename);
     const filePath = path.join(this.attachmentsDir, safeFilename);
@@ -171,11 +173,10 @@ export class AttachmentStorageService {
     if (!resolved.startsWith(path.resolve(this.attachmentsDir))) {
       return null;
     }
-    if (!fs.existsSync(filePath)) {
+    if (!isRegularFile(filePath)) {
       return null;
     }
-    const stat = fs.statSync(filePath);
-    return { filePath, size: stat.size, mimeType: this.mimeForExtension(safeFilename) };
+    return { filePath, mimeType: this.mimeForExtension(safeFilename) };
   }
 
   private mimeForExtension(filename: string): string {
@@ -226,5 +227,13 @@ export class AttachmentStorageService {
     } catch {
       return [];
     }
+  }
+}
+
+function isRegularFile(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
   }
 }

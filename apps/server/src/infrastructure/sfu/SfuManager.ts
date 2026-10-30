@@ -4,9 +4,10 @@ import dgram from 'dgram';
 import * as mediasoup from 'mediasoup';
 import type { RouterRtpCodecCapability, TransportListenInfo } from 'mediasoup/node/lib/types.js';
 import { LIMITS, SCREEN_SHARE_LIMITS, aggregateTransportHealth, VoiceConnectionHealth, type RtcTransportPurpose,
-  sfuCreateWebRtcTransportSchema, nativeScreenRenditionSchema } from '@monky/shared';
+  type SfuMediaAppData, sfuCreateWebRtcTransportSchema, nativeScreenRenditionSchema } from '@monky/shared';
 import { getPublicIp } from '../discovery/ServerIpScanner';
 import { describeFailure } from '../lifecycle/ServerResourceScope';
+import { Logger } from '../logger/Logger';
 
 const MEDIA_CODECS: RouterRtpCodecCapability[] = [
   {
@@ -83,8 +84,11 @@ export interface SfuProducerRecord {
   sessionId: string;
   channelId: string;
   kind: 'audio' | 'video';
-  appData: Record<string, any>;
+  appData: SfuMediaAppData;
 }
+
+/** What callers outside the manager may read of a producer. */
+export type SfuProducerView = Readonly<Pick<SfuProducerRecord, 'sessionId' | 'channelId' | 'kind' | 'appData'>>;
 
 export interface SfuConsumerRecord {
   consumer: mediasoup.types.Consumer;
@@ -157,7 +161,41 @@ export class SfuProducerClosedError extends Error {
   }
 }
 
-function isScreenMedia(appData: Record<string, unknown>): boolean {
+/** Publishing more than a session may, which no client does on its own. */
+export class SfuProducerLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SfuProducerLimitError';
+  }
+}
+
+/**
+ * What one session may publish at once in a call: a microphone, a camera and,
+ * for each screen, a video and an audio per rendition. Every producer is
+ * announced to the room and auto-consumed, so this bounds what one client
+ * makes everyone else receive.
+ */
+const MAX_PRODUCERS_PER_SESSION = 2 + SCREEN_SHARE_LIMITS.maximum * 4 * 2;
+
+/**
+ * Wait before starting the worker again once starts keep failing, doubling
+ * from the first value up to the second. The worker is started on demand, by
+ * the next call request, so this bounds how often a broken host spawns a
+ * process however many clients keep retrying.
+ */
+const WORKER_RETRY_MIN_MS = 2_000;
+const WORKER_RETRY_MAX_MS = 30_000;
+
+/**
+ * Clients swap devices with replaceTrack and close a producer before making its
+ * successor, so a second live one in the same slot of a transport is never
+ * legitimate. Each native rendition has a transport of its own.
+ */
+function producerSlot(transportId: string, appData: SfuMediaAppData): string {
+  return 'shareId' in appData ? `${transportId}:${appData.mediaType}:${appData.shareId}` : `${transportId}:${appData.mediaType}`;
+}
+
+function isScreenMedia(appData: SfuMediaAppData): boolean {
   return appData.mediaType === 'screen_video' || appData.mediaType === 'screen_audio';
 }
 
@@ -216,18 +254,25 @@ export class SfuManager {
   }
 
   private worker: mediasoup.types.Worker | null = null;
+  /** Monotonic time the current worker came up: tells a crash loop from a one-off death. */
+  private workerStartedAt = 0;
   private routers: Map<string, mediasoup.types.Router> = new Map(); // key = channelId
+  /** Routers being created: concurrent first requests for a channel must share one. */
+  private readonly routerCreations = new Map<string, Promise<mediasoup.types.Router>>();
   private transports: Map<string, SfuTransportRecord> = new Map(); // key = transportId
   private readonly pendingTransports = new Set<PendingSfuTransport>();
   private producers: Map<string, SfuProducerRecord> = new Map(); // key = producerId
   private consumers: Map<string, SfuConsumerRecord> = new Map(); // key = consumerId
 
-  private isInitialized = false;
-  private isAvailable = false;
+  private startup: Promise<boolean> | null = null;
+  /** Failed starts and young deaths in a row; the next start waits longer for each. */
+  private workerFailures = 0;
+  /** Monotonic time before which a failed or dead worker is not started again on demand. */
+  private retryAt = 0;
   private initializationError: string | null = null;
-  private initializationPromise: Promise<boolean> | null = null;
   private generation = 0;
   private readonly retiringWorkers = new Set<mediasoup.types.Worker>();
+  private workerLostListener?: () => void;
 
   private readonly rtcMinPort: number;
   private readonly rtcMaxPort: number;
@@ -338,12 +383,26 @@ export class SfuManager {
     });
   }
 
-  public init(): Promise<boolean> {
-    if (this.initializationPromise) return this.initializationPromise;
-    if (this.isInitialized) return Promise.resolve(this.isAvailable);
+  /** Called once the worker died and everything it carried was forgotten. */
+  public setWorkerLostListener(listener: () => void): void {
+    this.workerLostListener = listener;
+  }
+
+  /**
+   * Starts the mediasoup worker unless it is running or already starting.
+   *
+   * A worker that failed to start or died is started again on demand: by the
+   * next call request, whoever makes it. Starts that keep failing wait longer
+   * each time (see WORKER_RETRY_MIN_MS), so a broken host does not spawn a
+   * process per request; `retryNow` is for an operator's explicit action.
+   */
+  public init(options: { retryNow?: boolean } = {}): Promise<boolean> {
+    if (this.isReady()) return Promise.resolve(true);
+    if (this.startup) return this.startup;
+    if (!options.retryNow && performance.now() < this.retryAt) return Promise.resolve(false);
     const attempt = this.initializeWorker(this.generation);
-    this.initializationPromise = attempt;
-    const settled = () => { if (this.initializationPromise === attempt) this.initializationPromise = null; };
+    this.startup = attempt;
+    const settled = () => { if (this.startup === attempt) this.startup = null; };
     void attempt.then(settled, settled);
     return attempt;
   }
@@ -360,65 +419,132 @@ export class SfuManager {
         }).catch(() => {});
       }
 
-      worker = await mediasoup.createWorker({
+      const created = await mediasoup.createWorker({
         rtcMinPort: this.rtcMinPort,
         rtcMaxPort: this.rtcMaxPort,
         logLevel: 'warn',
       });
+      worker = created;
 
       if (generation !== this.generation) {
-        this.retiringWorkers.add(worker);
-        worker.close();
-        this.retiringWorkers.delete(worker);
+        this.retiringWorkers.add(created);
+        created.close();
+        this.retiringWorkers.delete(created);
         return false;
       }
-      this.worker = worker;
-      worker.on('died', (error) => {
-        if (this.worker !== worker) return;
-        console.error('[SFU] mediasoup Worker died:', error);
-        this.isAvailable = false;
-        this.initializationError = error?.message || 'Worker died unexpectedly';
-      });
+      this.worker = created;
+      this.workerStartedAt = performance.now();
+      created.on('died', (error) => this.workerDied(created, error));
 
-      this.isInitialized = true;
-      this.isAvailable = true;
+      if (this.initializationError !== null) Logger.info('SFU', 'The mediasoup worker is running again.');
       this.initializationError = null;
+      this.retryAt = 0;
       console.log(`[SFU] mediasoup Worker initialized on UDP ports ${this.rtcMinPort}-${this.rtcMaxPort}`);
       return true;
     } catch (error) {
       if (worker && generation !== this.generation) throw error;
       if (generation === this.generation) {
-        this.isInitialized = true;
-        this.isAvailable = false;
-        this.initializationError = describeFailure(error);
+        this.noteWorkerFailure(describeFailure(error));
+        Logger.warn('SFU', `Failed to start the mediasoup worker: ${describeFailure(error)}`);
       }
-      console.warn('[SFU] Failed to start mediasoup worker:', describeFailure(error));
       return false;
     }
   }
 
+  /**
+   * The worker crashed or was killed, and every router, transport, producer
+   * and consumer went with it. They are forgotten here, the server is told so
+   * it can tell the clients, and the next call request starts a new worker:
+   * nothing else would ever bring the SFU back short of restarting the server.
+   */
+  private workerDied(worker: mediasoup.types.Worker, error: Error): void {
+    if (this.worker !== worker) return;
+    // A worker that served for a while died of something transient: the next
+    // request starts another at once. One that keeps dying young backs off.
+    if (performance.now() - this.workerStartedAt >= WORKER_RETRY_MAX_MS) this.workerFailures = 0;
+    this.noteWorkerFailure(describeFailure(error) || 'Worker died unexpectedly');
+    this.generation++;
+    this.worker = null;
+    this.forgetMedia();
+    Logger.error('SFU', 'The mediasoup worker died; SFU calls reconnect once a new one starts.', error);
+    this.workerLostListener?.();
+  }
+
+  /** A start that failed or a worker that died young: the next start waits longer. */
+  private noteWorkerFailure(reason: string): void {
+    this.initializationError = reason;
+    this.workerFailures++;
+    // The first one is retried right away; repeated ones wait 2 s, 4 s, ... 30 s.
+    const wait = this.workerFailures === 1 ? 0
+      : Math.min(WORKER_RETRY_MAX_MS, WORKER_RETRY_MIN_MS * 2 ** (this.workerFailures - 2));
+    this.retryAt = performance.now() + wait;
+  }
+
+  /** Drops every record: the worker that owned them is gone or closing. */
+  private forgetMedia(): void {
+    this.cancelPendingTransports(() => true);
+    this.pendingTransports.clear();
+    this.routerCreations.clear();
+    this.routers.clear();
+    this.transports.clear();
+    this.producers.clear();
+    this.consumers.clear();
+  }
+
   public isReady(): boolean {
-    return this.isAvailable && this.worker !== null && !this.worker.died;
+    return this.worker !== null && !this.worker.died;
   }
 
   public getLastError(): string | null {
     return this.initializationError;
   }
 
-  public async getOrCreateRouter(channelId: string): Promise<mediasoup.types.Router> {
-    if (!this.isInitialized) {
-      await this.init();
-    }
-    if (!this.isReady() || !this.worker) {
+  /**
+   * The router of a channel, created on first use. Concurrent first requests
+   * share one creation: two routers would split the channel, leaving
+   * participants unable to hear each other, and the first one orphaned.
+   */
+  public getOrCreateRouter(channelId: string): Promise<mediasoup.types.Router> {
+    const router = this.routers.get(channelId);
+    if (router && !router.closed) return Promise.resolve(router);
+    const pending = this.routerCreations.get(channelId);
+    if (pending) return pending;
+    const creation = this.createRouter(channelId);
+    this.routerCreations.set(channelId, creation);
+    const settled = () => { if (this.routerCreations.get(channelId) === creation) this.routerCreations.delete(channelId); };
+    void creation.then(settled, settled);
+    return creation;
+  }
+
+  private async createRouter(channelId: string): Promise<mediasoup.types.Router> {
+    if (!this.isReady()) await this.init();
+    const worker = this.worker;
+    if (!worker || worker.died) {
       throw new Error(`SFU worker is not available: ${this.initializationError || 'worker offline'}`);
     }
-
-    let router = this.routers.get(channelId);
-    if (!router || router.closed) {
-      router = await this.worker.createRouter({ mediaCodecs: MEDIA_CODECS });
-      this.routers.set(channelId, router);
+    const generation = this.generation;
+    const router = await worker.createRouter({ mediaCodecs: MEDIA_CODECS });
+    // The worker died or the SFU was closed meanwhile: the router belongs to neither.
+    if (generation !== this.generation) {
+      router.close();
+      throw new Error('The SFU worker changed while the router was being created');
     }
+    this.routers.set(channelId, router);
     return router;
+  }
+
+  /**
+   * The address a client used to reach the server, as an ICE candidate: the
+   * `Host` of its upgrade request without the brackets an IPv6 literal keeps
+   * for URLs, which no ICE agent can parse. Loopback is announced anyway, and
+   * an IPv6 address cannot reach sockets bound to IPv4, so neither comes from here.
+   */
+  private static announceableClientHost(host: string | undefined, listenIp: string): string | undefined {
+    if (!host) return undefined;
+    const address = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+    if (!address || address === 'localhost' || address === '127.0.0.1') return undefined;
+    if (net.isIPv6(address) && !net.isIPv6(listenIp)) return undefined;
+    return address;
   }
 
   private getListenInfos(preferredAnnouncedIp?: string): TransportListenInfo[] {
@@ -451,8 +577,9 @@ export class SfuManager {
     }
 
     // 2. Client connection host / IP (if client reached server via a public IP or domain)
-    if (preferredAnnouncedIp && preferredAnnouncedIp !== 'localhost' && preferredAnnouncedIp !== '127.0.0.1') {
-      addAnnouncedAddress(preferredAnnouncedIp);
+    const clientHost = SfuManager.announceableClientHost(preferredAnnouncedIp, this.listenIp);
+    if (clientHost) {
+      addAnnouncedAddress(clientHost);
     }
 
     // 3. Auto-detected server public IP (for cloud VPS behind 1:1 NAT like AWS, Oracle Cloud, GCP, etc.)
@@ -708,13 +835,13 @@ export class SfuManager {
     producerId: string;
     producerSessionId: string;
     kind: 'audio' | 'video';
-    appData: Record<string, any>;
+    appData: SfuMediaAppData;
   }> {
     const list: Array<{
       producerId: string;
       producerSessionId: string;
       kind: 'audio' | 'video';
-      appData: Record<string, any>;
+      appData: SfuMediaAppData;
     }> = [];
 
     for (const [producerId, p] of this.producers.entries()) {
@@ -729,6 +856,15 @@ export class SfuManager {
     }
 
     return list;
+  }
+
+  /**
+   * One live producer by id, without walking every producer of the server as
+   * `getProducersInChannel` does: access checks run it per consumer (S-VOICE-10).
+   */
+  public getProducer(producerId: string): SfuProducerView | undefined {
+    const record = this.producers.get(producerId);
+    return record && !record.producer.closed ? record : undefined;
   }
 
   public async connectWebRtcTransport(
@@ -750,7 +886,7 @@ export class SfuManager {
     transportId: string,
     kind: 'audio' | 'video',
     rtpParameters: mediasoup.types.RtpParameters,
-    appData: Record<string, unknown> = {},
+    appData: SfuMediaAppData,
     paused = false
   ): Promise<{ id: string }> {
     const record = this.transports.get(transportId);
@@ -763,13 +899,14 @@ export class SfuManager {
     if (record.purpose === 'screen' && !isScreenMedia(appData)) {
       throw new Error('Screen transport only accepts screen video and screen audio');
     }
-    if (appData.nativeScreen !== undefined) {
+    if ('nativeScreen' in appData && appData.nativeScreen !== undefined) {
       const nativeScreen = nativeScreenRenditionSchema.parse(appData.nativeScreen);
       if (record.purpose !== 'screen' || record.screenSessionId !== nativeScreen.pipelineId || !isScreenMedia(appData)) {
         throw new Error('Native screen media must belong to its own rendition transport');
       }
     }
 
+    this.assertProducerFits(sessionId, channelId, transportId, appData);
     const producer = await record.transport.produce({
       kind,
       rtpParameters,
@@ -779,6 +916,12 @@ export class SfuManager {
     if (this.transports.get(transportId) !== record || record.transport.closed) {
       producer.close();
       throw new Error('Producer transport was closed during setup');
+    }
+    try {
+      this.assertProducerFits(sessionId, channelId, transportId, appData);
+    } catch (error) {
+      producer.close();
+      throw error;
     }
 
     console.log(`[SFU Server] Producer created ${producer.id} (${kind}, mediaType: ${appData?.mediaType || 'unknown'}) on transport ${transportId} for session ${sessionId}`);
@@ -805,6 +948,20 @@ export class SfuManager {
     return { id: producer.id };
   }
 
+  /** Refuses a producer beyond what one session may publish; see MAX_PRODUCERS_PER_SESSION. */
+  private assertProducerFits(sessionId: string, channelId: string, transportId: string, appData: SfuMediaAppData): void {
+    const slot = producerSlot(transportId, appData);
+    let live = 0;
+    for (const record of this.producers.values()) {
+      if (record.sessionId !== sessionId || record.channelId !== channelId || record.producer.closed) continue;
+      if (producerSlot(record.transportId, record.appData) === slot) {
+        throw new SfuProducerLimitError(`This session already publishes ${appData.mediaType} on this transport`);
+      }
+      live++;
+    }
+    if (live >= MAX_PRODUCERS_PER_SESSION) throw new SfuProducerLimitError('Too many producers for this voice session');
+  }
+
   public async consume(
     sessionId: string,
     channelId: string,
@@ -817,7 +974,7 @@ export class SfuManager {
     kind: 'audio' | 'video';
     rtpParameters: mediasoup.types.RtpParameters;
     producerSessionId: string;
-    appData: Record<string, any>;
+    appData: SfuMediaAppData;
   }> {
     const transportRecord = this.transports.get(transportId);
     if (!transportRecord) {
@@ -1079,10 +1236,13 @@ export class SfuManager {
     return { closedProducerIds };
   }
 
-  public closeChannel(channelId: string): void {
+  /** Closes everything of a removed channel, its router included, reporting the producers that went with it. */
+  public closeChannel(channelId: string): { closedProducerIds: string[] } {
     this.cancelPendingTransports(pending => pending.channelId === channelId);
+    const closedProducerIds: string[] = [];
     for (const [id, record] of Array.from(this.producers.entries())) {
       if (record.channelId === channelId) {
+        closedProducerIds.push(id);
         record.producer.close();
         this.producers.delete(id);
       }
@@ -1107,14 +1267,16 @@ export class SfuManager {
       router.close();
       this.routers.delete(channelId);
     }
+    return { closedProducerIds };
   }
 
   public close(): void {
     this.generation++;
-    this.initializationPromise = null;
+    this.startup = null;
+    // An explicit stop ends any backoff: the next start is a deliberate one.
+    this.workerFailures = 0;
+    this.retryAt = 0;
     const errors: unknown[] = [];
-    this.cancelPendingTransports(() => true);
-    this.pendingTransports.clear();
     for (const router of this.routers.values()) {
       try {
         router.close();
@@ -1122,23 +1284,19 @@ export class SfuManager {
         errors.push(error);
       }
     }
-    this.routers.clear();
-    this.transports.clear();
-    this.producers.clear();
-    this.consumers.clear();
+    this.forgetMedia();
 
     if (this.worker) this.retiringWorkers.add(this.worker);
+    // A worker whose close failed stays retiring, for the next close to retry.
+    this.worker = null;
     for (const worker of this.retiringWorkers) {
       try {
         if (!worker.died) worker.close();
         this.retiringWorkers.delete(worker);
-        if (this.worker === worker) this.worker = null;
       } catch (error) {
         errors.push(error);
       }
     }
-    this.isInitialized = false;
-    this.isAvailable = false;
     if (errors.length > 0) {
       throw new AggregateError(errors, `SFU cleanup failed: ${errors.map(describeFailure).join('; ')}`);
     }

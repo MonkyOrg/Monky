@@ -6,6 +6,21 @@ async function runScreenAudienceSmoke() {
   let checks = 0, mediaRequests = 0;
   const check = (value, message) => { if (!value) throw new Error(message); checks++; };
   const settle = async () => { await document.fonts.ready; await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame); };
+  // A panel opened by a switch unfolds (setSurfaceVisible) and may then scroll the dialog smoothly into view;
+  // measure the layout it ends with.
+  const settleMotion = async () => {
+    await settle();
+    await Promise.all(document.getAnimations()
+      .filter(animation => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .map(animation => animation.finished.catch(() => {})));
+    const dialog = document.querySelector('.screen-share-picker-card');
+    for (let stable = 0, last = NaN, frames = 0; stable < 3 && frames < 120; frames++) {
+      await new Promise(requestAnimationFrame);
+      const top = dialog?.scrollTop ?? 0;
+      stable = top === last ? stable + 1 : 0;
+      last = top;
+    }
+  };
   const media = navigator.mediaDevices;
   const originalMedia = { getUserMedia: media.getUserMedia, getDisplayMedia: media.getDisplayMedia };
   const deny = async () => { mediaRequests++; throw new Error('Audience UI must never request media.'); };
@@ -74,21 +89,20 @@ async function runScreenAudienceSmoke() {
       const search = document.querySelector('#share-audience-search');
       const card = document.querySelector('.screen-share-picker-card');
       trigger.scrollIntoView({ block: 'nearest' });
-      await settle();
+      await settleMotion();
       const closedHeight = card.getBoundingClientRect().height;
       check(!popupOpen(), 'Closed dropdown must hide all 520 choices.');
       check(trigger.textContent.includes(language.t('screenShare.privateChoose')), 'Localized placeholder.');
       trigger.click();
-      await settle();
+      await settleMotion();
       check(document.activeElement === search, 'Opening focuses search.');
       check(list.querySelectorAll('[role="option"]').length === 520, 'All members and roles remain searchable.');
       check(list.scrollHeight > list.clientHeight && list.clientHeight <= 280, 'Large audience has a bounded scrollable list.');
       check(Math.abs(card.getBoundingClientRect().height - closedHeight) <= 1, 'Opening the dropdown never expands the modal.');
-      const bounds = popup.getBoundingClientRect(), cardBounds = card.getBoundingClientRect();
-      check(bounds.top >= cardBounds.top && bounds.bottom <= cardBounds.bottom
-        && bounds.left >= 0 && bounds.right <= innerWidth,
-      `Popup remains inside the scrollable modal and viewport: ${JSON.stringify({
-        popup: bounds.toJSON(), card: cardBounds.toJSON(), viewport: { width: innerWidth, height: innerHeight },
+      const bounds = popup.getBoundingClientRect();
+      check(bounds.top >= 0 && bounds.bottom <= innerHeight && bounds.left >= 0 && bounds.right <= innerWidth,
+      `The popup opens on a side of its field where it fits in the window: ${JSON.stringify({
+        popup: bounds.toJSON(), trigger: trigger.getBoundingClientRect().toJSON(), viewport: { width: innerWidth, height: innerHeight },
       })}`);
       const role = list.querySelector('[data-audience-id="role-0"]');
       const roleBounds = role.getBoundingClientRect();

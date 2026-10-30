@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Menções: só quem foi mencionado pelo nome completo é notificado, então \"@Lucas\" não notifica mais a \"Lu\", e e-mails ou código com @ não notificam ninguém. Som, @ e destaque seguem a mesma regra.",
+  "en": "Mentions: only people mentioned by their full name are notified, so \"@Lucas\" no longer notifies \"Lu\", and e-mails or code with @ notify no one. Sound, @ badge and highlight follow the same rule."
+}

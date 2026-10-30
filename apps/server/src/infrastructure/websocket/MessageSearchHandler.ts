@@ -1,8 +1,7 @@
-import { MessageType, ProtocolErrorCode, type ProtocolMessage, type ServerErrorPayload,
-  type MessageSearchResultPayload, type UserSummary } from '@monky/shared';
+import { LIMITS, MessageType, ProtocolErrorCode, type ServerMessage, type UserSummary } from '@monky/shared';
 import type { WebSocket } from 'ws';
-import { MessageSearchError, type MessageSearchService } from '../../application/services/MessageSearchService';
-import { Logger } from '../logger/Logger';
+import type { MessageSearchService } from '../../application/services/MessageSearchService';
+import { toProtocolError } from './protocolErrors';
 
 export interface MessageSearchSession {
   ws: WebSocket;
@@ -12,7 +11,7 @@ export interface MessageSearchSession {
 }
 export interface MessageSearchHooks {
   isCurrent(session: MessageSearchSession): boolean;
-  send(session: MessageSearchSession, message: ProtocolMessage<MessageSearchResultPayload | ServerErrorPayload>): void;
+  send(session: MessageSearchSession, message: ServerMessage<MessageType.CHAT_SEARCH_RESULTS | MessageType.SERVER_ERROR>): void;
 }
 
 export class MessageSearchHandler {
@@ -35,7 +34,7 @@ export class MessageSearchHandler {
     if (!current()) return;
     if (!user || !sessionId) { fail(ProtocolErrorCode.UNAUTHORIZED, 'Authenticate before searching.'); return; }
     if (session.isBot || user.isBot) { fail(ProtocolErrorCode.PERMISSION_DENIED, 'Bots cannot search messages.'); return; }
-    if (!requestId || requestId.length > 128) { fail(ProtocolErrorCode.MESSAGE_SEARCH_INVALID, 'Invalid search request.'); return; }
+    if (!requestId || requestId.length > LIMITS.MAX_REQUEST_ID_LENGTH) { fail(ProtocolErrorCode.MESSAGE_SEARCH_INVALID, 'Invalid search request.'); return; }
     if (this.pending.has(session) || Date.now() - (this.lastRequest.get(session) ?? 0) < 250) {
       fail(ProtocolErrorCode.RATE_LIMITED, 'Wait before searching again.'); return;
     }
@@ -49,11 +48,8 @@ export class MessageSearchHandler {
       }
       this.hooks.send(session, { type: MessageType.CHAT_SEARCH_RESULTS, requestId, payload: result });
     } catch (error) {
-      if (error instanceof MessageSearchError) fail(error.code, error.message);
-      else {
-        Logger.error('NETWORK', 'Message search failed.', error);
-        fail(ProtocolErrorCode.INTERNAL_ERROR, 'Message search failed.');
-      }
+      const reply = toProtocolError(error, { message: 'Message search failed.', category: 'NETWORK' });
+      fail(reply.code, reply.message);
     } finally { this.pending.delete(session); }
   }
 

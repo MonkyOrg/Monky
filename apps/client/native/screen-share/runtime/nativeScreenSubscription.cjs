@@ -8,7 +8,7 @@ const {
   nativeScreenSourceSchema, screenShareProfileKey, screenShareQualitySchema,
   NATIVE_SCREEN_GAME_STARTUP_TIMEOUT_MS,
 } = require('@monky/shared');
-const { within } = require('./nativeDeadline.cjs');
+const { within, notifyObserver } = require('./asyncTools.cjs');
 
 const cancelled = () => new DOMException('The screen subscription was retired.', 'AbortError');
 const retiredSubscriptions = new WeakSet();
@@ -57,11 +57,9 @@ class NativeScreenSubscription {
 
   fail(error) {
     if (this.stopping && error.name === 'AbortError') return;
-    try { this.onError(error); }
-    catch (observerError) { console.error('Native screen subscription error observer failed:', observerError); }
+    notifyObserver('Native screen subscription error observer', this.onError, error);
     if (!this.stopping) void this.close().catch(cleanupError => {
-      try { this.onError(cleanupError); }
-      catch (observerError) { console.error('Native screen subscription cleanup observer failed:', observerError); }
+      notifyObserver('Native screen subscription cleanup observer', this.onError, cleanupError);
     });
   }
 

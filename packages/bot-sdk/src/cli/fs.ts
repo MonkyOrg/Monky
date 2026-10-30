@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -32,15 +33,74 @@ export function writePrivateJson(file: string, value: unknown): void {
   writePrivateFile(file, JSON.stringify(value, null, 2) + '\n');
 }
 
-export function readJsonFile(file: string, label: string, maxBytes = 256_000): unknown {
-  const stat = fs.statSync(file);
-  if (!stat.isFile()) throw new Error(`${label} is not a file.`);
-  if (stat.size > maxBytes) throw new Error(`${label} exceeds the size limit.`);
-  let input: unknown;
-  try {
-    input = JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    throw new Error(`${label} contains invalid JSON.`);
+/**
+ * Why a profile file exists but cannot be used. Each caller words it for its
+ * own file; the message is the English fallback.
+ */
+export class PrivateJsonError extends Error {
+  constructor(readonly problem: 'not-file' | 'too-large' | 'invalid-json', message: string) {
+    super(message);
   }
-  return input;
+}
+
+/** The replacement failed, and so did removing its temporary file. */
+export class LeftoverFileError extends Error {
+  constructor(readonly file: string) {
+    super(`Could not remove the temporary file ${file}.`);
+  }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT';
+}
+
+/**
+ * Reads a small JSON file of the profile. Links, directories and anything over
+ * `maxBytes` are refused rather than followed or loaded; a missing file throws
+ * ENOENT (see {@link readOptionalPrivateJson}).
+ */
+export function readJsonFile(file: string, label: string, maxBytes = 256_000): unknown {
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile()) throw new PrivateJsonError('not-file', `${label} is not a file.`);
+  if (stat.size > maxBytes) throw new PrivateJsonError('too-large', `${label} exceeds the size limit.`);
+  const contents = fs.readFileSync(file, 'utf8');
+  try {
+    return JSON.parse(contents);
+  } catch {
+    throw new PrivateJsonError('invalid-json', `${label} contains invalid JSON.`);
+  }
+}
+
+/**
+ * A profile file that may not exist yet: undefined when it is absent. Every
+ * other problem throws, so nothing is mistaken for an empty file and then
+ * overwritten.
+ */
+export function readOptionalPrivateJson(file: string, label: string, maxBytes: number): unknown {
+  try {
+    return readJsonFile(file, label, maxBytes);
+  } catch (error) {
+    if (isMissingFile(error)) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * Replaces a profile file in one step: the content goes to a temporary file
+ * beside it, renamed over it once complete. A failure, a full disk or a crash
+ * halfway leaves the previous file as it was, never a truncated one.
+ */
+export function writePrivateJsonAtomic(file: string, value: unknown): void {
+  const pending = path.join(path.dirname(file), `.${path.basename(file, '.json')}-${randomUUID()}.pending`);
+  try {
+    writePrivateJson(pending, value);
+    fs.renameSync(pending, file);
+  } catch (error) {
+    try {
+      fs.rmSync(pending, { force: true });
+    } catch {
+      throw new LeftoverFileError(pending);
+    }
+    throw error;
+  }
 }

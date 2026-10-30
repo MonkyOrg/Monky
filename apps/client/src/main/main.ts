@@ -1,9 +1,9 @@
 import { setMainStdioLogger } from './mainStdio';
-import { app, BrowserWindow, dialog, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
+import { markStartup, reportStartupWhenPainted } from './startupTiming';
+import { app, BrowserWindow, dialog, ipcMain as electronIpcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
 import path from 'path';
 import { setupIpcHandlers } from './ipcHandlers';
 import { flushDirectMessages } from './dm/dmIpc';
-import { setupUpdater } from './updater';
 import {
   handleLaunchDuringUpdate,
   isInstallSplashActive,
@@ -31,15 +31,22 @@ import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } fro
 import { CrashRecovery } from './crashRecovery';
 import { hasIdentity } from './identityService';
 import { initializeMainLanguage, mt } from './i18n';
-import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, BOT_STORAGE_CHANGED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
+import { APP_RENDERER_READY, APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, BOT_STORAGE_CHANGED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC } from '@monky/shared';
 import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
 import { configureVideoPresentation } from './videoPresentation';
 import { handleScreenPictureInPictureOpen } from './screenPictureInPictureWindow';
+import { installWebContentsPolicy } from './webContentsPolicy';
+import type { ContractIpcMain } from './ipcContract';
+import { webUrl } from './ipc/guards';
+import { IpcRegistry, sendEvent, windowContents } from './ipc/registry';
 
 import fs from 'fs';
 
+markStartup('modules');
 configureVideoPresentation(app.commandLine, process.platform);
 registerBotScreenScheme();
+// Before any window exists, so none is ever created without the guards.
+installWebContentsPolicy(app);
 
 const developmentQa = loadDevelopmentQa({
   packaged: app.isPackaged,
@@ -93,9 +100,7 @@ if (process.platform === 'win32' && process.env.MONKY_DISABLE_WGC !== '1') {
 
 let mainWindow: BrowserWindow | null = null;
 const botDeviceStorage = new BotDeviceStorage(path.join(app.getPath('userData'), 'bot-storage'), (scopeId) => {
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send(BOT_STORAGE_CHANGED, scopeId);
-  }
+  sendEvent(windowContents(mainWindow), BOT_STORAGE_CHANGED, scopeId);
 });
 const isMainWindowContents = (contents: Electron.WebContents): boolean => mainWindow?.webContents === contents;
 const unbindBotScreenDocuments = bindBotScreenDocuments(isMainWindowContents, botDeviceStorage);
@@ -103,8 +108,10 @@ const unbindBotDeviceStorage = bindBotDeviceStorage(isMainWindowContents, botDev
 app.once('will-quit', () => {
   unbindBotScreenDocuments();
   unbindBotDeviceStorage();
-  void botDeviceStorage.dispose();
 });
+// Channels that outlive any one window: they answer the main window that exists now (E-MAIN-4).
+const ipcMain: ContractIpcMain = electronIpcMain;
+const appIpc = new IpcRegistry(ipcMain, { main: () => windowContents(mainWindow), overlay: () => null });
 const serverInviteInbox = new ServerInviteInbox();
 let overlayManager: OverlayManager | null = null;
 let trayManager: TrayManager | null = null;
@@ -119,11 +126,17 @@ let leaveAnnounced = false;
 let localExecution: ReturnType<typeof setupIpcHandlers> | null = null;
 let localExecutionStopping = false;
 let localExecutionStopped = false;
+/**
+ * How long quitting waits for hosted servers to stop and bot storage to finish writing. A server
+ * flushes its database only at the end of its stop (sql.js writes every few seconds), so exiting
+ * without waiting loses what was saved just before; a stop that hangs still cannot keep Monky open.
+ */
+const HOSTED_SHUTDOWN_TIMEOUT_MS = 8000;
+let hostedServicesStopping = false;
+let hostedServicesStopped = false;
 
 function notifyServerInvite(): void {
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send(SERVER_INVITE_AVAILABLE);
-  }
+  sendEvent(windowContents(mainWindow), SERVER_INVITE_AVAILABLE);
 }
 
 const onOpenInviteUrl = (event: Electron.Event, url: string): void => {
@@ -138,18 +151,16 @@ const onOpenInviteUrl = (event: Electron.Event, url: string): void => {
 };
 app.on('open-url', onOpenInviteUrl);
 serverInviteInbox.receiveArguments(process.argv);
-ipcMain.handle(SERVER_INVITE_IPC.take, (event: Electron.IpcMainInvokeEvent, ...args: unknown[]): ServerInviteResult | null => {
-  const window = mainWindow;
-  if (!window || window.isDestroyed() || event.sender !== window.webContents
-    || event.senderFrame !== window.webContents.mainFrame || args.length !== 0) {
-    console.warn('[Invites] Rejected an invitation read outside the main application frame.');
+appIpc.handle(SERVER_INVITE_IPC.take, 'main', (_event, ...args) => {
+  if (args.length !== 0) {
+    console.warn('[Invites] Rejected an invitation read with unexpected arguments.');
     throw new Error(mt('error.serverInviteUnavailable'));
   }
   return serverInviteInbox.take();
 });
 app.once('will-quit', () => {
   flushDirectMessages();
-  ipcMain.removeHandler(SERVER_INVITE_IPC.take);
+  appIpc.dispose();
   app.removeListener('open-url', onOpenInviteUrl);
 });
 
@@ -209,10 +220,7 @@ let onLeaveComplete: ((request: unknown) => void) | null = null;
 let shutdownRequestId = 0;
 let rendererNativeRetired = false;
 
-ipcMain.handle(APP_SHUTDOWN_IPC.acknowledge, (event, request: unknown) => {
-  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
-    || event.senderFrame !== mainWindow.webContents.mainFrame)
-    throw new Error('Shutdown acknowledgement belongs to a different renderer.');
+appIpc.handle(APP_SHUTDOWN_IPC.acknowledge, 'main', (_event, request) => {
   onLeaveComplete?.(request);
 });
 
@@ -224,13 +232,9 @@ ipcMain.handle(APP_SHUTDOWN_IPC.acknowledge, (event, request: unknown) => {
  * this; the guards did not.
  */
 function openExternalIfWebUrl(url: string): void {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
-    void shell.openExternal(parsed.toString());
-  } catch {
-    // Not a URL we can make sense of: leaving it to the OS is the risk itself.
-  }
+  const parsed = webUrl(url);
+  // Not a web link we can make sense of: leaving it to the OS is the risk itself.
+  if (parsed) void shell.openExternal(parsed.toString());
 }
 
 function bindMainWindowNavigationGuards(): void {
@@ -259,6 +263,22 @@ function shutdownServer(): void {
   if (isShuttingDown) return;
   isShuttingDown = true;
   void serverManager.stopAll().catch(() => {});
+}
+
+/** The last quit phase: once hosted servers and bot storage settle, or the deadline passes, quit for real. */
+function stopHostedServicesThenQuit(): void {
+  if (hostedServicesStopping) return;
+  hostedServicesStopping = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), HOSTED_SHUTDOWN_TIMEOUT_MS); });
+  // stopAll logs its own failures; a failed stop must not keep the app open either.
+  const stopping = Promise.allSettled([serverManager.stopAll(), botDeviceStorage.dispose()]);
+  void Promise.race([stopping, deadline]).then((outcome) => {
+    clearTimeout(timer);
+    if (outcome === 'timeout') console.warn('[ServerManager] Hosted servers did not stop in time; quitting anyway.');
+    hostedServicesStopped = true;
+    app.quit();
+  });
 }
 
 function quitApplication(): void {
@@ -377,13 +397,14 @@ function createWindow(deferShow = false): void {
       contextIsolation: true,
       nodeIntegration: false,
       nodeIntegrationInSubFrames: false,
-      sandbox: false, // needed for custom desktopCapturer / preload access
+      sandbox: false, // The preload requires Node modules: the shared contracts and the native screen renderer.
       webSecurity: true,
       backgroundThrottling: false, // Keep audio and WebRTC processing smoothly when minimized/hidden
       offscreen: developmentQa?.smoke === true,
       additionalArguments: developmentQa ? ['--monky-prepared-qa'] : [],
     },
   });
+  markStartup('window');
 
   if (showNow && openMaximized) {
     mainWindow.maximize();
@@ -427,6 +448,7 @@ function createWindow(deferShow = false): void {
   });
   bindRendererDiagnostics(mainWindow.webContents, clientLogger);
   bindPerformanceDiagnostics(mainWindow, clientLogger);
+  reportStartupWhenPainted(mainWindow, clientLogger);
 
   localExecution = setupIpcHandlers(mainWindow, serverManager, trayManager, {
     setMinimizeToTray: (enabled: boolean) => {
@@ -439,7 +461,6 @@ function createWindow(deferShow = false): void {
   });
   localExecutionStopped = false;
   rendererNativeRetired = false;
-  setupUpdater(mainWindow, signal => serverManager.getUpdateInventory(signal));
 
   // A launch straight after an update install keeps the "finishing" splash up
   // while this fresh process cold-starts. Hold the main window back until the
@@ -456,7 +477,7 @@ function createWindow(deferShow = false): void {
     const cleanupReveal = (): void => {
       if (revealTimer) clearTimeout(revealTimer);
       if (dismissTimer) clearTimeout(dismissTimer);
-      if (onRendererReady) ipcMain.removeListener('app:renderer-ready', onRendererReady);
+      if (onRendererReady) ipcMain.removeListener(APP_RENDERER_READY, onRendererReady);
       revealTimer = null;
       dismissTimer = null;
       onRendererReady = null;
@@ -483,7 +504,7 @@ function createWindow(deferShow = false): void {
         reveal('renderer-ready');
       }
     };
-    ipcMain.on('app:renderer-ready', onRendererReady);
+    ipcMain.on(APP_RENDERER_READY, onRendererReady);
     // Fallback: never leave the window stranded behind the splash if the signal
     // never arrives (renderer crash, load failure, …).
     revealTimer = setTimeout(() => reveal('timeout'), 20000);
@@ -565,6 +586,7 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    markStartup('ready');
     registerServerInviteProtocol(app);
     initializeMainLanguage(app.getPath('userData'), app.getPreferredSystemLanguages());
     getCrashRecovery();
@@ -682,9 +704,14 @@ app.on('before-quit', (event) => {
     return;
   }
 
+  if (!hostedServicesStopped) {
+    event.preventDefault();
+    stopHostedServicesThenQuit();
+    return;
+  }
+
   crashRecovery?.dispose();
   clientLogger?.shutdown();
-  shutdownServer();
   trayManager?.destroy();
   overlayManager?.close();
 });

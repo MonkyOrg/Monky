@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -122,6 +123,30 @@ void serverPolicyOverridesTheControls() {
   require(view.deafenChecked && !view.deafenEnabled, "A server deafen must not offer to undo it");
   require(view.muteLabel == "Mute the microphone (by the server)", "A forced control says who forced it");
   require(view.deafenLabel == "Deafen (by the server)", "A forced control says who forced it");
+
+  // A room without Speak keeps the microphone closed, whatever the user chooses.
+  model.apply({{"event", "voice-policy"},
+               {"policy", {{"muted", false}, {"deafened", false}, {"serverMuted", false},
+                           {"serverDeafened", false}, {"permissionMuted", true}}}});
+  view = model.presentation();
+  require(view.muteChecked && !view.muteEnabled, "A room without Speak must not offer to unmute");
+  require(view.silenced, "A microphone the room keeps closed must show the silenced icon");
+  require(view.muteLabel == "Mute the microphone (no permission to speak)",
+          "The mute must say the room's permission keeps it closed");
+  require(view.deafenEnabled && !view.deafenChecked, "Speak says nothing about listening");
+  // The state snapshot carries the same policy shape as the event.
+  model.apply({{"event", "state"}, {"phase", "admitted"}, {"channelId", "first"}, {"mediaActive", true},
+               {"policy", {{"muted", false}, {"deafened", false}, {"serverMuted", false},
+                           {"serverDeafened", false}, {"permissionMuted", false}}}});
+  view = model.presentation();
+  require(!view.muteChecked && view.muteEnabled && view.muteLabel == "Mute the microphone",
+          "Granting Speak must hand the microphone back to the user");
+
+  TrayModel portuguese(Language::portuguese);
+  portuguese.apply(authenticated());
+  portuguese.apply({{"event", "voice-policy"}, {"policy", {{"permissionMuted", true}}}});
+  require(portuguese.presentation().muteLabel == "Microfone mudo (sem permissão para falar)",
+          "The Portuguese label names the missing permission");
 }
 
 void deviceRowsKeepThePreference() {
@@ -212,6 +237,19 @@ void failuresAndPermissionsReachTheInterface() {
   require(model.apply({{"event", "kicked"}, {"type", "ADMIN_KICK"}}), "A removal must reach the interface");
   const auto kicked = model.takeAlert();
   require(kicked && *kicked == "Removed from the channel", "A removal must be named");
+
+  // One participant's audio failing does not take the call down with it.
+  TrayModel call(Language::english);
+  call.apply(authenticated());
+  call.apply({{"event", "voice-admitted"}, {"channelId", "first"}});
+  call.apply({{"event", "media-connected"}});
+  require(call.apply({{"event", "media-error"}, {"sessionId", "peer:a"}, {"detail", "Peer audio failed"}}),
+          "A participant's failure must reach the interface");
+  require(call.takeAlert() == std::optional<std::string>("Peer audio failed"), "The failure must be named");
+  require(call.presentation().status == "In a call: General" && call.presentation().inCall,
+          "One participant's failure must not make the call look down");
+  call.apply({{"event", "media-error"}, {"sessionId", ""}, {"detail", "Call failed"}});
+  require(call.presentation().status == "Joining the channel…", "A failure of the call itself takes it down");
 }
 
 void portugueseFollowsTheSameStates() {

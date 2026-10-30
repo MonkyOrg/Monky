@@ -1,11 +1,10 @@
 import http from 'http';
-import fs from 'fs';
 import path from 'path';
 import { readUpdateInventory } from './infrastructure/database/updateInventory';
 import { v4 as uuidv4 } from 'uuid';
-import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator, type LogEntry, type ServerShutdownReason } from '@monky/shared';
+import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ServerStats, UserSummary, VoiceMode, stripAdministrator, type LogEntry, type ServerInviteInfoPayload, type ServerShutdownReason } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
-import { AttachmentService, type FinalizeUploadResult } from './application/services/AttachmentService';
+import { AttachmentService } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
 import { BotSelectorService } from './application/services/BotSelectorService';
 import { CommunityService } from './application/services/CommunityService';
@@ -61,6 +60,10 @@ import { SfuManager } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 import { closeHttpServer, listenHttpServer } from './infrastructure/lifecycle/httpLifecycle';
 import { ServerResourceScope } from './infrastructure/lifecycle/ServerResourceScope';
+import { acquireServerLock } from './infrastructure/lifecycle/serverLock';
+import { createHttpRequestListener } from './infrastructure/http/HttpRouter';
+import { publicRoutes } from './infrastructure/http/publicRoutes';
+import { attachmentRoutes } from './infrastructure/http/attachmentRoutes';
 import { resolveServerVersion } from './runtimeVersion';
 
 export interface ServerConfig {
@@ -248,8 +251,16 @@ export class MonkyServer {
     return Logger.withScope(logScope, async () => {
       let setupComplete = false;
       try {
+        // Claimed before the database is read and released only after its last
+        // write, so the CLI never sees the directory as free while it is used.
+        const lock = acquireServerLock(config.dataDir);
+        let database: DatabaseConnection | undefined;
+        resources.defer('database', () => {
+          database?.close({ discardChanges: !setupComplete });
+          lock.release();
+        });
         const dbConn = await DatabaseConnection.create(path.join(config.dataDir, 'server.db'));
-        resources.defer('database', () => dbConn.close({ discardChanges: !setupComplete }));
+        database = dbConn;
         const server = await dbConn.getDb().transactionAsync(() => MonkyServer.createResources(config, dbConn, resources, logScope));
         setupComplete = true;
         return server;
@@ -284,7 +295,8 @@ export class MonkyServer {
 
     const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
     const botPermissions = new BotPermissionService(new SqliteBotPermissionRepository(db));
-    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService, botPermissions, userRepo, channelRepo.categories);
+    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService, botPermissions, userRepo,
+      channelRepo.categories, attachmentService);
     const pollService = new NativePollService(new SqliteNativePollRepository(db), {
       consume: (refs, userId, channelId) => communityService.consumeImageAssets(refs, userId, channelId)
         .map(url => url.split('/').pop()!),
@@ -306,6 +318,7 @@ export class MonkyServer {
       serverRepo,
       (userId, channelId, permission) => channelService.canUserAccessChannel(userId, channelId, permission),
       (userId, channelId) => channelService.canUserAccessChannel(userId, channelId, Permission.READ_MESSAGES),
+      (channelId, userIds) => channelService.membersWithAccess(channelId, userIds, [Permission.VIEW_CHANNEL, Permission.READ_MESSAGES]),
       pollService,
     );
 
@@ -360,128 +373,63 @@ export class MonkyServer {
     // Seed server and default channels if new database
     await ensureServerSeedData(config, serverRepo, channelRepo, roleRepo);
 
-    const httpServer = http.createServer((req, res) => {
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, X-File-Name',
-          'Access-Control-Max-Age': '86400',
-        });
-        res.end();
-        return;
-      }
-      if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', time: Date.now() }));
-        return;
-      }
-      if (req.url === '/preview') {
-        const onlineSessions = getOnlineUsers();
-        const people = listOnlineHumans(onlineSessions.values());
-        const voiceStates = signalingService.getAllVoiceStates();
-        const voicePeople = listOnlineHumans(
-          [...onlineSessions.entries()].filter(([sessionId]) => voiceStates[sessionId]).map(([, value]) => value)
-        );
-        const users = people
-          .filter((user) => !user.invisible)
-          .slice(0, 10)
-          .map((user) => ({
-            nickname: user.nickname,
-            avatarUrl: user.avatarUrl || null,
-          }));
-        const voiceUsers = voicePeople
-          .filter((user) => !user.invisible)
-          .slice(0, 10)
-          .map((user) => ({ nickname: user.nickname, avatarUrl: user.avatarUrl || null }));
-        Promise.all([serverRepo.getServer(), userRepo.count(), botService.getCompatibility()])
-          .then(([server, memberCount, botCompatibility]) => {
-            res.writeHead(200, {
-              'Content-Type': 'application/json',
-              'Access-Control-Allow-Origin': '*',
-            });
-            res.end(
-              JSON.stringify({
-                name: server?.name || config.serverName || 'Monky Server',
-                hasPassword: !!(server?.passwordHash && server.passwordHash.length > 0),
-                iconUrl: avatarStorage.getPublicUrl(server?.iconPath),
-                // Distinct people, matching the per-person maxUsers semantics (#309).
-                userCount: people.length,
-                voiceUserCount: voicePeople.length,
-                voiceUsers,
-                botCompatibility,
-                // Registered members and the cap they count against, so a visitor
-                // can tell whether there is room before trying to join (#403).
-                // `??` rather than `||`: 0 is the "unlimited" sentinel and must
-                // survive, otherwise it would silently become the default of 20.
-                memberCount,
-                maxUsers: server?.maxUsers ?? LIMITS.MAX_USERS_DEFAULT,
-                users,
-              })
-            );
-          })
-          .catch((error) => {
-            Logger.error('NETWORK', 'Failed to prepare the public server preview.', error);
-            res.writeHead(500, { 'Access-Control-Allow-Origin': '*' });
-            res.end();
-          });
-        return;
-      }
-      if (req.url === '/invite-info') {
-        serverRepo
-          .getServer()
-          .then(async (server) => {
-            const addr = httpServer.address();
-            const port = addr && typeof addr === 'object' ? addr.port : config.port || LIMITS.DEFAULT_PORT;
-            const networkInterfaces = await scanServerNetworkInterfaces();
+    // What a visitor sees before joining. People are counted once however many
+    // devices they use (#309), and invisible people are counted but never named.
+    const describePreview = async () => {
+      const onlineSessions = getOnlineUsers();
+      const people = listOnlineHumans(onlineSessions.values());
+      const voiceStates = signalingService.getAllVoiceStates();
+      const voicePeople = listOnlineHumans(
+        [...onlineSessions.entries()].filter(([sessionId]) => voiceStates[sessionId]).map(([, value]) => value)
+      );
+      const named = (list: UserSummary[]) => list
+        .filter((user) => !user.invisible)
+        .slice(0, 10)
+        .map((user) => ({ nickname: user.nickname, avatarUrl: user.avatarUrl || null }));
+      const [server, memberCount, botCompatibility] =
+        await Promise.all([serverRepo.getServer(), userRepo.count(), botService.getCompatibility()]);
+      return {
+        name: server?.name || config.serverName || 'Monky Server',
+        hasPassword: !!(server?.passwordHash && server.passwordHash.length > 0),
+        iconUrl: avatarStorage.getPublicUrl(server?.iconPath),
+        userCount: people.length,
+        voiceUserCount: voicePeople.length,
+        voiceUsers: named(voicePeople),
+        botCompatibility,
+        // Registered members and the cap they count against, so a visitor
+        // can tell whether there is room before trying to join (#403).
+        // `??` rather than `||`: 0 is the "unlimited" sentinel and must
+        // survive, otherwise it would silently become the default of 20.
+        memberCount,
+        maxUsers: server?.maxUsers ?? LIMITS.MAX_USERS_DEFAULT,
+        users: named(people),
+      };
+    };
+    const describeInvite = async (): Promise<ServerInviteInfoPayload> => {
+      const server = await serverRepo.getServer();
+      const address = httpServer.address();
+      return {
+        port: address && typeof address === 'object' ? address.port : config.port || LIMITS.DEFAULT_PORT,
+        serverName: server?.name || config.serverName || 'Monky Server',
+        networkInterfaces: await scanServerNetworkInterfaces(),
+      };
+    };
 
-            res.writeHead(200, {
-              'Content-Type': 'application/json',
-              'Access-Control-Allow-Origin': '*',
-            });
-            res.end(
-              JSON.stringify({
-                port,
-                serverName: server?.name || config.serverName || 'Monky Server',
-                networkInterfaces,
-              })
-            );
-          })
-          .catch((err) => {
-            res.writeHead(500, { 'Access-Control-Allow-Origin': '*' });
-            res.end(JSON.stringify({ error: 'Erro ao obter dados de convite' }));
-          });
-        return;
-      }
-      if (req.url && req.url.startsWith('/avatars/')) {
-        const requested = decodeURIComponent(req.url.slice('/avatars/'.length).split('?')[0]);
-        const avatar = avatarStorage.getAvatarFile(requested);
-        if (!avatar) {
-          res.writeHead(404);
-          res.end();
-          return;
-        }
-        res.writeHead(200, {
-          'Content-Type': avatar.mimeType,
-          'Cache-Control': 'public, max-age=86400',
-          'Access-Control-Allow-Origin': '*',
-        });
-        fs.createReadStream(avatar.filePath).pipe(res);
-        return;
-      }
-      if (req.url && req.url.split('?')[0] === '/attachments' && req.method === 'POST') {
-        void MonkyServer.handleAttachmentUpload(req, res, attachmentService, attachmentStorage, async (userId, channelId) =>
+    // No deadline for a whole request: Node's default of 5 minutes cut large
+    // uploads on slow links. An upload stops on inactivity or below a minimum
+    // pace instead, and every request with a body ends its connection once
+    // answered (HttpRouter). The head keeps its own deadline, set explicitly
+    // because Node derives it from requestTimeout and would turn it off as well (S-WS-11).
+    const httpServer = http.createServer({ requestTimeout: 0, headersTimeout: 60_000 }, createHttpRequestListener([
+      ...publicRoutes({ avatars: avatarStorage, preview: describePreview, inviteInfo: describeInvite }),
+      ...attachmentRoutes({
+        attachments: attachmentService,
+        storage: attachmentStorage,
+        canUpload: async (userId, channelId) =>
           await channelService.canUserAccessChannel(userId, channelId, Permission.ATTACH_FILES) &&
-          await channelService.canUserAccessChannel(userId, channelId, Permission.SEND_MESSAGES));
-        return;
-      }
-      if (req.url && req.url.startsWith('/attachments/') && (req.method === 'GET' || req.method === 'HEAD')) {
-        MonkyServer.handleAttachmentDownload(req, res, attachmentStorage);
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
+          await channelService.canUserAccessChannel(userId, channelId, Permission.SEND_MESSAGES),
+      }),
+    ]));
     resources.defer('HTTP listener', () => closeHttpServer(httpServer));
 
     const coturnManager = new CoturnManager(config.dataDir);
@@ -509,10 +457,7 @@ export class MonkyServer {
       if (recovery.recoveredCorruptIndex) {
         Logger.warn('SOUNDBOARD', 'Recovered a corrupt recent sound cache index.');
       }
-      const configuration = await cache.configure(
-        Boolean(serverRecord.recentSoundCacheEnabled),
-        serverRecord.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
-      );
+      const configuration = await cache.configure(serverRecord.recentSoundCacheEnabled, serverRecord.recentSoundCacheLimit);
       if (configuration.cleanupError) {
         Logger.warn('SOUNDBOARD', 'Could not remove every unreferenced recent sound during startup.',
           configuration.cleanupError);
@@ -532,7 +477,7 @@ export class MonkyServer {
       new SqliteMessageSearchRepository(db), messageRepo, channelService, permissionService, chatService,
       () => wsServer.getChannelAccessVersion(),
     );
-    const wsServer: WebSocketServer = new WebSocketServer(
+    const wsServer: WebSocketServer = new WebSocketServer({
       httpServer,
       authService,
       userService,
@@ -549,12 +494,12 @@ export class MonkyServer {
       botService,
       commandRegistry,
       selectorService,
-      new BotSettingsService(new SqliteBotSettingsRepository(db), botPermissions),
+      botSettings: new BotSettingsService(new SqliteBotSettingsRepository(db), botPermissions),
       monitorService,
-      resolveServerVersion(config.version),
+      serverVersion: resolveServerVersion(config.version),
       communityService,
       messageSearchService,
-      new ForumService(
+      forumService: new ForumService(
         new SqliteForumRepository(db),
         channelService,
         permissionService,
@@ -563,9 +508,9 @@ export class MonkyServer {
       ),
       pollService,
       recentSoundCache,
-      new ServerAuditService(serverRecord.id, new SqliteServerAuditRepository(db), rateLimiter),
-      botStorage,
-    );
+      audit: new ServerAuditService(serverRecord.id, new SqliteServerAuditRepository(db), rateLimiter),
+      botStorageService: botStorage,
+    });
     resources.defer('WebSocket server', () => wsServer.close(instance?.shutdownReason ?? 'stopped'));
 
     getOnlineUsers = () => wsServer.getOnlineUsersMap();
@@ -586,159 +531,6 @@ export class MonkyServer {
       logScope,
     );
     return instance;
-  }
-
-  private static async handleAttachmentUpload(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    attachmentService: AttachmentService,
-    attachmentStorage: AttachmentStorageService,
-    canUpload: (userId: string, channelId: string) => Promise<boolean>,
-  ): Promise<void> {
-    const send = (status: number, obj: unknown) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify(obj));
-    };
-
-    try {
-      const url = new URL(req.url || '', 'http://localhost');
-      const token = url.searchParams.get('token');
-      const binding = attachmentService.consumeUploadToken(token);
-      if (!binding || !await canUpload(binding.userId, binding.channelId)) {
-        send(401, { error: 'unauthorized' });
-        return;
-      }
-
-      const originalName = (url.searchParams.get('name') || 'arquivo').slice(0, 255);
-      const maxFileBytes = await attachmentService.getMaxFileBytes();
-
-      const declaredLen = Number(req.headers['content-length'] || 0);
-      if (declaredLen && declaredLen > maxFileBytes) {
-        send(413, { error: ProtocolErrorCode.ATTACHMENT_TOO_LARGE });
-        return;
-      }
-
-      const tempPath = attachmentStorage.createTempPath();
-      const out = fs.createWriteStream(tempPath);
-      let received = 0;
-      let aborted = false;
-
-      const abort = (status: number, obj: unknown) => {
-        if (aborted) return;
-        aborted = true;
-        out.destroy();
-        attachmentStorage.discardTemp(tempPath);
-        send(status, obj);
-        try {
-          req.destroy();
-        } catch {
-          /* ignore */
-        }
-      };
-
-      req.on('data', (chunk: Buffer) => {
-        if (aborted) return;
-        received += chunk.length;
-        if (received > maxFileBytes) {
-          abort(413, { error: ProtocolErrorCode.ATTACHMENT_TOO_LARGE });
-          return;
-        }
-        if (!out.write(chunk)) {
-          req.pause();
-          out.once('drain', () => req.resume());
-        }
-      });
-
-      req.on('error', () => abort(400, { error: ProtocolErrorCode.BAD_REQUEST }));
-
-      req.on('end', () => {
-        if (aborted) return;
-        out.end(() => {
-          void canUpload(binding.userId, binding.channelId)
-            .then((allowed): Promise<FinalizeUploadResult> | FinalizeUploadResult => {
-              if (!allowed) {
-                attachmentStorage.discardTemp(tempPath);
-                return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND };
-              }
-              return attachmentService.finalizeUpload({ tempPath, sizeBytes: received, userId: binding.userId, channelId: binding.channelId, originalName });
-            })
-            .then((result) => {
-              if (!result.success || !result.meta) {
-                const status =
-                  result.errorCode === ProtocolErrorCode.ATTACHMENT_TOO_LARGE
-                    ? 413
-                    : result.errorCode === ProtocolErrorCode.STORAGE_FULL
-                      ? 507
-                      : 400;
-                send(status, { error: result.errorCode, message: result.errorMessage });
-                return;
-              }
-              send(200, result.meta);
-            })
-            .catch(() => send(500, { error: ProtocolErrorCode.INTERNAL_ERROR }));
-        });
-      });
-    } catch {
-      send(500, { error: ProtocolErrorCode.INTERNAL_ERROR });
-    }
-  }
-
-  private static handleAttachmentDownload(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    attachmentStorage: AttachmentStorageService
-  ): void {
-    const requested = decodeURIComponent((req.url || '').slice('/attachments/'.length).split('?')[0]);
-    const file = attachmentStorage.getFile(requested);
-    if (!file) {
-      res.writeHead(404);
-      res.end();
-      return;
-    }
-
-    const { filePath, size, mimeType } = file;
-    const previewable = mimeType.startsWith('image/') || mimeType.startsWith('video/');
-    const headers: Record<string, string> = {
-      'Content-Type': mimeType,
-      'Cache-Control': 'public, max-age=86400',
-      'Access-Control-Allow-Origin': '*',
-      'Accept-Ranges': 'bytes',
-      'X-Content-Type-Options': 'nosniff',
-    };
-    // Force download for anything that is not a validated image/video so the host
-    // never serves runnable HTML/SVG/JS inline (#11).
-    if (!previewable) headers['Content-Disposition'] = 'attachment';
-
-    const rangeHeader = req.headers['range'];
-    if (rangeHeader) {
-      const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
-      if (match) {
-        let start = match[1] ? parseInt(match[1], 10) : 0;
-        let end = match[2] ? parseInt(match[2], 10) : size - 1;
-        if (Number.isNaN(start)) start = 0;
-        if (Number.isNaN(end) || end >= size) end = size - 1;
-        if (start > end || start >= size) {
-          res.writeHead(416, { 'Content-Range': `bytes */${size}`, 'Access-Control-Allow-Origin': '*' });
-          res.end();
-          return;
-        }
-        res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(end - start + 1) });
-        if (req.method === 'HEAD') {
-          res.end();
-          return;
-        }
-        fs.createReadStream(filePath, { start, end }).pipe(res);
-        return;
-      }
-    }
-
-    res.writeHead(200, { ...headers, 'Content-Length': String(size) });
-    if (req.method === 'HEAD') {
-      res.end();
-      return;
-    }
-    fs.createReadStream(filePath).pipe(res);
   }
 
   public start(): Promise<void> {

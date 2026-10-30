@@ -1,13 +1,14 @@
 import {
   MessageType, Permission, SERVER_MONITOR_LIMITS, serverMonitorSnapshotSchema,
-  type LogEntry, type ServerDetails, type ServerMonitorGetPayload, type ServerMonitorStats, type ServerStats, type UserSummary,
+  type LogEntry, type ServerDetails, type ServerMonitorGetPayload, type ServerMonitorLogLine, type ServerMonitorStats,
+  type ServerStats, type UserSummary,
 } from '@monky/shared';
-import type { ElectronApi } from '../../preload/preload';
+import type { ElectronApi } from '../../preload/api';
 import type { NetworkClient } from './NetworkClient';
+import { BoundRequests, SessionBinding, type SessionBindingFailure } from './sessionBinding';
 
 export type ServerMonitorFailure =
-  | 'permissionDenied' | 'disconnected' | 'serverChanged'
-  | 'localStopped' | 'localUnavailable' | 'invalidResponse';
+  | SessionBindingFailure | 'permissionDenied' | 'localStopped' | 'localUnavailable' | 'invalidResponse';
 
 export class ServerMonitorError extends Error {
   constructor(public readonly reason: ServerMonitorFailure) {
@@ -18,7 +19,7 @@ export class ServerMonitorError extends Error {
 
 export interface MonitorUpdate {
   stats: ServerMonitorStats;
-  entries: LogEntry[];
+  entries: ServerMonitorLogLine[];
   replaceLogs: boolean;
   dropped: number;
 }
@@ -111,78 +112,55 @@ interface RemoteStore {
 }
 
 export class RemoteServerMonitorSource implements ServerMonitorSource {
-  private readonly connectionId: string;
-  private readonly serverId: string;
-  private readonly userId: string;
-  private readonly sessionId: string | undefined;
+  private readonly binding: SessionBinding;
+  private readonly requests: BoundRequests;
   private cursor: number | undefined;
-  private requestId: string | null = null;
   private disposed = false;
 
   constructor(
     private readonly client: RemoteClient,
     private readonly store: RemoteStore,
-    private readonly isActive: () => boolean,
+    isActive: () => boolean,
   ) {
-    this.connectionId = client.getConnectionId();
-    this.serverId = store.serverDetails?.id ?? '';
-    this.userId = store.currentUser?.id ?? '';
-    this.sessionId = store.currentUser?.sessionId;
+    this.binding = new SessionBinding(client, store, isActive);
+    this.requests = new BoundRequests(client);
   }
 
   public assertCurrent(): void {
     if (this.disposed) throw new DOMException('Monitor closed', 'AbortError');
-    if (!this.isActive() || !this.serverId || this.store.serverDetails?.id !== this.serverId) {
-      throw new ServerMonitorError('serverChanged');
-    }
-    if (this.client.getStatus() !== 'CONNECTED' || this.client.getConnectionId() !== this.connectionId
-      || !this.userId || !this.sessionId || this.store.currentUser?.id !== this.userId
-      || this.store.currentUser.sessionId !== this.sessionId) {
-      throw new ServerMonitorError('disconnected');
-    }
-    if (this.store.currentUser.isBot || !this.store.hasPermission(Permission.VIEW_SERVER_MONITOR)) {
+    const lost = this.binding.failure();
+    if (lost) throw new ServerMonitorError(lost);
+    if (this.store.currentUser?.isBot || !this.store.hasPermission(Permission.VIEW_SERVER_MONITOR)) {
       throw new ServerMonitorError('permissionDenied');
     }
   }
 
   public async read(): Promise<MonitorUpdate> {
     this.assertCurrent();
-    if (this.requestId) throw new Error('A server monitor request is already in progress.');
-    const requestId = crypto.randomUUID();
-    this.requestId = requestId;
+    if (this.requests.size) throw new Error('A server monitor request is already in progress.');
     const cursor = this.cursor;
-    const payload: ServerMonitorGetPayload = { serverId: this.serverId, cursor };
-    try {
-      const result = await this.client.sendRequest(
-        MessageType.SERVER_MONITOR_GET, payload, requestId, SERVER_MONITOR_LIMITS.REQUEST_TIMEOUT_MS,
-      );
-      this.assertCurrent();
-      const parsed = serverMonitorSnapshotSchema.safeParse(result);
-      if (!parsed.success || parsed.data.serverId !== this.serverId
-        || (cursor !== undefined && (parsed.data.cursor < cursor
-          || parsed.data.entries.some((entry) => entry.sequence <= cursor)))) {
-        throw new ServerMonitorError('invalidResponse');
-      }
-      this.cursor = parsed.data.cursor;
-      return {
-        stats: parsed.data.stats, entries: parsed.data.entries,
-        dropped: parsed.data.dropped, replaceLogs: cursor === undefined,
-      };
-    } finally {
-      if (this.requestId === requestId) {
-        this.requestId = null;
-        // Retire timeouts and completed requests too: late frames must not
-        // escape into unrelated global message handlers after this view ends.
-        this.client.cancelRequest(requestId);
-      }
+    const payload: ServerMonitorGetPayload = { serverId: this.binding.serverId, cursor };
+    const result = await this.requests.send((requestId) => this.client.sendRequest(
+      MessageType.SERVER_MONITOR_GET, payload, requestId, SERVER_MONITOR_LIMITS.REQUEST_TIMEOUT_MS,
+    ));
+    this.assertCurrent();
+    const parsed = serverMonitorSnapshotSchema.safeParse(result);
+    if (!parsed.success || parsed.data.serverId !== this.binding.serverId
+      || (cursor !== undefined && (parsed.data.cursor < cursor
+        || parsed.data.entries.some((entry) => entry.sequence <= cursor)))) {
+      throw new ServerMonitorError('invalidResponse');
     }
+    this.cursor = parsed.data.cursor;
+    return {
+      stats: parsed.data.stats, entries: parsed.data.entries,
+      dropped: parsed.data.dropped, replaceLogs: cursor === undefined,
+    };
   }
 
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    if (this.requestId) this.client.cancelRequest(this.requestId);
-    this.requestId = null;
+    this.requests.cancel();
   }
 }
 

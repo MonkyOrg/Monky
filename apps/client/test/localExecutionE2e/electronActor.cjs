@@ -187,6 +187,7 @@ const ready = app.whenReady().then(async () => {
   };
   const toolHost = {
     initialize: () => manager.initialize(),
+    supported: () => manager.supported(),
     snapshot: () => manager.snapshot(),
     prepare: async signal => {
       signal.throwIfAborted();

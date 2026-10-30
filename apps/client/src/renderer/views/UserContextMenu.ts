@@ -1,9 +1,9 @@
 import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, MessageType, normalizePublicKeyHex, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { activityIconSrc } from '../utils/activityIcon';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
 import { renderRoleOption } from '../utils/roleOption';
-import { settingsStore } from '../stores/settingsStore';
+import { settingsStore, type SaveTiming } from '../stores/settingsStore';
 import { getActiveServerStore, serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { voiceStore } from '../stores/voiceStore';
@@ -12,7 +12,9 @@ import { webRtcManager } from '../core/WebRtcManager';
 import { appEvents } from '../core/EventBus';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
 import { getActiveNetworkClient, networkClient } from '../core/NetworkClient';
-import { showAlert } from './Dialog';
+import { errorMessage, reportError } from '../utils/feedback';
+import { showErrorToast, showSuccessToast } from './CopyToast';
+import { canManageAdmins, changeMemberRole, memberRoleChangedMessage } from './memberActions';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { afkChannelIdOf } from '../utils/voiceRooms';
@@ -59,11 +61,7 @@ export class UserContextMenu {
     // Promoting/demoting admins is also available straight from the member list (#273).
     const adminRole = serverStore.getAdminRole();
     const isTargetAdmin = !!adminRole && roleIds.has(adminRole.id);
-    const canManageAdmin =
-      !user.isBot &&
-      !!adminRole &&
-      user.id !== serverStore.ownerId &&
-      serverStore.hasPermission(Permission.MANAGE_ROLES);
+    const canManageAdmin = !user.isBot && user.id !== serverStore.ownerId && canManageAdmins(serverStore);
     const showAdminSection = canMuteMembers || canDeafenMembers || canKickMembers || canMoveMembers || canManageRoles || canManageAdmin;
 
     // Jogo em andamento (#675) e o pedido para ver a partida (#763).
@@ -80,16 +78,17 @@ export class UserContextMenu {
 
     this.menuEl = document.createElement('div');
     this.menuEl.className = 'user-context-menu';
+    const avatarImg = html`<img class="context-menu-avatar" src="${avatarSrc}" alt="" data-fallback="avatar">`;
     this.menuEl.innerHTML = `
       <div class="context-menu-header">
         ${hasAvatar ? `
           <button type="button" id="ctx-view-avatar" class="context-menu-avatar-button" title="${t('userMenu.viewAvatar')}" aria-label="${t('userMenu.viewAvatar')}">
-            <img class="context-menu-avatar" src="${avatarSrc}" alt="" data-fallback="avatar">
+            ${avatarImg}
             <span class="context-menu-avatar-overlay">
               <span class="material-symbols-outlined md-18">visibility</span>
             </span>
           </button>
-        ` : `<img class="context-menu-avatar" src="${avatarSrc}" alt="" data-fallback="avatar">`}
+        ` : avatarImg}
         <div class="context-menu-user-info">
           <span class="context-menu-nickname">${escapeHtml(user.nickname)}</span>
           <span class="context-menu-subtext">${t('userMenu.audioSettings')}</span>
@@ -184,10 +183,10 @@ export class UserContextMenu {
               </span>
             </button>
             <div class="ctx-submenu">
-              ${voiceChannels.map((channel) => `
+              ${voiceChannels.map((channel) => html`
                 <button type="button" class="ctx-submenu-item" data-action="move-user" data-channel-id="${channel.id}">
                   <span class="material-symbols-outlined md-16">volume_up</span>
-                  <span>${escapeHtml(channel.name)}</span>
+                  <span>${channel.name}</span>
                 </button>
               `).join('')}
             </div>
@@ -203,15 +202,15 @@ export class UserContextMenu {
               </span>
             </button>
             <div class="ctx-submenu">
-              ${manageableRoles.map((role) => `
+              ${manageableRoles.map((role) => html`
                 <button type="button" class="ctx-submenu-item" data-action="toggle-role" data-role-id="${role.id}">
-                  ${renderRoleOption(role, roleIds.has(role.id))}
+                  ${trustedHtml(renderRoleOption(role, roleIds.has(role.id)))}
                 </button>
               `).join('')}
             </div>
           </div>
         ` : ''}
-        ${canManageAdmin ? `
+        ${canManageAdmin ? html`
           <button type="button" class="btn btn-secondary" data-action="toggle-admin" data-role-id="${adminRole?.id}">
             <span style="display: inline-flex; align-items: center; gap: 8px; width: 100%;">
               <span class="material-symbols-outlined md-16">${isTargetAdmin ? 'remove_moderator' : 'shield_person'}</span>
@@ -306,7 +305,7 @@ export class UserContextMenu {
     else if (volume === 200) this.menuEl.querySelector('#ctx-vol-200')?.classList.add('active');
   }
 
-  private applyVolume(user: UserSummary, volume: number): void {
+  private applyVolume(user: UserSummary, volume: number, timing: SaveTiming = 'now'): void {
     const clamped = Math.max(0, Math.min(200, Math.round(volume)));
     const badge = this.menuEl?.querySelector('#ctx-volume-badge');
     const icon = this.menuEl?.querySelector('#ctx-volume-icon');
@@ -322,8 +321,27 @@ export class UserContextMenu {
     this.updateActiveQuickButton(clamped);
 
     const sessionId = this.resolveVolumeTarget(user);
-    settingsStore.setUserVolume(sessionId, clamped);
+    settingsStore.setUserVolume(sessionId, clamped, timing);
     webRtcManager.setPeerVolume(sessionId, clamped);
+  }
+
+  /**
+   * Same command and feedback as the Members tab. Resolves whether the role
+   * changed; a refusal is reported even if the menu was closed meanwhile.
+   */
+  private async changeRole(userId: string, roleId: string, assign: boolean): Promise<boolean> {
+    const client = getActiveNetworkClient();
+    const store = getActiveServerStore();
+    try {
+      const change = await changeMemberRole((...message) => client.sendRequest(...message), store, userId, roleId, assign);
+      if (getActiveNetworkClient() === client) showSuccessToast(memberRoleChangedMessage(assign, change));
+      return true;
+    } catch (err: unknown) {
+      if (getActiveNetworkClient() === client) {
+        showErrorToast(err instanceof Error && err.message.trim() ? err.message : t('userMenu.actionFailed'));
+      }
+      return false;
+    }
   }
 
   private async runAdminAction(action: () => Promise<unknown>): Promise<void> {
@@ -332,12 +350,7 @@ export class UserContextMenu {
       await action();
       if (this.menuEl === menu) this.close();
     } catch (err: unknown) {
-      if (this.menuEl !== menu) return;
-      await showAlert({
-        title: t('common.error'),
-        message: err instanceof Error ? err.message : t('userMenu.actionFailed'),
-        variant: 'danger',
-      });
+      if (this.menuEl === menu) reportError(errorMessage(err, t('userMenu.actionFailed')));
     }
   }
 
@@ -397,11 +410,7 @@ export class UserContextMenu {
     } catch (err: unknown) {
       if (this.menuEl !== menu) return;
       this.close();
-      await showAlert({
-        title: t('common.error'),
-        message: err instanceof Error ? err.message : t('userMenu.actionFailed'),
-        variant: 'danger',
-      });
+      reportError(errorMessage(err, t('userMenu.actionFailed')));
     }
   }
 
@@ -536,20 +545,22 @@ export class UserContextMenu {
       });
     }
 
-    for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
+    for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed'] as const) {
       this.unbindGlobalListeners.push(appEvents.on(event, () => this.close()));
     }
     if (this.isSelf(user)) {
       this.menuEl.querySelector('[data-action="self-mute"]')?.addEventListener('click', toggleMicrophoneMute);
       this.menuEl.querySelector('[data-action="self-deafen"]')?.addEventListener('click', toggleAudioDeafen);
       this.updateSelfControls();
-      for (const event of ['voice.state_updated', 'server.voice_restrictions_updated', 'i18n.language_changed']) {
+      for (const event of ['voice.state_updated', 'server.voice_restrictions_updated', 'i18n.language_changed'] as const) {
         this.unbindGlobalListeners.push(appEvents.on(event, () => this.updateSelfControls()));
       }
     }
 
     const slider = this.menuEl.querySelector('#ctx-volume-slider') as HTMLInputElement | null;
-    slider?.addEventListener('input', () => this.applyVolume(user, parseInt(slider.value, 10)));
+    // Every step is heard at once; the volume is saved where the slider stops.
+    slider?.addEventListener('input', () => this.applyVolume(user, parseInt(slider.value, 10), 'soon'));
+    slider?.addEventListener('change', () => settingsStore.save());
     const avatarButton = this.menuEl.querySelector<HTMLButtonElement>('#ctx-view-avatar');
     avatarButton?.addEventListener('click', () => {
       const url = getAvatarUrl(user.avatarUrl);
@@ -632,31 +643,38 @@ export class UserContextMenu {
       });
     });
 
-    this.menuEl.querySelectorAll('[data-action="toggle-role"]').forEach((btn) => {
+    this.menuEl.querySelectorAll<HTMLButtonElement>('[data-action="toggle-role"]').forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const roleId = btn.getAttribute('data-role-id');
-        if (!roleId) return;
-        const hasRole = serverStore.getUserRoleIds(user.id).includes(roleId);
-        btn.querySelector('.role-option-check')?.classList.toggle('checked', !hasRole);
-        void networkClient.sendRequest(
-          hasRole ? MessageType.ROLE_UNASSIGN : MessageType.ROLE_ASSIGN,
-          { userId: user.id, roleId }
-        ).catch(() => {});
+        const roleId = btn.dataset.roleId;
+        if (!roleId || btn.disabled) return;
+        const assign = !serverStore.getUserRoleIds(user.id).includes(roleId);
+        const check = btn.querySelector('.role-option-check');
+        check?.classList.toggle('checked', assign);
+        btn.disabled = true;
+        btn.setAttribute('aria-busy', 'true');
+        void this.changeRole(user.id, roleId, assign).then((changed) => {
+          if (!changed) check?.classList.toggle('checked', !assign);
+          btn.disabled = false;
+          btn.removeAttribute('aria-busy');
+        });
       });
     });
 
-    const adminBtn = this.menuEl.querySelector('[data-action="toggle-admin"]');
+    const adminBtn = this.menuEl.querySelector<HTMLButtonElement>('[data-action="toggle-admin"]');
     adminBtn?.addEventListener('click', (e) => {
       e.stopPropagation();
-      const roleId = adminBtn.getAttribute('data-role-id');
-      if (!roleId) return;
-      const isAdmin = serverStore.getUserRoleIds(user.id).includes(roleId);
-      void networkClient.sendRequest(
-        isAdmin ? MessageType.ROLE_UNASSIGN : MessageType.ROLE_ASSIGN,
-        { userId: user.id, roleId }
-      ).catch(() => {});
-      this.close();
+      const roleId = adminBtn.dataset.roleId;
+      if (!roleId || adminBtn.disabled) return;
+      const menu = this.menuEl;
+      adminBtn.disabled = true;
+      adminBtn.setAttribute('aria-busy', 'true');
+      void this.changeRole(user.id, roleId, !serverStore.getUserRoleIds(user.id).includes(roleId)).then((changed) => {
+        if (this.menuEl !== menu) return;
+        if (changed) { this.close(); return; }
+        adminBtn.disabled = false;
+        adminBtn.removeAttribute('aria-busy');
+      });
     });
 
     const handleOutsideClick = (e: MouseEvent | PointerEvent) => {

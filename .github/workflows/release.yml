@@ -32,15 +32,22 @@ concurrency:
   group: release-${{ github.event.inputs.promote_tag || github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  actions: read
+# Nothing by default: each job declares what it needs. Only the publishing job
+# writes to the repository or obtains the OIDC identity Cosign signs with, and
+# the jobs that sign run in the `release` environment, whose secrets only main
+# can reach. Dependency install scripts and the packagers run in jobs that can
+# read, never publish.
+permissions: {}
 
 jobs:
   version:
     name: Resolve Version
     timeout-minutes: 15
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Finds the approved CI build of the commit being released.
+      actions: read
     outputs:
       version: ${{ steps.bump.outputs.version }}
       prev_tag: ${{ steps.bump.outputs.prev_tag }}
@@ -69,6 +76,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -78,7 +86,8 @@ jobs:
       # A PR merge into main produces a beta, unless none of the commits since
       # the last release ships anything to users (release=false). Manual
       # dispatch only promotes an explicitly selected beta from main; it never
-      # builds a branch beta.
+      # builds a branch beta. The tag typed in the dispatch form must name an
+      # existing beta tag, or the run stops here, before anything uses it.
       - name: Calculate Semantic Version
         id: bump
         env:
@@ -88,12 +97,15 @@ jobs:
 
       - name: Resolve checkout ref
         id: ref
+        env:
+          PROMOTE_TAG: ${{ github.event.inputs.promote_tag }}
+          HEAD_SHA: ${{ github.sha }}
         shell: bash
         run: |
-          if [ -n "${{ github.event.inputs.promote_tag }}" ]; then
-            echo "checkout_ref=${{ github.event.inputs.promote_tag }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$PROMOTE_TAG" ]; then
+            echo "checkout_ref=$PROMOTE_TAG" >> "$GITHUB_OUTPUT"
           else
-            echo "checkout_ref=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "checkout_ref=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Require bilingual client release notes before building
@@ -123,6 +135,14 @@ jobs:
     if: needs.version.outputs.release == 'true'
     # Generous: a legacy/expired-artifact release recompiles both native runtimes.
     timeout-minutes: 180
+    # Signs the macOS app: its certificate secrets belong to this environment.
+    environment: release
+    permissions:
+      contents: read
+      # Restores the approved CI build from its own run.
+      actions: read
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -137,6 +157,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.checkout_ref }}
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -151,7 +172,7 @@ jobs:
 
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           vsversion: '2022'
           toolset: '14.44'
@@ -177,7 +198,10 @@ jobs:
         if: needs.version.outputs.reuse_build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/ci-build-artifact.js restore ${{ matrix.platform }} "${{ needs.version.outputs.ci_run_id }}" "${{ fromJSON(needs.version.outputs.ci_artifacts)[matrix.platform] }}"
+          CI_RUN_ID: ${{ needs.version.outputs.ci_run_id }}
+          CI_ARTIFACT_ID: ${{ fromJSON(needs.version.outputs.ci_artifacts)[matrix.platform] }}
+        shell: bash
+        run: node scripts/ci-build-artifact.js restore ${{ matrix.platform }} "$CI_RUN_ID" "$CI_ARTIFACT_ID"
 
       # PR caches are visible only to their own PR. Saving the approved, hash-verified runtime
       # under the exact key CI recorded lets the next PRs skip an identical native build; it never
@@ -270,11 +294,12 @@ jobs:
           $Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
           npm run prepare:native-screen -- --python="$env:PYTHON" --git="$Git" --jobs=4
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run pack:native-sources -- --version=${{ needs.version.outputs.version }}
+          npm run pack:native-sources -- --version="$env:RELEASE_VERSION"
 
       - name: Bind approved corresponding sources to release (Windows)
         if: needs.version.outputs.reuse_build == 'true' && runner.os == 'Windows'
-        run: npm run pack:native-sources -- --from-ci --version=${{ needs.version.outputs.version }}
+        shell: pwsh
+        run: npm run pack:native-sources -- --from-ci --version="$env:RELEASE_VERSION"
 
       - name: Build native media and corresponding sources (macOS)
         if: needs.version.outputs.reuse_build != 'true' && runner.os == 'macOS' && hashFiles('apps/client/native/screen-share/scripts/prepareMacRtc.cjs') != ''
@@ -286,20 +311,17 @@ jobs:
             node apps/client/native/screen-share/scripts/buildMacRtc.cjs --arch=$architecture
           done
           node apps/client/native/screen-share/scripts/notices.cjs --mac
-          node apps/client/native/screen-share/scripts/packMacSources.cjs --version=${{ needs.version.outputs.version }}
+          node apps/client/native/screen-share/scripts/packMacSources.cjs --version="$RELEASE_VERSION"
 
       - name: Bind approved corresponding sources to release (macOS)
         if: needs.version.outputs.reuse_build == 'true' && runner.os == 'macOS'
-        run: node apps/client/native/screen-share/scripts/packMacSources.cjs --from-ci --version=${{ needs.version.outputs.version }}
+        run: node apps/client/native/screen-share/scripts/packMacSources.cjs --from-ci --version="$RELEASE_VERSION"
 
       - name: Set build version
         shell: bash
         run: |
-          VERSION="${{ needs.version.outputs.version }}"
-          for f in apps/client/package.json; do
-            node -e "const f='$f';const p=require('./'+f);p.version='${VERSION}';require('fs').writeFileSync(f, JSON.stringify(p, null, 2)+'\n');"
-          done
-          echo "Packaged version set to ${VERSION}"
+          node -e "const f='apps/client/package.json';const p=require('./'+f);p.version=process.env.RELEASE_VERSION;require('fs').writeFileSync(f, JSON.stringify(p, null, 2)+'\n');"
+          echo "Packaged version set to ${RELEASE_VERSION}"
 
       - name: Build ${{ matrix.platform }} distributables
         working-directory: apps/client
@@ -322,8 +344,9 @@ jobs:
             export APPLE_TEAM_ID="$MAC_APPLE_TEAM_ID"
           fi
           npx --no-install electron-builder --${{ matrix.platform }} --publish never
+        # No GitHub token: with --publish never, electron-builder reads one only
+        # to publish, so the packaging code and its dependency hooks get none.
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           npm_config_node_gyp: ${{ env.NODE_GYP_PATH || '' }}
           # macOS keeps the permissions a user granted (Screen Recording,
           # Microphone, Camera) while the app's designated requirement stays the
@@ -367,11 +390,18 @@ jobs:
     if: needs.version.outputs.release == 'true'
     timeout-minutes: 30
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Restores the approved CI build from its own run.
+      actions: read
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.checkout_ref }}
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -405,7 +435,9 @@ jobs:
         if: needs.version.outputs.reuse_build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/ci-build-artifact.js restore cli "${{ needs.version.outputs.ci_run_id }}" "${{ fromJSON(needs.version.outputs.ci_artifacts).cli }}"
+          CI_RUN_ID: ${{ needs.version.outputs.ci_run_id }}
+          CI_ARTIFACT_ID: ${{ fromJSON(needs.version.outputs.ci_artifacts).cli }}
+        run: node scripts/ci-build-artifact.js restore cli "$CI_RUN_ID" "$CI_ARTIFACT_ID"
 
       - name: Prepare the SFU worker for SDK voice tests
         if: needs.version.outputs.reuse_build != 'true' && hashFiles('packages/bot-sdk/test/voice-transport.test.js') != ''
@@ -426,12 +458,12 @@ jobs:
             echo "This ref predates the CLI tarball; skipping."
             exit 0
           fi
-          node scripts/pack-cli.js "${{ needs.version.outputs.version }}"
+          node scripts/pack-cli.js "$RELEASE_VERSION"
           echo "packed=true" >> "$GITHUB_OUTPUT"
 
       - name: Exercise isolated CLI installation
         if: steps.pack.outputs.packed == 'true' && hashFiles('scripts/test-cli-package.js') != ''
-        run: node scripts/test-cli-package.js "release/monky-cli-${{ needs.version.outputs.version }}.tgz"
+        run: node scripts/test-cli-package.js "release/monky-cli-$RELEASE_VERSION.tgz"
 
       - name: Upload CLI artifact
         if: steps.pack.outputs.packed == 'true'
@@ -452,12 +484,12 @@ jobs:
             echo "packed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          node scripts/pack-bot-sdk.js "${{ needs.version.outputs.version }}"
+          node scripts/pack-bot-sdk.js "$RELEASE_VERSION"
           echo "packed=true" >> "$GITHUB_OUTPUT"
 
       - name: Exercise isolated bot-sdk installation
         if: steps.pack-sdk.outputs.packed == 'true' && hashFiles('scripts/test-bot-sdk-package.js') != ''
-        run: node scripts/test-bot-sdk-package.js "release/monky-bot-sdk-${{ needs.version.outputs.version }}.tgz"
+        run: node scripts/test-bot-sdk-package.js "release/monky-bot-sdk-$RELEASE_VERSION.tgz"
 
       - name: Upload bot-sdk artifact
         if: steps.pack-sdk.outputs.packed == 'true'
@@ -474,15 +506,20 @@ jobs:
     if: needs.version.outputs.release == 'true'
     timeout-minutes: 30
     runs-on: ubuntu-latest
+    # The only job that publishes, and the identity Cosign certifies.
+    environment: release
     permissions:
       contents: write
       id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.checkout_ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -491,8 +528,9 @@ jobs:
 
       - name: Generate changelog
         id: changelog
+        env:
+          PREV_TAG: ${{ needs.version.outputs.prev_tag }}
         run: |
-          PREV_TAG="${{ needs.version.outputs.prev_tag }}"
           echo "Previous tag: ${PREV_TAG:-<none>}"
 
           # Technical notes keep commit details, issue references and comparison.
@@ -502,7 +540,7 @@ jobs:
           # keeping older clients from rendering the JSON.
           NOTES=$(node scripts/generate-changelog.js \
             --prev "$PREV_TAG" \
-            --version "${{ needs.version.outputs.version }}" \
+            --version "$RELEASE_VERSION" \
             --repo "$GITHUB_REPOSITORY")
 
           # Promoting a beta from before #616 checks out the old generator.
@@ -528,22 +566,24 @@ jobs:
 
       - name: Verify corresponding sources before publishing binaries
         id: native_sources
+        env:
+          SOURCE_COMMIT: ${{ steps.changelog.outputs.commit }}
         run: |
           if [ -f apps/client/native/screen-share/scripts/packSources.cjs ]; then
             node scripts/check-native-source-release.js artifacts \
-              "${{ needs.version.outputs.version }}" "${{ steps.changelog.outputs.commit }}"
+              "$RELEASE_VERSION" "$SOURCE_COMMIT"
             echo "required=true" >> "$GITHUB_OUTPUT"
           else
             echo "required=false" >> "$GITHUB_OUTPUT"
           fi
           if [ -f apps/client/native/screen-share/scripts/packMacSources.cjs ]; then
             node scripts/check-native-source-release.js artifacts \
-              "${{ needs.version.outputs.version }}" "${{ steps.changelog.outputs.commit }}" --mac
+              "$RELEASE_VERSION" "$SOURCE_COMMIT" --mac
             echo "mac_required=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
       - name: Generate checksums and sign artifacts
         run: |
@@ -557,7 +597,7 @@ jobs:
         run: cosign sign-blob --yes --output-signature artifacts/checksums-sha256.txt.sig --output-certificate artifacts/checksums-sha256.txt.crt artifacts/checksums-sha256.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: v${{ needs.version.outputs.version }}
           target_commitish: ${{ steps.changelog.outputs.commit }}
@@ -599,11 +639,12 @@ jobs:
             # 1. Verificar checksums
             sha256sum -c checksums-sha256.txt
 
-            # 2. Verificar assinatura (requer cosign instalado)
+            # 2. Verificar assinatura (requer cosign instalado). A identidade é
+            #    exatamente o workflow de release da main deste repositório.
             cosign verify-blob \
               --signature checksums-sha256.txt.sig \
               --certificate checksums-sha256.txt.crt \
-              --certificate-identity-regexp "https://github.com/MonkyOrg/Monky" \
+              --certificate-identity "https://github.com/MonkyOrg/Monky/.github/workflows/release.yml@refs/heads/main" \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
               checksums-sha256.txt
             ```

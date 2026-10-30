@@ -58,6 +58,11 @@ instala automaticamente. Os demais comandos apenas avisam:
 npm install -g pm2
 ```
 
+O CLI procura o PM2 como o terminal procuraria, pelo `PATH`, então também acha
+o que foi instalado pelo pnpm, pelo Yarn ou pelo Volta. Um PM2 encontrado em que
+`pm2 --version` falha não é instalado de novo por cima: o CLI avisa, e ele deve
+ser corrigido pela ferramenta que o instalou.
+
 ## Início rápido
 
 ```bash
@@ -155,7 +160,8 @@ valores como `true`, `false`, `p2p` e `sfu` não são traduzidos.
 | `monky.json` | Porta do servidor. |
 | `ecosystem.config.cjs` | Configuração do PM2, regravada a cada `start`/`restart`. |
 | `attachments/`, `avatars/`, `icons/` | Arquivos enviados. |
-| `auto-update.cjs` | Criado apenas quando o auto-update está ligado. |
+| `server.lock` | Existe enquanto o servidor está em execução. Veja [Alterações com o servidor no ar](#alteracoes-com-o-servidor-no-ar). |
+| `backups/` | Cópias do `server.db` feitas pelo `monky update` antes de reiniciar na nova versão. Ficam as 3 mais recentes. |
 
 ## Códigos de saída
 
@@ -163,6 +169,40 @@ valores como `true`, `false`, `p2p` e `sfu` não são traduzidos.
 |---|---|
 | `0` | Sucesso. |
 | `1` | Erro. A mensagem é impressa em `stderr`. |
+
+## Alterações com o servidor no ar
+
+O servidor mantém o banco inteiro em memória e regrava o `server.db` a partir
+dessa cópia. Uma alteração gravada por fora com ele no ar some em segundos,
+inclusive depois de um `monky restart`. Por isso, os comandos que alteram
+dados exigem o servidor parado:
+
+- `monky admin add` e `monky admin remove`;
+- `monky roles create`, `assign`, `unassign` e `delete`;
+- `monky config set`, exceto as chaves `port` e `autoUpdate`, que ficam fora do banco.
+
+Com o servidor no ar, seja pelo PM2, hospedado no app ou iniciado à mão, o
+comando é recusado sem gravar nada e explica como seguir:
+
+```bash
+monky stop
+monky admin add Fulano
+monky start
+```
+
+Com o servidor no ar, a alteração também pode ser feita pelo app. Se o
+servidor for iniciado enquanto um comando interativo espera uma resposta, o
+comando termina com erro sem salvar. Um comando que falha também não salva
+nada pela metade.
+
+As consultas (`monky members`, `monky roles` e `monky config show`) leem uma
+cópia do banco e funcionam com o servidor no ar, sem regravá-lo. Depois de
+atualizar o CLI, elas pedem um `monky restart` enquanto o servidor em execução
+ainda não tiver carregado a versão nova.
+
+Enquanto roda, o servidor marca a pasta de dados com o arquivo `server.lock`.
+Se ele for encerrado à força, o arquivo fica para trás e é ignorado: o CLI
+confere se o processo indicado ainda existe nesta máquina.
 
 ---
 
@@ -181,10 +221,18 @@ Após a escolha inicial de idioma, quando necessária, o comando pergunta:
 
 1. **Onde guardar os dados** — sugere `./data`, mas você pode informar qualquer
    caminho. Se já houver um servidor na pasta escolhida, ele pede outra.
-2. **Código de identidade do dono** (`MONKY-ID:...`) — exporte pelo app Monky em
+2. **Código de identidade do dono** (`MONKY-ID2:...`) — exporte pelo app Monky em
    *Configurações → Meu Perfil → Identidade*. Trate o backup e a senha como
    credenciais: use-os somente em uma máquina de administração confiável.
-3. **Senha da identidade** — a que você definiu ao exportar.
+   Códigos que começam com `MONKY-ID2:` precisam de um CLI atualizado; um CLI
+   anterior a eles responde "Código de identidade inválido". Se o CLI já estava
+   instalado, rode `monky update` antes do `monky create` (ou
+   `monky update --beta`, se o app estiver no canal beta). Códigos `MONKY-ID:`,
+   exportados por versões anteriores do app, continuam aceitos.
+3. **Senha da identidade** — a que você definiu ao exportar. O código e a senha
+   são conferidos antes de qualquer dado ser gravado: uma senha errada não deixa
+   um servidor pela metade. Se o comando avisar que o código veio de uma versão
+   mais nova do Monky, atualize o CLI com `monky update` e rode de novo.
 4. **Nome do servidor**
 5. **Porta do servidor** (padrão: `3000`)
 6. **Senha do servidor** — deixe vazio para um servidor aberto.
@@ -201,7 +249,7 @@ Ao final, exibe um resumo, pede confirmação e oferece iniciar o servidor.
 |---|---|---|
 | `--identity <código>` | Código de identidade do dono | perguntado |
 | `--name <nome>` | Nome do servidor | `Servidor dos Amigos` |
-| `--port <n>` | Porta do servidor | `3000` |
+| `--port <n>` | Porta do servidor, de 1024 a 65535 | `3000` |
 | `--password <senha>` | Senha do servidor (vazio = sem senha) | perguntado |
 | `--max-users <n>` | Limite de membros cadastrados (`0` = sem limite) | perguntado |
 | `--voice-mode <p2p\|sfu>` | Modo de voz e mídia (`p2p` ou `sfu`) | `p2p` |
@@ -220,7 +268,7 @@ monky create --data /srv/monky-amigos
 
 # Não interativo, exceto a senha da identidade
 monky create --data /srv/monky-amigos \
-  --identity "MONKY-ID:..." \
+  --identity "MONKY-ID2:..." \
   --name "Servidor dos Amigos" --port 3000 --password "senhaDoServidor"
 ```
 
@@ -516,7 +564,8 @@ monky admin add [nickname|clientId]
 monky admin remove [nickname|clientId]
 ```
 
-Sem argumento, o comando lista os membros para você escolher.
+Sem argumento, o comando lista os membros para você escolher. Exige o servidor
+parado; veja [Alterações com o servidor no ar](#alteracoes-com-o-servidor-no-ar).
 
 ---
 
@@ -534,7 +583,12 @@ monky roles delete [cargo]
 
 Sem argumentos, cada subcomando é interativo. As permissões podem ser passadas
 por nome, separadas por vírgula. A cor usa o formato `#RRGGBB`. O cargo padrão
-do servidor não pode ser removido de um membro.
+do servidor não pode ser removido de um membro. Criar, atribuir, remover e
+apagar cargos exige o servidor parado; listar, não.
+
+Um cargo novo segue as mesmas regras do app: o nome tem de 1 a 32 caracteres e
+não pode ser `Admin`, reservado ao cargo de administrador. Cargo não concede a
+permissão de administrador; para isso, use `monky admin add`.
 
 ---
 
@@ -557,21 +611,25 @@ monky config set <chave> [valor]    # altera direto
 |---|---|---|
 | `name` | Nome do servidor (mínimo 2 caracteres) | `Servidor dos Amigos` |
 | `password` | Senha de entrada. Vazio, `none` ou `clear` remove a senha | sem senha |
-| `port` | Porta TCP | `3000` |
+| `port` | Porta TCP, de 1024 a 65535 | `3000` |
 | `icon` | Caminho de uma imagem, copiada para a pasta de dados. Vazio ou `clear` remove | sem ícone |
 | `maxUsers` | Máximo de membros cadastrados. `0` remove o limite | `20` |
 | `maxMessageLength` | Caracteres por mensagem. `0` remove o limite de caracteres; o teto técnico de 8 MiB por pacote permanece | `16000` |
-| `allowSoundboard` | Permite o soundboard (`true`/`false`) | `true` |
+| `allowSoundboard` | Permite o soundboard (`true`/`false`). Desligar também desliga o cache de áudios recentes | `true` |
 | `allowEveryoneMention` | Permite `@todos`/`@everyone` no chat (`true`/`false`) | `true` |
-| `maxAttachmentFileBytes` | Tamanho máximo por anexo, em bytes | sem limite |
+| `maxAttachmentFileBytes` | Tamanho máximo por anexo, em bytes. Não pode passar do espaço total | sem limite |
 | `maxAttachmentStorageBytes` | Espaço total para anexos, em bytes | sem limite |
 | `voiceMode` | Modo de voz: `p2p` (mesh direto) ou `sfu` (Selective Forwarding Unit) | `p2p` |
-| `autoUpdate` | Liga a atualização automática diária (`true`/`false`) | `false` |
+| `autoUpdate` | Liga a atualização automática da máquina (`true`/`false`). Veja [Atualização automática](#atualizacao-automatica) | `false` |
 | `turn` | Liga o relay de mídia TURN (`true`/`false`). Só em Linux, exige o coturn instalado | `false` |
 
-Alterar `port` com o servidor no ar oferece reiniciar na hora para aplicar.
-Alterar `turn` exige um `monky restart` manual.
-Alterar `voiceMode` aplica dinamicamente e notifica todos os clientes conectados.
+`port` e `autoUpdate` podem mudar com o servidor no ar. Alterar `port` com o
+servidor no ar oferece reiniciar na hora, pelo mesmo caminho do `monky restart`:
+avisa quem está em chamada, regrava o registro do PM2 e roda `pm2 save`, para
+que a porta nova sobreviva a um reboot. As demais chaves ficam no banco e
+exigem o servidor parado (veja
+[Alterações com o servidor no ar](#alteracoes-com-o-servidor-no-ar)); elas
+passam a valer no próximo `monky start`.
 
 ### Exemplos
 
@@ -604,8 +662,9 @@ troubleshooting.
 ### Ativando
 
 ```bash
+monky stop
 monky config set turn true
-monky restart
+monky start
 ```
 
 O coturn é instalado **automaticamente** pela sua distro. Se o servidor não rodar
@@ -627,11 +686,16 @@ Devem estar abertas **tanto no firewall do Linux quanto no painel do provedor**
 monky status    # deve mostrar ✔ acessível
 ```
 
+No painel `monky status --watch`, a configuração do TURN é relida só quando o
+banco muda (no máximo a cada 30 s), e as portas são testadas a cada 60 s ou
+logo que o TURN é ligado.
+
 ### Desligando
 
 ```bash
+monky stop
 monky config set turn false
-monky restart
+monky start
 ```
 
 ---
@@ -645,7 +709,9 @@ O modo **SFU** centraliza o encaminhamento de mídia via `mediasoup`. Quem compa
 ### Ativando via CLI
 
 ```bash
+monky stop
 monky config set voiceMode sfu
+monky start
 ```
 
 O CLI calcula e exibe automaticamente uma **estimativa de capacidade** baseada na quantidade de cores da CPU, memória RAM do servidor e banda de upload.
@@ -679,7 +745,28 @@ monky update [--beta] [--check] [--yes]
 O comando baixa e instala o novo pacote com `npm install -g` a partir dos
 artefatos da release no GitHub.
 
-Ao final, o servidor é reiniciado (com confirmação, exceto com `--yes`).
+Ao final, os servidores em execução são reiniciados (com confirmação, exceto
+com `--yes`): todos os desta máquina, ou só o de `--data`. Servidores parados
+continuam parados e usam a nova versão no próximo `monky start`.
+
+Para que uma versão quebrada não deixe o servidor fora do ar:
+
+- **Antes de reiniciar**, o CLI novo é executado uma vez. Se ele não roda nesta
+  máquina (Node antigo, módulo faltando), a versão anterior é reinstalada e
+  nenhum servidor é reiniciado.
+- **Cada servidor** tem o `server.db` copiado para `backups/` antes do reinício
+  (ficam as 3 cópias mais recentes) e precisa voltar a responder em até 60
+  segundos.
+- **Se o primeiro servidor que reinicia na versão nova não responder**, a
+  atualização é desfeita: a versão anterior é reinstalada, o banco volta da
+  cópia quando a versão nova já o tinha migrado, e o servidor sobe de novo. O
+  comando termina com erro para avisar, e `monky logs` mostra o motivo.
+
+`monky update` nunca instala uma versão mais antiga que a atual. Por exemplo,
+quem está numa beta mais nova que a última estável não recebe a estável por
+cima. Forçar a reinstalação só é oferecido para a mesma versão. Duas
+atualizações na mesma máquina não rodam ao mesmo tempo: a segunda espera a
+primeira terminar.
 
 Antes de desconectar os participantes para esse reinício, o servidor informa
 que está em atualização. Os clientes mostram um aviso próprio no idioma
@@ -703,9 +790,19 @@ monky update --beta            # atualiza para a última, incluindo betas
 monky config set autoUpdate true
 ```
 
-Registra no PM2 uma tarefa diária, às 4h, que roda `monky update --yes` para
-aquele servidor. O canal segue a versão instalada: se você está numa beta, o
-auto-update acompanha o canal beta.
+Registra no PM2 um único agendamento para a máquina (`monky-auto-updater`),
+que roda `monky update --yes`: instala a atualização uma vez e reinicia os
+servidores que estiverem em execução. Um servidor parado de propósito não é
+ligado. Se uma execução encontrar um servidor ainda com o código anterior (por
+exemplo, depois de um reinício recusado), ela o reinicia, com a mesma cópia do
+banco e a mesma volta de versão em caso de falha.
+
+No terminal, o CLI pergunta a agenda: diária num horário `HH:MM` (padrão
+`04:00`) ou a cada 1 a 168 horas. Em scripts, usa a diária às 04:00. O canal
+segue a versão instalada: se você está numa beta, o auto-update acompanha o
+canal beta. O script fica em `~/.monky/auto-update.cjs` (ou na pasta de
+`MONKY_HOME`). Ligar o auto-update substitui os agendamentos por servidor
+criados por versões anteriores.
 
 Funciona em Linux, macOS e Windows. Para desligar:
 
@@ -726,6 +823,11 @@ monky destroy [--data <pasta>]
 Remove o banco, anexos, avatares e configurações, encerra o processo PM2 e tira
 o servidor do registro. Pede duas confirmações: digitar `DESTROY` e um "sim"
 final. Só aceita pastas que realmente contenham um servidor Monky.
+
+Sem um PM2 que o CLI consiga usar, os processos PM2 do servidor não podem ser
+removidos e continuariam reiniciando o servidor apagado. Nesse caso, o aviso
+mostra os nomes deles e uma terceira confirmação pergunta se os dados devem ser
+apagados mesmo assim; recusar mantém tudo como está.
 
 Se houver gente conectada, o aviso aparece antes das confirmações, informando
 quantas pessoas serão desconectadas.

@@ -20,7 +20,8 @@ if (!process.versions.electron) {
   const { app, BrowserWindow, ipcMain } = require('electron');
   const { SoundboardDownloads } = require('../dist-electron/main/soundboardDownload.js');
   const { SoundboardFiles } = require('../dist-electron/main/soundboardFiles.js');
-  const { setupSoundboardFilesIpc } = require('../dist-electron/main/soundboardFilesIpc.js');
+  const { IpcRegistry, windowContents } = require('../dist-electron/main/ipc/registry.js');
+  const { registerSoundboardFilesIpc } = require('../dist-electron/main/soundboardFilesIpc.js');
   const { SOUNDBOARD_FILES_IPC, SOUND_DOWNLOAD_IPC, SHORTCUT_IPC, encodeSoundboardEdit } = require('@monky/shared');
   app.setPath('userData', process.env.MONKY_SOUNDBOARD_FILES_PROFILE);
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -87,7 +88,9 @@ if (!process.versions.electron) {
       const url = new URL(details.url);
       callback({ cancel: url.origin !== origin && !['data:', 'blob:'].includes(url.protocol) });
     });
-    dispose = setupSoundboardFilesIpc(browser, files);
+    const registry = new IpcRegistry(ipcMain, { main: () => windowContents(browser), overlay: () => null });
+    registerSoundboardFilesIpc(registry, files);
+    dispose = () => registry.dispose();
     ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, () => folder);
     ipcMain.handle('app:set-language', () => {});
     ipcMain.handle(SHORTCUT_IPC.registerSoundboard, () => true);
@@ -253,6 +256,8 @@ async function runDom(fixture) {
     import('/i18n/index.ts'), import('/core/SoundboardLibrary.ts'), import('/stores/voiceStore.ts'),
     import('/stores/serverStore.ts'), import('/core/SessionManager.ts'), import(fixture.sharedUrl),
   ]);
+  // Importing has no side effects (R-MEDIA-3): the main window starts the call's sounds like this.
+  soundboardService.init();
   setLanguage(fixture.language);
   settingsStore.soundboardFolderPath = fixture.folder;
   settingsStore.soundboardMuted = false;
@@ -380,6 +385,13 @@ async function runDom(fixture) {
   check(!popup(), 'Closing parent removes dropdown');
   await modal.open();
   check(!root().querySelector('input[type="radio"], input[type="checkbox"]:not([role="switch"])'), 'No standalone native choices');
+  const shortcutDialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) [role="dialog"][aria-labelledby="sb-keybind-title"]');
+  [...root().querySelectorAll('.sb-btn-add-shortcut')].find(button => button.dataset.soundname === 'tone').click();
+  check(shortcutDialog()?.getAttribute('aria-modal') === 'true' && shortcutDialog().querySelector('strong')?.textContent === 'tone',
+    'The soundboard and the settings share one accessible shortcut dialog');
+  shortcutDialog().querySelector('#sb-keybind-btn-cancel').click();
+  await until(() => !shortcutDialog(), 'Cancelling did not close the shortcut dialog');
+  check(!Object.hasOwn(settingsStore.soundboardShortcuts, 'tone'), 'Cancelling the dialog binds nothing');
   const volume = settingsStore.soundboardVolume;
   root().querySelector('#sb-btn-settings').click();
   const quickSettings = document.querySelector('#sb-settings-section');
@@ -434,7 +446,10 @@ async function runDom(fixture) {
   actions('rename', 'renamed.wav').click();
   input('[data-dialog-input]', 'other');
   dialog().querySelector('[data-action="confirm"]').click();
-  await until(() => exactStatus(t('soundboard.fileError.exists')), 'Duplicate rename must show exact localized error');
+  const renameError = () => document.querySelector('.chat-copy-toast[role="alert"]:not([data-ui-closing]) .chat-copy-toast-label');
+  await until(() => renameError()?.textContent === t('soundboard.fileError.exists') && document.querySelector('#sb-file-status').hidden,
+    'Duplicate rename must show exact localized error, in the alert toast rather than the modal layout');
+  renameError().closest('.chat-copy-toast').querySelector('.chat-copy-toast-close').click();
   check(!!name('renamed.wav') && !!name('other.wav'), 'Duplicate rename retains both list entries');
   actions('delete', 'renamed.wav').click();
   check(dialog().querySelector('.dialog-message').textContent === t('soundboard.deleteConfirm', { name: 'renamed.wav' }), 'Permanent deletion warning exact');
@@ -541,6 +556,35 @@ async function runDom(fixture) {
     check(await broadcast === true && soundboardService.getActivePlaybacks().some(entry => entry.userId === 'self'),
       'Call playback resolves once the relayed clip is audible here');
     check(soundboardService.getLoadingSoundPaths().size === 0, 'An audible sound is no longer loading');
+    soundboardService.stopSound();
+    // A sound relayed for another call, or by another server, never plays here.
+    const routing = await import('/core/sessionRouting.ts');
+    const strayAudio = await window.api.readSoundboardSound(name('tone.wav').filePath);
+    const stray = (channelId) => ({ channelId, userId: 'stray', userName: 'Stray', soundName: 'tone',
+      audioBase64: strayAudio.base64, mimeType: strayAudio.mimeType });
+    appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_PLAYED}`, stray('another-channel'));
+    routing.setEventOrigin('another-server');
+    try {
+      appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_PLAYED}`, stray('qa-channel'));
+    } finally {
+      routing.setEventOrigin(null);
+    }
+    voiceStore.currentVoiceChannelId = null;
+    voiceStore.voiceSessionKey = null;
+    appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_PLAYED}`, stray('qa-channel'));
+    voiceStore.currentVoiceChannelId = 'qa-channel';
+    voiceStore.voiceSessionKey = 'qa-session';
+    await wait(100);
+    check(!soundboardService.getActivePlaybacks(true).some(entry => entry.userId === 'stray'),
+      'Sounds for another call, another server or no call at all are never played');
+    routing.setEventOrigin('qa-session');
+    try {
+      appEvents.emit(`message.${shared.MessageType.SOUNDBOARD_PLAYED}`, stray('qa-channel'));
+    } finally {
+      routing.setEventOrigin(null);
+    }
+    await until(() => soundboardService.getActivePlaybacks().some(entry => entry.userId === 'stray'),
+      'A sound relayed by the call server for this call still plays');
     soundboardService.stopSound();
     const incoming = await window.api.readSoundboardSound(name('tone.wav').filePath);
     await soundboardService.handleIncomingSound({ userId: 'self', userName: 'QA', soundName: 'tone', audioBase64: incoming.base64, mimeType: incoming.mimeType });
@@ -759,9 +803,22 @@ async function runDom(fixture) {
       check(document.querySelector('[data-player-stop]').title === t('soundboard.player.stop'), 'Edited player has its own localized stop');
       document.querySelector('[data-player-stop]').click();
       check(preview.audio.paused && !preview.audio.getAttribute('src'), 'Preview stop releases media');
+      input('#sb-edit-name', '');
+      document.querySelector('[data-editor-save]').click();
+      const alertToast = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+      await until(alertToast, 'An empty copy name was not explained');
+      const missingName = alertToast();
+      check(document.querySelector('[data-editor-form]').noValidate
+        && missingName.textContent.includes(t('validation.required', { field: t('soundboard.copyName') }))
+        && document.querySelector('#sb-edit-name').getAttribute('aria-invalid') === 'true' && !!document.querySelector('.sb-editor-card'),
+      'An empty copy name is explained in the app language, not in the browser balloon, and nothing is saved');
+      missingName.querySelector('.chat-copy-toast-close').click();
       input('#sb-edit-name', 'tone');
       document.querySelector('[data-editor-save]').click();
-      await until(() => document.querySelector('[data-editor-status]').textContent === t('soundboard.fileError.exists'), 'Original overwrite must fail visibly');
+      const overwriteError = () => document.querySelector('.chat-copy-toast[role="alert"]:not([data-ui-closing])');
+      await until(() => overwriteError()?.querySelector('.chat-copy-toast-label').textContent === t('soundboard.fileError.exists')
+        && !document.querySelector('[data-editor-status]').textContent, 'Original overwrite must fail visibly, in the alert toast');
+      overwriteError().querySelector('.chat-copy-toast-close').click();
       input('#sb-edit-name', `copy-${fixture.language}`);
       document.querySelector('[data-editor-save]').click();
       await until(() => !document.querySelector('.sb-editor-card') && name(`copy-${fixture.language}.wav`), 'Save must write copy and refresh library');
@@ -882,7 +939,9 @@ async function runDom(fixture) {
       HTMLMediaElement.prototype.play = () => Promise.reject(new Error('Controlled player rejection'));
       try {
         button('play').click();
-        await until(() => document.querySelector('[data-editor-status]').textContent === t('soundboard.previewFailed'), 'Playback error must be localized and visible');
+        const playbackError = () => document.querySelector('.chat-copy-toast[role="alert"]:not([data-ui-closing]) .chat-copy-toast-label');
+        await until(() => playbackError()?.textContent === t('soundboard.previewFailed'), 'Playback error must be localized and visible');
+        playbackError().closest('.chat-copy-toast').querySelector('.chat-copy-toast-close').click();
         check(!audio() && !button('play').disabled, 'Failed play leaves usable controls and no active source');
       } finally { HTMLMediaElement.prototype.play = nativePlay; }
       seek(0.65); button('play').click();

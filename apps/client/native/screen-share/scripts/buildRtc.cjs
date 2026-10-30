@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { root, execute, write, digest, regularFiles } = require('./buildTools.cjs');
+const { root, execute, write, digest, regularFiles, withBuildLock } = require('./buildTools.cjs');
 const windowsToolchain = require('./windowsToolchain.cjs');
 
 const source = path.join(root, 'src', 'rtc');
@@ -62,9 +62,7 @@ function build(config) {
   const inputs = ownedDirectory(path.join(sdk, 'out', `ms${key}i`));
   const output = ownedDirectory(path.join(sdk, 'out', `ms${key}`));
   const localBuild = ownedDirectory(path.join(root, 'build', 'rtc-production'));
-  const lock = path.join(localBuild, 'rtc.lock');
-  const lockHandle = fs.openSync(lock, 'wx');
-  try {
+  return withBuildLock(path.join(localBuild, 'rtc.lock'), () => {
     const sourceFiles = regularFiles(source).map(relative => {
       const bytes = fs.readFileSync(path.join(source, relative));
       write(path.join(inputs, relative), bytes);
@@ -180,10 +178,7 @@ function build(config) {
     write(path.join(root, 'build', 'tools', 'monky_msvc_job.exe'), fs.readFileSync(path.join(output, 'monky_msvc_job.exe')));
     console.log(JSON.stringify({ nativeRtcBuilt: true, contractChecks: contracts.checks, binaries }));
     return report;
-  } finally {
-    fs.closeSync(lockHandle);
-    fs.unlinkSync(lock);
-  }
+  });
 }
 
 module.exports = { options, build };

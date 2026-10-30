@@ -2,10 +2,9 @@ import { ConnectionStatus } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
 import { LIMITS, VoiceMode } from '@monky/shared';
-import { favoritesStore, savedServerFavoriteKey } from './favoritesStore';
+import { favoritesStore } from './favoritesStore';
 import { settingsStore } from './settingsStore';
-
-const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+import { isLoopbackHost, sameServerAddress, serverAddressKey, type ServerAddress } from '../utils/serverAddress';
 
 export interface SavedServer {
   host: string;
@@ -139,11 +138,14 @@ export class ConnectionStore {
     this.syncSavedServerFavorites();
   }
 
+  /** The saved entry of a server, however its address was typed this time. */
+  public findSavedServer(address: ServerAddress): SavedServer | undefined {
+    return this.savedServers.find((server) => sameServerAddress(server, address));
+  }
+
   public addSavedServer(server: SavedServer): void {
     clientLog.info('STORE', `Saving server: ${server.host}:${server.port}`, { name: server.name });
-    const existingIdx = this.savedServers.findIndex(
-      (s) => s.host === server.host && s.port === server.port
-    );
+    const existingIdx = this.savedServers.findIndex((s) => sameServerAddress(s, server));
     if (existingIdx >= 0) {
       // Preserve existing fields if new values are default/empty
       const existing = this.savedServers[existingIdx];
@@ -173,7 +175,7 @@ export class ConnectionStore {
 
   public removeSavedServer(host: string, port: number): void {
     clientLog.info('STORE', `Removing saved server: ${host}:${port}`);
-    this.savedServers = this.savedServers.filter((s) => !(s.host === host && s.port === port));
+    this.savedServers = this.savedServers.filter((s) => !sameServerAddress(s, { host, port }));
     this.syncSavedServerFavorites();
     this.syncRailLayoutWithSavedServers();
     this.saveSavedServers();
@@ -187,10 +189,14 @@ export class ConnectionStore {
    * time you connected (#85).
    */
   public updateSavedServerMeta(host: string, port: number, meta: { name?: string; iconUrl?: string | null }): void {
-    const srv = this.savedServers.find((s) => s.host === host && s.port === port);
+    const srv = this.findSavedServer({ host, port });
     if (!srv) return;
-    if (meta.name) srv.name = meta.name;
-    if (meta.iconUrl !== undefined) srv.iconUrl = meta.iconUrl || undefined;
+    const name = meta.name || srv.name;
+    const iconUrl = meta.iconUrl !== undefined ? meta.iconUrl || undefined : srv.iconUrl;
+    // Every sign-in reports both: only a real change is saved and redraws the rail.
+    if (name === srv.name && iconUrl === srv.iconUrl) return;
+    srv.name = name;
+    srv.iconUrl = iconUrl;
     this.saveSavedServers();
     appEvents.emit('connection.saved_servers_changed');
   }
@@ -201,8 +207,7 @@ export class ConnectionStore {
   }
 
   public rememberSavedServerIdentity(host: string, port: number, serverId: string): void {
-    const key = savedServerFavoriteKey({ host, port });
-    const server = this.savedServers.find(item => savedServerFavoriteKey(item) === key);
+    const server = this.findSavedServer({ host, port });
     if (!server || !serverId || server.serverId === serverId) return;
     if (server.serverId) this.clearServerAutoEntry(server);
     server.serverId = serverId;
@@ -211,8 +216,7 @@ export class ConnectionStore {
   }
 
   public invalidateSavedServerIdentity(host: string, port: number): void {
-    const key = savedServerFavoriteKey({ host, port });
-    const server = this.savedServers.find(item => savedServerFavoriteKey(item) === key);
+    const server = this.findSavedServer({ host, port });
     if (!server) return;
     delete server.serverId;
     this.clearServerAutoEntry(server);
@@ -235,9 +239,9 @@ export class ConnectionStore {
   }
 
   public updateSavedServer(oldHost: string, oldPort: number, updated: SavedServer): void {
-    const idx = this.savedServers.findIndex((s) => s.host === oldHost && s.port === oldPort);
+    const idx = this.savedServers.findIndex((s) => sameServerAddress(s, { host: oldHost, port: oldPort }));
     if (idx >= 0) {
-      if (savedServerFavoriteKey(this.savedServers[idx]) === savedServerFavoriteKey(updated)) {
+      if (sameServerAddress(this.savedServers[idx], updated)) {
         updated.serverId = this.savedServers[idx].serverId;
       } else {
         delete updated.serverId;
@@ -381,7 +385,7 @@ export class ConnectionStore {
   }
 
   public moveServerToFolder(host: string, port: number, folderId: string | null, index?: number): void {
-    const server = this.savedServers.find((item) => item.host === host && item.port === port);
+    const server = this.findSavedServer({ host, port });
     if (!server) return;
 
     const removal = this.removeServerNode(host, port);
@@ -527,7 +531,7 @@ export class ConnectionStore {
     const used = new Set<number>(extra);
     for (const server of this.createdServers) used.add(server.port);
     for (const server of this.savedServers) {
-      if (LOCAL_HOSTS.has(server.host.trim().toLowerCase())) used.add(server.port);
+      if (isLoopbackHost(server.host)) used.add(server.port);
     }
     for (let port = Math.max(LIMITS.MIN_PORT, preferred); port <= LIMITS.MAX_PORT; port++) {
       if (!used.has(port)) return port;
@@ -725,7 +729,7 @@ export class ConnectionStore {
   private syncCreatedServersIntoSavedServers(persist: boolean = true): void {
     let changed = false;
     for (const server of this.createdServers) {
-      const existing = this.savedServers.find(item => item.host === '127.0.0.1' && item.port === server.port);
+      const existing = this.findSavedServer({ host: '127.0.0.1', port: server.port });
       if (!existing) {
         this.savedServers.push({
           host: '127.0.0.1',
@@ -804,7 +808,7 @@ export class ConnectionStore {
   }
 
   private serverKey(host: string, port: number): string {
-    return `${host}:${port}`;
+    return serverAddressKey({ host, port });
   }
 }
 

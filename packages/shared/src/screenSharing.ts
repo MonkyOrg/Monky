@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { AUDIENCE_LIMITS } from './resourceAudience.js';
+import { errorChain } from './screenShareFailures.js';
 
 const utf8 = new TextEncoder();
 const reference = (bytes: number) => z.string().min(1).max(bytes)
@@ -30,7 +32,8 @@ export interface ScreenEncodingSelection {
 }
 export interface ScreenEncodingAvailability {
   selection: ScreenEncodingSelection | null;
-  hardware: { available: boolean; reason: string | null; error?: boolean };
+  /** `reason` is technical, for the log; `codes` are the native codes behind it, which the app explains. */
+  hardware: { available: boolean; reason: string | null; codes?: readonly string[]; error?: boolean };
   fallback: boolean;
   reason?: string;
 }
@@ -96,8 +99,8 @@ export const nativeScreenRenditionSchema = z.object({
 export type NativeScreenRendition = z.infer<typeof nativeScreenRenditionSchema>;
 
 export const screenShareAudienceSchema = z.object({
-  userIds: z.array(reference(128)).max(256),
-  roleIds: z.array(reference(128)).max(128),
+  userIds: z.array(reference(128)).max(AUDIENCE_LIMITS.users),
+  roleIds: z.array(reference(128)).max(AUDIENCE_LIMITS.roles),
 }).strict().refine(value => value.userIds.length + value.roleIds.length > 0,
   'A private screen share requires at least one user or role.');
 export type ScreenShareAudience = z.infer<typeof screenShareAudienceSchema>;
@@ -241,6 +244,34 @@ export const nativeScreenFailureSchema = z.enum([
   'unsupported', 'source-unavailable', 'capture-failed', 'connection-failed', 'capacity-exceeded',
 ]);
 export type NativeScreenFailure = z.infer<typeof nativeScreenFailureSchema>;
+
+const unsupportedScreenFailures: ReadonlySet<string> = new Set([
+  'ERR_RTC_ENCODED_FORMAT', 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED',
+  'ERR_MAC_VIDEO_PROFILE_UNSUPPORTED', 'ERR_MAC_VIDEO_ENCODER_UNSUPPORTED',
+]);
+const unavailableScreenSources: ReadonlySet<string> = new Set([
+  'ERR_SCREEN_CAPTURE_SOURCE_LOST', 'ERR_MAC_SOURCE_LOST', 'ERR_MAC_SOURCE_CHANGED',
+  'ERR_MAC_SOURCE_IDENTITY', 'ERR_MAC_CAPTURE_SOURCE_CHANGED', 'ERR_AUDIO_TARGET',
+]);
+const failureCode = (value: unknown): string => {
+  const code: unknown = typeof value === 'object' && value !== null ? Reflect.get(value, 'code') : undefined;
+  return typeof code === 'string' ? code : '';
+};
+
+/**
+ * The public reason of a native screen failure, the same for its publisher and for every viewer.
+ * Retiring failed media often wraps the real cause with cleanup errors, so a known cause anywhere in
+ * the AggregateError/cause chain wins. Only `connection-failed` makes a viewer reconnect by itself.
+ */
+export function nativeScreenFailureReason(error: unknown): NativeScreenFailure {
+  for (const current of errorChain(error)) {
+    const code = failureCode(current);
+    if (code === 'ERR_SCREEN_CAPACITY') return 'capacity-exceeded';
+    if (unsupportedScreenFailures.has(code)) return 'unsupported';
+    if (unavailableScreenSources.has(code)) return 'source-unavailable';
+  }
+  return failureCode(error).includes('CAPTURE') ? 'capture-failed' : 'connection-failed';
+}
 
 export const nativeScreenSignalSchema = z.discriminatedUnion('action', [
   signalEnvelope.extend({

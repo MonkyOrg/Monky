@@ -3,10 +3,12 @@ import { constants, type Stats } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { samePath } from '../canonicalDirectory';
 import { LocalExecutionError } from './errors';
 
-const MAX_TREE_ENTRIES = 10_000;
-const MAX_TREE_DEPTH = 16;
+/** Bounds every walk of a tools or cache tree: a task cache the live scan accepted can always be measured and removed. */
+export const LOCAL_TOOL_TREE_LIMITS = { entries: 10_000, depth: 16 } as const;
+const READ_CHUNK_BYTES = 1024 * 1024;
 const WINDOWS_RETRY_DELAYS = [50, 100, 200, 400, 800];
 
 export async function retryLocalToolMutation(action: () => Promise<void>, signal?: AbortSignal): Promise<void> {
@@ -43,12 +45,6 @@ export function localToolPath(root: string, ...parts: string[]): string {
     throw new LocalExecutionError('invalid_request');
   }
   return filename;
-}
-
-function samePath(first: string, second: string): boolean {
-  return process.platform === 'win32'
-    ? path.normalize(first).toLowerCase() === path.normalize(second).toLowerCase()
-    : path.normalize(first) === path.normalize(second);
 }
 
 export async function localToolStat(filename: string): Promise<Stats | null> {
@@ -115,18 +111,30 @@ export async function readLocalToolFile(
       throw new LocalExecutionError('integrity_failed');
     }
     const digest = createHash('sha256');
-    const buffer = Buffer.allocUnsafe(64 * 1024);
+    // While Main hashes one buffer, the thread pool already fills the other one: the digest of
+    // hundreds of MB costs about the hashing alone, in short slices that keep the event loop free.
+    const length = Math.min(READ_CHUNK_BYTES, opened.size);
+    const buffers = [Buffer.allocUnsafe(length), Buffer.allocUnsafe(length)];
     const chunks: Buffer[] = [];
     let size = 0;
-    while (true) {
-      signal?.throwIfAborted();
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length);
-      if (!bytesRead) break;
-      size += bytesRead;
-      if (size > limit || size > opened.size) throw new LocalExecutionError('integrity_failed');
-      const chunk = buffer.subarray(0, bytesRead);
-      digest.update(chunk);
-      if (collect) chunks.push(Buffer.from(chunk));
+    let filling = 0;
+    let reading = handle.read(buffers[filling], 0, length, 0);
+    try {
+      while (true) {
+        signal?.throwIfAborted();
+        const { bytesRead } = await reading;
+        if (!bytesRead) break;
+        const chunk = buffers[filling].subarray(0, bytesRead);
+        size += bytesRead;
+        if (size > limit || size > opened.size) throw new LocalExecutionError('integrity_failed');
+        filling ^= 1;
+        reading = handle.read(buffers[filling], 0, length, size);
+        digest.update(chunk);
+        if (collect) chunks.push(Buffer.from(chunk));
+      }
+    } finally {
+      // A read issued ahead must settle before the handle closes; its outcome cannot replace the first error.
+      await reading.catch(() => undefined);
     }
     signal?.throwIfAborted();
     const after = await localToolStat(filename);
@@ -145,7 +153,7 @@ export async function localToolTreeBytes(root: string, filename: string): Promis
   await localToolDirectory(path.dirname(filename));
   let entries = 0;
   const visit = async (target: string, depth: number): Promise<number> => {
-    if (++entries > MAX_TREE_ENTRIES || depth > MAX_TREE_DEPTH) throw new LocalExecutionError('storage_failed');
+    if (++entries > LOCAL_TOOL_TREE_LIMITS.entries || depth > LOCAL_TOOL_TREE_LIMITS.depth) throw new LocalExecutionError('storage_failed');
     const stat = await localToolStat(target);
     if (!stat) return 0;
     // Inventory counts the link itself, never its potentially external target.
@@ -172,7 +180,7 @@ export async function removeLocalToolTree(root: string, filename: string): Promi
   await localToolDirectory(path.dirname(filename));
   let entries = 0;
   const remove = async (target: string, depth: number): Promise<void> => {
-    if (++entries > MAX_TREE_ENTRIES || depth > MAX_TREE_DEPTH) throw new LocalExecutionError('storage_failed');
+    if (++entries > LOCAL_TOOL_TREE_LIMITS.entries || depth > LOCAL_TOOL_TREE_LIMITS.depth) throw new LocalExecutionError('storage_failed');
     const stat = await localToolStat(target);
     if (!stat) return;
     await localToolDirectory(path.dirname(target));

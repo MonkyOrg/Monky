@@ -1,7 +1,7 @@
 import {
   LIMITS, MessageType, Permission,
   type ServerUpdateSettingsPayload, type ServerSettingsUpdatedPayload,
-  type TurnInstallProgressPayload, type TurnInstallStage,
+  type TurnInstallProgressPayload, type TurnInstallStage, type ClientMessageArgs,
 } from '@monky/shared';
 import { getActiveNetworkClient, RequestTimeoutError } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
@@ -9,9 +9,11 @@ import { currentEventOrigin, isForegroundEvent } from '../core/sessionRouting';
 import { getActiveServerStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { t, type TranslationKey } from '../i18n';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { escapeHtml } from '../utils/html';
+import { openModal, type ModalShell } from '../utils/modalShell';
+import { reportError } from '../utils/feedback';
+import { selectChoiceCard } from '../utils/formControls';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
-import { enableBackdropClose } from '../utils/modal';
 import { getAvatarUrl } from '../utils/avatar';
 import { afkChannelIdOf } from '../utils/voiceRooms';
 import logoUrl from '../assets/Logo.png';
@@ -29,7 +31,8 @@ import { ServerBotsTab } from './serverSettings/tabs/ServerBotsTab';
 import { ServerCommunitySettings } from './serverSettings/ServerCommunitySettings';
 import { sessionManager } from '../core/SessionManager';
 import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
-import { ServerSettingsOperations } from './serverSettings/ServerSettingsOperations';
+import { renderSettingsTabButtons, renderSettingsTabLabel, selectSettingsTab, type SettingsTabEntry } from './settings/settingsLayout';
+import { ServerSettingsOperations, type ServerSettingsFailure } from './serverSettings/ServerSettingsOperations';
 import type { ServerSettingsContext } from './serverSettings/ServerSettingsContext';
 import { serverSettingsValidationError } from './serverSettings/serverSettingsValidation';
 import './serverSettings/serverSettingsImmediate.css';
@@ -44,10 +47,12 @@ interface FieldBinding {
 }
 
 export class ServerSettingsModal {
+  private shell: ModalShell | null = null;
   private modalEl: HTMLElement | null = null;
   private context: ServerSettingsContext | null = null;
   private invalidated = false;
   private activeTab = 'general';
+  private tabs: readonly SettingsTabEntry[] = [];
   private sectionNavigation: SettingsSectionNavigation | null = null;
   private unbind: Array<() => void> = [];
   private domEvents = new AbortController();
@@ -85,53 +90,48 @@ export class ServerSettingsModal {
       errorMessage: (error) => error instanceof RequestTimeoutError
         ? t('serverSettings.applyTimeout')
         : error instanceof Error && error.message.trim() ? error.message : t('serverSettings.saveError'),
+      failed: (failure) => this.showFailure(failure),
     });
     this.context = {
       client, store, operations, isCurrent, assertAllowed,
-      request: <T>(type: MessageType, payload: object, permission: Permission, timeoutMs?: number) => {
+      request: <T>(message: ClientMessageArgs, permission: Permission, timeoutMs?: number) => {
         assertAllowed(permission);
-        return client.sendRequest<T>(type, payload, undefined, timeoutMs);
+        return client.sendRequest<T>(...message, undefined, timeoutMs);
       },
     };
 
-    const tabs = [
-      { id: 'general', icon: 'tune', title: 'serverSettings.tabGeneral', permission: undefined, html: this.generalTab.renderHtml(this.communitySettings) },
-      { id: 'security', icon: 'lock', title: 'serverSettings.tabSecurity', permission: Permission.MANAGE_SERVER, html: new ServerSecurityTab().renderHtml() },
-      { id: 'voice_video', icon: 'music_note', title: 'serverSettings.tabVoiceVideo', permission: Permission.MANAGE_SERVER, html: new ServerVoiceVideoTab().renderHtml() },
-      { id: 'storage', icon: 'cloud', title: 'serverSettings.tabStorage', permission: Permission.MANAGE_SERVER, html: this.storageTab.renderHtml() },
-      { id: 'notifications', icon: 'notifications', title: 'serverSettings.tabNotifications', permission: undefined, html: new ServerNotificationsTab().renderHtml() },
-      { id: 'members', icon: 'group', title: 'serverSettings.tabMembers', permission: Permission.MANAGE_ROLES, html: new ServerMembersTab().renderHtml() },
-      { id: 'roles', icon: 'admin_panel_settings', title: 'serverSettings.tabRoles', permission: undefined, html: this.rolesTab.renderHtml() },
-      { id: 'bots', icon: 'smart_toy', title: 'serverSettings.tabBots', permission: Permission.MANAGE_BOTS, html: this.botsTab.renderHtml() },
-    ] as const;
+    const tabs: Array<SettingsTabEntry & { permission: Permission | undefined; html: string }> = [
+      { id: 'general', icon: 'tune', label: 'serverSettings.tabGeneral', permission: undefined, html: this.generalTab.renderHtml(this.communitySettings) },
+      { id: 'security', icon: 'lock', label: 'serverSettings.tabSecurity', permission: Permission.MANAGE_SERVER, html: new ServerSecurityTab().renderHtml() },
+      { id: 'voice_video', icon: 'music_note', label: 'serverSettings.tabVoiceVideo', permission: Permission.MANAGE_SERVER, html: new ServerVoiceVideoTab().renderHtml() },
+      { id: 'storage', icon: 'cloud', label: 'serverSettings.tabStorage', permission: Permission.MANAGE_SERVER, html: this.storageTab.renderHtml() },
+      { id: 'notifications', icon: 'notifications', label: 'serverSettings.tabNotifications', permission: undefined, html: new ServerNotificationsTab().renderHtml() },
+      { id: 'members', icon: 'group', label: 'serverSettings.tabMembers', permission: Permission.MANAGE_ROLES, html: new ServerMembersTab().renderHtml() },
+      { id: 'roles', icon: 'admin_panel_settings', label: 'serverSettings.tabRoles', permission: undefined, html: this.rolesTab.renderHtml() },
+      { id: 'bots', icon: 'smart_toy', label: 'serverSettings.tabBots', permission: Permission.MANAGE_BOTS, html: this.botsTab.renderHtml() },
+    ];
     if (!tabs.some((tab) => tab.id === this.activeTab)) this.activeTab = 'general';
-    this.modalEl = document.createElement('div');
-    this.modalEl.className = 'modal-backdrop';
-    this.modalEl.innerHTML = `
-      <div class="modal-card settings-modal-card server-settings-modal-card" role="dialog" aria-modal="true" aria-label="${t('serverSettings.title')}">
+    this.tabs = tabs;
+    const shell = openModal({
+      card: `
+      <div class="modal-card settings-modal-card server-settings-modal-card" aria-label="${escapeHtml(t('serverSettings.title'))}">
         <div class="settings-sidebar">
-          <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); padding: 4px 10px 8px;">${t('connection.settingsTitle')}</div>
-          ${tabs.map((tab) => `
-            <button type="button" class="settings-tab-btn" data-tab="${tab.id}">
-              <span class="material-symbols-outlined md-18">${tab.icon}</span>
-              <span>${t(tab.title)}</span>
-            </button>`).join('')}
+          ${renderSettingsTabButtons(tabs, this.activeTab)}
         </div>
         <div class="settings-main-container">
           <div class="settings-content-header">
-            <div id="server-settings-tab-title" style="font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px;"></div>
-            <button type="button" id="modal-close" class="settings-back-btn" title="${t('common.done')} (ESC)">
+            <div id="server-settings-tab-title" class="settings-tab-title"></div>
+            <button type="button" id="modal-close" class="settings-back-btn" data-modal-close title="${t('common.done')} (ESC)" aria-label="${escapeHtml(t('common.done'))}">
               <span class="material-symbols-outlined md-18">close</span><span class="esc-hint">ESC</span>
             </button>
           </div>
           <form id="form-server-settings" novalidate style="display: flex; flex-direction: column; flex: 1; min-height: 0; margin: 0;">
             <div class="settings-content-body">
               ${tabs.map((tab) => `
-                <div class="settings-tab-panel" id="tab-panel-${tab.id}">
+                <div class="settings-tab-panel" id="tab-panel-${tab.id}" ${tab.id === this.activeTab ? '' : 'hidden'}>
                   <fieldset class="server-settings-fieldset" ${tab.permission === undefined ? 'data-server-local' : `data-server-permission="${tab.permission}"`}>${tab.html}</fieldset>
                 </div>`).join('')}
             </div>
-            <div id="server-settings-banner" class="error-banner server-settings-errors" role="alert" aria-live="polite"></div>
             <div id="turn-install-progress" class="turn-install-progress" hidden>
               <div class="turn-install-progress-head">
                 <span class="material-symbols-outlined md-16">download</span>
@@ -143,18 +143,27 @@ export class ServerSettingsModal {
             </div>
             <div class="modal-footer" style="padding: 14px 24px; border-top: 1px solid var(--border-color); background: var(--bg-panel); margin-top: auto; gap: 16px;">
               <span id="server-settings-status" class="server-settings-status" role="status" aria-live="polite">${t('serverSettings.immediateHint')}</span>
-              <button type="button" id="btn-done" class="btn btn-primary">${t('common.done')}</button>
+              <button type="button" id="btn-done" class="btn btn-primary" data-modal-close>${t('common.done')}</button>
             </div>
           </form>
         </div>
-      </div>`;
-    document.body.appendChild(this.modalEl);
-    enterModal(this.modalEl);
+      </div>`,
+      initialFocus: false,
+      // Closing first commits a field being typed; it waits while any edit is still being applied.
+      canClose: () => {
+        this.finishEditing();
+        return !this.context?.operations.pendingCount;
+      },
+      onClose: () => this.teardown(),
+    });
+    this.shell = shell;
+    this.modalEl = shell.element;
     this.domEvents = new AbortController();
     this.attachEvents();
     this.sectionNavigation = new SettingsSectionNavigation(this.modalEl);
     this.switchTab(this.activeTab);
     this.refreshState();
+    shell.card.querySelector<HTMLElement>(`[data-tab="${this.activeTab}"]`)?.focus({ preventScroll: true });
   }
 
   private switchTab(tabName: string): void {
@@ -163,14 +172,13 @@ export class ServerSettingsModal {
     if (!root || !button || button.hidden) return;
     this.finishEditing();
     this.activeTab = tabName;
-    root.querySelectorAll<HTMLButtonElement>('.settings-tab-btn').forEach((tab) => {
-      tab.classList.toggle('active', tab === button);
-    });
+    selectSettingsTab(root, tabName);
     root.querySelectorAll<HTMLElement>('.settings-tab-panel').forEach((panel) => {
-      panel.style.display = panel.id === `tab-panel-${tabName}` ? 'flex' : 'none';
+      panel.hidden = panel.id !== `tab-panel-${tabName}`;
     });
     const title = root.querySelector('#server-settings-tab-title');
-    if (title) title.innerHTML = button.innerHTML;
+    const entry = this.tabs.find((tab) => tab.id === tabName);
+    if (title && entry) title.innerHTML = renderSettingsTabLabel(entry).toString();
     this.sectionNavigation?.setTab(tabName);
   }
 
@@ -180,24 +188,7 @@ export class ServerSettingsModal {
     if (!root || !context) return;
     const options = { signal: this.domEvents.signal };
     if (this.communitySettings) this.unbind.push(this.communitySettings.attach(root, context));
-    root.querySelector('#modal-close')?.addEventListener('click', () => this.close(), options);
-    root.querySelector('#btn-done')?.addEventListener('click', () => this.close(), options);
-    root.addEventListener('mousedown', (event) => { if (event.target === root) this.close(); }, options);
-    const escape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || !handlesModalKey(root, event)) return;
-      event.preventDefault();
-      // A search being typed is cleared first; the next Escape closes.
-      const field = event.target;
-      if (field instanceof HTMLInputElement && field.hasAttribute('data-clear-on-escape') && field.value) {
-        event.stopPropagation();
-        field.value = '';
-        field.dispatchEvent(new Event('input', { bubbles: true }));
-        return;
-      }
-      this.close();
-    };
-    window.addEventListener('keydown', escape, true);
-    this.unbind.push(() => window.removeEventListener('keydown', escape, true), this.generalTab.attach(root));
+    this.unbind.push(this.generalTab.attach(root));
     root.querySelector('#form-server-settings')?.addEventListener('submit', (event) => {
       event.preventDefault();
       this.finishEditing();
@@ -299,7 +290,7 @@ export class ServerSettingsModal {
         ) : null;
         if (action === 'change' && !image) return;
         await context.request<ServerSettingsUpdatedPayload>(
-          MessageType.SERVER_UPDATE_SETTINGS, { iconBase64: image }, Permission.MANAGE_SERVER, 11 * 60 * 1000,
+          [MessageType.SERVER_UPDATE_SETTINGS, { iconBase64: image }], Permission.MANAGE_SERVER, 11 * 60 * 1000,
         );
       });
     }, options);
@@ -325,7 +316,7 @@ export class ServerSettingsModal {
       }
       this.refreshState();
     };
-    for (const event of ['server.updated', 'server.roles_updated', 'server.members_updated', 'session.changed', 'network.status', 'network.connected', 'settings.updated']) {
+    for (const event of ['server.updated', 'server.roles_updated', 'server.members_updated', 'session.changed', 'network.status', 'network.connected', 'settings.updated'] as const) {
       this.unbind.push(appEvents.on(event, refresh));
     }
     window.addEventListener('storage', refresh);
@@ -404,7 +395,7 @@ export class ServerSettingsModal {
         // Another administrator can already be installing TURN in the server's
         // shared settings queue, even when this particular patch is a rename.
         await context.request<ServerSettingsUpdatedPayload>(
-          MessageType.SERVER_UPDATE_SETTINGS, patch, Permission.MANAGE_SERVER, 11 * 60 * 1000,
+          [MessageType.SERVER_UPDATE_SETTINGS, patch], Permission.MANAGE_SERVER, 11 * 60 * 1000,
         );
       } finally {
         stopProgress?.();
@@ -427,13 +418,13 @@ export class ServerSettingsModal {
     root.querySelectorAll<HTMLButtonElement>('#modal-close, #btn-done').forEach((button) => { button.disabled = pending; });
     root.querySelector('#form-server-settings')?.setAttribute('aria-busy', String(pending));
     const status = root.querySelector('#server-settings-status');
-    if (status) status.textContent = pending
-      ? t('serverSettings.applying', { count: operations.pendingCount })
-      : t('serverSettings.immediateHint');
-    const banner = root.querySelector('#server-settings-banner');
-    if (banner) {
-      banner.textContent = operations.failures.map((failure) => `${failure.label}: ${failure.message}`).join('\n');
-      banner.classList.toggle('show', operations.failures.length > 0);
+    if (status) status.textContent = this.invalidated ? t('serverSettings.sessionChanged')
+      : pending ? t('serverSettings.applying', { count: operations.pendingCount })
+        : t('serverSettings.immediateHint');
+    // A field stays marked from its refused edit until the next attempt to apply it.
+    for (const binding of this.bindings) {
+      if (operations.failures.some((failure) => failure.key === binding.key)) binding.input.setAttribute('aria-invalid', 'true');
+      else binding.input.removeAttribute('aria-invalid');
     }
     root.querySelectorAll<HTMLFieldSetElement>('fieldset[data-server-permission], fieldset[data-server-local]').forEach((fieldset) => {
       const permission = Number(fieldset.dataset.serverPermission);
@@ -511,52 +502,34 @@ export class ServerSettingsModal {
   private syncVoiceCards(mode: 'p2p' | 'sfu'): void {
     const input = this.modalEl?.querySelector<HTMLInputElement>('#input-server-voice-mode');
     if (input) input.value = mode;
-    this.modalEl?.querySelectorAll<HTMLButtonElement>('#server-voice-mode-cards [data-mode]').forEach((card) => {
-      const selected = card.dataset.mode === mode;
-      card.classList.toggle('selected', selected);
-      card.setAttribute('aria-pressed', String(selected));
-      card.style.borderColor = selected ? 'var(--accent-primary)' : 'var(--border-color)';
-      card.style.background = selected ? 'rgba(88, 101, 242, 0.1)' : 'var(--bg-card-secondary)';
-      const icon = card.querySelector<HTMLElement>('.material-symbols-outlined');
-      if (icon) icon.style.color = selected ? 'var(--accent-primary)' : 'var(--text-muted)';
-    });
+    const cards = this.modalEl?.querySelector<HTMLElement>('#server-voice-mode-cards');
+    if (cards) selectChoiceCard(cards, 'data-mode', mode);
   }
 
   private showIconActionModal(hasCustomIcon: boolean): Promise<'change' | 'remove' | null> {
     return new Promise((resolve) => {
-      const backdrop = document.createElement('div');
-      backdrop.className = 'modal-backdrop';
-      backdrop.style.zIndex = '10001';
-      backdrop.innerHTML = `
-        <div class="modal-card dialog-card" role="dialog" aria-modal="true" style="max-width: 380px;">
-          <div class="modal-header"><div class="modal-title">${t('serverSettings.photoDialogTitle')}</div>
-            <button type="button" class="modal-close-btn" data-action="cancel" aria-label="${t('common.cancel')}">&times;</button></div>
-          <div class="dialog-message">${t('serverSettings.photoDialogPrompt')}</div>
+      let action: 'change' | 'remove' | null = null;
+      const shell = openModal({
+        card: `
+        <div class="modal-card dialog-card" style="max-width: 380px;">
+          <div class="modal-header"><div class="modal-title">${escapeHtml(t('serverSettings.photoDialogTitle'))}</div>
+            <button type="button" class="modal-close-btn" data-action="cancel" data-modal-close aria-label="${escapeHtml(t('common.cancel'))}">&times;</button></div>
+          <div class="dialog-message">${escapeHtml(t('serverSettings.photoDialogPrompt'))}</div>
           <div style="display: flex; flex-direction: column; gap: 8px;">
-            <button type="button" class="btn btn-primary" data-action="change">${t('settings.avatarChange')}</button>
-            ${hasCustomIcon ? `<button type="button" class="btn btn-danger" data-action="remove">${t('settings.avatarRemove')}</button>` : ''}
-            <button type="button" class="btn btn-secondary" data-action="cancel">${t('common.cancel')}</button>
+            <button type="button" class="btn btn-primary" data-action="change">${escapeHtml(t('settings.avatarChange'))}</button>
+            ${hasCustomIcon ? `<button type="button" class="btn btn-danger" data-action="remove">${escapeHtml(t('settings.avatarRemove'))}</button>` : ''}
+            <button type="button" class="btn btn-secondary" data-action="cancel" data-modal-close>${escapeHtml(t('common.cancel'))}</button>
           </div>
-        </div>`;
-      const settle = (result: 'change' | 'remove' | null) => {
-        document.removeEventListener('keydown', keydown, true);
-        exitModal(backdrop);
-        resolve(result);
-      };
-      const keydown = (event: KeyboardEvent) => {
-        if (!handlesModalKey(backdrop, event)) return;
-        if (event.key === 'Escape') { event.stopPropagation(); settle(null); }
-      };
-      backdrop.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((button) => {
-        button.addEventListener('click', () => {
-          const action = button.dataset.action;
-          settle(action === 'change' || action === 'remove' ? action : null);
-        });
+        </div>`,
+        initialFocus: '[data-action="change"]',
+        onClose: () => resolve(action),
       });
-      enableBackdropClose(backdrop, () => settle(null));
-      document.addEventListener('keydown', keydown, true);
-      document.body.appendChild(backdrop);
-      enterModal(backdrop);
+      shell.card.querySelectorAll<HTMLButtonElement>('[data-action="change"], [data-action="remove"]').forEach((button) => {
+        button.addEventListener('click', () => {
+          action = button.dataset.action === 'remove' ? 'remove' : 'change';
+          shell.close('button');
+        }, { signal: shell.signal });
+      });
     });
   }
 
@@ -594,10 +567,16 @@ export class ServerSettingsModal {
       this.modalEl?.contains(active)) active.blur();
   }
 
+  /** Every refused edit is explained once, in the shared alert toast. */
+  private showFailure(failure: ServerSettingsFailure): void {
+    if (this.modalEl) reportError(`${failure.label}: ${failure.message}`);
+  }
+
   public close(): boolean {
-    if (!this.modalEl) return true;
-    this.finishEditing();
-    if (this.context?.operations.pendingCount) return false;
+    return this.shell?.close('api') ?? true;
+  }
+
+  private teardown(): void {
     this.sectionNavigation?.destroy();
     this.sectionNavigation = null;
     this.domEvents.abort();
@@ -605,11 +584,10 @@ export class ServerSettingsModal {
     this.unbind = [];
     this.rolesTab.detachEvents();
     this.botsTab.detachEvents();
-    exitModal(this.modalEl);
+    this.shell = null;
     this.modalEl = null;
     this.context = null;
     this.bindings = [];
-    return true;
   }
 }
 

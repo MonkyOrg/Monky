@@ -761,7 +761,9 @@ async function runLocalizedCommandDomSmoke() {
     check(!alice.store.getCommandDraft('chat') && !alice.invoked.length &&
       root.querySelectorAll('[data-command-section^="bot:"]').length === 2,
     'Canonical input shared by two bots shows disambiguation without invoking either');
-    check(!find('#chat-command-notice').hidden, 'Ambiguous input explains that a bot must be selected');
+    check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-label')?.textContent ===
+      language.t('botChat.commandAmbiguous') && !root.querySelector('#chat-command-notice'),
+    'Ambiguous input explains in the alert toast, not in a line of the composer, that a bot must be selected');
     preference(alice, secondary.botId, 'pt-BR');
     type(find('#chat-message-input'), '/musica Alias  values');
     find('#btn-send-message').click();
@@ -1389,8 +1391,7 @@ async function runAutocompleteDomSmoke() {
       queries: queries.map(entry => entry.payload.query), invoked: invoked.length,
       field: root.querySelector('[data-bot-autocomplete]')?.value,
       menu: root.querySelector('#bot-parameter-options')?.textContent?.slice(0, 200),
-      notice: root.querySelector('#chat-command-notice')?.textContent,
-      error: root.querySelector('.bot-error')?.textContent,
+      alert: document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-label')?.textContent,
     }));
   };
   const type = (element, value) => { element.focus(); element.value = value; element.dispatchEvent(new Event('input', { bubbles: true })); };
@@ -1670,8 +1671,8 @@ async function runAutocompleteDomSmoke() {
   settingsStore.soundboardFolderPath = '';
   select();
   check(!store.getCommandDraft('one') && pickerCalls === 0 &&
-    find('#chat-command-notice').textContent.includes('Selecione uma pasta'),
-    'Missing folders warn immediately without entering a command or opening a native picker');
+    find('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-label').textContent.includes('Selecione uma pasta'),
+    'Missing folders warn immediately, in the alert toast, without entering a command or opening a native picker');
   settingsStore.soundboardFolderPath = 'C:\\isolated-fixture-sounds';
   settingsStore.save();
   settingsStore.soundboardFolderPath = '';
@@ -1680,9 +1681,10 @@ async function runAutocompleteDomSmoke() {
     'A saved legacy sound folder survives settings restoration before selecting /query');
   availability = 'confirmation_required';
   select();
-  await waitFor(() => root.querySelector('#chat-command-notice')?.textContent?.includes('Confirme a pasta'));
+  await waitFor(() => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-label')?.textContent?.includes('Confirme a pasta'));
   check(!store.getCommandDraft('one'), 'An unconfirmed legacy folder must block composer activation');
-  check(!root.querySelector('#chat-command-notice button'), 'Folder confirmation is handled in settings, not by an inline picker');
+  check(![...document.querySelectorAll('.chat-copy-toast:not([data-ui-closing]) button')].some(button => !button.classList.contains('chat-copy-toast-close')),
+    'Folder confirmation is handled in settings, not by an inline picker');
   const { SoundboardTab } = await import('/views/settings/tabs/SoundboardTab.ts');
   const folderSettings = document.createElement('section');
   document.body.appendChild(folderSettings);
@@ -2342,8 +2344,11 @@ async function runLocalDownloadGestureSmoke(window) {
       }
       input.value = '../escape';
       input.dispatchEvent(new Event('input', { bubbles: true }));
-      if (!modal.querySelector('[data-action="confirm"]').disabled || modal.querySelector('[data-dialog-input-error]').hidden ||
-          input.getAttribute('aria-invalid') !== 'true') throw new Error('Invalid names must show an error and block saving');
+      const refusal = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+      if (!modal.querySelector('[data-action="confirm"]').disabled || input.getAttribute('aria-invalid') !== 'true'
+          || modal.querySelector('.dialog-input-error') || !refusal?.querySelector('.chat-copy-toast-label')?.textContent.trim()) {
+        throw new Error('Invalid names must be marked, explained in the alert toast and block saving');
+      }
     })()`, true);
     enter();
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -2354,7 +2359,7 @@ async function runLocalDownloadGestureSmoke(window) {
       const input = modal.querySelector('[data-dialog-input]');
       input.value = ${JSON.stringify(baseName)};
       input.dispatchEvent(new Event('input', { bubbles: true }));
-      if (modal.querySelector('[data-action="confirm"]').disabled || !modal.querySelector('[data-dialog-input-error]').hidden) {
+      if (modal.querySelector('[data-action="confirm"]').disabled || input.getAttribute('aria-invalid') === 'true') {
         throw new Error('Correcting the filename must clear the error and enable confirmation');
       }
       modal.querySelector('[data-action="confirm"]').click();
@@ -2655,9 +2660,13 @@ async function runSettingsNavigationSmoke() {
   let cleanups = 0;
   let versions = 0;
   const modal = new SettingsModal();
-  for (const key of ['accountTab', 'soundboardTab', 'stickersTab', 'keybindsTab', 'notificationsTab', 'qualityTab', 'logsTab']) {
+  for (const key of ['accountTab', 'soundboardTab', 'stickersTab', 'keybindsTab', 'notificationsTab', 'logsTab']) {
     modal[key] = { renderHtml: () => '', attachEvents: () => {}, cleanup: () => {} };
   }
+  let qualityActivations = 0;
+  let qualityDeactivations = 0;
+  modal.qualityTab = { renderHtml: () => '', attachEvents: () => {}, cleanup: () => {},
+    activate: () => { qualityActivations++; }, deactivate: () => { qualityDeactivations++; } };
   modal.aboutTab = { renderHtml: () => '', attachEvents: () => {}, cleanup: () => {}, loadAppVersion: async () => { versions++; } };
   modal.voiceVideoTab = {
     renderHtml: () => '<label for="settings-select-fixture">Device</label><select id="settings-select-fixture" title="Device choice"><option value="one">One</option><option value="two">Two</option></select>',
@@ -2668,11 +2677,15 @@ async function runSettingsNavigationSmoke() {
   try {
     await modal.open();
     check(starts === 0 && cameraActivations === 0, 'Opening account settings must not start hidden media previews');
+    check(qualityActivations === 0, 'Opening settings on another tab must not start the screen encoder checks');
     modal.close();
     await modal.open('voice_video');
-    check(document.querySelector('#tab-panel-voice_video').style.display !== 'none'
+    // Panels are shown and hidden with the hidden attribute: what is on screen is what counts.
+    const voicePanel = document.querySelector('#tab-panel-voice_video');
+    const accountPanel = document.querySelector('#tab-panel-account');
+    check(!voicePanel.hidden && voicePanel.checkVisibility() && accountPanel.hidden && !accountPanel.checkVisibility()
       && document.querySelector('#settings-current-tab-title').textContent.includes(t('settings.tabVoiceVideo')),
-    'Quick audio settings shortcut opens the voice tab directly');
+    'Quick audio settings shortcut opens the voice tab directly, with the account tab hidden');
     check(starts === 1 && cameraActivations === 1, 'Visible voice settings activates its media previews exactly once');
     const select = document.getElementById('settings-select-fixture');
     select.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' }));
@@ -2688,6 +2701,13 @@ async function runSettingsNavigationSmoke() {
     modal.switchTab('voice_video');
     check(starts === 2 && cameraActivations === 2 && cleanups === priorCleanup,
       'Returning to voice resumes its media previews without duplicating or dropping bindings');
+    check(qualityActivations === 0, 'Voice settings never start the screen encoder checks');
+    modal.switchTab('quality');
+    check(qualityActivations === 1, 'Showing quality settings starts its encoder checks once');
+    const qualityStops = qualityDeactivations;
+    modal.switchTab('account');
+    check(qualityActivations === 1 && qualityDeactivations === qualityStops + 1,
+      'Leaving quality settings stops its automatic encoder checks');
     modal.close();
     check(cleanups === priorCleanup + 1, 'Closing settings performs full voice tab cleanup');
     let resolveRefresh;
@@ -3261,7 +3281,7 @@ async function runSidebarPttSmoke() {
     document.getElementById('ptt-stage-fixture').style.display = 'none';
     view.render();
     language.setLanguage('pt-BR');
-    const healthChanged = webRtcManager.sfuEngine.callbacks.onHealthChanged;
+    const healthChanged = webRtcManager.sfu.engine.callbacks.onHealthChanged;
     const connectionRow = () => root.querySelector('#voice-connection-row');
     const connectionStatus = () => root.querySelector('.voice-conn-status');
     const connectionSignal = () => root.querySelector('.voice-conn-signal');
@@ -3671,9 +3691,10 @@ async function runDomSmoke(sharedModule) {
     navigator.clipboard.writeText = async () => { throw new Error('Clipboard denied by fixture'); };
     find('[data-message-action="copy"]').click();
     await Promise.resolve();
-    check(!active('.chat-copy-toast'), 'Clipboard failure must never show a success toast');
-    check(find('.dialog-message').textContent === 'Não foi possível copiar a mensagem.', 'Clipboard failure must retain localized error feedback');
-    find('.dialog-card [data-action="confirm"]').click();
+    check(!active('.chat-copy-toast:not(.chat-copy-toast--danger)'), 'Clipboard failure must never show a success toast');
+    check(active('.chat-copy-toast--danger')?.querySelector('.chat-copy-toast-label').textContent === 'Não foi possível copiar a mensagem.'
+      && !active('.modal-backdrop .dialog-card'), 'Clipboard failure must retain localized error feedback, in the alert toast');
+    active('.chat-copy-toast--danger').querySelector('.chat-copy-toast-close').click();
     navigator.clipboard.writeText = async () => {};
     find('[data-message-action="copy"]').click();
     await Promise.resolve();
@@ -4215,10 +4236,27 @@ async function runDomSmoke(sharedModule) {
   view.setChannel('two');
   view.setChannel('one');
   check(find('#chat-message-input').value === 'Ordinary draft stays here', 'Channel switches must retain ordinary drafts');
+  // A mention list still open when the channel changes must not take over the next channel's first Enter.
+  store.clearCommand('two');
+  store.setDraft('two', 'Draft waiting in the other channel');
+  type(find('#chat-message-input'), '@');
+  check(!!active('#mention-dropup .mention-item'), 'Typing @ opens the mention list');
+  view.setChannel('two');
+  check(find('#chat-message-input').value === 'Draft waiting in the other channel' && !active('#mention-dropup .mention-item'),
+    'The next channel restores its own draft, with no mention list');
+  const chatSends = () => sent.filter((entry) => entry.type === 'CHAT_SEND');
+  const sendsBeforeSwitch = chatSends().length;
+  key(find('#chat-message-input'), 'Enter');
+  check(chatSends().length === sendsBeforeSwitch + 1 && chatSends().at(-1).payload.channelId === 'two'
+    && chatSends().at(-1).payload.content === 'Draft waiting in the other channel' && !store.getDraft('two'),
+  `The first Enter in the next channel sends its own draft, untouched by the previous channel's mention list: ${JSON.stringify({
+    draft: store.getDraft('two'), sent: chatSends().slice(sendsBeforeSwitch) })}`);
+  view.setChannel('one');
+  type(find('#chat-message-input'), '');
   type(find('#chat-message-input'), '/ping');
   key(find('#chat-message-input'), 'Tab');
   check(!store.getCommandDraft('one'), 'No-argument Tab selection must execute immediately, leaving the composer at once');
-  await view.botChat.invoke();
+  await view.commands.botChat.invoke();
   document.querySelector('#chat-command-composer form')?.requestSubmit();
   await waitFor(() => sent.filter((entry) => entry.type === 'COMMAND_INVOKE').length === 2);
   await frame();
@@ -4257,12 +4295,30 @@ async function runDomSmoke(sharedModule) {
   server.myPermissions = 2147483647;
   events.appEvents.emit('server.roles_updated');
   check(!find('.bot-inline-form button[type="submit"]').disabled, 'Restored access must restore form editing');
+  const pendingSubmitRequest = client.sendRequest;
+  client.sendRequest = (messageType, ...args) => messageType === 'COMMAND_SUBMIT'
+    ? Promise.reject(new Error('Retry this form')) : pendingSubmitRequest(messageType, ...args);
   find('.bot-inline-form button[type="submit"]').click();
-  store.failFormSubmit(invocation.invocationId, 'form', 'Retry this form');
-  check(find('.bot-inline-form .bot-error').textContent === 'Retry this form', 'Failed form must stay visible with its error');
+  await frame();
+  client.sendRequest = pendingSubmitRequest;
+  check(active('.chat-copy-toast--danger')?.querySelector('.chat-copy-toast-label').textContent === 'Retry this form'
+    && !find('.bot-inline-form button[type="submit"]').disabled && !document.querySelector('.bot-inline-form .bot-error'),
+  'A failed form stays open for another try and explains the failure in the alert toast, not inside the form');
+  active('.chat-copy-toast--danger').querySelector('.chat-copy-toast-close').click();
   find('.bot-inline-form button[type="submit"]').click();
   store.acknowledgeForm({ invocationId: invocation.invocationId, interactionId: 'form', values: { question: 'Preserve the private form' } });
   check(!document.querySelector('[data-interaction-id="form"]'), 'Acknowledged form must disappear');
+  const pendingCancelRequest = client.sendRequest;
+  client.sendRequest = (messageType, ...args) => messageType === 'COMMAND_CANCEL'
+    ? Promise.reject(new Error('Cancel refused by fixture')) : pendingCancelRequest(messageType, ...args);
+  find(`[data-invocation-id="${invocation.invocationId}"] [data-bot-action="cancel-invocation"]`).click();
+  await frame();
+  client.sendRequest = pendingCancelRequest;
+  check(active('.chat-copy-toast--danger')?.querySelector('.chat-copy-toast-label').textContent === 'Cancel refused by fixture'
+    && !find(`[data-invocation-id="${invocation.invocationId}"] [data-bot-action="cancel-invocation"]`).disabled
+    && !document.querySelector('.bot-interaction-card .bot-error'),
+  'A refused cancel keeps the command running and explains the failure in the alert toast, not inside the card');
+  active('.chat-copy-toast--danger').querySelector('.chat-copy-toast-close').click();
   const selectorForm = (presentation) => ({
     title: 'Choose a next step',
     fields: [{ name: 'choice', label: 'Choose', type: 'select', required: true, presentation,
@@ -4505,6 +4561,19 @@ async function runDomSmoke(sharedModule) {
   selectorFeed.querySelector('[data-selector-confirm]').click();
   await frame();
   check(publicRequests.filter((request) => request.type === 'SELECTOR_RESPOND').length === 2, 'Confirm must submit a public dropdown once');
+  // A refused response is explained in the alert toast, never inside the selector, which stays open for another try (#490).
+  const answerPublic = selectorClient.sendRequest;
+  selectorClient.sendRequest = async (messageType, payload) => {
+    if (messageType === 'SELECTOR_RESPOND') throw new Error('Selector refused by fixture');
+    return answerPublic(messageType, payload);
+  };
+  selectorFeed.querySelector('[data-selector-confirm]').click();
+  await frame();
+  selectorClient.sendRequest = answerPublic;
+  check(active('.chat-copy-toast--danger')?.querySelector('.chat-copy-toast-label').textContent === 'Selector refused by fixture'
+    && !selectorFeed.querySelector('.bot-error') && !selectorFeed.querySelector('[data-selector-confirm]').disabled,
+  'A refused public response is explained in the alert toast and the selector stays open for another try');
+  active('.chat-copy-toast--danger').querySelector('.chat-copy-toast-close').click();
   selectorRow();
   await frame();
   check(!!selectorFeed.querySelector('[data-selector-value="a"]'), 'History rerenders must restore public audio selector controls');
@@ -4572,10 +4641,10 @@ async function runDomSmoke(sharedModule) {
     const pointerRow = find('[data-message-id="toolbar-pointer"]');
     pointerRow.style.marginTop = '60px';
     pointerRow.scrollIntoView({ block: 'center' });
-    window.closeToolbarPointerPicker = () => view.reactionPicker?.close();
+    window.closeToolbarPointerPicker = () => view.feed.reactionPicker?.close();
     window.cleanupToolbarPointerFixture = () => {
       contextMenu.close();
-      view.reactionPicker?.close();
+      view.feed.reactionPicker?.close();
       navigator.clipboard.writeText = writeText;
       navigator.clipboard.write = write;
       offTooltips();

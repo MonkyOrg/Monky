@@ -4,9 +4,10 @@ import type { ChannelService } from './ChannelService';
 import type { PermissionService } from './PermissionService';
 import type { ChatService } from './ChatService';
 import type { SqliteForumRepository } from '../../infrastructure/database/SqliteForumRepository';
+import { ServiceError } from '../errors';
 
-export class ForumError extends Error {
-  constructor(message: string, readonly code = ProtocolErrorCode.FORUM_INVALID) { super(message); }
+export class ForumError extends ServiceError {
+  constructor(message: string, code: ProtocolErrorCode = ProtocolErrorCode.FORUM_INVALID) { super(code, message); }
 }
 
 export class ForumService {

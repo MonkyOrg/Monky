@@ -2,50 +2,58 @@ import { ChannelType, UserStatus, VoiceMode } from '@monky/shared';
 
 export type { VoiceRestrictions } from '@monky/shared';
 
+/**
+ * The server's settings as `getServer()` reads them: every one holds its
+ * value, with the defaults already applied (SERVER_SETTING_DEFAULTS), so no
+ * reader repeats them (S-APP-10).
+ */
 export interface ServerRecord {
-  everyonePermissions?: number;
-  maxMessageLength?: number;
+  everyonePermissions: number;
+  maxMessageLength: number;
   id: string;
   name: string;
   passwordHash: string;
   createdAt: number;
   maxUsers: number;
-  ownerUserId?: string | null;
-  allowSoundboard?: boolean;
-  dmRelayEnabled?: boolean;
-  recentSoundCacheEnabled?: boolean;
-  recentSoundCacheLimit?: number;
+  ownerUserId: string | null;
+  allowSoundboard: boolean;
+  dmRelayEnabled: boolean;
+  recentSoundCacheEnabled: boolean;
+  recentSoundCacheLimit: number;
   /** Whether `@todos` / `@everyone` pings the whole channel (#464). */
-  allowEveryoneMention?: boolean;
-  allowMessageEdit?: boolean;
-  messageDeleteUndoSeconds?: number;
+  allowEveryoneMention: boolean;
+  allowMessageEdit: boolean;
+  messageDeleteUndoSeconds: number;
   /**
    * Whether role badges in the member list are shown to everyone (#530).
    * When off, a badge is only visible to members who hold that same role.
    */
-  showRoleBadgesToEveryone?: boolean;
+  showRoleBadgesToEveryone: boolean;
   /** Voice mode ('p2p' | 'sfu') (#515). */
-  voiceMode?: VoiceMode;
-  iconPath?: string | null;
+  voiceMode: VoiceMode;
+  iconPath: string | null;
   // Attachment storage limits in bytes (#11); null → shared defaults.
-  maxAttachmentFileBytes?: number | null;
-  maxAttachmentStorageBytes?: number | null;
+  maxAttachmentFileBytes: number | null;
+  maxAttachmentStorageBytes: number | null;
   /** Whether the built-in TURN relay should run alongside the server (#425). */
-  turnEnabled?: boolean;
+  turnEnabled: boolean;
   /** Voice channel idle members are moved to; null when the server has none. */
-  afkChannelId?: string | null;
+  afkChannelId: string | null;
   /** One of AFK_TIMEOUT_OPTIONS_SECONDS. */
-  afkTimeoutSeconds?: number;
+  afkTimeoutSeconds: number;
   /** Maximum number of bots allowed on this server (#569). */
-  maxBots?: number;
+  maxBots: number;
   /**
    * Shared secret backing TURN's REST-API credentials (#425).
    *
    * Never leaves the server: clients only ever receive values derived from it.
    * Null until the relay is enabled for the first time.
    */
-  turnSecret?: string | null;
+  turnSecret: string | null;
 }
+
+/** What creating the server takes: the settings left out start at their defaults. */
+export type NewServerRecord = Pick<ServerRecord, 'id' | 'name' | 'passwordHash' | 'createdAt' | 'maxUsers'> & Partial<ServerRecord>;
 
 export interface UserRecord {
   id: string;

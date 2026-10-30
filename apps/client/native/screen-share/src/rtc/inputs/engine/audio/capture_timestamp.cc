@@ -29,10 +29,14 @@ std::optional<std::int64_t> CaptureTimestampQpc(
 }
 
 RtcCaptureTimestamp CaptureTimestampRtc(const CaptureClockMapping& mapped) {
-  if (mapped.status == CaptureClockStatus::kSampleUncertain)
-    throw AudioError(Failure::ClockObservationUnavailable, CaptureClockErrorMessage(mapped.status));
-  if (mapped.status != CaptureClockStatus::kOk)
-    throw AudioError(Failure::Clock, CaptureClockErrorMessage(mapped.status));
+  switch (CaptureClockActionFor(mapped.status)) {
+    case CaptureClockAction::kUse: break;
+    case CaptureClockAction::kDropFrame:
+      // Only this block's absolute capture time is unavailable: its PCM continuity is still proven.
+      throw AudioError(Failure::ClockObservationUnavailable, CaptureClockErrorMessage(mapped.status));
+    case CaptureClockAction::kReset:
+      throw AudioError(Failure::Clock, CaptureClockErrorMessage(mapped.status));
+  }
   // AudioTrackSinkInterface's "absolute" timestamp uses TimeMillis, not the
   // NTP value reported independently by a remote mixer's RTP/RTCP mapping.
   return RtcCaptureTimestamp{mapped.timestamp_us / 1000};

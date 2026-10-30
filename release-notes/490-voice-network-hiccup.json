@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Uma oscilação curta de rede (até ~20 s) não tira mais ninguém da chamada, e um engasgo do servidor não derruba todos de uma vez. Bots entram em chamadas SFU mesmo conectados por domínio.",
+  "en": "A short network hiccup (up to ~20 s) no longer drops anyone from a call, and a server stall no longer disconnects everyone at once. Bots now join SFU calls even when connected through a domain name."
+}

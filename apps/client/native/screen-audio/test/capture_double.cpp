@@ -17,7 +17,6 @@
 namespace screen_audio {
 Napi::Value CreatePacketCapture(const Napi::CallbackInfo&);
 static std::atomic<int> scenario{0}, activeWorkers{0};
-static std::unique_ptr<CaptureLease> legacy;
 
 namespace packet_capture_test {
 enum Metric : size_t {
@@ -480,16 +479,9 @@ static Napi::Object InitDouble(Napi::Env env, Napi::Object exports) {
   exports.Set("activeWorkers", Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
     return Napi::Number::New(info.Env(), activeWorkers.load());
   }));
-  exports.Set("legacyStart", Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
-    if (legacy) return Napi::Boolean::New(info.Env(), false);
-    auto candidate = std::make_unique<CaptureLease>(CaptureOwner::legacy);
-    if (!candidate->held()) return Napi::Boolean::New(info.Env(), false);
-    legacy = std::move(candidate);
-    return Napi::Boolean::New(info.Env(), true);
-  }));
-  exports.Set("legacyStop", Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
-    legacy.reset();
-    return info.Env().Undefined();
+  // Leases held on the real production counter; zero once every session returned its slot.
+  exports.Set("captureLeases", Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
+    return Napi::Number::New(info.Env(), packetCaptures.load());
   }));
   return exports;
 }

@@ -33,6 +33,7 @@ import type {
   LocalTaskFailureEvent,
 } from './localExecution.js';
 import type { UserActivity } from './models.js';
+import type { DmEvent, DmExportMode, DmInvokeChannels } from './directMessages.js';
 import {
   botDeviceStorageGrantSchema, botDeviceStorageScopeSchema,
   type BotDeviceStorageDocumentState, type BotDeviceStorageEntry, type BotDeviceStorageResponse,
@@ -253,6 +254,20 @@ export const SOUND_DOWNLOAD_IPC = {
 
 export const SOUND_DOWNLOAD_PROGRESS = 'soundboard:download-progress' satisfies keyof IpcEvents;
 
+/**
+ * Sound and sticker folders the renderer had configured before reading them
+ * required a native confirmation. Only the main window's preload reports them,
+ * once per document; Main adopts them on the first report of a profile only.
+ */
+export interface ConfiguredMediaFolders {
+  soundboard?: string;
+  stickers?: string;
+}
+
+export const MEDIA_FOLDERS_IPC = {
+  adopt: 'media-folders:adopt-configured',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
 export type AudioPreviewInput = {
   requestId: string;
   fileName?: string;
@@ -405,15 +420,6 @@ export interface LinkPreviewData {
 export interface ServerProbeResult {
   reachable: boolean;
   reason: 'online' | 'refused' | 'timeout' | 'unreachable';
-}
-
-export interface ScreenAudioDiagnostics {
-  nativeModuleLoaded: boolean;
-  platformSupported: boolean;
-  osVersion: string;
-  pid: number;
-  captureStatus?: number;
-  lastError?: string;
 }
 
 /**
@@ -585,13 +591,44 @@ export interface AppIdentityResult {
 }
 
 /**
+ * Why the identity file on this computer could not be opened (#490):
+ * - `locked`: the system keychain (macOS Keychain, Windows DPAPI) did not
+ *   unlock it, e.g. access denied or a file copied from another user;
+ * - `corrupt`: the file is damaged or incomplete;
+ * - `io`: the file could not be read right now, e.g. held by another program.
+ */
+export type IdentityUnreadableReason = 'locked' | 'corrupt' | 'io';
+
+/**
+ * The identity on this computer. When it is `unreadable` the file is kept as
+ * it is: the app only replaces it when the user explicitly imports or creates
+ * another identity, and even then the old file is set aside, not deleted.
+ */
+export type AppIdentityStatus =
+  | { state: 'ready' }
+  | { state: 'missing' }
+  | { state: 'unreadable'; reason: IdentityUnreadableReason };
+
+/**
  * Import result. `extras` carries the opaque servers/settings backup that may
  * have been exported alongside the identity (#472); only the renderer knows how
  * to read it.
  */
 export interface AppIdentityImportResult extends AppIdentityResult {
+  status: 'imported';
   extras?: string;
 }
+
+/**
+ * The code belongs to another identity than the one this computer uses, and
+ * nothing was written (#490). Importing again with `replace` set to this
+ * `publicKey` switches to it; the identity in use is kept aside, not deleted.
+ */
+export interface AppIdentityReplaceRequest extends AppIdentityResult {
+  status: 'confirm-replace';
+}
+
+export type AppIdentityImportOutcome = AppIdentityImportResult | AppIdentityReplaceRequest;
 
 export interface BackupSaveResult {
   success: boolean;
@@ -684,10 +721,33 @@ export interface OverlaySyncState {
   config: OverlayConfig;
 }
 
-export interface OverlaySignalPayload {
-  target: 'main' | 'overlay';
-  signal: string; // JSON com Offer/Answer/Candidate
-}
+const overlaySessionSchema = z.string().regex(/^[A-Za-z0-9-]{1,64}$/);
+const overlaySdpSchema = z.string().min(1).max(262_144);
+
+/**
+ * Negotiation of the local video link between the main window (offerer) and
+ * the overlay (answerer). Every message names the main window's connection:
+ * the overlay builds one connection per `session` and both sides drop what
+ * belongs to a connection already replaced. `hello` asks an overlay that is
+ * already running to negotiate a new connection; `ready` answers it, or, with
+ * `session: null`, is the first word of an overlay that just started. `scale`
+ * is the overlay's own pixel ratio, which sizes the video it is sent: the
+ * overlay may sit on a display with another scale than the main window (R-MEDIA-2).
+ */
+export const overlaySignalSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('hello'), session: overlaySessionSchema }).strict(),
+  z.object({ kind: z.literal('ready'), session: overlaySessionSchema.nullable() }).strict(),
+  z.object({ kind: z.literal('offer'), session: overlaySessionSchema, sdp: overlaySdpSchema }).strict(),
+  z.object({ kind: z.literal('answer'), session: overlaySessionSchema, sdp: overlaySdpSchema }).strict(),
+  z.object({ kind: z.literal('scale'), session: overlaySessionSchema, pixelRatio: z.number().finite().min(0.25).max(8) }).strict(),
+]);
+export type OverlaySignal = z.infer<typeof overlaySignalSchema>;
+
+export const overlaySignalPayloadSchema = z.object({
+  target: z.enum(['main', 'overlay']),
+  signal: overlaySignalSchema,
+}).strict();
+export type OverlaySignalPayload = z.infer<typeof overlaySignalPayloadSchema>;
 
 export interface NativeScreenAudioOutputConfig {
   epoch: number;
@@ -857,8 +917,11 @@ export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEven
 
 /**
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
+ *
+ * Os canais das DMs ficam em `DmInvokeChannels` (directMessages.ts), junto do
+ * resto do contrato delas, e entram aqui por herança.
  */
-export interface IpcInvokeChannels {
+export interface IpcInvokeChannels extends DmInvokeChannels {
   'bot-screen-document:create': { args: [html: string, consent: BotScreenDocumentConsent]; returnType: string };
   'bot-screen-document:remove': { args: [url: string]; returnType: void };
   'bot-storage:document-state': { args: [url: string]; returnType: BotDeviceStorageDocumentState };
@@ -884,7 +947,9 @@ export interface IpcInvokeChannels {
   'crash-recovery:close': { args: []; returnType: boolean };
   // Janela
   'window:minimize': { args: []; returnType: void };
-  'screen-pip:open': { args: [requestId: string, requireInactive: boolean]; returnType: boolean };
+  'screen-pip:open': { args: [requestId: string, requireInactive: boolean, aspectRatio: number]; returnType: boolean };
+  /** "Voltar ao Monky": brings the main window back from minimized or the tray. */
+  'screen-pip:return': { args: []; returnType: void };
   'window:maximize': { args: []; returnType: void };
   'window:toggle-maximize': { args: []; returnType: void };
   'window:set-in-server': { args: [inServer: boolean]; returnType: void };
@@ -920,6 +985,7 @@ export interface IpcInvokeChannels {
   'app:set-minimize-to-tray': { args: [enabled: boolean]; returnType: void };
   'app:download-file': { args: [url: string, fileName: string]; returnType: { success: boolean; error?: string } };
   'app:download-files': { args: [request: FileBatchDownloadRequest]; returnType: FileBatchDownloadResult };
+  'app:save-csv-file': { args: [content: string, fileName: string]; returnType: { success: boolean; error?: string } };
   'app:save-recent-sound': { args: [input: RecentSoundSaveInput]; returnType: RecentSoundSaveResult };
   'community:save-event-calendar': { args: [input: EventCalendarExport]; returnType: EventCalendarSaveResult };
   'onboarding:save-hosting-skill': { args: [id: HostingSkillId]; returnType: HostingSkillSaveResult };
@@ -927,12 +993,17 @@ export interface IpcInvokeChannels {
   'app:leave-complete': { args: [request: AppShutdownRequest]; returnType: void };
 
   // Identidade
-  'identity:has': { args: []; returnType: boolean };
+  'identity:status': { args: []; returnType: AppIdentityStatus };
+  // Cria uma identidade quando não há uma legível; um arquivo ilegível é guardado à parte antes
+  'identity:create': { args: []; returnType: AppIdentityResult };
   'identity:get': { args: []; returnType: AppIdentityResult };
   'identity:get-client-id': { args: []; returnType: string };
   'identity:sign-challenge': { args: [nonceHex: string]; returnType: string };
-  'identity:export': { args: [password: string, extras?: string]; returnType: string };
-  'identity:import': { args: [exportedIdentity: string, password: string]; returnType: AppIdentityImportResult };
+  'identity:export': { args: [password: string, extras?: string, dmMode?: DmExportMode]; returnType: string };
+  'identity:import': {
+    args: [exportedIdentity: string, password: string, replace?: string];
+    returnType: AppIdentityImportOutcome;
+  };
   // Sair: apaga a identidade, amigos e DMs deste computador e reinicia o app
   'identity:logout': { args: []; returnType: { success: boolean; error?: string } };
 
@@ -971,7 +1042,9 @@ export interface IpcInvokeChannels {
 
   // Soundboard
   'soundboard:default-folder': { args: []; returnType: string | null };
-  'soundboard:list-sounds': { args: [folderPath: string]; returnType: SoundboardSoundEntry[] };
+  // userAction: set by the preload during a direct user action; only then may Main ask,
+  // natively, to confirm a configured folder this profile never confirmed (D4).
+  'soundboard:list-sounds': { args: [folderPath: string, userAction?: boolean]; returnType: SoundboardSoundEntry[] };
   'soundboard:read-sound': { args: [filePath: string]; returnType: SoundboardSoundData | null };
   'soundboard:edit-read': { args: [input: SoundboardFileInput]; returnType: SoundboardFileResult<Uint8Array> };
   'soundboard:rename-file': { args: [input: SoundboardRenameInput]; returnType: SoundboardFileResult<SoundboardSavedFile> };
@@ -984,6 +1057,7 @@ export interface IpcInvokeChannels {
   'soundboard:authorize-download': { args: [input: SoundboardDownloadAuthorization]; returnType: SoundboardDownloadPermit };
   'soundboard:download-sound': { args: [input: SoundboardDownloadInput]; returnType: SoundDownloadResult };
   'soundboard:cancel-download': { args: [key: SoundboardDownloadCancellation]; returnType: boolean };
+  'media-folders:adopt-configured': { args: [folders: ConfiguredMediaFolders]; returnType: void };
   'audio-preview:load': { args: [input: AudioPreviewInput]; returnType: AudioPreviewResult };
   'audio-preview:cancel': { args: [input: AudioPreviewCancellation]; returnType: boolean };
   'soundboard:register-shortcuts': { args: [shortcuts: SoundboardShortcutBinding[]]; returnType: boolean };
@@ -1004,7 +1078,7 @@ export interface IpcInvokeChannels {
   'local-preparation-dialog:action': { args: [action: LocalPreparationDialogAction]; returnType: void };
 
   // Figurinhas do chat (#356)
-  'stickers:list': { args: [folderPath: string]; returnType: StickerEntry[] };
+  'stickers:list': { args: [folderPath: string, userAction?: boolean]; returnType: StickerEntry[] };
   'stickers:read': { args: [filePath: string]; returnType: StickerData | null };
   'stickers:save': {
     args: [folderPath: string, fileName: string, bytes: Uint8Array];
@@ -1025,12 +1099,6 @@ export interface IpcInvokeChannels {
 
   // Rede
   'net:probe-server': { args: [host: string, port: number]; returnType: ServerProbeResult };
-
-  // Áudio da Tela (Nativo)
-  'screen-audio:is-supported': { args: []; returnType: boolean };
-  'screen-audio:diagnose': { args: []; returnType: ScreenAudioDiagnostics };
-  'screen-audio:start': { args: [sourceId?: string]; returnType: { success: boolean; error?: string } };
-  'screen-audio:stop': { args: []; returnType: { success: boolean } };
 
   // Bandeja do Sistema (Tray)
   'tray:update-voice-status': { args: [status: TrayVoiceStatus]; returnType: void };
@@ -1078,9 +1146,6 @@ export interface IpcEvents {
   'shortcut:action-triggered': [action: string];
   'ptt:state-changed': [active: boolean];
   'ptt:captured': [binding: PttKeyBinding];
-  'screen-audio:frame': [buffer: ArrayBuffer | Uint8Array];
-  /** Falha assincrona da captura nativa (dispositivo caiu, stream derrubado pelo sistema). */
-  'screen-audio:error': [message: string];
   // Comandos de chamada vindos do sistema: menu da bandeja e miniatura da barra de tarefas (Windows).
   'tray:toggle-mute': [];
   'tray:toggle-deafen': [];
@@ -1099,10 +1164,30 @@ export interface IpcEvents {
   'overlay:config-updated': [config: OverlayConfig];
   'overlay:hover-changed': [hovered: boolean, point?: { x: number; y: number }];
   'overlay:resize-state-changed': [resizing: boolean];
-  'overlay:signal-received': [signal: string];
+  'overlay:signal-received': [signal: OverlaySignal];
   'overlay:sync-state-received': [state: OverlaySyncState];
   'overlay:close-requested': [];
+
+  // Mensagens diretas (#743)
+  'dm:event': [event: DmEvent];
 }
+
+/**
+ * Mensagens Renderer -> Main sem resposta (ipcRenderer.send / ipcMain.on).
+ */
+export interface IpcSendChannels {
+  /** The renderer painted its first frame: the window may be revealed. */
+  'app:renderer-ready': [];
+}
+export const APP_RENDERER_READY = 'app:renderer-ready' satisfies keyof IpcSendChannels;
 
 export type IpcInvokeChannel = keyof IpcInvokeChannels;
 export type IpcEventChannel = keyof IpcEvents;
+export type IpcSendChannel = keyof IpcSendChannels;
+
+/** A bridge method that is exactly one invoke channel: its arguments, then its answer. */
+export type IpcInvoker<C extends IpcInvokeChannel> =
+  (...args: IpcInvokeChannels[C]['args']) => Promise<IpcInvokeChannels[C]['returnType']>;
+
+/** A bridge method that listens to one Main -> renderer event; the result stops listening. */
+export type IpcSubscriber<E extends IpcEventChannel> = (callback: (...args: IpcEvents[E]) => void) => () => void;

@@ -1,7 +1,6 @@
 import { randomUUID } from 'crypto';
 import { WebSocket } from 'ws';
 import {
-  hasChannelPermission,
   BotCommandMessagePayload,
   BotForm,
   BotSettingsContext,
@@ -21,13 +20,11 @@ import {
   CommandSoundDownloadResultPayload,
   LIMITS,
   MessageType,
-  Permission,
   ProtocolErrorCode,
-  ProtocolMessage,
+  ServerMessage,
   SlashCommand,
   SoundDownloadResult,
   UserSummary,
-  canAccessChannel,
   commandAutocompleteCancelSchema,
   commandAutocompleteResultSchema,
   commandAutocompleteSchema,
@@ -43,7 +40,6 @@ import {
   commandSoundDownloadResultSchema,
   commandSoundDownloadSchema,
   commandSubmitSchema,
-  hasPermission,
   validateBotFormValues,
   validateCommandOptions,
   resolveBotSettingsValues,
@@ -63,6 +59,11 @@ import { RateLimiter } from '../security/RateLimiter';
 import { Logger } from '../logger/Logger';
 import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
 import type { BotLocalContext } from '../../application/services/BotLocalExecutionService';
+import { BOT_ACCESS_REFUSALS, BotAccess, BotAccessGate, evaluateBotChannelAccess } from '../../application/services/BotAccessPolicy';
+import { toProtocolError } from './protocolErrors';
+
+/** What a person or bot is told when an interaction fails without a more specific reason. */
+const INTERACTION_FAILED = 'Não foi possível processar a interação com o bot.';
 
 export interface BotInteractionSession {
   ws: WebSocket;
@@ -88,9 +89,9 @@ interface InteractionTransport {
   getVoiceChannelId?(sessionId: string): string | null;
   isCurrent(session: BotInteractionSession): boolean;
   findBot(botId: string): BotInteractionSession | undefined;
-  send(ws: WebSocket, message: ProtocolMessage): void;
+  send(ws: WebSocket, message: ServerMessage): void;
   sendError(ws: WebSocket, code: ProtocolErrorCode, message: string, requestId?: string): void;
-  broadcastToChannel(channelId: string, message: ProtocolMessage, canSend: () => boolean): Promise<void>;
+  broadcastToChannel(channelId: string, message: ServerMessage, canSend: () => boolean): Promise<void>;
   publishResponse(session: BotInteractionSession, response: BotCommandMessagePayload, canSend: () => boolean, requestId?: string): Promise<void>;
   resolveImageAssets?(userId: string, channelId: string, refs: string[]): string[];
   localContextEnded?(context: Exclude<LocalRequestContext, { kind: 'source' }>, cause: LocalTaskCancellationCause): void;
@@ -184,6 +185,8 @@ export class BotInteractionHandler {
   private audioPreviews = new Map<string, AudioPreview>();
   private autocompleteLimiter = new RateLimiter();
   private closed = false;
+  /** Who may take part in a command: the rule shared with selectors and miniapps (BOTS-8). */
+  private readonly gate: BotAccessGate;
 
   constructor(
     private transport: InteractionTransport,
@@ -192,7 +195,9 @@ export class BotInteractionHandler {
     private registry: CommandRegistry,
     private settings?: BotSettingsService,
     private messageLimit: () => Promise<number> = async () => LIMITS.MAX_MESSAGE_LENGTH,
-  ) {}
+  ) {
+    this.gate = new BotAccessGate(channelService, userService);
+  }
 
   async autocomplete(session: BotInteractionSession, payload: unknown, requestId?: string): Promise<void> {
     const user = session.user;
@@ -306,8 +311,8 @@ export class BotInteractionHandler {
       pending.settings = execution.settings;
       this.transport.send(bot.ws, { type: MessageType.COMMAND_AUTOCOMPLETE, requestId: id, payload: execution });
     } catch (error) {
-      this.failAutocomplete(pending, error instanceof BotSettingsError ? error.code : ProtocolErrorCode.INTERNAL_ERROR,
-        error instanceof BotSettingsError ? error.message : undefined);
+      const reply = toProtocolError(error, { message: INTERACTION_FAILED, category: 'BOT' });
+      this.failAutocomplete(pending, reply.code, reply.message);
     }
   }
 
@@ -778,7 +783,7 @@ export class BotInteractionHandler {
       botAvatarUrl: botUser.avatarUrl,
       createdAt: Date.now(),
     };
-    const message: ProtocolMessage<BotCommandMessagePayload> = { type: MessageType.COMMAND_RESPONSE, payload: response };
+    const message: ServerMessage<MessageType.COMMAND_RESPONSE> = { type: MessageType.COMMAND_RESPONSE, payload: response };
     if (response.ephemeral) {
       this.transport.send(invocation.origin.ws, message);
     } else {
@@ -893,14 +898,15 @@ export class BotInteractionHandler {
     channels: ReadonlyMap<string, ChannelSummary>,
     contexts: ReadonlyMap<string, ChannelAccessContext>
   ): void {
+    // Membership is not read here: removing a member ends their connections.
     const canContinue = (invokerId: string, channelId: string): boolean => {
-      const channel = channels.get(channelId);
-      const context = contexts.get(invokerId);
-      if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') || !context || !channel.botCommandsEnabled) return false;
-      const rules = this.channelService.rulesFor(channel, context);
-      return hasChannelPermission(rules, context.permissions, context.roleIds, Permission.USE_BOT_COMMANDS, false, context.userId) &&
-        hasChannelPermission(rules, context.permissions, context.roleIds, Permission.SEND_MESSAGES, false, context.userId) &&
-        canAccessChannel(rules, context.permissions, context.roleIds, false, context.userId);
+      const channel = channels.get(channelId) ?? null;
+      const known = contexts.get(invokerId);
+      if (!known) return false;
+      const context = this.channelService.withinChannel(known, channel);
+      return !evaluateBotChannelAccess({
+        channel, context, rules: channel && this.channelService.rulesFor(channel, context), isMember: true,
+      }, BotAccess.commandCaller);
     };
     for (const pending of this.autocompletes.values()) {
       if (!canContinue(pending.invokerId, pending.channelId)) {
@@ -1008,12 +1014,7 @@ export class BotInteractionHandler {
     const originSessionId = invocation.origin.sessionId;
     if (!originSessionId || !this.transport.getVoiceChannelId) return undefined;
     if (await this.getAccessError(invocation.invokerId, invocation.channelId)) return undefined;
-    const [channel, context] = await Promise.all([
-      this.channelService.getChannelSummary(channelId),
-      this.channelService.getAccessContext(invocation.invokerId, channelId),
-    ]);
-    if (!channel || channel.type !== 'VOICE' || (requireSpeak && !hasPermission(context.permissions, Permission.SPEAK)) ||
-        !canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, false, context.userId)) return undefined;
+    if (await this.gate.check(invocation.invokerId, channelId, BotAccess.voiceRoom(requireSpeak))) return undefined;
     const isCurrent = () => this.isActive(invocation) &&
       this.transport.getVoiceChannelId?.(originSessionId) === channelId;
     return isCurrent() ? { creatorUserId: invocation.invokerId, originChannelId: invocation.channelId, isCurrent } : undefined;
@@ -1254,21 +1255,8 @@ export class BotInteractionHandler {
   }
 
   private async getAccessError(userId: string, channelId: string): Promise<ProtocolErrorCode | undefined> {
-    const [channel, context, isMember] = await Promise.all([
-      this.channelService.getChannelSummary(channelId),
-      this.channelService.getAccessContext(userId, channelId),
-      this.userService.isMember(userId),
-    ]);
-    if (!isMember) return ProtocolErrorCode.UNAUTHORIZED;
-    if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') ||
-        !canAccessChannel(this.channelService.rulesFor(channel, context), context.permissions, context.roleIds, false, context.userId)) {
-      return ProtocolErrorCode.CHANNEL_NOT_FOUND;
-    }
-    if (!hasPermission(context.permissions, Permission.SEND_MESSAGES)) return ProtocolErrorCode.PERMISSION_DENIED;
-    if (!channel.botCommandsEnabled || !hasPermission(context.permissions, Permission.USE_BOT_COMMANDS)) {
-      return ProtocolErrorCode.PERMISSION_DENIED;
-    }
-    return undefined;
+    const denial = await this.gate.check(userId, channelId, BotAccess.commandCaller);
+    return denial && BOT_ACCESS_REFUSALS[denial].code;
   }
 
   private getVoiceAccessError(
@@ -1334,7 +1322,7 @@ export class BotInteractionHandler {
   }
 
   private error(session: BotInteractionSession, code: ProtocolErrorCode, requestId?: string, message?: string): void {
-    this.transport.sendError(session.ws, code, message ?? 'Não foi possível processar a interação com o bot.', requestId);
+    this.transport.sendError(session.ws, code, message ?? INTERACTION_FAILED, requestId);
   }
 }
 import { createMessageContentSchema } from '@monky/shared';

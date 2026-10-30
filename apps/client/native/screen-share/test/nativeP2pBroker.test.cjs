@@ -5,6 +5,7 @@ const { test } = require('node:test');
 const { NativeP2pBroker, NATIVE_P2P_CONTROL_SCHEMA, parseNativeP2pMessage } = require('../runtime/nativeP2pBroker.cjs');
 const { NativeRtcCommands, isNativeRtcCommandsForEngine, assertNativeRtcEngineClosed } = require('../runtime/nativeRtcCommands.cjs');
 const { NativeScreenRoutes } = require('../runtime/nativeScreenRoutes.cjs');
+const { NativeSignalOutbox } = require('../runtime/nativeSignalOutbox.cjs');
 
 function deferred() {
   let resolve, reject;
@@ -463,11 +464,9 @@ class AudioOwnerDouble {
     this.revocations = [];
     this.volumes = [];
     this.publications = [];
-    this.rebinds = [];
     this.unavailable = false;
     this.observeStoppedEpoch = true;
     this.preparationHold = null;
-    this.rebindHold = null;
   }
 
   async prepareReceive(context) {
@@ -520,38 +519,9 @@ class AudioOwnerDouble {
   onReceiverVolume(selection, result) { this.volumes.push({ selection: structuredClone(selection), result: structuredClone(result) }); }
   onPublicationState(state) { this.publications.push(structuredClone(state)); }
 
-  async rebindSource(context) {
-    this.rebinds.push({ sourceId: context.sourceId, screenAudioShareId: context.screenAudioShareId, syncGroup: context.syncGroup });
-    if (this.rebindHold && !this.rebindHold.afterCommit) {
-      this.rebindHold.started.resolve();
-      await this.rebindHold.gate.promise;
-    }
-    if (context.signal.aborted || !context.isCurrent()) throw nativeError('OWNER_ABORTED');
-    for (const resource of this.engine.resources.values()) {
-      assert.ok(resource.kind !== 'publication' || resource.sourceId !== context.sourceId, 'source group needs all native publications retired');
-      if (resource.kind === 'peer') {
-        assert.ok(![...resource.retiringAudio.values()].some(publication => publication.sourceId === context.sourceId),
-          'source owner cannot rebind before the stopped SDP mutation is negotiated');
-      }
-    }
-    const source = this.engine.externalSources.get(context.sourceId);
-    assert.equal(source.kind, 'audio');
-    source.syncGroup = context.syncGroup;
-    if (this.rebindHold?.afterCommit) {
-      this.rebindHold.started.resolve();
-      await this.rebindHold.gate.promise;
-    }
-    return { sourceId: context.sourceId, syncGroup: source.syncGroup };
-  }
-
   holdPreparation() {
     this.preparationHold = { started: deferred(), gate: deferred(), used: false };
     return this.preparationHold;
-  }
-
-  holdRebind(afterCommit = false) {
-    this.rebindHold = { started: deferred(), gate: deferred(), afterCommit };
-    return this.rebindHold;
   }
 }
 
@@ -662,7 +632,6 @@ async function world(t, names = ['a', 'b'], options = {}) {
     for (const endpoint of endpoints.values()) {
       endpoint.engine.finishHolds();
       endpoint.audioOwner?.preparationHold?.gate.resolve();
-      endpoint.audioOwner?.rebindHold?.gate.resolve();
     }
     for (const endpoint of endpoints.values()) {
       await endpoint.broker.close();
@@ -788,6 +757,50 @@ test('consecutive peer.state patches preserve other fields, isolate peers and re
   await h.connect('a', 'b', 2);
   assert.deepEqual(a.broker.getPeer('b').nativeState, initial, 'a new peer cannot inherit the previous peer state');
   assert.deepEqual(a.broker.getPeer('c').nativeState, initial);
+});
+
+test('a native error of one peer fails only that peer, also once it is already retiring', async t => {
+  const h = await world(t, ['a', 'b', 'c']), a = h.endpoints.get('a');
+  await h.connect('a', 'b');
+  await h.connect('a', 'c');
+  const scopes = [];
+  a.broker.onError = (error, scope) => { a.errors.push(error); scopes.push(scope); };
+  const peerId = a.broker.getPeer('b').peerId;
+  const failure = { code: 'ERR_RTC_PEER', message: 'Peer transport failed.', status: 7, hresult: 0, terminal: true };
+  assert.equal(a.broker.handleNativeEvent({ type: 'error', target: peerId, data: failure }), true);
+  assert.equal(a.broker.getPeer('b').status, 'failed');
+  assert.equal(a.broker.getPeer('c').status, 'open');
+  assert.deepEqual(a.errors.map(error => error.code), ['ERR_RTC_PEER']);
+  assert.deepEqual([scopes[0].remoteSessionId, scopes[0].connectionId, scopes[0].generation], ['b', 'a-b-1', 1]);
+  // A late error of the retiring peer stays with that viewer instead of becoming an engine failure.
+  assert.equal(a.broker.handleNativeEvent({ type: 'error', target: peerId, data: failure }), true);
+  assert.deepEqual(scopes.map(scope => scope.remoteSessionId), ['b', 'b']);
+  assert.equal(a.broker.getPeer('c').status, 'open');
+  // Nothing claims an unknown resource: its endpoint treats it as the whole engine's failure.
+  assert.equal(a.broker.handleNativeEvent({ type: 'error', target: 987654, data: failure }), false);
+});
+
+test('a peer that stays disconnected fails after the grace period, while a reconnected one stays', async t => {
+  const h = await world(t, ['a', 'b', 'c']), a = h.endpoints.get('a');
+  await h.connect('a', 'b');
+  await h.connect('a', 'c');
+  const b = a.broker.getPeer('b').peerId, c = a.broker.getPeer('c').peerId;
+  for (const peerId of [b, c]) {
+    a.engine.emit('peer.state', peerId, { connectionState: 'connected' });
+    a.engine.emit('peer.state', peerId, { connectionState: 'disconnected' });
+  }
+  h.clock.advance(5000);
+  a.engine.emit('peer.state', c, { connectionState: 'connected' });
+  a.engine.emit('peer.state', b, { connectionState: 'connecting' });
+  a.engine.emit('peer.state', b, { iceConnectionState: 'checking' });
+  h.clock.advance(4999);
+  assert.equal(a.broker.getPeer('b').status, 'open', 'A short disconnection can still recover.');
+  h.clock.advance(1);
+  assert.equal(a.broker.getPeer('b').status, 'failed');
+  assert.deepEqual(a.errors.map(error => error.code), ['P2P_NATIVE_DISCONNECTED']);
+  h.clock.advance(60000);
+  assert.equal(a.broker.getPeer('c').status, 'open');
+  assert.equal(a.errors.length, 1);
 });
 
 test('two distinct source groups share one peer, stay sender-disabled before Watch, and Stop is per screen', async t => {
@@ -1608,6 +1621,33 @@ test('a signaling enqueue timeout is bounded even though no remote handler or re
   pendingEnqueue.resolve();
 });
 
+test('through the endpoint signal outbox, held server acknowledgements stall neither negotiation nor a received answer', async t => {
+  const h = await world(t), a = h.endpoints.get('a'), b = h.endpoints.get('b');
+  const acknowledgement = deferred();
+  for (const endpoint of [a, b]) {
+    // Each message reaches the other side at once; the server's acknowledgement is held.
+    const outbox = new NativeSignalOutbox({ timers: h.clock, isCurrent: () => true,
+      onFailure: error => endpoint.errors.push(error),
+      carrier: (to, message) => { h.wire.send(endpoint.name, to, message); return acknowledgement.promise; } });
+    endpoint.broker.send = (to, message) => outbox.send(to, message);
+  }
+  await h.connect();
+  await a.broker.publish(h.supply('a'), 'b');
+  await h.settle();
+  await b.broker.watch('a', 'screen-one', destination('watched'));
+  await h.settle();
+  const [publication] = pubs(a, 'b');
+  assert.ok(a.engine.requests.some(request => request.operation === 'peer.setRemoteDescription' && request.data.type === 'answer'),
+    'The received answer was applied before any acknowledgement.');
+  assert.equal(a.broker.getPeer('b').turn, null);
+  assert.equal(b.broker.getPeer('a').turn, null);
+  assert.equal(publication.enabled, true);
+  assert.equal(watchedReceiver(b, 'a', publication).enabled, true);
+  acknowledgement.resolve();
+  await microtasks();
+  assert.equal(a.errors.length + b.errors.length, 0);
+});
+
 test('negotiation timeout and native SDP rejection have explicit failed outcomes, never fake connected or browser fallback', async t => {
   const h = await world(t, ['a', 'b'], { turnTimeoutMs: 100 }), a = h.endpoints.get('a');
   await h.connect();
@@ -1856,7 +1896,7 @@ test('A/V registration enforces unique video groups, one explicit PCM associatio
   assert.throws(() => a.broker.setAudioVolume('b', 'screen-one', NaN), /0\.\.2/u);
 });
 
-test('A/V stopping the associated screen never falls back; explicit rebind reuses PCM with a new sendonly publication', async t => {
+test('A/V stopping the associated screen retires its audio and never falls back to another screen', async t => {
   const h = await world(t, ['a', 'b'], { av: true }), a = h.endpoints.get('a'), b = h.endpoints.get('b');
   await h.connect();
   const one = h.supply('a'), two = h.supply('a', 'screen-two'), pcm = h.supplyAudio('a');
@@ -1864,36 +1904,20 @@ test('A/V stopping the associated screen never falls back; explicit rebind reuse
   await h.settle();
   await Promise.all([b.broker.watch('a', 'screen-one', destination('one')), b.broker.watch('a', 'screen-two', destination('two'))]);
   await h.settle();
-  const previous = pubs(a, 'b').find(publication => publication.mediaKind === 'audio');
-  const oldWatch = h.messages('watch', 'b').findLast(item => item.message.kind === 'audio' && item.message.watching).message;
   const input = a.engine.externalSources.get(pcm), epoch = input.inputEpoch;
   const removal = a.broker.removeSource(one);
   await h.settle();
   await removal;
   assert.equal(pubs(a, 'b').filter(publication => publication.mediaKind === 'audio').length, 0);
-  assert.equal(a.broker.getAudioSource().screenAudioShareId, null);
+  assert.throws(() => a.broker.publishAudio(pcm, 'b'), /associated/u, 'audio never moves to the remaining screen');
   assert.equal(input.enabled, true);
   assert.equal(input.inputEpoch, epoch);
   assert.equal(b.audioOwner.bindings.size, 0);
   assert.equal(pubs(a, 'b').find(publication => publication.sourceId === two).enabled, true);
-  const moving = a.broker.rebindAudioSource(pcm, { screenAudioShareId: 'screen-two' });
-  await h.settle();
-  const association = await moving;
-  assert.equal(association.sourceId, pcm);
-  assert.equal(association.syncGroup, a.engine.externalSources.get(two).syncGroup);
-  const replacement = await a.broker.publishAudio(pcm, 'b');
-  await h.settle();
-  assert.notEqual(replacement.publicationId, previous.publicationId);
-  assert.notEqual(replacement.trackId, previous.trackId);
-  assert.equal(a.engine.resources.get(replacement.publicationId).enabled, true);
-  assert.equal([...b.audioOwner.bindings.values()][0].shareId, 'screen-two');
-  await a.broker.receive('b', oldWatch);
-  assert.equal(a.engine.resources.get(replacement.publicationId).enabled, true, 'old audio Watch cannot mutate a replacement');
-  assert.equal(input.inputEpoch, epoch);
   assert.equal(a.engine.requests.filter(request => request.operation === 'peer.create').length, 1);
 });
 
-test('A/V audio rebind waits for a completed local offer covering StopStandard, not an older answer or stable patch', async t => {
+test('A/V audio removal waits for a completed local offer covering StopStandard, not an older answer or stable patch', async t => {
   const h = await world(t, ['a', 'b'], { av: true }), a = h.endpoints.get('a'), b = h.endpoints.get('b');
   await h.connect();
   const one = h.supply('a'), two = h.supply('a', 'screen-two'), pcm = h.supplyAudio('a');
@@ -1905,25 +1929,24 @@ test('A/V audio rebind waits for a completed local offer covering StopStandard, 
   a.engine.emit('peer.negotiationNeeded', peerOf(a, 'b').peerId, {});
   await h.settle();
   const preceding = a.broker.getPeer('b').turn.sequence;
-  const moving = a.broker.rebindAudioSource(pcm, { screenAudioShareId: 'screen-two' });
+  let removed = false;
+  const removing = a.broker.removeSource(pcm).then(() => { removed = true; });
   await h.settle();
-  assert.equal(a.audioOwner.rebinds.length, 0);
-  assert.equal(a.broker.getAudioSource().rebinding, true);
+  assert.equal(removed, false);
   assert.throws(() => a.broker.publishAudio(pcm, 'b'), /obsolete|unowned/u);
   h.wire.block = item => item.message.type === 'answer' && item.message.turn !== preceding;
   await h.settle();
   assert.ok(a.broker.getPeer('b').completedTurn >= preceding);
   assert.ok(a.broker.getPeer('b').turn.sequence > preceding);
-  assert.equal(a.audioOwner.rebinds.length, 0, 'the old offer did not contain the stopped mutation');
+  assert.equal(removed, false, 'the old offer did not contain the stopped mutation');
   a.engine.emit('peer.state', peerOf(a, 'b').peerId, { signalingState: 'stable' });
   await microtasks();
-  assert.equal(a.audioOwner.rebinds.length, 0);
+  assert.equal(removed, false);
   h.wire.block = () => false;
   await h.settle();
-  await moving;
-  assert.equal(a.audioOwner.rebinds.length, 1);
+  await removing;
   assert.equal(peerOf(a, 'b').retiringAudio.size, 0);
-  assert.equal(a.broker.getAudioSource().screenAudioShareId, 'screen-two');
+  assert.equal(a.broker.sources.has(pcm), false);
   assert.equal(pubs(a, 'b').filter(publication => publication.mediaKind === 'video').length, 2);
 });
 
@@ -2048,15 +2071,15 @@ test('A/V normal RTC pause preserves the owned output epoch across source retire
   await b.broker.watch('a', 'screen-one', destination('watch'));
   await h.settle();
   const epoch = b.engine.outputEpoch;
-  const rebinding = a.broker.rebindAudioSource(pcm, { screenAudioShareId: 'screen-one' });
+  const retiring = a.broker.removeSource(pcm);
   await h.settle();
-  await rebinding;
+  await retiring;
   assert.equal(b.engine.outputReady, true);
   assert.ok(b.engine.outputStops > 0);
   assert.equal(b.engine.events.some(event => event.type === 'audio.outputError'), false,
     'normal StopPlayout is not an output retirement or an output failure');
   b.audioOwner.observeStoppedEpoch = false;
-  await a.broker.publishAudio(pcm, 'b');
+  await a.broker.publishAudio(h.supplyAudio('a'), 'b');
   await h.settle();
   assert.equal(b.engine.outputEpoch, epoch, 'a broker-local receiver count cannot replace the global output epoch');
   assert.equal(b.audioOwner.configurations.length, 1);
@@ -2104,9 +2127,10 @@ test('A/V closing a local sendonly publication does not close the remote audio t
   await h.settle();
   const remotePub = pubs(b, 'a').find(value => value.mediaKind === 'audio');
   const receiver = watchedReceiver(a, 'b', remotePub), epoch = a.engine.outputEpoch;
-  const moving = a.broker.rebindAudioSource(aPcm, { screenAudioShareId: 'screen-two' });
+  const removing = a.broker.removeSource(aPcm);
   await h.settle();
-  await moving;
+  await removing;
+  assert.equal(pubs(a, 'b').some(value => value.mediaKind === 'audio'), false);
   assert.equal(receiver.present, true);
   assert.equal(receiver.enabled, true);
   assert.equal(receiver.volume, 0.8);
@@ -2158,7 +2182,7 @@ test('A/V audio close failure retains its ID but closes the RTP gate without pau
   await h.settle();
   const audio = pubs(a, 'b').find(value => value.mediaKind === 'audio');
   a.engine.failNext('resource.close', audio.publicationId, 'ERR_RTC_RESOURCE');
-  await assert.rejects(a.broker.rebindAudioSource(pcm, { screenAudioShareId: 'screen-two' }), AggregateError);
+  await assert.rejects(a.broker.removeSource(pcm), AggregateError);
   assert.equal(a.engine.resources.has(audio.publicationId), true);
   assert.equal(audio.enabled, false);
   assert.equal(audio.requestedEnabled, false);
@@ -2166,37 +2190,13 @@ test('A/V audio close failure retains its ID but closes the RTP gate without pau
   assert.equal(a.engine.externalSources.get(pcm).inputEpoch, 7);
   assert.equal(pubs(a, 'b').find(value => value.sourceId === one).enabled, true);
   assert.equal(a.broker.getPeer('b').status, 'open');
-  const retry = a.broker.rebindAudioSource(pcm, { screenAudioShareId: 'screen-two' });
+  assert.equal(a.broker.sources.has(pcm), true, 'the unclosed publication keeps its source owned');
+  const retry = a.broker.removeSource(pcm);
   await h.settle();
   await retry;
   assert.equal(a.engine.resources.has(audio.publicationId), false);
-  assert.equal(a.broker.getAudioSource().screenAudioShareId, 'screen-two');
-});
-
-test('A/V a timed-out committed group change cannot republish or restore the old association from a late ACK', async t => {
-  const h = await world(t, ['a', 'b'], { av: true, operationTimeoutMs: 100 }), a = h.endpoints.get('a');
-  await h.connect();
-  const one = h.supply('a'), two = h.supply('a', 'screen-two'), pcm = h.supplyAudio('a');
-  await Promise.all([a.broker.publish(one, 'b'), a.broker.publish(two, 'b')]);
-  await h.settle();
-  const hold = a.audioOwner.holdRebind(true);
-  const moving = a.broker.rebindAudioSource(pcm, { screenAudioShareId: 'screen-two' });
-  const timedOut = assert.rejects(moving, { code: 'P2P_TIMEOUT' });
-  await hold.started.promise;
-  h.clock.advance(101);
-  await timedOut;
-  assert.equal(a.broker.getAudioSource().rebinding, true);
-  assert.throws(() => a.broker.publishAudio(pcm, 'b'), /obsolete|unowned/u);
-  hold.gate.resolve();
-  await microtasks();
-  assert.equal(a.broker.getAudioSource().screenAudioShareId, null);
-  assert.equal(a.broker.getAudioSource().syncGroup, a.engine.externalSources.get(two).syncGroup);
-  assert.throws(() => a.broker.publishAudio(pcm, 'b'), /associated/u);
-  a.audioOwner.rebindHold = null;
-  await a.broker.rebindAudioSource(pcm, { screenAudioShareId: 'screen-two' });
-  await a.broker.publishAudio(pcm, 'b');
-  await h.settle();
-  assert.equal(a.engine.externalSources.get(pcm).inputEpoch, 7);
+  assert.equal(a.broker.sources.has(pcm), false);
+  assert.equal(pubs(a, 'b').find(value => value.sourceId === one).enabled, true);
 });
 
 test('A/V aborting the associated video publication retires its audio without stopping the peer or PCM source', async t => {
@@ -2226,15 +2226,16 @@ test('A/V pending stopped negotiation remains owned after timeout and only full 
   await b.broker.watch('a', 'screen-one', destination('watch'));
   await h.settle();
   h.wire.block = item => item.message.type === 'answer';
-  const moving = a.broker.rebindAudioSource(pcm, { screenAudioShareId: 'screen-two' });
-  const timeout = assert.rejects(moving, { code: 'P2P_TIMEOUT' });
+  const removing = a.broker.removeSource(pcm);
+  const timeout = assert.rejects(removing, error => error instanceof AggregateError
+    && error.errors.some(cause => cause.code === 'P2P_TIMEOUT'));
   await h.settle();
   h.clock.advance(101);
   await timeout;
   await microtasks();
   assert.equal(a.broker.getPeer('b').audioRetirements.length, 1);
-  assert.equal(a.audioOwner.rebinds.length, 0);
-  assert.throws(() => a.broker.publishAudio(pcm, 'b'), /retained audio|rebinding|unowned|obsolete/u);
+  assert.equal(a.broker.sources.has(pcm), true, 'a pending stopped negotiation keeps its source owned');
+  assert.throws(() => a.broker.publishAudio(pcm, 'b'), /unowned|obsolete/u);
   const closed = beginOwnerClose(a);
   const finishing = a.broker.finishAfterEngineClose(closed.promise);
   a.broker.handleNativeEvent({ type: 'closed', target: 0, data: {} });
@@ -2242,8 +2243,7 @@ test('A/V pending stopped negotiation remains owned after timeout and only full 
   closed.resolve();
   await finishing;
   assert.equal(a.broker.getPeer('b'), null);
-  assert.equal(a.broker.getAudioSource(), null);
-  assert.equal(a.audioOwner.rebinds.length, 0);
+  assert.equal(a.broker.sources.has(pcm), false);
 });
 
 test('A/V invalid synchronous readiness assertions are rejected before native receiving SDP', async t => {

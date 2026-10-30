@@ -9,11 +9,22 @@ bool ApplicationLoop::post(Task task, std::size_t retainedBytes) {
   if (!task) throw std::invalid_argument("Cannot queue an empty application callback");
   std::lock_guard lock(mutex_);
   if (stopped_ || overflowed_) return false;
-  constexpr std::size_t maxCallbacks = 256;
-  constexpr std::size_t maxRetainedBytes = 16 * 1024 * 1024;
   if (tasks_.size() >= maxCallbacks || retainedBytes > maxRetainedBytes - retainedBytes_) {
     overflowed_ = true;
     changed_.notify_one();
+    return false;
+  }
+  tasks_.push_back({std::move(task), retainedBytes});
+  retainedBytes_ += retainedBytes;
+  changed_.notify_one();
+  return true;
+}
+
+bool ApplicationLoop::offer(Task task, std::size_t retainedBytes) {
+  if (!task) throw std::invalid_argument("Cannot queue an empty application callback");
+  std::lock_guard lock(mutex_);
+  if (stopped_ || overflowed_ || tasks_.size() >= maxOfferedCallbacks ||
+      retainedBytes_ > maxOfferedBytes || retainedBytes > maxOfferedBytes - retainedBytes_) {
     return false;
   }
   tasks_.push_back({std::move(task), retainedBytes});

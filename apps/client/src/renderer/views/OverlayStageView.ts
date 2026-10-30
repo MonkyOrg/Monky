@@ -1,14 +1,16 @@
 import type {
   OverlayConfig,
   OverlayParticipantState,
+  OverlaySignal,
   OverlaySyncState,
   OverlayCardSize,
 } from '@monky/shared';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { t } from '../i18n';
 import { renderAudioMuteIndicators } from './AudioStateIcon';
 import { arrangeOverlayCards, fitOverlayCards } from '../utils/overlayLayout';
-import { getOverlayCardSize, overlayCardAspect } from '@monky/shared';
+import { getOverlayCardSize, overlayCardAspect, overlaySignalSchema } from '@monky/shared';
+import { waitForIceGatheringComplete } from '../core/webrtc/iceGathering';
 
 type OverlayTile = {
   p: OverlayParticipantState;
@@ -20,11 +22,16 @@ type OverlayTile = {
 
 /** Deve acompanhar a duração das animações overlayCardIn/Out do theme.css. */
 const CARD_FADE_MS = 260;
+/** Loopback host candidates arrive at once; the answer never waits longer than this for them. */
+const ICE_GATHERING_TIMEOUT_MS = 300;
 
 export class OverlayStageView {
   private container: HTMLElement;
   private currentState: OverlaySyncState | null = null;
   private localPeerConnection: RTCPeerConnection | null = null;
+  /** The main window's connection this one answers: a new session means a new connection (R-MEDIA-2). */
+  private linkSession: string | null = null;
+  private unwatchPixelRatio: (() => void) | null = null;
   private slotStreams: MediaStream[] = [];
   private unbindListeners: Array<() => void> = [];
   private leavingTimers = new Map<string, number>();
@@ -40,9 +47,7 @@ export class OverlayStageView {
 
   public init(): void {
     document.body.classList.add('overlay-window-mode');
-    document.getElementById('titlebar')?.remove();
 
-    this.initLocalPeerConnection();
     this.layoutObserver = new ResizeObserver(() => {
       this.applyCardLayout();
       this.applyHoverState();
@@ -95,69 +100,86 @@ export class OverlayStageView {
 
     if (window.api?.onOverlaySignalReceived) {
       this.unbindListeners.push(
-        window.api.onOverlaySignalReceived(async (signalJson) => {
-          try {
-            const signal = JSON.parse(signalJson);
-            if (signal.type === 'offer' && this.localPeerConnection) {
-              await this.localPeerConnection.setRemoteDescription(new RTCSessionDescription(signal));
-              const answer = await this.localPeerConnection.createAnswer();
-              await this.localPeerConnection.setLocalDescription(answer);
-
-              // Aguarda colheita completa de candidatos host no localhost
-              await new Promise<void>((resolve) => {
-                if (this.localPeerConnection?.iceGatheringState === 'complete') {
-                  resolve();
-                } else {
-                  const handler = () => {
-                    if (this.localPeerConnection?.iceGatheringState === 'complete') {
-                      this.localPeerConnection?.removeEventListener('icegatheringstatechange', handler);
-                      resolve();
-                    }
-                  };
-                  this.localPeerConnection?.addEventListener('icegatheringstatechange', handler);
-                  setTimeout(resolve, 300);
-                }
-              });
-
-              const completeAnswer = this.localPeerConnection.localDescription || answer;
-              if (window.api?.sendOverlaySignal) {
-                await window.api.sendOverlaySignal({
-                  target: 'main',
-                  signal: JSON.stringify(completeAnswer),
-                });
-              }
-            }
-          } catch (e) {
-            console.warn('[OverlayStage] Erro ao processar sinal WebRTC:', e);
+        window.api.onOverlaySignalReceived((value) => {
+          const signal = overlaySignalSchema.safeParse(value);
+          if (!signal.success) {
+            console.warn('[OverlayStage] Ignoring an invalid overlay signal.');
+            return;
           }
+          void this.handleSignal(signal.data);
         })
       );
     }
 
     this.render();
+    this.watchPixelRatio();
 
-    // Sinaliza ao main bridge que o overlay está pronto para receber a offer WebRTC.
-    if (window.api?.sendOverlaySignal) {
-      window.api.sendOverlaySignal({
-        target: 'main',
-        signal: JSON.stringify({ type: 'ready' }),
-      }).catch(() => {});
+    // Tells the main window this overlay just started and can take an offer.
+    void this.sendSignal({ kind: 'ready', session: null });
+  }
+
+  /**
+   * Keeps the main window told of this window's pixel ratio, which sizes the
+   * video it sends: moving to a display with another scale changes it.
+   */
+  private watchPixelRatio(): void {
+    this.unwatchPixelRatio?.();
+    const query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    const changed = () => {
+      this.watchPixelRatio();
+      if (this.linkSession) void this.sendSignal({ kind: 'scale', session: this.linkSession, pixelRatio: window.devicePixelRatio });
+    };
+    query.addEventListener('change', changed);
+    this.unwatchPixelRatio = () => query.removeEventListener('change', changed);
+  }
+
+  private sendSignal(signal: OverlaySignal): Promise<void> {
+    if (!window.api?.sendOverlaySignal) return Promise.resolve();
+    return window.api.sendOverlaySignal({ target: 'main', signal }).catch((error: unknown) => {
+      console.warn(`[OverlayStage] Could not send the ${signal.kind} signal:`, error);
+    });
+  }
+
+  private async handleSignal(signal: OverlaySignal): Promise<void> {
+    if (signal.kind === 'hello') {
+      await this.sendSignal({ kind: 'ready', session: signal.session });
+      return;
+    }
+    if (signal.kind !== 'offer') return;
+    try {
+      if (signal.session !== this.linkSession || !this.localPeerConnection) this.openLink(signal.session);
+      const connection = this.localPeerConnection;
+      if (!connection) return;
+      await connection.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
+      const answer = await connection.createAnswer();
+      if (this.localPeerConnection !== connection) return;
+      await connection.setLocalDescription(answer);
+      await waitForIceGatheringComplete(connection, ICE_GATHERING_TIMEOUT_MS);
+      const sdp = connection.localDescription?.sdp ?? answer.sdp;
+      if (this.localPeerConnection !== connection || !sdp) return;
+      await this.sendSignal({ kind: 'answer', session: signal.session, sdp });
+      await this.sendSignal({ kind: 'scale', session: signal.session, pixelRatio: window.devicePixelRatio });
+    } catch (e) {
+      console.warn('[OverlayStage] Erro ao processar sinal WebRTC:', e);
     }
   }
 
-  private initLocalPeerConnection(): void {
+  /** Replaces the connection with one for `session`: whatever the old one carried is gone. */
+  private openLink(session: string): void {
+    this.closeLink();
     try {
-      this.localPeerConnection = new RTCPeerConnection({ iceServers: [] });
-      this.slotStreams = [];
+      const connection = new RTCPeerConnection({ iceServers: [] });
+      this.localPeerConnection = connection;
+      this.linkSession = session;
 
-      this.localPeerConnection.ontrack = (event) => {
+      connection.ontrack = (event) => {
+        if (this.localPeerConnection !== connection) return;
         const mid = event.transceiver?.mid;
         const slotIndex = mid !== undefined && mid !== null ? parseInt(mid, 10) : this.slotStreams.length;
-        const stream = event.streams[0] || new MediaStream([event.track]);
-        this.slotStreams[slotIndex] = stream;
+        this.slotStreams[slotIndex] = event.streams[0] || new MediaStream([event.track]);
 
         event.track.onunmute = () => {
-          this.bindVideos();
+          if (this.localPeerConnection === connection) this.bindVideos();
         };
 
         this.bindVideos();
@@ -165,6 +187,13 @@ export class OverlayStageView {
     } catch (e) {
       console.warn('[OverlayStage] Erro ao inicializar RTCPeerConnection:', e);
     }
+  }
+
+  private closeLink(): void {
+    this.localPeerConnection?.close();
+    this.localPeerConnection = null;
+    this.linkSession = null;
+    this.slotStreams = [];
   }
 
   public render(): void {
@@ -438,46 +467,44 @@ export class OverlayStageView {
   }
 
   private getCardInnerHtml(tile: OverlayTile, hasVideo: boolean, name: string, isSpeaking: boolean): string {
-    const escapedName = escapeHtml(name);
-    return `
-      ${hasVideo ? `
+    return html`
+      ${hasVideo ? html`
         <div class="overlay-video-wrapper">
           <video id="vid-${tile.key}" autoplay playsinline muted></video>
         </div>
-      ` : `
+      ` : html`
         <div class="overlay-avatar-wrapper">
-          ${tile.p.avatarUrl ? `
-            <img src="${tile.p.avatarUrl}" alt="${escapedName}" class="overlay-avatar-img ${isSpeaking ? 'speaking-pulse' : ''}" />
-          ` : `
-            <div class="overlay-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${escapedName.charAt(0).toUpperCase()}</div>
+          ${tile.p.avatarUrl ? html`
+            <img src="${tile.p.avatarUrl}" alt="${name}" class="overlay-avatar-img ${isSpeaking ? 'speaking-pulse' : ''}" data-fallback="avatar" />
+          ` : html`
+            <div class="overlay-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${(name || '').charAt(0).toUpperCase()}</div>
           `}
         </div>
       `}
 
       <div class="overlay-card-footer">
-        <span class="overlay-user-name">${escapedName}</span>
+        <span class="overlay-user-name">${name}</span>
         <div class="overlay-user-badges">
-          ${this.getBadgesHtml(tile)}
+          ${trustedHtml(this.getBadgesHtml(tile))}
         </div>
       </div>
-    `;
+    `.toString();
   }
 
   private getMinimalistInnerHtml(p: OverlayParticipantState, name: string, isSpeaking: boolean): string {
-    const escapedName = escapeHtml(name);
-    return `
+    return html`
       <div class="overlay-mini-avatar-wrapper">
-        ${p.avatarUrl ? `
-          <img src="${p.avatarUrl}" alt="${escapedName}" class="overlay-mini-avatar ${isSpeaking ? 'speaking-pulse' : ''}" />
-        ` : `
-          <div class="overlay-mini-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${escapedName.charAt(0).toUpperCase()}</div>
+        ${p.avatarUrl ? html`
+          <img src="${p.avatarUrl}" alt="${name}" class="overlay-mini-avatar ${isSpeaking ? 'speaking-pulse' : ''}" data-fallback="avatar" />
+        ` : html`
+          <div class="overlay-mini-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${(name || '').charAt(0).toUpperCase()}</div>
         `}
       </div>
-      <span class="overlay-mini-name">${escapedName}</span>
+      <span class="overlay-mini-name">${name}</span>
       <div class="overlay-mini-icons">
-        ${this.getMiniIconsHtml(p)}
+        ${trustedHtml(this.getMiniIconsHtml(p))}
       </div>
-    `;
+    `.toString();
   }
 
   private getMiniIconsHtml(p: OverlayParticipantState): string {
@@ -614,11 +641,8 @@ export class OverlayStageView {
     this.unbindListeners = [];
     this.leavingTimers.forEach((timer) => clearTimeout(timer));
     this.leavingTimers.clear();
-    if (this.localPeerConnection) {
-      try {
-        this.localPeerConnection.close();
-      } catch {}
-      this.localPeerConnection = null;
-    }
+    this.unwatchPixelRatio?.();
+    this.unwatchPixelRatio = null;
+    this.closeLink();
   }
 }

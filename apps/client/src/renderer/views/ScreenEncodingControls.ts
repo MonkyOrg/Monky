@@ -2,8 +2,10 @@ import type { NativeScreenVideoProfile, ScreenEncodingAvailability, ScreenEncodi
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { probeScreenEncoding, type ScreenEncodingPreferences } from '../core/screenEncoding';
+import { webRtcManager } from '../core/WebRtcManager';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { nextIndex } from '../utils/rovingFocus';
 import { appEvents } from '../core/EventBus';
 import { FPS_OPTIONS } from './settings/qualityOptions';
 import { showInfoToast } from './CopyToast';
@@ -35,6 +37,12 @@ export class ScreenEncodingControls {
   private unbindVoice: (() => void) | null = null;
   private userRequest = false;
   private handoff = false;
+  // Checks start an encoder on the GPU, so they run only while the owner shows these controls.
+  private active = false;
+  // Main's capture support does not change while the app runs; once known, checks start without waiting.
+  private captureKnown: boolean | null = null;
+  // Without native capture there is no encoder to check; the controls say so instead.
+  private captureUnavailable = false;
 
   constructor(private readonly profile: () => NativeScreenVideoProfile | null,
     private readonly changed: () => void = () => {},
@@ -100,26 +108,28 @@ export class ScreenEncodingControls {
         this.requested = null;
         this.selectionKey = null;
       }
-      void this.refresh();
+      if (this.active) void this.refresh();
     });
     this.unbindVoice = appEvents.on('voice.state_updated', () => this.resumeDeferredChoices());
-    for (const strategy of ['automatic', 'manual'] as const) {
+    const strategies = ['automatic', 'manual'] as const;
+    for (const strategy of strategies) {
       const button = container.querySelector<HTMLButtonElement>(`#screen-encoding-${strategy}`);
       button?.addEventListener('click', () => {
         if (this.preferences().encodingStrategy === strategy) return;
         this.requested = { ...this.savedPreferences(), encodingStrategy: strategy };
         void this.refresh();
       }, { signal: this.events.signal });
-      this.keyboard(button, strategy === 'automatic' ? 'manual' : 'automatic', 'automatic', 'manual');
+      this.keyboard(button, strategies, strategy);
     }
-    for (const mode of ['hardware', 'software'] as const) {
+    const modes = ['hardware', 'software'] as const;
+    for (const mode of modes) {
       const button = container.querySelector<HTMLButtonElement>(`#screen-encoding-${mode}`);
       button?.addEventListener('click', () => {
         if (button.disabled || this.preferences().encodingStrategy !== 'manual') return;
         this.requested = { ...this.preferences(), encodingMode: mode, codec: this.modeCodec(mode) };
         void this.refresh();
       }, { signal: this.events.signal });
-      this.keyboard(button, mode === 'hardware' ? 'software' : 'hardware', 'hardware', 'software');
+      this.keyboard(button, modes, mode);
     }
     const codec = container.querySelector<HTMLSelectElement>('#select-video-codec');
     codec?.addEventListener('change', () => {
@@ -132,20 +142,40 @@ export class ScreenEncodingControls {
       void this.refresh();
     }, { signal: this.events.signal });
     if (resume) this.render();
-    void this.refresh();
   }
 
-  private keyboard(button: HTMLButtonElement | null, other: string, first: string, last: string): void {
+  /** The owner shows these controls: check the encoder now and on later changes (#490). */
+  activate(): void {
+    if (this.active || !this.container) return;
+    this.active = true;
+    void this.refresh();
+    this.resumeDeferredChoices();
+  }
+
+  /** Hidden controls stop automatic checks until shown again; a change the user asked for keeps verifying. */
+  deactivate(): void {
+    this.active = false;
+    if (this.hasPendingRequest || (!this.pending && !this.checkingChoices)) return;
+    this.probe?.abort();
+    this.probe = null;
+    this.pending = false;
+    this.checkingChoices = false;
+    this.selectionKey = null;
+  }
+
+  /** Each row of cards is one choice: the arrows, Home and End move to a card and choose it. */
+  private keyboard(button: HTMLButtonElement | null, group: readonly string[], id: string): void {
     button?.addEventListener('keydown', event => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         button.click();
-      } else if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-        event.preventDefault();
-        const next = this.container?.querySelector<HTMLButtonElement>(
-          `#screen-encoding-${event.key === 'Home' ? first : event.key === 'End' ? last : other}`);
-        if (next && !next.disabled) { next.focus(); next.click(); }
+        return;
       }
+      const index = nextIndex(event.key, group.indexOf(id), group.length, { orientation: 'horizontal' });
+      if (index === null) return;
+      event.preventDefault();
+      const next = this.container?.querySelector<HTMLButtonElement>(`#screen-encoding-${group[index]}`);
+      if (next && !next.disabled) { next.focus(); next.click(); }
     }, { signal: this.events?.signal });
   }
 
@@ -256,6 +286,8 @@ export class ScreenEncodingControls {
 
   async refresh(applyRequested = false): Promise<void> {
     if (this.committing) return;
+    // Only a change the user asked for is checked while the controls are hidden (#490).
+    if (!this.active && !applyRequested && !this.requested) return;
     const profile = this.profile();
     const preferences = { ...this.preferences() }, saved = JSON.stringify(this.savedPreferences());
     this.pendingSaved = saved;
@@ -296,6 +328,14 @@ export class ScreenEncodingControls {
     let checkedCurrent = false;
     try {
       if (!profile) throw new Error(t('screenShare.nativeProfileChangeBlocked'));
+      const capture = this.captureKnown ?? await this.nativeCaptureAvailable();
+      if (!current()) return;
+      this.captureKnown = capture;
+      this.captureUnavailable = !capture;
+      if (!capture) {
+        this.settleWithoutCapture(profile, applyRequested);
+        return;
+      }
       const checked = await this.check(profile, preferences, probe.signal);
       if (!current()) return;
       checkedCurrent = true;
@@ -343,6 +383,37 @@ export class ScreenEncodingControls {
     }
   }
 
+  /** Main reports whether this device can capture at all; probing where it cannot only fails (#490). */
+  private async nativeCaptureAvailable(): Promise<boolean> {
+    try {
+      const capabilities = await webRtcManager.getNativeScreenCapabilities();
+      return capabilities.capture || capabilities.requiresSelectionProbe === true;
+    } catch (error) {
+      console.warn('[ScreenEncoding] Native capture capabilities are unavailable:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Without native capture there is no encoder to verify: the status says so, without an error
+   * notice, and a quality change the user asked for applies as requested.
+   */
+  private settleWithoutCapture(profile: NativeScreenVideoProfile, applyRequested: boolean): void {
+    this.availability = null;
+    this.requested = null;
+    if (applyRequested) {
+      this.committing = true;
+      try { this.applyCompatibleProfile?.(profile); }
+      catch (error) {
+        console.warn('[ScreenEncoding] Quality could not be applied:', error);
+        this.rejected?.();
+        this.clearToast = showInfoToast(t('settings.screenEncodingAdjustmentBlocked'));
+      }
+      finally { this.committing = false; }
+    }
+    this.selectionKey = this.key();
+  }
+
   private async discoverChoices(probe: AbortController): Promise<void> {
     const profile = this.profile();
     if (!profile) return;
@@ -355,7 +426,8 @@ export class ScreenEncodingControls {
       && JSON.stringify(this.profile()) === profileKey && this.key() === key
       && JSON.stringify(this.savedPreferences()) === saved;
     const defer = (): boolean => {
-      this.choicesDeferred = voiceStore.isScreenSharing;
+      // Alternatives also wait while the controls are hidden; showing them resumes the checks.
+      this.choicesDeferred = voiceStore.isScreenSharing || !this.active;
       return this.choicesDeferred;
     };
     if (defer()) { this.render(); return; }
@@ -385,8 +457,8 @@ export class ScreenEncodingControls {
 
   private resumeDeferredChoices(): void {
     const probe = this.probe;
-    if (!this.choicesDeferred || voiceStore.isScreenSharing || this.pending || !probe || !this.container?.isConnected)
-      return;
+    if (!this.active || !this.choicesDeferred || voiceStore.isScreenSharing || this.pending || !probe
+      || !this.container?.isConnected) return;
     void this.discoverChoices(probe);
   }
 
@@ -395,28 +467,31 @@ export class ScreenEncodingControls {
   private render(): void {
     const preferences = this.preferences();
     const automatic = preferences.encodingStrategy === 'automatic';
+    const unavailable = this.captureUnavailable;
     const selection = this.availability?.selection;
     const selectedMode = automatic ? selection?.mode : preferences.encodingMode;
-    for (const strategy of ['automatic', 'manual'] as const)
-      this.container?.querySelector(`#screen-encoding-${strategy}`)?.setAttribute('aria-pressed',
-        String(preferences.encodingStrategy === strategy));
+    for (const strategy of ['automatic', 'manual'] as const) {
+      const button = this.container?.querySelector<HTMLButtonElement>(`#screen-encoding-${strategy}`);
+      button?.setAttribute('aria-pressed', String(preferences.encodingStrategy === strategy));
+      if (button) button.disabled = unavailable;
+    }
     const hardware = this.container?.querySelector<HTMLButtonElement>('#screen-encoding-hardware');
     const software = this.container?.querySelector<HTMLButtonElement>('#screen-encoding-software');
     if (hardware) {
       const choice = this.choice('hardware', this.modeCodec('hardware'));
-      hardware.disabled = automatic || !!choice && !('error' in choice) && !choice.availability.selection;
+      hardware.disabled = unavailable || automatic || !!choice && !('error' in choice) && !choice.availability.selection;
       hardware.setAttribute('aria-pressed', String(selectedMode === 'hardware'));
       hardware.setAttribute('aria-describedby', 'screen-encoding-status');
     }
     if (software) {
       const choice = this.choice('software', this.modeCodec('software'));
-      software.disabled = automatic || !!choice && !('error' in choice) && !choice.availability.selection;
+      software.disabled = unavailable || automatic || !!choice && !('error' in choice) && !choice.availability.selection;
       software.setAttribute('aria-pressed', String(selectedMode === 'software'));
     }
     const codec = this.container?.querySelector<HTMLSelectElement>('#select-video-codec');
     if (codec) {
-      codec.disabled = automatic;
-      codec.setAttribute('aria-readonly', String(automatic));
+      codec.disabled = unavailable || automatic;
+      codec.setAttribute('aria-readonly', String(unavailable || automatic));
       for (const value of ['h264', 'av1'] as const) {
         const option = codec.querySelector<HTMLOptionElement>(`option[value="${value}"]`);
         if (!option) continue;
@@ -435,12 +510,13 @@ export class ScreenEncodingControls {
     }
     for (const mode of ['hardware', 'software'] as const) {
       const label = this.container?.querySelector(`#screen-encoding-${mode}-choice`);
-      if (label) label.textContent = automatic ? '' : this.choiceText(mode, this.modeCodec(mode), this.choice(mode, this.modeCodec(mode)));
+      if (label) label.textContent = automatic || unavailable ? ''
+        : this.choiceText(mode, this.modeCodec(mode), this.choice(mode, this.modeCodec(mode)));
     }
     const choices = this.container?.querySelector('#screen-encoding-choices');
     if (choices) {
       choices.setAttribute('aria-busy', String(this.checkingChoices));
-      choices.textContent = automatic ? '' : this.checkingChoices ? t('settings.screenEncodingCheckingChoices')
+      choices.textContent = automatic || unavailable ? '' : this.checkingChoices ? t('settings.screenEncodingCheckingChoices')
         : [...(this.choicesDeferred ? [t('settings.screenEncodingChoicesDeferred')] : []),
           ...(['h264', 'av1'] as const).flatMap(codec => {
             const choice = this.choice(preferences.encodingMode, codec);
@@ -451,7 +527,7 @@ export class ScreenEncodingControls {
     const status = this.container?.querySelector<HTMLElement>('#screen-encoding-status');
     if (status) {
       status.setAttribute('aria-busy', String(this.pending));
-      status.textContent = this.pending ? t('common.loading') : this.error
+      status.textContent = this.pending ? t('common.loading') : unavailable ? t('settings.screenEncodingCaptureUnavailable') : this.error
         ? this.error
         : !selection ? t('settings.screenEncodingProfileUnavailable', {
           codec: settingsStore.preferredScreenCodec.toUpperCase(),
@@ -486,6 +562,7 @@ export class ScreenEncodingControls {
   }
 
   private unbindUi(): void {
+    this.active = false;
     this.unbindSettings?.();
     this.unbindSettings = null;
     this.unbindVoice?.();

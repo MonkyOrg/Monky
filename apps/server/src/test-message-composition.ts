@@ -8,7 +8,7 @@ import {
   LIMITS, MIN_CLIENT_PROTOCOL, MIN_BOT_PROTOCOL, MessageType, ProtocolErrorCode,
   PROTOCOL_VERSION, Permission, createProtocolOffer, negotiateProtocol, messageBlocksContent,
 } from '@monky/shared';
-import { createFixture, identity, record, records, text } from './testFixtures/bots';
+import { createApprovedBotFixture, createFixture, identity, record, records, text } from './testFixtures/bots';
 import { SqliteMentionRepository, SqliteMessageRepository } from './infrastructure/database/SqliteRepositories';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 
@@ -399,4 +399,89 @@ test('direct and everyone mentions only persist for readers and never deliver pr
   await mentions.clearForUserChannel(allowed.id, channelId);
   await owner.peer.request(MessageType.CHAT_SEND, { channelId, content: '@Allowed' });
   assert.deepEqual(await mentions.listChannelIdsForUser(allowed.id), []);
+});
+
+test('only whole nicknames are mentioned: a longer name, an address or code never pings someone else', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Mention owner');
+  const members = [await f.human('Lu'), await f.human('Lucas'), await f.human('Ana'), await f.human('Ana Paula')];
+  const nicknames = ['Lu', 'Lucas', 'Ana', 'Ana Paula'];
+  const channelId = text(records(record(owner.auth.payload.server).channels).find(channel => channel.type === 'TEXT')?.id);
+  const mentions = new SqliteMentionRepository(f.database.getDb());
+  const mentioned = async (content: string) => {
+    for (const member of members) await mentions.clearForUserChannel(member.id, channelId);
+    const sent = await owner.peer.request(MessageType.CHAT_SEND, { channelId, content });
+    assert.equal(sent.type, MessageType.CHAT_MESSAGE);
+    const reached: string[] = [];
+    for (const [index, member] of members.entries()) {
+      if ((await mentions.listChannelIdsForUser(member.id)).includes(channelId)) reached.push(nicknames[index]);
+    }
+    return reached;
+  };
+  assert.deepEqual(await mentioned('@Lucas, olha isso'), ['Lucas']);
+  assert.deepEqual(await mentioned('falem com @Ana Paula'), ['Ana Paula']);
+  assert.deepEqual(await mentioned('**@lu** e (@ana)'), ['Lu', 'Ana']);
+  assert.deepEqual(await mentioned('lu@exemplo.com, `@Lucas` e contato@todos.com.br'), []);
+  assert.deepEqual(await mentioned('_@lucas_ e __@Ana__, ana_@lu.com'), ['Lucas', 'Ana']);
+  assert.deepEqual(await mentioned('https://x.com/(@Lucas) e [perfil](https://y.com/(@Ana))'), []);
+});
+
+test('bots are not mentionable: "@Lucas Bot" mentions the member Lucas, whether the bot is online or not', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Bot keeper');
+  const lucas = await f.human('Lucas');
+  const channelId = text(records(record(owner.auth.payload.server).channels).find(channel => channel.type === 'TEXT')?.id);
+  const mentions = new SqliteMentionRepository(f.database.getDb());
+  const pinged = async (content: string) => {
+    await mentions.clearForUserChannel(lucas.id, channelId);
+    const sent = await owner.peer.request(MessageType.CHAT_SEND, { channelId, content });
+    assert.equal(sent.type, MessageType.CHAT_MESSAGE);
+    return (await mentions.listChannelIdsForUser(lucas.id)).includes(channelId);
+  };
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const bot = await f.bot(text(created.payload.token), identity(), 'Lucas Bot');
+  assert.equal(await pinged('@Lucas Bot toca a próxima'), true, 'Presence never changes who a message mentions');
+  await bot.peer.close();
+  await owner.peer.wait(message => message.type === MessageType.USER_LEFT && message.payload.userId === botId);
+  assert.equal(await pinged('@Lucas Bot toca a próxima'), true);
+});
+
+test('bot posts record the mentions their readers are told about, once, in any of their languages', async (t) => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Post owner');
+  const ana = await f.human('Ana');
+  const lucas = await f.human('Lucas');
+  const channelId = text(records(record(owner.auth.payload.server).channels).find(channel => channel.type === 'TEXT')?.id);
+  const mentionedBy = (messageId: string) => (f.database.getDb().prepare('SELECT user_id AS userId FROM mentions WHERE message_id = ?')
+    .all(messageId) as Array<{ userId: string }>).map(row => row.userId).sort();
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const bot = await f.bot(text(created.payload.token), identity(), 'Announcer');
+  const post = await bot.peer.request(MessageType.CHAT_SEND, {
+    channelId, content: 'Meeting now', localizations: { 'pt-BR': '@Ana, reunião agora', en: 'Meeting now, @Lucas' },
+  });
+  assert.equal(post.type, MessageType.CHAT_MESSAGE, JSON.stringify(post.payload));
+  assert.deepEqual(mentionedBy(text(post.payload.id)), [ana.id, lucas.id].sort(), 'Whoever any language mentions is mentioned');
+  assert.ok((await new SqliteMentionRepository(f.database.getDb()).listChannelIdsForUser(ana.id)).includes(channelId),
+    'The @ badge is still there after reconnecting');
+  const quiet = await bot.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Sem menções' });
+  assert.deepEqual(mentionedBy(text(quiet.payload.id)), []);
+  const botRecord = await f.botRepo.findById(botId);
+  assert.ok(botRecord);
+  const repeatedId = randomUUID();
+  const send = () => f.chatService.sendBotMessage(botRecord, channelId, '@Lucas, de novo', undefined, repeatedId);
+  // Sent together, both copies look the post up before either stores it.
+  assert.deepEqual((await Promise.all([send(), send()])).map(result => result.success), [true, true]);
+  assert.equal((await send()).success, true);
+  assert.deepEqual(mentionedBy(repeatedId), [lucas.id], 'A retried post records its mentions once');
+  const responseId = randomUUID();
+  const response = await f.chatService.sendBotMessage(botRecord, channelId, '@Lucas, pronto', {
+    invocationId: randomUUID(), commandName: 'ping', invokerId: owner.id, invokerNickname: 'Post owner',
+  }, responseId, () => true, owner.id);
+  assert.equal(response.success, true);
+  assert.deepEqual(mentionedBy(responseId), [], 'Command responses, shown without a cue, record no mention');
 });

@@ -1,53 +1,57 @@
-import { SCREEN_SHARE_LIMITS, type DesktopSource, type NativeScreenCapabilities, type NativeScreenCaptureKind,
-  type ScreenShareAudience } from '@monky/shared';
-import { escapeHtml } from '../utils/html';
-import { getAvatarUrl } from '../utils/avatar';
-import { isHexColor } from '../utils/colors';
-import { appEvents } from '../core/EventBus';
-import { screenAudioService } from '../core/ScreenAudioService';
 import {
-  captureScreenShareCall, notifyScreenShareState, screenShareLimit, stopLocalScreenShares,
-} from '../core/screenShareControls';
+  PUBLIC_AUDIENCE, SCREEN_SHARE_LIMITS, type DesktopSource, type NativeScreenCapabilities, type ResourceAudience,
+} from '@monky/shared';
+import { escapeHtml, html, trustedHtml } from '../utils/html';
+import { appEvents } from '../core/EventBus';
+import { captureScreenShareCall, screenShareLimit, type ScreenShareCall } from '../core/screenShareControls';
+import { startScreenShare } from '../core/screenShareStart';
 import { videoService } from '../core/VideoService';
 import { voiceStore } from '../stores/voiceStore';
 import { webRtcManager } from '../core/WebRtcManager';
 import { setButtonLoading } from '../utils/buttonLoading';
+import { ScreenShareUserError, screenShareFailureMessage } from '../utils/screenShareFailure';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { showAlert, showConfirm } from './Dialog';
 import { showErrorToast } from './CopyToast';
 import { screenShareChooser } from './ScreenShareChooser';
 import { getLanguage, t } from '../i18n';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { openModal, type ModalShell } from '../utils/modalShell';
+import { reportError } from '../utils/feedback';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { nativeScreenProfile } from '../core/webrtc/NativeScreenController';
 import { GameCaptureGuideModal } from './GameCaptureGuideModal';
-import { smoothScrollIntoView } from '../utils/scroll';
+import { ResourceAudiencePicker, type AudienceTexts } from './ResourceAudiencePicker';
+import { nextIndex } from '../utils/rovingFocus';
+import {
+  SOURCE_TABS, canCaptureNatively, captureKindOf, captureUnavailableMessage, hasUnownedAudio, isMacPlatform, planAudio,
+  sourceMatchesTab, supportsCaptureKind, supportsTab, windowCaptureMethods,
+  type AudioBlock, type CaptureContext, type LiveScreens, type SourceTab, type WindowCaptureMethod,
+} from './screenShare/captureRules';
 
 type SourceLoadState =
   | { status: 'loading' }
   | { status: 'ready'; sources: DesktopSource[] }
   | { status: 'error' };
 
-const SOURCE_TABS = [
-  { id: 'screen', label: 'screenShare.screensTab', icon: 'desktop_windows' },
-  { id: 'window', label: 'screenShare.windowsTab', icon: 'web_asset' },
-] as const;
-type SourceTab = typeof SOURCE_TABS[number]['id'];
+/** A private share speaks of who can watch; the picker is the same one community resources use. */
+const SCREEN_AUDIENCE_TEXTS: AudienceTexts = {
+  private: 'screenShare.privateLabel', description: 'screenShare.privateDescription', who: 'screenShare.privateAudience',
+  search: 'screenShare.privateSearch', choose: 'screenShare.privateChoose', noResults: 'screenShare.privateNoResults',
+  empty: 'screenShare.privateEmpty', selected: 'screenShare.privateSelected', roles: 'screenShare.privateRoles',
+  members: 'screenShare.privateUsers', more: 'screenShare.privateMore',
+};
 
-const WINDOW_CAPTURE_METHODS = [
-  { id: 'window', label: 'screenShare.windowCapture', description: 'screenShare.windowCaptureDescription', icon: 'web_asset' },
-  { id: 'game', label: 'screenShare.gameCapture', description: 'screenShare.gameCaptureDescription', icon: 'sports_esports' },
-] as const;
-type WindowCaptureMethod = typeof WINDOW_CAPTURE_METHODS[number]['id'];
-
-/** Why a share cannot carry sound beside the existing ones (#253). */
-type AudioBlock = 'system' | 'mac' | 'app';
-type AudioPlan =
-  | { kind: 'free'; handedOver: string[] }
-  | { kind: 'ask'; apps: string[]; handedOver: string[] }
-  | { kind: 'blocked'; reason: AudioBlock };
+/** The live shares as the audio rules read them. */
+function liveScreens(): LiveScreens {
+  return {
+    shareIds: voiceStore.screenShareIds,
+    audioShareIds: voiceStore.screenAudioShareIds,
+    capture: shareId => videoService.getNativeScreenCapture(shareId),
+  };
+}
 
 export class ScreenSharePickerModal {
+  private shell: ModalShell | null = null;
   private modalEl: HTMLElement | null = null;
   private selectedSourceId: string | null = null;
   private activeTab: SourceTab = 'window';
@@ -57,223 +61,65 @@ export class ScreenSharePickerModal {
   private sourceState: SourceLoadState = { status: 'loading' };
   private sourceRequest = 0;
   private nativeCapabilities: NativeScreenCapabilities | null = null;
-  private eventController: AbortController | null = null;
   private readonly gameGuide = new GameCaptureGuideModal();
-  private privateShare = false;
-  private audienceRendered = false;
-  private audienceOpen = false;
-  private audience: ScreenShareAudience = { userIds: [], roleIds: [] };
-  private pickerCall: ReturnType<typeof captureScreenShareCall> | null = null;
+  private audience = this.createAudience(PUBLIC_AUDIENCE);
+  private pickerCall: ScreenShareCall | null = null;
   private audioAttentionTimer: number | null = null;
   /** The call in which adding screens past the comfortable amount was already confirmed. */
   private extraScreensConfirmedFor: string | null = null;
 
-  private audienceIsValid(): boolean {
-    return !this.privateShare || this.audience.userIds.length + this.audience.roleIds.length > 0;
+  /** Who can watch, picked from the call's server; the call may end while the picker is open. */
+  private createAudience(initial: ResourceAudience): ResourceAudiencePicker {
+    return new ResourceAudiencePicker(() => this.pickerCall?.serverStore ?? null, 'share-audience', initial, 'adaptive',
+      'audience', { texts: SCREEN_AUDIENCE_TEXTS, externalSwitch: true, className: 'share-audience-field' });
   }
 
+  /** The picker's own switch and the audience field follow the audience and the start in flight. */
   private updateAudience(): void {
     const modal = this.modalEl;
     if (!modal) return;
-    const section = modal.querySelector<HTMLElement>('#share-audience');
-    if (section) section.hidden = !this.privateShare;
     const privacy = modal.querySelector<HTMLInputElement>('#chk-private-share');
-    if (privacy) { privacy.checked = this.privateShare; privacy.disabled = this.isStarting; }
-    if (!this.privateShare || this.isStarting) this.audienceOpen = false;
-    const trigger = modal.querySelector<HTMLButtonElement>('#share-audience-toggle');
-    if (trigger) {
-      trigger.disabled = this.isStarting;
-      trigger.setAttribute('aria-expanded', String(this.audienceOpen));
+    if (privacy) {
+      privacy.checked = this.audience.value().visibility === 'private';
+      privacy.disabled = this.isStarting;
     }
-    const popup = modal.querySelector<HTMLElement>('#share-audience-popup');
-    if (popup) setSurfaceVisible(popup, this.audienceOpen, 'popover');
-    if (!this.privateShare) return;
-    if (!this.audienceRendered) {
-      const choices = modal.querySelector<HTMLElement>('.share-audience-options');
-      if (choices) choices.innerHTML = this.audienceOptions();
-      this.audienceRendered = true;
-    }
-    const search = modal.querySelector<HTMLInputElement>('#share-audience-search');
-    if (search) search.disabled = this.isStarting;
-    const normalize = (value: string) => value.normalize('NFD').replace(/\p{M}/gu, '').toLocaleLowerCase();
-    const query = normalize((search?.value ?? '').trim());
-    const candidates = modal.querySelectorAll<HTMLButtonElement>('[data-audience-id]');
-    const selectedOptions: HTMLButtonElement[] = [];
-    let visible = 0;
-    candidates.forEach(button => {
-      const kind = button.dataset.audienceKind === 'role' ? 'roleIds' : 'userIds';
-      const selected = this.audience[kind].includes(button.dataset.audienceId ?? '');
-      button.setAttribute('aria-selected', String(selected));
-      button.classList.toggle('selected', selected);
-      button.disabled = this.isStarting || (!selected && this.audience[kind].length >= (kind === 'userIds' ? 256 : 128));
-      button.hidden = !normalize(button.dataset.audienceName ?? '').includes(query);
-      if (selected) selectedOptions.push(button);
-      if (!button.hidden) visible++;
-    });
-    for (const group of modal.querySelectorAll<HTMLElement>('.share-audience-group')) {
-      group.hidden = ![...group.querySelectorAll<HTMLButtonElement>('[data-audience-id]')].some(button => !button.hidden);
-    }
-    const summary = modal.querySelector<HTMLElement>('#share-audience-summary');
-    if (summary) {
-      const content = selectedOptions.length
-        ? selectedOptions.slice(0, 2).map(button =>
-          `<span class="share-audience-chip">${button.querySelector('.share-audience-identity')?.innerHTML ?? ''}</span>`).join('')
-          + (selectedOptions.length > 2
-            ? `<span class="share-audience-more" aria-label="${escapeHtml(t('screenShare.privateMore', { count: selectedOptions.length - 2 }))}">+${selectedOptions.length - 2}</span>` : '')
-        : `<span class="share-audience-placeholder">${escapeHtml(t('screenShare.privateChoose'))}</span>`;
-      if (summary.innerHTML !== content) summary.innerHTML = content;
-    }
-    const empty = modal.querySelector<HTMLElement>('#share-audience-no-results');
-    if (empty) empty.hidden = visible > 0;
-    const status = modal.querySelector<HTMLElement>('#share-audience-status');
-    if (status) status.textContent = this.audienceIsValid()
-      ? t('screenShare.privateSelected', { count: this.audience.userIds.length + this.audience.roleIds.length })
-      : t('screenShare.privateEmpty');
+    this.audience.setDisabled(modal, this.isStarting);
   }
 
-  private setAudienceOpen(open: boolean): void {
-    if (this.isStarting || !this.privateShare) return;
-    this.audienceOpen = open;
-    this.updateAudience();
-    if (open) this.modalEl?.querySelector<HTMLInputElement>('#share-audience-search')?.focus();
+  private readySources(): readonly DesktopSource[] {
+    return this.sourceState.status === 'ready' ? this.sourceState.sources : [];
   }
 
-  private audienceOptions(): string {
-    const serverStore = this.pickerCall?.serverStore;
-    const options = (kind: 'role' | 'user', values: { id: string; name: string; color?: string | null; avatarUrl?: string | null }[]) => [...values]
-      .sort((a, b) => a.name.localeCompare(b.name)).map(value => `
-        <button type="button" class="share-audience-option" data-audience-kind="${kind}"
-          data-audience-id="${escapeHtml(value.id)}" data-audience-name="${escapeHtml(value.name)}"
-          role="option" aria-selected="false" tabindex="-1">
-          <span class="share-audience-identity">
-            ${kind === 'role'
-              ? `<span class="share-audience-role" style="--role-color: ${isHexColor(value.color) ? value.color : 'var(--text-muted)'}" aria-hidden="true"></span>`
-              : `<img class="share-audience-avatar" src="${escapeHtml(getAvatarUrl(value.avatarUrl))}" alt="" data-fallback="avatar" loading="lazy" decoding="async">`}
-            <span class="share-audience-name">${escapeHtml(value.name)}</span>
-          </span>
-          <span class="material-symbols-outlined md-18 share-audience-check" aria-hidden="true">check</span>
-        </button>`).join('');
-    const members = [...(serverStore?.knownMembers.values() ?? [])]
-      .filter(user => user.id !== serverStore?.currentUser?.id && !user.isBot)
-      .map(user => ({ id: user.id, name: user.nickname, avatarUrl: user.avatarUrl }));
-    return `<div class="share-audience-group" role="group" aria-labelledby="share-audience-roles">
-        <h4 id="share-audience-roles">${escapeHtml(t('screenShare.privateRoles'))}</h4>
-        ${options('role', serverStore?.roles ?? [])}
-      </div><div class="share-audience-group" role="group" aria-labelledby="share-audience-users">
-        <h4 id="share-audience-users">${escapeHtml(t('screenShare.privateUsers'))}</h4>
-        ${options('user', members)}
-      </div>`;
-  }
-
-  /** A share's audio is the whole system mix on a monitor, and on macOS for any source (#298). */
-  private isSystemAudio(kind: NativeScreenCaptureKind | undefined): boolean {
-    return this.isMac || kind === undefined || kind === 'monitor';
-  }
-
-  /** Local shares carrying audio, and whether each one carries the whole system mix (#253). */
-  private audioShares(): Array<{ shareId: string; system: boolean }> {
-    return voiceStore.screenAudioShareIds.filter(shareId => voiceStore.screenShareIds.includes(shareId))
-      .map(shareId => ({ shareId, system: this.isSystemAudio(videoService.getNativeScreenCapture(shareId)?.captureKind) }));
-  }
-
-  /** Audio held outside any live share (the legacy capture, or an association still being set up). */
-  private hasUnownedScreenAudio(): boolean {
-    return voiceStore.screenAudioShareIds.some(shareId => !voiceStore.screenShareIds.includes(shareId))
-      || (screenAudioService.getIsCapturing() && this.audioShares().length === 0);
-  }
-
-  /**
-   * How the audio of a new share fits the existing ones (#253): each application may share its own sound,
-   * but a whole screen's sound is the entire system mix, so nothing else may carry sound beside it. The
-   * shares being replaced hand their audio over.
-   */
-  private planAudio(mode: 'add' | 'replace', target: string | undefined, kind: NativeScreenCaptureKind,
-    source: DesktopSource | undefined): AudioPlan {
-    const retiring = mode === 'add' ? [] : target !== undefined ? [target] : [...voiceStore.screenShareIds];
-    const owners = this.audioShares();
-    const handedOver = owners.filter(owner => retiring.includes(owner.shareId)).map(owner => owner.shareId);
-    const remaining = owners.filter(owner => !retiring.includes(owner.shareId));
-    if (this.hasUnownedScreenAudio() || remaining.some(owner => owner.system))
-      return { kind: 'blocked', reason: this.isMac ? 'mac' : 'system' };
-    if (this.isSystemAudio(kind) && remaining.length)
-      return { kind: 'ask', apps: remaining.map(owner => owner.shareId), handedOver };
-    if (this.sharesAppAudio(source, remaining.map(owner => owner.shareId))) return { kind: 'blocked', reason: 'app' };
-    return { kind: 'free', handedOver };
-  }
-
-  /**
-   * Windows captures an application's audio together with the processes it started: another window of
-   * it, or a launcher and the game it opened, would share the same audio twice.
-   */
-  private sharesAppAudio(source: DesktopSource | undefined, owners: readonly string[]): boolean {
-    const processId = source?.processId;
-    if (processId === undefined || this.sourceState.status !== 'ready') return false;
-    const sources = this.sourceState.sources;
-    return owners.some(shareId => {
-      const desktopSourceId = videoService.getNativeScreenCapture(shareId)?.desktopSourceId;
-      const owner = sources.find(item => item.id === desktopSourceId);
-      const ownerProcess = owner?.processId;
-      if (ownerProcess === undefined) return false;
-      return ownerProcess === processId || !!source?.processAncestry?.includes(ownerProcess)
-        || !!owner?.processAncestry?.includes(processId);
-    });
-  }
-
-  private captureKind(tab = this.activeTab): NativeScreenCaptureKind {
-    return tab === 'screen' ? 'monitor' : this.windowCaptureMethod;
-  }
-
-  private supportsCaptureKind(kind: NativeScreenCaptureKind): boolean {
-    const capabilities = this.nativeCapabilities;
-    return !!capabilities && (capabilities.capture === true || capabilities.requiresSelectionProbe === true)
-      && (capabilities.captureKinds ?? (capabilities.capture === true ? ['window'] : [])).includes(kind);
-  }
-
-  private supportsTab(tab: SourceTab): boolean {
-    return tab === 'screen' ? this.supportsCaptureKind('monitor')
-      : this.supportsCaptureKind('window') || this.supportsCaptureKind('game');
+  private captureKind(tab = this.activeTab) {
+    return captureKindOf(tab, this.windowCaptureMethod);
   }
 
   private get selectionProbePending(): boolean {
     return this.nativeCapabilities?.requiresSelectionProbe === true;
   }
 
-  private sourceMatchesTab(source: DesktopSource, tab = this.activeTab): boolean {
-    const type = tab === 'screen' ? 'screen' : 'window';
-    return source.type === type && source.id.startsWith(tab === 'screen' ? 'native-monitor:' : 'window:');
+  private selectedSource(): DesktopSource | undefined {
+    if (this.sourceState.status !== 'ready' || !supportsTab(this.nativeCapabilities, this.activeTab)) return undefined;
+    return this.sourceState.sources.find(source => source.id === this.selectedSourceId
+      && sourceMatchesTab(source, this.activeTab) && !videoService.getActiveSourceIds().has(source.id));
   }
 
-  private selectedSource(): DesktopSource | undefined {
-    if (this.sourceState.status !== 'ready' || !this.supportsTab(this.activeTab)) return undefined;
-    return this.sourceState.sources.find(source => source.id === this.selectedSourceId
-      && this.sourceMatchesTab(source) && !videoService.getActiveSourceIds().has(source.id));
+  private captureContext(): CaptureContext {
+    return {
+      capabilities: this.nativeCapabilities,
+      loading: this.sourceState.status === 'loading',
+      ownWindow: this.selectedSource()?.isOwnWindow === true,
+      unownedAudio: hasUnownedAudio(liveScreens()),
+      profileAvailable: nativeScreenProfile(videoService.getProfile()) !== null,
+    };
   }
 
   private usesNativeCapture(sourceId: string | undefined, audio: boolean, kind = this.captureKind()): boolean {
-    return !!sourceId?.startsWith(kind === 'monitor' ? 'native-monitor:' : 'window:') && this.supportsCaptureKind(kind)
-      && (!audio || !this.selectedSource()?.isOwnWindow)
-      && (!audio || (this.nativeCapabilities?.captureAudio === true && !this.hasUnownedScreenAudio()))
-      && nativeScreenProfile(videoService.getProfile()) !== null;
+    return canCaptureNatively(sourceId, audio, kind, this.captureContext());
   }
 
   private captureUnavailableMessage(audio: boolean, kind = this.captureKind()): string {
-    if (audio && this.selectedSource()?.isOwnWindow) return t('screenShare.ownWindowAudioUnavailable');
-    const capabilities = this.nativeCapabilities;
-    if (!capabilities && this.sourceState.status === 'loading') return t('common.loading');
-    if (!capabilities || (!capabilities.capture && capabilities.requiresSelectionProbe !== true)) {
-      if (capabilities?.reason === 'encoder') return t('screenShare.nativeEncoderUnavailable');
-      return t(capabilities?.reason === 'runtime' ? 'screenShare.nativeUnavailable' : 'screenShare.platformSoon');
-    }
-    if (!this.supportsCaptureKind(kind)) {
-      return t('screenShare.captureMethodUnavailable', {
-        method: t(kind === 'monitor' ? 'screenShare.screensTab'
-          : kind === 'window' ? 'screenShare.windowCapture' : 'screenShare.gameCapture'),
-      });
-    }
-    if (audio && this.hasUnownedScreenAudio())
-      return t('screenShare.audioAlreadySharing');
-    if (audio && !capabilities.captureAudio) return t('screenShare.nativeAudioUnavailable');
-    return t('screenShare.nativeProfileChangeBlocked');
+    return captureUnavailableMessage(audio, kind, this.captureContext());
   }
 
   private updateCaptureInfo(): void {
@@ -301,7 +147,7 @@ export class ScreenSharePickerModal {
     const permissionMuted = voiceStore.permissionMuted;
     if (audioInput) {
       audioInput.checked = !ownWindow && !permissionMuted && this.shareAudioByTab[this.activeTab];
-      audioInput.disabled = this.isStarting || ownWindow || permissionMuted || this.hasUnownedScreenAudio();
+      audioInput.disabled = this.isStarting || ownWindow || permissionMuted || hasUnownedAudio(liveScreens());
       audioInput.title = permissionMuted ? t('permissions.permissionMuted') : '';
       if (ownWindow) audioInput.setAttribute('aria-describedby', 'share-audio-warning');
       else audioInput.removeAttribute('aria-describedby');
@@ -334,7 +180,7 @@ export class ScreenSharePickerModal {
       .forEach(button => {
         // A second audio share is explained by a toast on click (#253), not by
         // a dead button whose reason only showed up in a hover tooltip.
-        button.disabled = this.isStarting || !source || !native || !this.audienceIsValid();
+        button.disabled = this.isStarting || !source || !native || !this.audience.isValid();
         if (source && this.captureKind() === 'game') button.setAttribute('aria-describedby', 'share-game-tip');
         else button.removeAttribute('aria-describedby');
       });
@@ -351,13 +197,13 @@ export class ScreenSharePickerModal {
   }
 
   private updateTabs(): void {
-    const available = SOURCE_TABS.filter(tab => this.supportsTab(tab.id));
+    const available = SOURCE_TABS.filter(tab => supportsTab(this.nativeCapabilities, tab.id));
     const focusTab = available.find(tab => tab.id === this.activeTab) ?? available[0];
     const reasons = new Set<string>();
     for (const tab of SOURCE_TABS) {
       const button = this.modalEl?.querySelector<HTMLButtonElement>(`#share-tab-${tab.id}`);
       if (!button) continue;
-      const supported = this.supportsTab(tab.id);
+      const supported = supportsTab(this.nativeCapabilities, tab.id);
       const selected = this.activeTab === tab.id;
       button.disabled = this.isStarting || !supported;
       button.classList.toggle('active', selected);
@@ -387,15 +233,16 @@ export class ScreenSharePickerModal {
     const section = this.modalEl?.querySelector<HTMLElement>('#share-window-methods');
     if (!section) return;
     const visible = this.activeTab === 'window' && !!source;
-    section.hidden = !visible;
+    setSurfaceVisible(section, visible, 'panel');
     const label = section.querySelector<HTMLElement>('#share-method-label');
     if (label) label.textContent = source ? t('screenShare.captureMethodForWindow', { name: source.name }) : '';
-    const available = this.windowCaptureMethods.filter(method => this.supportsCaptureKind(method.id));
+    const methods = windowCaptureMethods(isMacPlatform());
+    const available = methods.filter(method => supportsCaptureKind(this.nativeCapabilities, method.id));
     const focusMethod = available.find(method => method.id === this.windowCaptureMethod) ?? available[0];
-    for (const method of this.windowCaptureMethods) {
+    for (const method of methods) {
       const button = section.querySelector<HTMLButtonElement>(`#share-method-${method.id}`);
       if (!button) continue;
-      const supported = this.supportsCaptureKind(method.id);
+      const supported = supportsCaptureKind(this.nativeCapabilities, method.id);
       button.disabled = !visible || this.isStarting || !supported;
       button.setAttribute('aria-pressed', String(this.windowCaptureMethod === method.id));
       button.tabIndex = !button.disabled && method.id === focusMethod?.id ? 0 : -1;
@@ -412,20 +259,12 @@ export class ScreenSharePickerModal {
     if (tip) {
       tip.hidden = !visible || this.windowCaptureMethod !== 'game';
       tip.textContent = t('screenShare.gameCompatibility')
-        + (this.supportsCaptureKind('window') ? ` ${t('screenShare.gameWindowAlternative')}` : '');
+        + (supportsCaptureKind(this.nativeCapabilities, 'window') ? ` ${t('screenShare.gameWindowAlternative')}` : '');
     }
   }
 
-  private get isMac(): boolean {
-    return window.api?.platform === 'darwin';
-  }
-
-  private get windowCaptureMethods() {
-    return WINDOW_CAPTURE_METHODS.filter(method => !this.isMac || method.id === 'window');
-  }
-
   private audioToggleLabel(tab: SourceTab): string {
-    if (this.hasUnownedScreenAudio()) return t('screenShare.audioAlreadySharing');
+    if (hasUnownedAudio(liveScreens())) return t('screenShare.audioAlreadySharing');
     if (tab !== 'screen') {
       return t('screenShare.shareAppAudio');
     }
@@ -437,28 +276,27 @@ export class ScreenSharePickerModal {
     this.pickerCall = captureScreenShareCall();
 
     const alreadySharing = voiceStore.isScreenSharing;
-    this.audienceRendered = false;
-    this.audienceOpen = false;
+    // A switch keeps the audience of the share it replaces.
     const retained = videoService.getNativeScreenCaptures().find(capture => capture.source.audience)?.source.audience;
-    this.privateShare = retained !== undefined;
-    this.audience = { userIds: [...(retained?.userIds ?? [])], roleIds: [...(retained?.roleIds ?? [])] };
-    const audioAlreadyCaptured = this.hasUnownedScreenAudio();
-    const shareAudio = !audioAlreadyCaptured && !screenAudioService.getIsTestTone();
+    this.audience = this.createAudience(retained
+      ? { visibility: 'private', userIds: [...retained.userIds], roleIds: [...retained.roleIds] } : PUBLIC_AUDIENCE);
+    const audioAlreadyCaptured = hasUnownedAudio(liveScreens());
+    const shareAudio = !audioAlreadyCaptured;
     this.shareAudioByTab = { screen: shareAudio, window: shareAudio };
+    const methods = windowCaptureMethods(isMacPlatform());
 
-    this.modalEl = document.createElement('div');
-    this.modalEl.className = 'modal-backdrop';
-    this.modalEl.innerHTML = `
+    const shell = openModal({
+      card: html`
       <div class="modal-card screen-share-picker-card" role="dialog" aria-modal="true" aria-labelledby="share-picker-title">
         <div class="modal-header">
           <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
             <span class="material-symbols-outlined" style="color: var(--accent-primary);">screen_share</span>
-            <span id="share-picker-title">${escapeHtml(alreadySharing ? t('screenShare.titleSwitch') : t('screenShare.title'))}</span>
+            <span id="share-picker-title">${alreadySharing ? t('screenShare.titleSwitch') : t('screenShare.title')}</span>
           </div>
-          <button type="button" id="modal-close" class="modal-close-btn" aria-label="${escapeHtml(t('common.close'))}">&times;</button>
+          <button type="button" id="modal-close" class="modal-close-btn" data-modal-close aria-label="${t('common.close')}">&times;</button>
         </div>
 
-        ${alreadySharing ? `
+        ${alreadySharing ? html`
           <div class="share-active-banner">
             <span class="live-pulse-dot"></span>
             <span>${t('screenShare.alreadySharingNotice')}</span>
@@ -466,107 +304,85 @@ export class ScreenSharePickerModal {
         ` : ''}
 
         <div class="share-source-toolbar">
-          <div class="nav-tabs share-source-tabs" role="tablist" aria-label="${escapeHtml(t('screenShare.sourceTypes'))}">
-            ${SOURCE_TABS.map(tab => `
+          <div class="nav-tabs share-source-tabs" role="tablist" aria-label="${t('screenShare.sourceTypes')}">
+            ${SOURCE_TABS.map(tab => html`
               <button type="button" id="share-tab-${tab.id}" class="tab-button ${this.activeTab === tab.id ? 'active' : ''}"
                 role="tab" aria-selected="${this.activeTab === tab.id}" aria-controls="share-sources-panel" tabindex="-1" disabled>
                 <span class="material-symbols-outlined md-16" aria-hidden="true">${tab.icon}</span>
-                ${escapeHtml(t(tab.label))}
-                <span class="share-tab-status">${escapeHtml(t('common.loading'))}</span>
+                ${t(tab.label)}
+                <span class="share-tab-status">${t('common.loading')}</span>
               </button>
-            `).join('')}
+            `)}
           </div>
           <button type="button" id="btn-refresh-sources" class="btn btn-secondary share-refresh-button"
-            aria-label="${escapeHtml(t('screenShare.refreshSourcesLabel'))}" aria-controls="share-sources-panel" disabled>
+            aria-label="${t('screenShare.refreshSourcesLabel')}" aria-controls="share-sources-panel" disabled>
             <span class="material-symbols-outlined md-18" aria-hidden="true">refresh</span>
-            ${escapeHtml(t('screenShare.refreshSources'))}
+            ${t('screenShare.refreshSources')}
           </button>
         </div>
         <p id="share-method-reasons" class="share-method-reasons" role="status"></p>
-        <p id="share-preview-error" class="share-method-reasons" role="status" hidden></p>
 
         <div id="share-sources-panel" role="tabpanel" aria-labelledby="share-tab-${this.activeTab}" aria-busy="true" tabindex="0"></div>
         <button type="button" id="btn-game-capture-guide" class="btn game-capture-guide-trigger"
           aria-haspopup="dialog" aria-expanded="false" ${this.activeTab === 'window' ? '' : 'hidden'}>
           <span class="material-symbols-outlined md-16" aria-hidden="true">help_outline</span>
-          ${escapeHtml(t('screenShare.gameGuideButton'))}
+          ${t('screenShare.gameGuideButton')}
         </button>
         <section id="share-window-methods" class="share-window-methods" hidden>
           <p id="share-method-label" class="share-method-label"></p>
           <div class="input-mode-cards share-capture-methods" role="group" aria-labelledby="share-method-label">
-            ${this.windowCaptureMethods.map(method => `
+            ${methods.map(method => html`
               <button type="button" id="share-method-${method.id}" class="input-mode-card"
                 aria-pressed="${this.windowCaptureMethod === method.id}" tabindex="-1" disabled>
                 <span class="input-mode-card-title">
                   <span class="material-symbols-outlined md-18" aria-hidden="true">${method.icon}</span>
-                  ${escapeHtml(t(method.label))}
+                  ${t(method.label)}
                 </span>
-                <span id="share-method-${method.id}-description" class="input-mode-card-description">${escapeHtml(t(method.description))}</span>
+                <span id="share-method-${method.id}-description" class="input-mode-card-description">${t(method.description)}</span>
                 <span id="share-method-${method.id}-status" class="share-method-status" hidden></span>
               </button>
-            `).join('')}
+            `)}
           </div>
           <p id="share-game-tip" class="share-game-tip" hidden></p>
         </section>
         <div class="share-aspect-option">
           <div>
-            <label id="share-aspect-label" for="chk-preserve-aspect-ratio">${escapeHtml(t('screenShare.preserveAspectRatio'))}</label>
+            <label id="share-aspect-label" for="chk-preserve-aspect-ratio">${t('screenShare.preserveAspectRatio')}</label>
             <label class="toggle-switch">
               <input id="chk-preserve-aspect-ratio" type="checkbox" role="switch" checked
                 aria-labelledby="share-aspect-label" aria-describedby="share-aspect-description">
               <span class="toggle-slider"></span>
             </label>
           </div>
-          <div id="share-aspect-description" class="audio-device-status">${escapeHtml(t('screenShare.preserveAspectRatioDescription'))}</div>
+          <div id="share-aspect-description" class="audio-device-status">${t('screenShare.preserveAspectRatioDescription')}</div>
         </div>
         <p id="share-capture-info" class="share-game-tip" role="status" hidden></p>
         <p id="share-audio-warning" class="share-game-tip" role="status" hidden></p>
         <p id="share-occlusion-tip" class="share-game-tip" role="note" hidden></p>
         <div class="share-aspect-option">
           <div>
-            <label id="share-private-label" for="chk-private-share">${escapeHtml(t('screenShare.privateLabel'))}</label>
+            <label id="share-private-label" for="chk-private-share">${t('screenShare.privateLabel')}</label>
             <label class="toggle-switch">
               <input id="chk-private-share" type="checkbox" role="switch" aria-labelledby="share-private-label"
-                aria-describedby="share-private-description" aria-controls="share-audience">
+                aria-describedby="share-private-description" aria-controls="share-audience" ${retained ? 'checked' : ''}>
               <span class="toggle-slider"></span>
             </label>
           </div>
-          <p id="share-private-description" class="audio-device-status">${escapeHtml(t('screenShare.privateDescription'))}</p>
+          <p id="share-private-description" class="audio-device-status">${t('screenShare.privateDescription')}</p>
         </div>
-        <section id="share-audience" class="share-audience" aria-labelledby="share-private-label" hidden>
-          <label class="share-audience-label" for="share-audience-toggle">${escapeHtml(t('screenShare.privateAudience'))}</label>
-          <div class="share-audience-picker">
-            <button type="button" id="share-audience-toggle" class="share-audience-trigger" aria-haspopup="listbox"
-              aria-expanded="false" aria-controls="share-audience-options" aria-describedby="share-audience-status">
-              <span id="share-audience-summary"></span>
-              <span class="material-symbols-outlined md-20 share-audience-chevron" aria-hidden="true">expand_more</span>
-            </button>
-            <div id="share-audience-popup" class="share-audience-popup" hidden>
-              <div class="share-audience-search">
-                <span class="material-symbols-outlined md-18" aria-hidden="true">search</span>
-                <input id="share-audience-search" type="search" autocomplete="off"
-                  aria-label="${escapeHtml(t('screenShare.privateSearch'))}"
-                  placeholder="${escapeHtml(t('screenShare.privateSearch'))}" aria-controls="share-audience-options">
-              </div>
-              <div id="share-audience-options" class="share-audience-options" role="listbox"
-                aria-multiselectable="true" aria-label="${escapeHtml(t('screenShare.privateAudience'))}"></div>
-              <p id="share-audience-no-results" role="status" hidden>${escapeHtml(t('screenShare.privateNoResults'))}</p>
-            </div>
-          </div>
-          <p id="share-audience-status" class="audio-device-status" role="status" aria-live="polite"></p>
-        </section>
+        ${trustedHtml(this.audience.render())}
 
         <div class="modal-footer">
           <div id="share-audio-label" style="display: flex; align-items: center; gap: 8px; margin-right: auto; font-size: 0.85rem; color: var(--text-secondary); ${audioAlreadyCaptured ? 'opacity: 0.5;' : ''}">
             <span class="material-symbols-outlined md-16">volume_up</span>
-            <label id="share-audio-text" for="chk-share-audio">${escapeHtml(this.audioToggleLabel(this.activeTab))}</label>
+            <label id="share-audio-text" for="chk-share-audio">${this.audioToggleLabel(this.activeTab)}</label>
             <label class="toggle-switch share-audio-toggle" style="margin-left: 4px;">
-              <input type="checkbox" id="chk-share-audio" aria-labelledby="share-audio-text" ${audioAlreadyCaptured ? 'disabled' : ''} ${shareAudio ? 'checked' : ''} />
+              <input type="checkbox" role="switch" id="chk-share-audio" aria-labelledby="share-audio-text" ${audioAlreadyCaptured ? 'disabled' : ''} ${shareAudio ? 'checked' : ''} />
               <span class="toggle-slider"></span>
             </label>
           </div>
-          <button type="button" id="btn-cancel" class="btn btn-secondary">${t('common.cancel')}</button>
-          ${alreadySharing && voiceStore.canAddScreenShare(screenShareLimit(this.pickerCall)) ? `
+          <button type="button" id="btn-cancel" class="btn btn-secondary" data-modal-close>${t('common.cancel')}</button>
+          ${alreadySharing && voiceStore.canAddScreenShare(screenShareLimit(this.pickerCall)) ? html`
             <button type="button" id="btn-share-add" class="btn btn-secondary" disabled>
               <span class="material-symbols-outlined md-16" style="margin-right: 4px;">add_to_queue</span>
               ${t('screenShare.confirmAdd')}
@@ -578,13 +394,14 @@ export class ScreenSharePickerModal {
           </button>
         </div>
       </div>
-    `;
-
-    const modal = this.modalEl;
-    document.body.appendChild(modal);
-    enterModal(modal);
+    `,
+      onClose: () => this.teardown(shell),
+    });
+    this.shell = shell;
+    this.modalEl = shell.element;
+    const modal = shell.element;
     this.renderSources();
-    this.attachEvents();
+    this.attachEvents(shell);
     this.updateCaptureInfo();
     // Signal that the picker is now visible so the triggering button can clear
     // its loading state (loading should last only until the modal opens) (#48).
@@ -600,8 +417,6 @@ export class ScreenSharePickerModal {
     const restoreRefreshFocus = document.activeElement === refresh;
     this.sourceState = { status: 'loading' };
     this.nativeCapabilities = null;
-    const previewError = modal.querySelector<HTMLElement>('#share-preview-error');
-    if (previewError) { previewError.hidden = true; previewError.textContent = ''; }
     this.renderSources();
     this.updateCaptureInfo();
     try {
@@ -610,7 +425,7 @@ export class ScreenSharePickerModal {
       if (!isCurrent()) return;
       this.nativeCapabilities = capabilities;
       this.updateCaptureInfo();
-      if (!SOURCE_TABS.some(tab => this.supportsTab(tab.id))) {
+      if (!SOURCE_TABS.some(tab => supportsTab(this.nativeCapabilities, tab.id))) {
         this.sourceState = { status: 'ready', sources: [] };
         this.renderSources();
         this.updateCaptureInfo();
@@ -655,6 +470,8 @@ export class ScreenSharePickerModal {
     const sources = this.sourceState.sources;
     const isCurrent = (): boolean => this.modalEl === modal && this.sourceRequest === request
       && this.sourceState.status === 'ready' && !this.isStarting;
+    // Sources stay selectable without previews; the failure is explained once per load.
+    let failureReported = false;
     await Promise.all(SOURCE_TABS.map(async ({ id: type }) => {
       const pending = sources.filter(source => source.type === type && source.thumbnailState !== undefined
         && (source.thumbnailState === 'pending' || (type === 'window' && !source.appIconDataUrl)));
@@ -677,8 +494,8 @@ export class ScreenSharePickerModal {
           if (!isCurrent()) return;
           console.error('[ScreenShare] Could not load source previews', error);
           for (const source of batch) source.thumbnailState = 'unavailable';
-          const note = modal.querySelector<HTMLElement>('#share-preview-error');
-          if (note) { note.textContent = t('screenShare.previewsFailed'); note.hidden = false; }
+          if (!failureReported) reportError(t('screenShare.previewsFailed'));
+          failureReported = true;
         }
         if (!isCurrent()) return;
         const updated = new Map(batch.map(source => [source.id, source]));
@@ -730,11 +547,11 @@ export class ScreenSharePickerModal {
       return;
     }
 
-    if (!this.supportsTab(this.activeTab)) {
+    if (!supportsTab(this.nativeCapabilities, this.activeTab)) {
       panel.innerHTML = '';
       return;
     }
-    const filtered = this.sourceState.sources.filter(source => this.sourceMatchesTab(source));
+    const filtered = this.sourceState.sources.filter(source => sourceMatchesTab(source, this.activeTab));
     const activeSourceIds = videoService.getActiveSourceIds();
     const available = filtered.filter((s) => !activeSourceIds.has(s.id));
 
@@ -767,8 +584,8 @@ export class ScreenSharePickerModal {
   }
 
   private selectSource(sourceId: string | undefined): boolean {
-    if (this.isStarting || !sourceId || this.sourceState.status !== 'ready' || !this.supportsTab(this.activeTab)) return false;
-    if (!this.sourceState.sources.some(source => source.id === sourceId && this.sourceMatchesTab(source))
+    if (this.isStarting || !sourceId || this.sourceState.status !== 'ready' || !supportsTab(this.nativeCapabilities, this.activeTab)) return false;
+    if (!this.sourceState.sources.some(source => source.id === sourceId && sourceMatchesTab(source, this.activeTab))
       || videoService.getActiveSourceIds().has(sourceId)) return false;
     if (this.selectedSourceId !== sourceId) this.windowCaptureMethod = 'window';
     this.selectedSourceId = sourceId;
@@ -777,7 +594,7 @@ export class ScreenSharePickerModal {
   }
 
   private selectTab(tab: SourceTab): void {
-    if (this.isStarting || !this.supportsTab(tab) || this.activeTab === tab) return;
+    if (this.isStarting || !supportsTab(this.nativeCapabilities, tab) || this.activeTab === tab) return;
     const audio = this.modalEl?.querySelector<HTMLInputElement>('#chk-share-audio');
     if (audio && !this.selectedSource()?.isOwnWindow) this.shareAudioByTab[this.activeTab] = audio.checked;
     this.activeTab = tab;
@@ -788,77 +605,21 @@ export class ScreenSharePickerModal {
   }
 
   private selectWindowCaptureMethod(method: WindowCaptureMethod): void {
-    if (this.isStarting || this.activeTab !== 'window' || !this.supportsCaptureKind(method)) return;
+    if (this.isStarting || this.activeTab !== 'window' || !supportsCaptureKind(this.nativeCapabilities, method)) return;
     if (this.selectedSource()) this.windowCaptureMethod = method;
     this.updateCaptureInfo();
   }
 
-  private attachEvents(): void {
-    if (!this.modalEl) return;
-    const modal = this.modalEl;
-    this.eventController?.abort();
-    this.eventController = new AbortController();
-    const options = { signal: this.eventController.signal };
+  private attachEvents(shell: ModalShell): void {
+    const modal = shell.element;
+    const options = { signal: shell.signal };
     modal.querySelector<HTMLInputElement>('#chk-private-share')?.addEventListener('change', event => {
       if (!this.isStarting && event.currentTarget instanceof HTMLInputElement) {
-        this.privateShare = event.currentTarget.checked;
+        this.audience.setPrivate(modal, event.currentTarget.checked);
         this.updateCaptureInfo();
       }
     }, options);
-    modal.querySelector('#share-audience-search')?.addEventListener('input', () => this.updateAudience(), options);
-    modal.querySelector('#share-audience-toggle')?.addEventListener('click', () => this.setAudienceOpen(!this.audienceOpen), options);
-    const closeAudienceOutside = (event: Event) => {
-      if (this.audienceOpen && event.target instanceof Element
-          && !modal.querySelector('.share-audience-picker')?.contains(event.target)) this.setAudienceOpen(false);
-    };
-    modal.addEventListener('pointerdown', closeAudienceOutside, options);
-    modal.addEventListener('focusin', closeAudienceOutside, options);
-    modal.querySelector('#share-audience')?.addEventListener('click', event => {
-      const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-audience-id]') : null;
-      if (!button || button.disabled || this.isStarting) return;
-      const id = button.dataset.audienceId;
-      if (!id) return;
-      const kind = button.dataset.audienceKind === 'role' ? 'roleIds' : 'userIds';
-      const values = this.audience[kind];
-      this.audience[kind] = values.includes(id) ? values.filter(value => value !== id) : [...values, id];
-      this.updateCaptureInfo();
-    }, options);
-    modal.querySelector<HTMLElement>('#share-audience')?.addEventListener('keydown', event => {
-      if (this.isStarting || event.altKey || event.ctrlKey || event.metaKey) return;
-      if (event.key === 'Escape' && this.audienceOpen) {
-        event.preventDefault();
-        this.setAudienceOpen(false);
-        modal.querySelector<HTMLButtonElement>('#share-audience-toggle')?.focus();
-        return;
-      }
-      if (!this.audienceOpen) {
-        if (event.target === modal.querySelector('#share-audience-toggle')
-            && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
-          event.preventDefault();
-          this.setAudienceOpen(true);
-        }
-        return;
-      }
-      const buttons = [...modal.querySelectorAll<HTMLButtonElement>('[data-audience-id]')]
-        .filter(button => !button.hidden && !button.disabled);
-      if (!buttons.length) return;
-      const index = buttons.findIndex(button => button === event.target);
-      let next: HTMLButtonElement | undefined;
-      if (event.key === 'ArrowDown') next = buttons[(index + 1) % buttons.length];
-      else if (event.key === 'ArrowUp') next = index < 0 ? buttons[buttons.length - 1] : buttons[(index - 1 + buttons.length) % buttons.length];
-      else if (index >= 0 && event.key === 'Home') next = buttons[0];
-      else if (index >= 0 && event.key === 'End') next = buttons[buttons.length - 1];
-      if (!next) return;
-      event.preventDefault();
-      next.focus({ preventScroll: true });
-      smoothScrollIntoView(next, { block: 'nearest' });
-    }, options);
-    modal.querySelector('#modal-close')?.addEventListener('click', () => this.close(), options);
-    modal.querySelector('#btn-cancel')?.addEventListener('click', () => this.close(), options);
-    modal.addEventListener('mousedown', event => { if (event.target === modal) this.close(); }, options);
-    modal.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && handlesModalKey(this.modalEl, event)) { event.preventDefault(); this.close(); }
-    }, options);
+    this.audience.bind(shell.card, shell.signal, () => this.updateCaptureInfo());
     modal.querySelector('#btn-share')?.addEventListener('click', () => { void this.requestReplace(); }, options);
     modal.querySelector('#btn-share-add')?.addEventListener('click', () => { void this.startSharing('add'); }, options);
     modal.querySelector('#btn-refresh-sources')?.addEventListener('click', () => {
@@ -873,35 +634,29 @@ export class ScreenSharePickerModal {
       button?.addEventListener('click', () => this.selectTab(tab.id), options);
       button?.addEventListener('keydown', event => {
         if (this.isStarting || event.altKey || event.ctrlKey || event.metaKey) return;
-        const available = SOURCE_TABS.filter(item => this.supportsTab(item.id));
+        const available = SOURCE_TABS.filter(item => supportsTab(this.nativeCapabilities, item.id));
         const index = available.findIndex(item => item.id === tab.id);
-        if (index < 0) return;
-        let next: typeof available[number] | undefined;
-        if (event.key === 'ArrowRight') next = available[(index + 1) % available.length];
-        else if (event.key === 'ArrowLeft') next = available[(index + available.length - 1) % available.length];
-        else if (event.key === 'Home') next = available[0];
-        else if (event.key === 'End') next = available[available.length - 1];
-        if (!next) return;
+        const step = index < 0 ? null : nextIndex(event.key, index, available.length, { orientation: 'horizontal' });
+        if (step === null) return;
+        const next = available[step];
         event.preventDefault();
         this.selectTab(next.id);
         modal.querySelector<HTMLButtonElement>(`#share-tab-${next.id}`)?.focus();
       }, options);
     }
-    for (const method of this.windowCaptureMethods) {
+    const methods = windowCaptureMethods(isMacPlatform());
+    for (const method of methods) {
       const button = modal.querySelector<HTMLButtonElement>(`#share-method-${method.id}`);
       button?.addEventListener('click', () => this.selectWindowCaptureMethod(method.id), options);
       button?.addEventListener('keydown', event => {
         if (this.isStarting || event.altKey || event.ctrlKey || event.metaKey || !this.selectedSource()) return;
-        const available = this.windowCaptureMethods.filter(item => this.supportsCaptureKind(item.id));
+        const available = methods.filter(item => supportsCaptureKind(this.nativeCapabilities, item.id));
         const index = available.findIndex(item => item.id === method.id);
         if (index < 0) return;
-        let next: typeof available[number] | undefined;
-        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = available[(index + 1) % available.length];
-        else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = available[(index + available.length - 1) % available.length];
-        else if (event.key === 'Home') next = available[0];
-        else if (event.key === 'End') next = available[available.length - 1];
-        else if (event.key === 'Enter' || event.key === ' ') next = method;
-        if (!next) return;
+        const step = event.key === 'Enter' || event.key === ' ' ? index
+          : nextIndex(event.key, index, available.length, { orientation: 'both' });
+        if (step === null) return;
+        const next = available[step];
         event.preventDefault();
         this.selectWindowCaptureMethod(next.id);
         modal.querySelector<HTMLButtonElement>(`#share-method-${next.id}`)?.focus();
@@ -970,7 +725,7 @@ export class ScreenSharePickerModal {
       message: t('screenShare.extraScreensMessage', { count: String(count), max: String(limit) }),
       confirmLabel: t('screenShare.extraScreensConfirm'),
       variant: 'warning',
-      signal: this.eventController?.signal,
+      signal: this.shell?.signal,
     });
     if (confirmed) this.extraScreensConfirmedFor = callKey;
     return confirmed;
@@ -990,7 +745,7 @@ export class ScreenSharePickerModal {
       confirmLabel: t('screenShare.replaceAppAudioConfirm'),
       cancelLabel: t('screenShare.replaceAppAudioKeep'),
       variant: 'warning',
-      signal: this.eventController?.signal,
+      signal: this.shell?.signal,
     });
   }
 
@@ -1010,16 +765,16 @@ export class ScreenSharePickerModal {
   }
 
   /**
-   * Starts a screen share. 'replace' keeps the historical behaviour of swapping
-   * the current source (#264) — only `targetShareId` when given; 'add'
-   * broadcasts an extra screen alongside the existing ones, up to the call
-   * server's screenShareLimit() (#253).
+   * Starts the selected share through core/screenShareStart. The picker owns what the person sees: the
+   * questions, the buttons while it starts and the error when it fails. 'replace' swaps the current source
+   * (#264) — only `targetShareId` when given; 'add' broadcasts another screen up to screenShareLimit() (#253).
    */
   private async startSharing(mode: 'add' | 'replace', targetShareId?: string): Promise<void> {
-    if (this.isStarting || !this.modalEl || this.gameGuide.isOpen()) return;
-    if (!this.audienceIsValid()) {
+    const shell = this.shell;
+    if (this.isStarting || !shell || this.gameGuide.isOpen()) return;
+    if (!this.audience.isValid()) {
       this.updateCaptureInfo();
-      this.setAudienceOpen(true);
+      this.audience.showOptions();
       return;
     }
     const call = this.pickerCall ?? captureScreenShareCall();
@@ -1033,13 +788,15 @@ export class ScreenSharePickerModal {
       return;
     }
 
-    const modal = this.modalEl;
+    const modal = shell.element;
     const source = this.selectedSource();
     const sourceId = source?.id;
     const tab = this.activeTab;
     const captureKind = this.captureKind(tab);
-    let shareAudio = !voiceStore.permissionMuted && (modal.querySelector<HTMLInputElement>('#chk-share-audio')?.checked ?? false);
-    const audioPlan = shareAudio ? this.planAudio(mode, targetShareId, captureKind, source) : null;
+    const audio = !voiceStore.permissionMuted && (modal.querySelector<HTMLInputElement>('#chk-share-audio')?.checked ?? false);
+    const audioPlan = audio
+      ? planAudio({ mode, targetShareId, kind: captureKind, source, sources: this.readySources() }, liveScreens(), isMacPlatform())
+      : null;
     // Sound another share already carries is explained by a toast, and the switch is right there.
     if (audioPlan?.kind === 'blocked') {
       this.updateCaptureInfo();
@@ -1047,16 +804,7 @@ export class ScreenSharePickerModal {
       return;
     }
     const preserveAspectRatio = modal.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio')?.checked ?? true;
-    let stream: MediaStream | null = null;
-    let published = false;
-    let retiringPrevious = false;
-    const assertCurrent = () => {
-      if (this.modalEl !== modal || !call.isCurrent()
-        || (stream && (videoService.getScreenStream(stream.id) !== stream
-          || (!videoService.getNativeScreenCapture(stream.id) && stream.getVideoTracks()[0]?.readyState !== 'live')))) {
-        throw new DOMException('Screen share was cancelled', 'AbortError');
-      }
-    };
+    const audience = this.audience.value();
     this.isStarting = true;
     this.updateCaptureInfo();
     const btnShare = modal.querySelector<HTMLButtonElement>('#btn-share');
@@ -1072,128 +820,43 @@ export class ScreenSharePickerModal {
     if (btnClose) btnClose.disabled = true;
 
     try {
-      if (!source || !sourceId) throw new Error(t('screenShare.sourceUnavailable'));
-      if (mode === 'add' && !await this.confirmExtraScreen(limit)) return;
-      assertCurrent();
-      // Shares whose audio this one takes over, and those that keep running without it.
-      let audioOwners = audioPlan?.handedOver ?? [];
-      let withdrawn: string[] = [];
-      if (audioPlan?.kind === 'ask') {
-        if (await this.confirmAudioTakeover(audioPlan.apps)) {
-          withdrawn = audioPlan.apps;
-          audioOwners = [...audioOwners, ...audioPlan.apps];
-        } else {
-          shareAudio = false;
-          audioOwners = [];
-        }
-        assertCurrent();
-      }
-      // ScreenCaptureKit captures the entire system mix even for one window.
-      // Confirm before capturing or replacing anything (#298).
-      if (this.isMac && sourceId?.startsWith('window:') && shareAudio && !screenAudioService.getIsCapturing()) {
-        const proceed = await showConfirm({
+      if (!source || !sourceId) throw new ScreenShareUserError(t('screenShare.sourceUnavailable'));
+      const outcome = await startScreenShare({
+        mode, targetShareId, sourceId, label: this.sourceName(source), captureKind, audio,
+        audioHandover: audioPlan
+          ? { handedOver: audioPlan.handedOver, askTakeover: audioPlan.kind === 'ask' ? audioPlan.apps : [] } : null,
+        macSystemMix: isMacPlatform() && sourceId.startsWith('window:'),
+        preserveAspectRatio,
+        audience: audience.visibility === 'private' ? { userIds: audience.userIds, roleIds: audience.roleIds } : undefined,
+      }, {
+        call,
+        isOpen: () => this.shell === shell,
+        isSelected: () => this.activeTab === tab && this.selectedSourceId === sourceId && this.captureKind() === captureKind,
+        confirmExtraScreen: () => this.confirmExtraScreen(limit),
+        confirmAudioTakeover: shareIds => this.confirmAudioTakeover(shareIds),
+        confirmMacSystemAudio: () => showConfirm({
           title: t('screenShare.macSystemAudioWarnTitle'),
           message: t('screenShare.macSystemAudioWarnMessage'),
           confirmLabel: t('screenShare.macSystemAudioWarnConfirm'),
           variant: 'warning',
-        });
-        if (!proceed) return;
-      }
-      assertCurrent();
-      await window.api.cancelDesktopSourcePreviews?.();
-      assertCurrent();
-      const native = this.usesNativeCapture(sourceId, shareAudio, captureKind);
-      if (!native) throw new Error(this.captureUnavailableMessage(shareAudio, captureKind));
-      // Prepare the selection before retiring existing shares. Audible
-      // replacements defer preview until the previous PCM owners give their audio up.
-      const previousShareIds = mode !== 'replace' ? []
-        : targetShareId !== undefined ? [targetShareId] : [...voiceStore.screenShareIds];
-      const retirePrevious = async (): Promise<void> => {
-        assertCurrent();
-        retiringPrevious = true;
-        await stopLocalScreenShares(screenAudioService, { shareIds: previousShareIds, notify: false });
-        assertCurrent();
-      };
-      const handOverAudio = async (): Promise<void> => {
-        if (previousShareIds.length > 0) await retirePrevious();
-        for (const shareId of withdrawn) {
-          assertCurrent();
-          await webRtcManager.withdrawScreenAudio(shareId);
-        }
-        assertCurrent();
-      };
-      if (native && sourceId) {
-        const restored = tab !== 'screen' && await window.api.prepareScreenShareWindow(sourceId);
-        if (restored) await new Promise(resolve => setTimeout(resolve, 350));
-        assertCurrent();
-        stream = await webRtcManager.startNativeScreenShare(sourceId, shareAudio,
-          () => this.modalEl === modal && call.isCurrent() && this.activeTab === tab
-            && this.selectedSourceId === sourceId && this.captureKind() === captureKind,
-          captureKind, preserveAspectRatio,
-          shareAudio && audioOwners.length > 0 ? {
-            shareIds: audioOwners.filter(shareId => !!videoService.getNativeScreenCapture(shareId)),
-            retirePrevious: handOverAudio,
-          } : undefined, this.privateShare ? { userIds: [...this.audience.userIds], roleIds: [...this.audience.roleIds] } : undefined);
-      } else stream = await videoService.startScreenShare(sourceId);
-      assertCurrent();
-      videoService.setScreenShareLabel(stream.id, this.sourceName(source));
-      if (!native) webRtcManager.assertScreenShareSupported();
-      if (previousShareIds.length > 0 && !retiringPrevious) await retirePrevious();
-
-      assertCurrent();
-      if (!native) await webRtcManager.addLocalScreenTrack(stream);
-      else if (shareAudio) {
-        await screenAudioService.stop();
-        assertCurrent();
-        voiceStore.addScreenAudioShare(stream.id);
-      }
-      assertCurrent();
-      voiceStore.addScreenShare(stream.id);
-      // Camera and screen are independent (#26) — do not disturb camera state.
-      notifyScreenShareState(call);
-      published = true;
-
-      if (shareAudio && !native) {
-        await screenAudioService.stop();
-        if (!call.isCurrent() || videoService.getScreenStream(stream.id) !== stream) {
-          throw new DOMException('Screen share was cancelled', 'AbortError');
-        }
-        // Associate before awaiting startup so source-ended also cancels audio
-        // that has not finished acquiring its native capture yet.
-        voiceStore.addScreenAudioShare(stream.id);
-        let audioTrack: MediaStreamTrack | null = null;
-        try {
-          audioTrack = await screenAudioService.start(sourceId);
-        } finally {
-          if (!audioTrack) voiceStore.removeScreenAudioShare(stream.id);
-        }
-        if (!audioTrack) {
-          console.warn('[ScreenShare] Screen audio capture not available or failed to start');
-        }
-      }
-
-      if (this.modalEl === modal) this.close();
+          signal: shell.signal,
+        }),
+        captureBlocked: shareAudio => this.usesNativeCapture(sourceId, shareAudio, captureKind)
+          ? null : this.captureUnavailableMessage(shareAudio, captureKind),
+      });
+      if (outcome === 'published' && this.shell === shell) this.close();
     } catch (err) {
-      if (retiringPrevious && !published) notifyScreenShareState(call);
-      if (stream && !published && videoService.getScreenStream(stream.id) === stream) {
-        try {
-          if (call.isCurrent()) await stopLocalScreenShares(screenAudioService, { shareIds: [stream.id] });
-          else videoService.stopScreenShare(stream.id);
-        } catch (cleanupError) {
-          console.warn('[ScreenShare] Failed to finish cancelled screen cleanup', cleanupError);
-        }
-      }
-      if ((err instanceof Error && err.name === 'AbortError') || this.modalEl !== modal || !call.isCurrent()) {
-        if (this.modalEl === modal) this.close();
+      if ((err instanceof Error && err.name === 'AbortError') || this.shell !== shell || !call.isCurrent()) {
+        if (this.shell === shell) this.close();
         return;
       }
       await showAlert({
         title: t('screenShare.errorTitle'),
-        message: t('screenShare.errorMessage', { error: err instanceof Error ? err.message : String(err) }),
+        message: screenShareFailureMessage(err, 'start'),
         variant: 'danger',
       });
     } finally {
-      if (this.modalEl === modal) {
+      if (this.shell === shell) {
         this.isStarting = false;
         setButtonLoading(targetBtn, false);
         if (btnCancel) btnCancel.disabled = false;
@@ -1204,38 +867,35 @@ export class ScreenSharePickerModal {
     }
   }
 
-
   public close(): void {
-    this.gameGuide.close(false);
-    if (this.modalEl && screenShareChooser.isOpenWithin(this.modalEl)) screenShareChooser.close();
+    // The guide goes first, so its focus returns into a picker that is still open.
+    this.gameGuide.close();
+    this.shell?.close('api');
+  }
+
+  /** Runs once, as the picker starts to close by any way. */
+  private teardown(shell: ModalShell): void {
+    if (this.shell !== shell) return;
+    this.gameGuide.close();
+    if (screenShareChooser.isOpenWithin(shell.element)) screenShareChooser.close();
     if (this.audioAttentionTimer !== null) {
       window.clearTimeout(this.audioAttentionTimer);
       this.audioAttentionTimer = null;
     }
     this.sourceRequest++;
-    this.eventController?.abort();
-    this.eventController = null;
     this.sourceState = { status: 'loading' };
     this.nativeCapabilities = null;
     this.pickerCall = null;
-    const wasOpen = this.modalEl !== null;
-    if (this.modalEl) {
-      if (this.isStarting) videoService.cancelPendingScreenShare();
-      exitModal(this.modalEl);
-      this.modalEl = null;
-      this.selectedSourceId = null;
-      this.windowCaptureMethod = 'window';
-      this.isStarting = false;
-    }
-    // Let callers (e.g. the screen-share button loading state) know the picker
-    // is no longer open, including on cancel (#48). Only emit when something was
-    // actually open, otherwise the close() call at the start of open() would
-    // instantly clear the button loading before the picker even appears.
-    if (wasOpen) {
-      void window.api.cancelDesktopSourcePreviews?.()
-        .catch(error => console.error('[ScreenShare] Could not cancel source previews', error));
-      appEvents.emit('modal.screenshare_picker_closed');
-    }
+    this.shell = null;
+    this.modalEl = null;
+    this.selectedSourceId = null;
+    this.windowCaptureMethod = 'window';
+    this.isStarting = false;
+    // Callers (e.g. the screen-share button loading state) learn the picker is
+    // no longer open, including on cancel (#48).
+    void window.api.cancelDesktopSourcePreviews?.()
+      .catch(error => console.error('[ScreenShare] Could not cancel source previews', error));
+    appEvents.emit('modal.screenshare_picker_closed');
   }
 }
 

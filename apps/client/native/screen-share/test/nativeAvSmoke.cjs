@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { setTimeout: delay } = require('node:timers/promises');
-const { within } = require('../runtime/nativeDeadline.cjs');
+const { within } = require('../runtime/asyncTools.cjs');
 const directory = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);
 const mode = process.argv.find(value => value.startsWith('--mode='))?.slice('--mode='.length) ?? 'p2p';
 const sfuListenIp = process.argv.find(value => value.startsWith('--sfu-listen-ip='))?.slice('--sfu-listen-ip='.length);

@@ -2,13 +2,9 @@
 
 const { randomUUID } = require('node:crypto');
 const { NativeAudioPort } = require('./nativeAudioPort.cjs');
+const { notifyObserver } = require('./asyncTools.cjs');
 
 const positive = value => Number.isSafeInteger(value) && value > 0;
-const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-};
 const documentUrl = value => {
   const url = new URL(value);
   const localFile = url.protocol === 'file:' && !url.hostname;
@@ -52,12 +48,8 @@ class NativeAudioPortMain {
     if (!record.failure) {
       record.failure = error;
       record.ready.reject(error);
-      try {
-        const observed = this.onError(error, { sessionId: this.sessionId, epoch: record.config.epoch });
-        if (typeof observed?.then === 'function') void observed.catch(observerError => {
-          console.error('Native audio Main error observer failed:', observerError);
-        });
-      } catch (observerError) { console.error('Native audio Main error observer failed:', observerError); }
+      notifyObserver('Native audio Main error observer', this.onError, error,
+        { sessionId: this.sessionId, epoch: record.config.epoch });
     }
   }
 
@@ -74,10 +66,10 @@ class NativeAudioPortMain {
       || typeof signal.removeEventListener !== 'function')) throw new Error('Invalid native audio output cancellation signal.');
     if (signal?.aborted) throw signal.reason ?? abortError();
     const record = {
-      config: Object.freeze({ ...config }), portId: randomUUID(), ready: deferred(), port: null, localPort: null, untransferred: null,
+      config: Object.freeze({ ...config }), portId: randomUUID(), ready: Promise.withResolvers(), port: null, localPort: null, untransferred: null,
       transferAttempted: false, configured: false, configureWork: null, readyObserved: false,
       stopping: false, retired: false, stopWork: null, failure: null, retirement: null,
-      retirementReady: deferred(), listeners: new Map(), ignoredAfterStop: 0, signal, abortListener: null,
+      retirementReady: Promise.withResolvers(), listeners: new Map(), ignoredAfterStop: 0, signal, abortListener: null,
     };
     this.current = record;
     this.lastEpoch = config.epoch;

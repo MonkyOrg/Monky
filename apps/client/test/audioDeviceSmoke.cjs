@@ -441,6 +441,11 @@ async function runAudioDeviceSmoke() {
     inputTrigger.click();
     await wait();
     check(captures.length === beforeCall, 'in-call preview reuses raw stream without capture');
+    const callPreview = contexts.at(-1);
+    const previewTrack = () => callPreview.previewStream?.getAudioTracks()[0];
+    const callTrack = callStream.getAudioTracks()[0];
+    check(previewTrack() && previewTrack() !== callTrack && previewTrack().readyState === 'live',
+      'in-call preview measures its own clone of the call microphone');
     for (const mute of ['isMuted', 'serverMuted']) {
       voice[mute] = true;
       callStream.getAudioTracks().forEach((track) => { track.enabled = false; });
@@ -448,17 +453,17 @@ async function runAudioDeviceSmoke() {
       await wait();
       check(callStream.getAudioTracks().every((track) => !track.enabled) && voice[mute],
         `${mute}: preview never unmutes live raw tracks or mute state`);
-      const isolated = captures.at(-1);
-      check(isolated !== callStream && isolated.getAudioTracks().every((track) => track.enabled && track.readyState === 'live'),
-        `${mute}: independent local capture supplies preview`);
+      check(captures.length === beforeCall && contexts.at(-1) === callPreview && callPreview.state === 'running'
+        && previewTrack().enabled && previewTrack().readyState === 'live',
+        `${mute}: muting neither reopens the microphone nor restarts the preview`);
       check(parseFloat(panel().querySelector('.vad-meter-fill').style.width) > 0,
         `${mute}: muted call still has a useful local input level (width=${panel().querySelector('.vad-meter-fill').style.width}, source=${input.state}, meter=${contexts.at(-1).state})`);
       voice[mute] = false;
       callStream.getAudioTracks().forEach((track) => { track.enabled = true; });
       appEvents.emit('voice.microphone_updated');
       await wait();
-      check(isolated.getAudioTracks().every((track) => track.readyState === 'ended'),
-        `${mute}: unmuting releases isolated preview and returns to raw stream`);
+      check(contexts.at(-1) === callPreview && previewTrack().readyState === 'live' && callTrack.enabled,
+        `${mute}: unmuting keeps the same preview`);
     }
     const applyCalls = [];
     let pendingSwitch = null;
@@ -481,7 +486,10 @@ async function runAudioDeviceSmoke() {
     mic.dispatchEvent(new Event('change'));
     await wait();
     check(settings.selectedMicrophoneId === 'mic-1' && mic.value === 'mic-1', 'failed replacement retains previous selection');
-    check(Boolean(panel().querySelector('[role="status"]').textContent), 'failed switch shown');
+    const switchError = document.querySelector('.chat-copy-toast[role="alert"]:not([data-ui-closing]) .chat-copy-toast-label');
+    check(Boolean(switchError?.textContent) && !panel().querySelector('[role="status"]').textContent,
+      'failed switch shown in the alert toast, not in the popover layout');
+    switchError?.closest('.chat-copy-toast').querySelector('.chat-copy-toast-close').click();
     pendingSwitch = {};
     mic.value = 'mic-2';
     mic.dispatchEvent(new Event('change'));
@@ -513,12 +521,15 @@ async function runAudioDeviceSmoke() {
     callStream.getAudioTracks().forEach((track) => { track.enabled = false; });
     inputTrigger.click();
     await wait();
-    const mutedPreview = captures.at(-1);
+    const mutedPreview = contexts.at(-1).previewStream;
+    check(mutedPreview.getAudioTracks().every((track) => track.readyState === 'live' && track.enabled)
+      && !callStream.getAudioTracks().some((track) => mutedPreview.getAudioTracks().includes(track)),
+    'a muted-call panel previews its own enabled clone');
     inputTrigger.click();
     check(mutedPreview.getAudioTracks().every((track) => track.readyState === 'ended'),
-      'closing a muted-call panel stops its isolated preview');
+      'closing a muted-call panel stops its preview clone');
     check(voice.serverMuted && callStream.getAudioTracks().every((track) => track.readyState === 'live' && !track.enabled),
-      'closing isolated preview preserves admin mute and call tracks');
+      'closing the preview preserves admin mute and call tracks');
     voice.serverMuted = false;
     callStream.getTracks().forEach((track) => track.stop());
     callStream = null;

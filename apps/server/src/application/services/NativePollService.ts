@@ -18,9 +18,19 @@ import {
 } from '@monky/shared';
 import type { MessageRecord, NativePollRecord, NativePollVoterRecord } from '../../domain/entities';
 import type { INativePollRepository } from '../../domain/repositories';
+import { ServiceError } from '../errors';
 
-export class NativePollError extends Error {
-  constructor(message: string, readonly code = ProtocolErrorCode.BAD_REQUEST) { super(message); }
+export class NativePollError extends ServiceError {
+  constructor(message: string, code: ProtocolErrorCode = ProtocolErrorCode.BAD_REQUEST) { super(code, message); }
+}
+
+/**
+ * A refusal from the image store reaches the client as a poll refusal, in the
+ * same words. Any other failure stays one, so the client is not handed the
+ * words of a disk error, which name paths on the server (S-APP-8).
+ */
+function asPollImageError(error: unknown): unknown {
+  return error instanceof ServiceError && !(error instanceof NativePollError) ? new NativePollError(error.message) : error;
 }
 
 export class NativePollService {
@@ -73,8 +83,7 @@ export class NativePollService {
     try {
       imagePaths = this.media.consume(parsed.imageAssetRefs ?? [], userId, parsed.channelId);
     } catch (error) {
-      throw error instanceof NativePollError ? error :
-        new NativePollError(error instanceof Error ? error.message : 'Poll images are unavailable.');
+      throw asPollImageError(error);
     }
     const poll: NativePollRecord = {
       id: randomUUID(),
@@ -172,8 +181,7 @@ export class NativePollService {
     try {
       added = this.media.consume(parsed.images.filter(image => !image.startsWith('/avatars/')), userId, before.channelId);
     } catch (error) {
-      throw error instanceof NativePollError ? error :
-        new NativePollError(error instanceof Error ? error.message : 'Poll images are unavailable.');
+      throw asPollImageError(error);
     }
     let next = 0;
     const imagePaths = parsed.images.map(image => image.startsWith('/avatars/') ? image.slice('/avatars/'.length) : added[next++]);

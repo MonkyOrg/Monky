@@ -5,6 +5,8 @@ import ts from 'typescript';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const entry = path.join(root, 'packages', 'bot-sdk', 'src', 'index.ts');
+// BotClient's public contracts live beside it in src/client and belong on the same page.
+const clientSources = path.join(root, 'packages', 'bot-sdk', 'src', 'client') + path.sep;
 const check = process.argv.includes('--check');
 if (process.argv.slice(2).some(argument => argument !== '--check')) {
   throw new Error('Usage: node docs-site\\scripts\\generate-bot-reference.mjs [--check]');
@@ -79,7 +81,8 @@ function groupFor(name, declaration) {
   if (/managedTools|[\\/]cli[\\/]|[\\/]tooling[\\/]|[\\/]reachability\.ts|[\\/]constants\.ts|[\\/]protocol\.ts/.test(file)
     && !['BotManifest', 'CommandResponsePayload'].includes(name)) return groups.tools;
   if (/^(BotVoice|BotScreen|BotDeviceStorage|Local)/.test(name)) return groups.media;
-  if (path.resolve(file) === entry || /^(BotStor|BotRequestError$)/.test(name)
+  if (path.resolve(file) === entry || path.resolve(file).startsWith(clientSources)
+    || /^(BotStor|BotRequestError$)/.test(name)
     || ['BotCapability', 'BotPermissions', 'BotManifest'].includes(name)) return groups.client;
   return groups.interactions;
 }

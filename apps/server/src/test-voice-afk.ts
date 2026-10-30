@@ -258,7 +258,8 @@ test('AFK channel: set up in server settings, entered only when idle, muted by t
 
   from = owner.peer.mark();
   alice.peer.send(MessageType.VOICE_AFK, { channelId: lobbyId });
-  await owner.peer.next(message => message.type === MessageType.ADMIN_MOVE_USER, 'third AFK move', from);
+  // The move itself goes only to who was moved and who asked; the room sees the arrival.
+  await owner.peer.next(arrival(alice.sessionId, afkId), 'third AFK move', from);
   alice.peer.ws.terminate();
   await owner.peer.next(message => message.type === MessageType.USER_CONNECTION_STATE
     && record(message.payload).userId === alice.id && record(message.payload).status === 'reconnecting', 'dropped socket', from);

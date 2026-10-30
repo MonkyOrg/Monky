@@ -286,11 +286,13 @@ test('version and explicit process choices bypass unreadable saved preferences',
   tty(t, true, true);
   t.mock.method(readline, 'createInterface', () => assert.fail('must not prompt'));
   const file = path.join(f.profile, 'preferences.json');
-  const stat = fs.statSync;
-  t.mock.method(fs, 'statSync', (target, ...args) => {
-    assert.notEqual(target, file, 'The explicit process choice must not read preferences');
-    return stat(target, ...args);
-  });
+  for (const reader of ['statSync', 'lstatSync']) {
+    const original = fs[reader];
+    t.mock.method(fs, reader, (target, ...args) => {
+      assert.notEqual(target, file, 'The explicit process choice must not read preferences');
+      return original(target, ...args);
+    });
+  }
   await runBotCli(f.bot, ['--version']);
   assert.deepEqual(f.output, ['locale-bot 1.2.3']);
   await runBotCli(f.bot, ['--locale', 'en-US', '--help']);

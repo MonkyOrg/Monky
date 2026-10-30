@@ -9,41 +9,48 @@ const test = require('node:test');
 const ts = require('typescript');
 
 function fixture(respond, redirect) {
-  const filename = path.resolve(__dirname, '../src/main/updateDownload.ts');
-  const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
-  }).outputText;
-  const module = { exports: {} };
+  const main = path.resolve(__dirname, '../src/main');
   const requests = [];
-  vm.runInNewContext(code, {
-    module, exports: module.exports, URL, Buffer, Error,
-    require(id) {
-      if (id !== 'node:https') return require(id);
-      return { get(url, options, callback) {
-        requests.push(String(url));
-        const request = new EventEmitter();
-        const response = new PassThrough();
-        response.statusCode = 200;
-        response.headers = { 'content-length': '10' };
-        const abort = () => {
-          response.destroy(options.signal.reason);
-          request.emit('error', options.signal.reason);
-        };
-        options.signal.addEventListener('abort', abort, { once: true });
-        response.on('close', () => options.signal.removeEventListener('abort', abort));
-        queueMicrotask(() => {
-          if (redirect && requests.length === 1) {
-            response.statusCode = 302;
-            response.headers = { location: redirect };
-          }
-          callback(response);
-          respond(response, requests.length);
-        });
-        return request;
-      } };
-    },
-  }, { filename });
-  return { downloadToFile: module.exports.downloadToFile, requests };
+  const https = { get(url, options, callback) {
+    requests.push(String(url));
+    const request = new EventEmitter();
+    const response = new PassThrough();
+    response.statusCode = 200;
+    response.headers = { 'content-length': '10' };
+    const abort = () => {
+      response.destroy(options.signal.reason);
+      request.emit('error', options.signal.reason);
+    };
+    options.signal.addEventListener('abort', abort, { once: true });
+    response.on('close', () => options.signal.removeEventListener('abort', abort));
+    queueMicrotask(() => {
+      if (redirect && requests.length === 1) {
+        response.statusCode = 302;
+        response.headers = { location: redirect };
+      }
+      callback(response);
+      respond(response, requests.length);
+    });
+    return request;
+  } };
+  // The real updateDownload and httpGet modules, over a scripted node:https.
+  const load = (name) => {
+    const filename = path.join(main, `${name}.ts`);
+    const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
+    }).outputText;
+    const module = { exports: {} };
+    vm.runInNewContext(code, {
+      module, exports: module.exports, URL, Buffer, Error,
+      require(id) {
+        if (id === 'node:https') return https;
+        if (id === './net/httpGet') return load('net/httpGet');
+        return require(id);
+      },
+    }, { filename });
+    return module.exports;
+  };
+  return { downloadToFile: load('updateDownload').downloadToFile, requests };
 }
 
 test('cancelled macOS transfer closes the stream, removes the partial file and can be retried', async () => {

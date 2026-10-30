@@ -8,17 +8,19 @@ import {
   type ServerEvent, type ServerEventPublic, type LiveAction, type LiveActionRecord, type LiveActionCreate, type LiveActionUpdate,
   type CommunitySettingsUpdate, type EventInterestedList, type EventInterestedListResult, eventInterestedListSchema,
   type NativeLiveForm, type NativeLiveFormCreate, type NativeLiveFormRecord, type NativeLiveFormResults,
-  type NativeLiveFormResultsRequest, type NativeLiveFormSubmit, type NativePoll,
+  type NativeLiveFormResultsRequest, type NativeLiveFormSubmit, type NativePoll, type ResourceAudience,
 } from '@monky/shared';
 import type { ICommunityRepository } from '../../domain/community';
 import type { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
-import type { ChannelService } from './ChannelService';
-import type { PermissionService } from './PermissionService';
+import type { ChannelAccessScope, ChannelService } from './ChannelService';
+import { audienceAllows, revealsAudience, type PermissionService } from './PermissionService';
 import type { BotSelectorService } from './BotSelectorService';
 import type { NativePollService } from './NativePollService';
+import { ServiceError } from '../errors';
+import { Logger } from '../../infrastructure/logger/Logger';
 
-export class CommunityError extends Error {
-  constructor(message: string, readonly code = ProtocolErrorCode.COMMUNITY_INVALID) { super(message); }
+export class CommunityError extends ServiceError {
+  constructor(message: string, code: ProtocolErrorCode = ProtocolErrorCode.COMMUNITY_INVALID) { super(code, message); }
 }
 
 const DAY = 86_400_000;
@@ -65,23 +67,36 @@ export class CommunityService {
     }
   }
 
-  async canViewEvent(userId: string, event: ServerEvent): Promise<boolean> {
-    return await this.permissions.canAccessAudience(userId, event.creatorUserId, event.audience) &&
-      (event.location.kind === 'external' ||
-        await this.channels.canUserAccessChannel(userId, event.location.channelId));
+  /**
+   * Members of a resource's audience. Reads go through the access scope, so a
+   * whole snapshot reads each member and channel once (S-APP-5).
+   */
+  private async inAudience(
+    access: ChannelAccessScope, userId: string, creatorUserId: string, audience: ResourceAudience,
+  ): Promise<boolean> {
+    return userId === creatorUserId || audienceAllows(await access.member(userId), creatorUserId, audience);
   }
 
-  async canViewLiveAction(userId: string, action: LiveActionRecord): Promise<boolean> {
+  private async revealsAudienceTo(access: ChannelAccessScope, userId: string, creatorUserId: string): Promise<boolean> {
+    return userId === creatorUserId || revealsAudience(await access.member(userId), creatorUserId);
+  }
+
+  async canViewEvent(userId: string, event: ServerEvent, access = this.channels.accessScope()): Promise<boolean> {
+    return await this.inAudience(access, userId, event.creatorUserId, event.audience) &&
+      (event.location.kind === 'external' || await access.can(userId, event.location.channelId));
+  }
+
+  async canViewLiveAction(userId: string, action: LiveActionRecord, access = this.channels.accessScope()): Promise<boolean> {
     return this.settings().eventsEnabled && this.botAllowed(action.botId) && action.expiresAt > Date.now() &&
-      (await this.channels.getChannelSummary(action.channelId))?.botCommandsEnabled === true &&
-      await this.channels.canUserAccessChannel(userId, action.channelId, Permission.READ_MESSAGES) &&
-      await this.permissions.canAccessAudience(userId, action.creatorUserId, action.audience);
+      (await access.channel(action.channelId))?.botCommandsEnabled === true &&
+      await access.can(userId, action.channelId, Permission.READ_MESSAGES) &&
+      await this.inAudience(access, userId, action.creatorUserId, action.audience);
   }
 
-  async canViewNativeForm(userId: string, form: NativeLiveFormRecord): Promise<boolean> {
+  async canViewNativeForm(userId: string, form: NativeLiveFormRecord, access = this.channels.accessScope()): Promise<boolean> {
     return this.settings().eventsEnabled &&
-      await this.channels.canUserAccessChannel(userId, form.channelId, Permission.READ_MESSAGES) &&
-      await this.permissions.canAccessAudience(userId, form.creatorUserId, form.audience);
+      await access.can(userId, form.channelId, Permission.READ_MESSAGES) &&
+      await this.inAudience(access, userId, form.creatorUserId, form.audience);
   }
 
   private async canManageAudienceResource(
@@ -97,8 +112,8 @@ export class CommunityService {
         : await this.permissions.checkPermission(userId, permission));
   }
 
-  async publicEvent(event: ServerEvent, userId: string): Promise<ServerEventPublic> {
-    const reveal = await this.permissions.canRevealAudience(userId, event.creatorUserId);
+  async publicEvent(event: ServerEvent, userId: string, access = this.channels.accessScope()): Promise<ServerEventPublic> {
+    const reveal = await this.revealsAudienceTo(access, userId, event.creatorUserId);
     return {
       ...event,
       audience: projectResourceAudience(event.audience, reveal),
@@ -106,8 +121,8 @@ export class CommunityService {
     };
   }
 
-  async publicLiveAction(action: LiveActionRecord, userId: string): Promise<LiveAction> {
-    const reveal = await this.permissions.canRevealAudience(userId, action.creatorUserId);
+  async publicLiveAction(action: LiveActionRecord, userId: string, access = this.channels.accessScope()): Promise<LiveAction> {
+    const reveal = await this.revealsAudienceTo(access, userId, action.creatorUserId);
     return { ...action, audience: projectResourceAudience(action.audience, reveal) };
   }
 
@@ -133,10 +148,12 @@ export class CommunityService {
 
   async snapshot(userId: string, includeEnded = false): Promise<CommunitySnapshot> {
     const settings = this.settings();
+    // One read of the member and of each channel for the whole snapshot (S-APP-5).
+    const access = this.channels.accessScope();
     const events: ServerEventPublic[] = [];
     if (settings.eventsEnabled) {
       for (const event of this.repository.events(includeEnded)) {
-        if (await this.canViewEvent(userId, event)) events.push(await this.publicEvent(event, userId));
+        if (await this.canViewEvent(userId, event, access)) events.push(await this.publicEvent(event, userId, access));
       }
     }
     const polls: NativePoll[] = [];
@@ -144,20 +161,20 @@ export class CommunityService {
     const nativeForms: NativeLiveForm[] = [];
     if (settings.eventsEnabled) {
       for (const action of this.repository.liveActions()) {
-        if (await this.canViewLiveAction(userId, action)) liveActions.push(await this.publicLiveAction(action, userId));
+        if (await this.canViewLiveAction(userId, action, access)) liveActions.push(await this.publicLiveAction(action, userId, access));
       }
       for (const poll of this.polls?.repository.listActiveLiveActions(Date.now()) ?? []) {
-        if (await this.channels.canUserAccessChannel(userId, poll.channelId, Permission.READ_MESSAGES) &&
-            await this.permissions.canAccessAudience(userId, poll.creatorUserId, poll.audience)) {
+        if (await access.can(userId, poll.channelId, Permission.READ_MESSAGES) &&
+            await this.inAudience(access, userId, poll.creatorUserId, poll.audience)) {
           polls.push(this.polls!.publicPoll(
             poll,
             userId,
-            await this.permissions.canRevealAudience(userId, poll.creatorUserId),
+            await this.revealsAudienceTo(access, userId, poll.creatorUserId),
           ));
         }
       }
       for (const form of this.repository.activeNativeForms(Date.now())) {
-        if (await this.canViewNativeForm(userId, form)) nativeForms.push(await this.publicNativeForm(form, userId));
+        if (await this.canViewNativeForm(userId, form, access)) nativeForms.push(await this.publicNativeForm(form, userId, access));
       }
     }
     return { settings, events, liveActions, polls, nativeForms };
@@ -373,17 +390,29 @@ export class CommunityService {
   advance(now = Date.now()): { changed: boolean; started: ServerEvent[]; polls: NativePoll[] } {
     const started: ServerEvent[] = [];
     const expiredImageUrls: string[] = [];
-    let changed = false;
-    this.repository.transaction(() => {
-      if (this.settings().eventsEnabled) {
-        for (const event of this.repository.events()) {
+    // Runs every second, so the reads decide whether anything is due before a
+    // transaction opens. The repository is synchronous: nothing changes these
+    // rows before the transaction below.
+    const dueEvents = this.settings().eventsEnabled
+      ? this.repository.events().filter(event =>
+        (event.endsAt !== null && event.endsAt <= now) || (event.status === 'scheduled' && event.startsAt <= now))
+      : [];
+    const expiredActions = this.repository.liveActions().filter(action => {
+      const selector = action.content.kind === 'selector' ? this.selectors.get(action.content.selectorId) : undefined;
+      return action.expiresAt <= now || !this.botAllowed(action.botId) ||
+        (action.content.kind === 'selector' && (!selector || selector.closedAt !== null ||
+          (selector.expiresAt !== undefined && selector.expiresAt <= now)));
+    });
+    let changed = dueEvents.length > 0 || expiredActions.length > 0;
+    if (changed) {
+      this.repository.transaction(() => {
+        for (const event of dueEvents) {
           if (event.endsAt !== null && event.endsAt <= now) {
             event.status = 'ended';
             event.endedAt = event.endsAt;
             event.revision++;
             this.repository.saveEvent(event);
             this.scheduleNext(event, now);
-            changed = true;
           }
           if (event.status === 'scheduled' && event.startsAt <= now) {
             event.status = 'active';
@@ -391,21 +420,14 @@ export class CommunityService {
             event.revision++;
             this.repository.saveEvent(event);
             started.push(event);
-            changed = true;
           }
         }
-      }
-      for (const action of this.repository.liveActions()) {
-        const selector = action.content.kind === 'selector' ? this.selectors.get(action.content.selectorId) : undefined;
-        if (action.expiresAt <= now || !this.botAllowed(action.botId) ||
-            (action.content.kind === 'selector' && (!selector || selector.closedAt !== null ||
-              (selector.expiresAt !== undefined && selector.expiresAt <= now)))) {
+        for (const action of expiredActions) {
           this.repository.deleteLiveAction(action.id);
           expiredImageUrls.push(...action.imageUrls);
-          changed = true;
         }
-      }
-    });
+      });
+    }
     this.deleteImageUrls(expiredImageUrls);
     for (const [ref, image] of this.stagedImages) {
       if (image.expiresAt > now) continue;
@@ -653,8 +675,8 @@ export class CommunityService {
     };
   }
 
-  async publicNativeForm(form: NativeLiveFormRecord, userId: string): Promise<NativeLiveForm> {
-    const reveal = await this.permissions.canRevealAudience(userId, form.creatorUserId);
+  async publicNativeForm(form: NativeLiveFormRecord, userId: string, access = this.channels.accessScope()): Promise<NativeLiveForm> {
+    const reveal = await this.revealsAudienceTo(access, userId, form.creatorUserId);
     return {
       ...form,
       audience: projectResourceAudience(form.audience, reveal),
@@ -752,7 +774,9 @@ export class CommunityService {
         this.images.deleteAvatar(asset.path);
         this.stagedImages.delete(ref);
       }
-      throw new CommunityError(error instanceof Error ? error.message : 'Could not store image.');
+      // The words of a disk error name paths on the server: they go to the log only (S-APP-8).
+      Logger.error('NETWORK', 'Could not store community images.', error);
+      throw new CommunityError('Could not store image.');
     }
     for (const { ref } of assets) this.stagedImages.delete(ref);
     return promoted.map(path => this.images.getPublicUrl(path)!);
@@ -768,10 +792,8 @@ export class CommunityService {
 
   private async saveImage(input: string | null, prefix = ''): Promise<string | null> {
     if (input === null) return null;
-    const encoded = input.replace(/^data:image\/(?:png|jpeg|webp);base64,/, '');
-    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new CommunityError('Invalid image.');
-    const result = this.images.validateAvatarBuffer(Buffer.from(encoded, 'base64'));
-    if (!result.isValid || !result.buffer || !result.extension) throw new CommunityError(result.error ?? 'Invalid image.');
-    return this.images.saveAvatar(result.buffer, result.extension, prefix);
+    const image = this.images.decodeImage(input);
+    if (!image.ok) throw new CommunityError(image.message);
+    return this.images.saveAvatar(image.buffer, image.extension, prefix);
   }
 }

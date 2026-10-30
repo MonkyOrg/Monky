@@ -7,7 +7,8 @@ import {
   type SoundboardSoundData,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
-import { callClient } from './serverConnection';
+import { callClient } from './callScope';
+import { currentEventOrigin } from './sessionRouting';
 import { sessionManager } from './SessionManager';
 import { ProtocolRequestError } from './NetworkClient';
 import { settingsStore } from '../stores/settingsStore';
@@ -15,7 +16,6 @@ import { voiceStore } from '../stores/voiceStore';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
 import { SoundboardAudioOutput } from './SoundboardAudioOutput';
-import { setAudioOutputSink } from './AudioOutputSink';
 import { showErrorToast } from '../views/CopyToast';
 
 /**
@@ -55,6 +55,18 @@ interface ManagedSoundPlayback extends ActiveSoundPlayback {
 /** How one attempt to play a clip ended: audible, broken, or stopped/replaced first. */
 export type PlaybackOutcome = 'started' | 'failed' | 'cancelled';
 
+/** One clip to play locally, whatever brought it: the call, the library, the recent list or the editor. */
+interface PlaybackRequest {
+  userId: string;
+  userName?: string;
+  soundName: string;
+  src: string;
+  startTime?: number;
+  /** Frees `src` once nothing plays it (a blob URL). */
+  release?: () => void;
+  showInGlobalPlayer?: boolean;
+}
+
 /** A library sound this client asked to play that is not audible yet. */
 interface SoundRequest {
   filePath: string;
@@ -67,7 +79,6 @@ export class SoundboardService {
   private sounds: SoundItem[] = [];
   private loadGeneration = 0;
   private loadStatus: 'loading' | 'ready' | 'error' = 'ready';
-  private sinkId: string = settingsStore.selectedSpeakerId;
   private activePlaybacks: Map<string, ManagedSoundPlayback> = new Map();
   private pendingPlaybacks = new Map<string, PendingSoundPlayback>();
   private readonly soundRequests = new Set<SoundRequest>();
@@ -82,15 +93,27 @@ export class SoundboardService {
     this.intensity = value;
     appEvents.emit('soundboard.intensity', value);
   });
+  private initialized = false;
 
-  constructor() {
+  /**
+   * Plays the call's sounds and loads the library. Importing the module has no
+   * side effects: only the main window calls this (R-MEDIA-3).
+   */
+  public init(): void {
+    if (this.initialized) return;
+    this.initialized = true;
     this.setupListeners();
-    this.loadSounds();
+    void this.loadSounds();
   }
 
   private setupListeners(): void {
-    // Listen to network events when another user or server sends a soundboard play
+    // A sound relayed by the server hosting this client's call, its own included.
     appEvents.on(`message.${MessageType.SOUNDBOARD_PLAYED}`, (payload: SoundboardPlayedPayload) => {
+      if (!this.isForCurrentCall(payload)) {
+        // Our own request ends quietly when the call changed before its echo.
+        if (payload && typeof payload === 'object') this.incomingPlaybacks.set(payload, Promise.resolve<PlaybackOutcome>('cancelled'));
+        return;
+      }
       const playback = this.handleIncomingSound(payload);
       if (payload && typeof payload === 'object') this.incomingPlaybacks.set(payload, playback);
     });
@@ -106,13 +129,8 @@ export class SoundboardService {
       this.audioOutput.setVolume(vol);
     });
 
-    // Update speaker device and active audio volume when settings change
+    // Volume and limiter follow the settings; the device follows the general output (SoundboardAudioOutput).
     appEvents.on('settings.updated', () => {
-      if (settingsStore.selectedSpeakerId !== this.sinkId) {
-        void this.setSinkId(settingsStore.selectedSpeakerId).catch((error: unknown) => {
-          console.warn('[SoundboardService] Could not switch speaker:', error);
-        });
-      }
       const vol = this.getEffectiveVolume();
       this.audioOutput.setVolume(vol);
       this.audioOutput.updateLimiter();
@@ -143,15 +161,6 @@ export class SoundboardService {
       if (!ok) console.warn('[SoundboardService] Shortcuts unavailable: invalid binding or native input hook failed.');
     } catch (err) {
       console.warn('[SoundboardService] Failed to sync shortcuts:', err);
-    }
-  }
-
-  public async setSinkId(sinkId: string): Promise<void> {
-    this.sinkId = sinkId;
-    await this.audioOutput.setSinkId(sinkId);
-    for (const playback of this.activePlaybacks.values()) await setAudioOutputSink(playback.audio, sinkId);
-    for (const pending of this.pendingPlaybacks.values()) {
-      if (pending.audio) await setAudioOutputSink(pending.audio, sinkId);
     }
   }
 
@@ -304,6 +313,15 @@ export class SoundboardService {
     this.stopSound();
   }
 
+  /** Whether this client may hear a relayed sound: it is in that call, on the server hosting it. */
+  private isForCurrentCall(payload: SoundboardPlayedPayload): boolean {
+    const channelId = voiceStore.currentVoiceChannelId;
+    const voiceKey = voiceStore.voiceSessionKey;
+    if (!channelId || !voiceKey || payload?.channelId !== channelId) return false;
+    const origin = currentEventOrigin();
+    return !origin || origin === voiceKey;
+  }
+
   /** Whether a playback entry belongs to this client (call user or preview). */
   private isLocalPlayback(userId: string): boolean {
     if (userId === 'local') return true;
@@ -351,50 +369,19 @@ export class SoundboardService {
 
   /** Plays a cached server sound locally without broadcasting or recording it again. */
   public async previewRecentSound(soundName: string, audioBase64: string, mimeType: string): Promise<boolean> {
-    const userId = 'recent-preview';
-    const pending = this.beginPlayback(userId, soundName);
-    try {
-      const audio = new Audio(`data:${mimeType};base64,${audioBase64}`);
-      pending.audio = audio;
-      this.audioOutput.setVolume(this.getEffectiveVolume());
-      await setAudioOutputSink(audio, this.sinkId);
-      await this.audioOutput.connect(audio, pending.controller.signal);
-      if (this.pendingPlaybacks.get(userId) !== pending) return false;
-      return await this.playAudioForUser(audio, userId, t('common.you'), soundName, undefined, false) === 'started';
-    } catch (err) {
-      if (!pending.controller.signal.aborted) console.warn('[SoundboardService] Recent sound preview failed:', err);
-      pending.controller.abort();
-      return false;
-    } finally {
-      if (this.pendingPlaybacks.get(userId) === pending) this.pendingPlaybacks.delete(userId);
-    }
+    return await this.startPlayback({
+      userId: 'recent-preview', userName: t('common.you'), soundName,
+      src: `data:${mimeType};base64,${audioBase64}`, showInGlobalPlayer: false,
+    }) === 'started';
   }
 
-  /** Explicit local-only preview through the same volume, sink and limiter graph. */
+  /** Explicit local-only preview through the same volume, output and limiter graph. */
   public async previewEditedSound(bytes: Uint8Array, soundName: string, startTime = 0): Promise<boolean> {
-    const userId = 'editor-preview';
-    const pending = this.beginPlayback(userId);
     const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'audio/wav' }));
-    try {
-      const audio = new Audio(url);
-      audio.currentTime = startTime;
-      pending.audio = audio;
-      this.audioOutput.setVolume(this.getEffectiveVolume());
-      await setAudioOutputSink(audio, this.sinkId);
-      await this.audioOutput.connect(audio, pending.controller.signal);
-      if (this.pendingPlaybacks.get(userId) !== pending) return false;
-      return await this.playAudioForUser(audio, userId, t('soundboard.editorPreview'), soundName, () => URL.revokeObjectURL(url)) === 'started';
-    } catch (error: unknown) {
-      if (!pending.controller.signal.aborted) console.warn('[SoundboardService] Edited audio playback failed:', error);
-      pending.controller.abort();
-      pending.audio?.pause();
-      if (pending.audio) pending.audio.src = '';
-      URL.revokeObjectURL(url);
-      return false;
-    } finally {
-      if (this.pendingPlaybacks.get(userId) === pending) this.pendingPlaybacks.delete(userId);
-      else URL.revokeObjectURL(url);
-    }
+    return await this.startPlayback({
+      userId: 'editor-preview', userName: t('soundboard.editorPreview'), soundName, src: url, startTime,
+      release: () => URL.revokeObjectURL(url),
+    }) === 'started';
   }
 
   public async selectFolder(): Promise<string | null> {
@@ -500,7 +487,7 @@ export class SoundboardService {
     const soundData = await window.api.readSoundboardSound(request.filePath);
     if (request.controller.signal.aborted) return 'cancelled';
     if (!soundData) throw new Error(`Failed to read sound file: ${request.filePath}`);
-    const outcome = await this.playLocalPreview(request.filePath, soundData);
+    const outcome = await this.playLocalPreview(soundData);
     if (outcome === 'started') this.recordLocalPreview(soundData);
     return outcome;
   }
@@ -642,11 +629,51 @@ export class SoundboardService {
     return Math.max(0, Math.min(1, settingsStore.soundboardVolume / 100));
   }
 
+  /** Applies the volume in the settings to what is playing, before it is saved (a slider still moving). */
+  public applyVolume(): void {
+    this.audioOutput.setVolume(this.getEffectiveVolume());
+  }
+
   private beginPlayback(userId: string, soundName?: string): PendingSoundPlayback {
     this.stopSoundForUser(userId);
     const pending: PendingSoundPlayback = { audio: null, controller: new AbortController(), soundName };
     this.pendingPlaybacks.set(userId, pending);
     return pending;
+  }
+
+  /**
+   * Plays one clip through the soundboard output. A newer clip of the same user
+   * replaces it, and a stop while it loads keeps it silent: until it is audible
+   * it is a pending playback, which every stop cancels.
+   */
+  private async startPlayback(request: PlaybackRequest): Promise<PlaybackOutcome> {
+    const { userId } = request;
+    const pending = this.beginPlayback(userId, request.soundName);
+    // Frees the source unless the playback took it over.
+    let release = request.release;
+    try {
+      const audio = new Audio(request.src);
+      if (request.startTime) audio.currentTime = request.startTime;
+      pending.audio = audio;
+      this.audioOutput.setVolume(this.getEffectiveVolume());
+      await this.audioOutput.connect(audio, pending.controller.signal);
+      if (this.pendingPlaybacks.get(userId) !== pending) return 'cancelled';
+      release = undefined;
+      return await this.playAudioForUser(audio, userId, request.userName, request.soundName, request.release,
+        request.showInGlobalPlayer);
+    } catch (error: unknown) {
+      if (pending.controller.signal.aborted) return 'cancelled';
+      console.warn(`[SoundboardService] Could not play ${userId}'s sound:`, error);
+      pending.controller.abort();
+      if (pending.audio) {
+        pending.audio.pause();
+        pending.audio.src = '';
+      }
+      return 'failed';
+    } finally {
+      if (this.pendingPlaybacks.get(userId) === pending) this.pendingPlaybacks.delete(userId);
+      release?.();
+    }
   }
 
   private recordLocalPreview(soundData: SoundboardSoundData): void {
@@ -662,59 +689,19 @@ export class SoundboardService {
     });
   }
 
-  private async playLocalPreview(filePath: string, soundData: SoundboardSoundData): Promise<PlaybackOutcome> {
-    const pending = this.beginPlayback('local', this.sounds.find(sound => sound.filePath === filePath)?.name);
-    try {
-      const audio = new Audio(soundData.dataUrl);
-      pending.audio = audio;
-      this.audioOutput.setVolume(this.getEffectiveVolume());
-
-      await setAudioOutputSink(audio, this.sinkId);
-      await this.audioOutput.connect(audio, pending.controller.signal);
-      if (this.pendingPlaybacks.get('local') !== pending) return 'cancelled';
-
-      return await this.playAudioForUser(audio, 'local', t('common.you'), soundData.soundName);
-    } catch (err) {
-      if (pending.controller.signal.aborted) return 'cancelled';
-      console.warn('[SoundboardService] Local preview failed:', err);
-      pending.controller.abort();
-      return 'failed';
-    } finally {
-      if (this.pendingPlaybacks.get('local') === pending) this.pendingPlaybacks.delete('local');
-    }
+  private playLocalPreview(soundData: SoundboardSoundData): Promise<PlaybackOutcome> {
+    return this.startPlayback({ userId: 'local', userName: t('common.you'), soundName: soundData.soundName, src: soundData.dataUrl });
   }
 
   public async handleIncomingSound(payload: SoundboardPlayedPayload): Promise<PlaybackOutcome> {
     appEvents.emit('soundboard.played', payload);
-
-    const userId = payload.userId || 'unknown';
-
-    // Per #156: If the SAME user triggers another sound, interrupt and replace their own previous sound.
-    // Different users play their sounds concurrently at the same time.
-    const pending = this.beginPlayback(userId, payload.soundName);
-
-    try {
-      const dataUrl = payload.audioBase64.startsWith('data:')
-        ? payload.audioBase64
-        : `data:${payload.mimeType || 'audio/mp3'};base64,${payload.audioBase64}`;
-
-      const audio = new Audio(dataUrl);
-      pending.audio = audio;
-      this.audioOutput.setVolume(this.getEffectiveVolume());
-
-      await setAudioOutputSink(audio, this.sinkId);
-      await this.audioOutput.connect(audio, pending.controller.signal);
-      if (this.pendingPlaybacks.get(userId) !== pending) return 'cancelled';
-
-      return await this.playAudioForUser(audio, userId, payload.userName, payload.soundName);
-    } catch (err) {
-      if (pending.controller.signal.aborted) return 'cancelled';
-      console.warn('[SoundboardService] Failed to play incoming soundboard audio:', err);
-      pending.controller.abort();
-      return 'failed';
-    } finally {
-      if (this.pendingPlaybacks.get(userId) === pending) this.pendingPlaybacks.delete(userId);
-    }
+    const src = typeof payload.audioBase64 === 'string' && payload.audioBase64.startsWith('data:')
+      ? payload.audioBase64
+      : `data:${payload.mimeType || 'audio/mp3'};base64,${payload.audioBase64}`;
+    // Per #156: a user's newer sound replaces their previous one; different users play at the same time.
+    return this.startPlayback({
+      userId: payload.userId || 'unknown', userName: payload.userName, soundName: payload.soundName, src,
+    });
   }
 }
 

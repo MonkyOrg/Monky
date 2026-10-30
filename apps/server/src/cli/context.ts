@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { LIMITS } from '@monky/shared';
 import { DatabaseConnection } from '../infrastructure/database/DatabaseConnection';
-import type { DatabaseOpenOptions } from '../infrastructure/database/SqliteWrapper';
+import type { DatabaseOpenOptions, IDatabaseDriver } from '../infrastructure/database/SqliteWrapper';
 import {
   SqliteChannelRepository,
   SqliteRoleRepository,
@@ -17,6 +17,7 @@ import {
   SERVER_DB_NAME,
 } from './constants';
 import { t, getCliLanguage } from './i18n/index';
+import { assertServerStopped, findRunningServer } from './runningServer';
 
 export interface CliContext {
   dataDir: string;
@@ -93,21 +94,20 @@ export function isHelpArg(value?: string): boolean {
   return value === 'help' || value === '--help' || value === '-h';
 }
 
-export async function withContext<T>(
-  dataDir: string,
-  fn: (ctx: CliContext) => Promise<T>,
-  seed: boolean = true,
-  options: DatabaseOpenOptions = {}
-): Promise<T> {
-  if (options.readOnly && seed) throw new Error('A read-only CLI context cannot seed server data.');
+async function openContext(dataDir: string, options: DatabaseOpenOptions): Promise<CliContext> {
   const dbConn = await DatabaseConnection.create(dataDbPath(dataDir), options);
   const db = dbConn.getDb();
-  const serverRepo = new SqliteServerRepository(db);
-  const userRepo = new SqliteUserRepository(db);
-  const channelRepo = new SqliteChannelRepository(db);
-  const roleRepo = new SqliteRoleRepository(db);
+  return {
+    dataDir,
+    dbConn,
+    serverRepo: new SqliteServerRepository(db),
+    userRepo: new SqliteUserRepository(db),
+    roleRepo: new SqliteRoleRepository(db),
+  };
+}
 
-  if (seed) {
+async function seedContext(ctx: CliContext): Promise<void> {
+  try {
     await ensureServerSeedData(
       {
         serverName: DEFAULT_SERVER_NAME,
@@ -117,15 +117,128 @@ export async function withContext<T>(
         initialVoiceChannel: 'Geral',
         categoryLocale: getCliLanguage(),
       },
-      serverRepo,
-      channelRepo,
-      roleRepo
+      ctx.serverRepo,
+      new SqliteChannelRepository(ctx.dbConn.getDb()),
+      ctx.roleRepo
     );
+  } catch (error) {
+    ctx.dbConn.close({ discardChanges: true });
+    throw error;
   }
+}
+
+export async function withContext<T>(
+  dataDir: string,
+  fn: (ctx: CliContext) => Promise<T>,
+  seed: boolean = true,
+  options: DatabaseOpenOptions = {}
+): Promise<T> {
+  if (options.readOnly && seed) throw new Error('A read-only CLI context cannot seed server data.');
+  const ctx = await openContext(dataDir, options);
+  if (seed) await seedContext(ctx);
 
   try {
-    return await fn({ dataDir, dbConn, serverRepo, userRepo, roleRepo });
+    return await fn(ctx);
   } finally {
-    dbConn.close();
+    ctx.dbConn.close();
+  }
+}
+
+/**
+ * Database writes for a server that must be stopped.
+ *
+ * A running server keeps the whole database in memory and rewrites the file
+ * from it, so a change saved here would vanish within seconds. The command
+ * runs inside one transaction: sql.js then skips its own save timer, so
+ * nothing reaches `server.db` while an interactive command waits, a failed
+ * command saves nothing at all, and the check runs again right before the
+ * only save, in case the server started in the meantime.
+ */
+export async function withWritableContext<T>(dataDir: string, fn: (ctx: CliContext) => Promise<T>): Promise<T> {
+  assertServerStopped(dataDir);
+  const ctx = await openContext(dataDir, {});
+  await seedContext(ctx);
+  let saved = false;
+  try {
+    const result = await ctx.dbConn.getDb().transactionAsync(() => fn(ctx));
+    if (findRunningServer(dataDir)) throw new Error(t('guard.startedDuringCommand'));
+    ctx.dbConn.close();
+    saved = true;
+    return result;
+  } finally {
+    if (!saved) ctx.dbConn.close({ discardChanges: true });
+  }
+}
+
+/** Migration files shipped with this build, found the way the server finds them. */
+function bundledMigrations(): string[] {
+  const databaseDir = path.join(__dirname, '..', 'infrastructure', 'database');
+  for (const directory of [
+    path.join(databaseDir, 'migrations'),
+    path.join(databaseDir, '..', '..', '..', 'src', 'infrastructure', 'database', 'migrations'),
+  ]) {
+    if (fs.existsSync(directory)) return fs.readdirSync(directory).filter((file) => file.endsWith('.sql'));
+  }
+  return [];
+}
+
+/** Versions in the migration ledger; empty when the database predates it. */
+export function appliedMigrations(db: IDatabaseDriver): Set<string> {
+  const applied = new Set<string>();
+  const ledger: unknown = db.prepare(
+    "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+  ).get();
+  if (!ledger) return applied;
+  for (const row of db.prepare('SELECT version FROM schema_migrations').all()) {
+    const entry: unknown = row;
+    if (entry && typeof entry === 'object' && 'version' in entry && typeof entry.version === 'string') {
+      applied.add(entry.version);
+    }
+  }
+  return applied;
+}
+
+function hasPendingMigrations(db: IDatabaseDriver): boolean {
+  const applied = appliedMigrations(db);
+  return bundledMigrations().some((file) => !applied.has(file));
+}
+
+/** A starting server saves its upgraded database a few seconds after it opens it. Tests shorten these. */
+export const snapshotTiming = { upgradeWaitMs: 6_000, pollMs: 250 };
+
+async function waitForUpgradedSnapshot(dataDir: string): Promise<CliContext> {
+  const deadline = Date.now() + snapshotTiming.upgradeWaitMs;
+  while (Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, snapshotTiming.pollMs));
+    const ctx = await openContext(dataDir, { readOnly: true });
+    if (!hasPendingMigrations(ctx.dbConn.getDb())) return ctx;
+    ctx.dbConn.close();
+  }
+  throw new Error(t('guard.outdatedSchemaRunning'));
+}
+
+/**
+ * Snapshot for commands that only show data: it never writes `server.db`, so
+ * reading cannot replace a newer file saved by a running server.
+ *
+ * A database older than this CLI is upgraded first, but only while no server
+ * holds it. A running server either has just started and is about to save the
+ * upgraded file, or still runs the previous version.
+ */
+export async function withReadOnlyContext<T>(dataDir: string, fn: (ctx: CliContext) => Promise<T>): Promise<T> {
+  let ctx = await openContext(dataDir, { readOnly: true });
+  try {
+    if (hasPendingMigrations(ctx.dbConn.getDb())) {
+      ctx.dbConn.close();
+      if (findRunningServer(dataDir)) {
+        ctx = await waitForUpgradedSnapshot(dataDir);
+      } else {
+        (await DatabaseConnection.create(dataDbPath(dataDir))).close();
+        ctx = await openContext(dataDir, { readOnly: true });
+      }
+    }
+    return await fn(ctx);
+  } finally {
+    ctx.dbConn.close();
   }
 }

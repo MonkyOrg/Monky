@@ -9,12 +9,13 @@ import {
   LIMITS, MessageType, type SlashCommand, type CommandSoundDownloadReceivedPayload,
   type SoundboardDownloadInput, type SoundboardDownloadProgress, type SoundDownloadResult,
 } from '@monky/shared';
-import { SoundboardDownloads, SoundDownloadError, soundDownloadUrl, isPublicSoundAddress, type SoundDownloadTransport } from '../src/main/soundboardDownload';
+import { SoundboardDownloads, SoundDownloadError, soundDownloadUrl, type SoundDownloadTransport } from '../src/main/soundboardDownload';
+import { isPublicAddress } from '../src/main/net/addressPolicy';
 import { isSoundAudio, isSoundFileName } from '../src/main/soundAudioValidation';
 import { AudioPreviews } from '../src/main/audioPreviews';
 import type { SoundDownloadApproval, SoundDownloadConfirmationDetails } from '../src/renderer/utils/soundDownloadConfirmation';
 import { LocalSoundDownloadService } from '../src/renderer/core/LocalSoundDownloadService';
-import type { ElectronApi } from '../src/preload/preload';
+import type { ElectronApi } from '../src/preload/api';
 import { createChatStore, setActiveChatStore } from '../src/renderer/stores/chatStore';
 import { createServerStore } from '../src/renderer/stores/serverStore';
 import { createNetworkClient } from '../src/renderer/core/NetworkClient';
@@ -630,7 +631,7 @@ function confirmationFixture(
   client.getStatus = () => 'CONNECTED';
   client.getCurrentServerUrl = () => 'ws://example.test:46332';
   const sent: unknown[] = [];
-  client.send = (_type, payload: unknown) => { sent.push(payload); };
+  client.send = (_type: MessageType, payload: unknown, _requestId?: string) => { sent.push(payload); };
   const server = createServerStore();
   server.currentUser = { id: 'caller', clientId: 'identity', nickname: 'Caller', status: 'ONLINE', joinedAt: 1 };
   const ack = { invocationId: randomUUID(), channelId: 'text', botId: command.botId, commandName: command.name };
@@ -896,10 +897,10 @@ test('filenames, URL schemes and public IPv4/IPv6 checks reject traversal, devic
   assert.equal(isSoundFileName('Som autoral.mp3'), true);
   for (const address of ['127.0.0.1', '10.2.3.4', '172.16.0.2', '192.168.0.1', '100.64.0.1', '169.254.169.254',
     '0.0.0.0', '224.0.0.1', '::1', '::ffff:127.0.0.1', '0:0:0:0:0:ffff:7f00:1', 'fc00::1', 'fe80::1', '2001:db8::1']) {
-    assert.equal(isPublicSoundAddress(address), false, address);
+    assert.equal(isPublicAddress(address), false, address);
   }
-  assert.equal(isPublicSoundAddress('93.184.216.34'), true);
-  assert.equal(isPublicSoundAddress('2606:4700:4700::1111'), true);
+  assert.equal(isPublicAddress('93.184.216.34'), true);
+  assert.equal(isPublicAddress('2606:4700:4700::1111'), true);
   for (const url of ['http://audio.example/a.mp3', 'https://user:pass@audio.example/a.mp3', 'https://127.1/a.mp3',
     'https://[::ffff:127.0.0.1]/a.mp3', 'https://localhost/a.mp3', 'file:///sound.mp3']) assert.throws(() => soundDownloadUrl(url));
 });
@@ -1151,7 +1152,7 @@ test('download completion stays in the captured background store and only actual
   const client = createNetworkClient();
   client.getStatus = () => 'CONNECTED';
   const sent: Array<{ type: MessageType; payload: unknown }> = [];
-  client.send = (type, payload: unknown) => { sent.push({ type, payload }); };
+  client.send = (type: MessageType, payload: unknown, _requestId?: string) => { sent.push({ type, payload }); };
   const server = createServerStore();
   server.currentUser = { id: 'caller', clientId: 'identity', nickname: 'Caller', status: 'ONLINE', joinedAt: 1 };
   const ack = { invocationId: 'invocation', channelId: 'text', commandName: command.name, botId: command.botId };

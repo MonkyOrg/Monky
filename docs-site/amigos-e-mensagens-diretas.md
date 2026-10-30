@@ -53,6 +53,12 @@ Markdown ou sem formatação) e, nas suas, **Editar mensagem** e **Apagar
 mensagem**. Os detalhes estão em [Chat](/usando-o-app#chat); enquetes e
 figurinhas continuam exclusivas dos servidores.
 
+O que você começou a escrever numa conversa fica nela, como nos canais: o
+texto, os arquivos escolhidos, a mensagem que você está respondendo e uma
+edição ainda não salva. Abrir outra conversa ou um servidor e voltar não apaga
+nada; o rascunho só some quando você envia a mensagem ou fecha o Monky. Clicar
+na prévia de uma resposta leva à mensagem original e a destaca.
+
 O Monky mostra quando a outra pessoa está digitando.
 Mensagens seguidas da mesma pessoa no mesmo dia ficam agrupadas sob um único
 nome e foto; passe o mouse sobre uma delas para ver o horário. Uma mensagem

@@ -1,8 +1,11 @@
-import type {
-  OverlayConfig,
-  OverlayParticipantState,
-  OverlaySyncState,
-  NativeScreenCaptureMode,
+import {
+  getOverlayCardSize,
+  overlaySignalSchema,
+  type OverlayConfig,
+  type OverlayParticipantState,
+  type OverlaySignal,
+  type OverlaySyncState,
+  type NativeScreenCaptureMode,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { sessionManager } from './SessionManager';
@@ -12,10 +15,18 @@ import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { isParticipantSpeaking } from '../utils/voiceConnection';
 import { videoService } from './VideoService';
-import { getAvatarUrl } from '../utils/avatar';
-import { applyVideoCodecPreferences } from './webrtc/codecPreferences';
+import { resolveAvatarUrl } from '../utils/avatar';
+import { networkClient } from './NetworkClient';
+import { preferVideoCodec } from './webrtc/codecPreferences';
+import { waitForIceGatheringComplete } from './webrtc/iceGathering';
+import { updateRtpSenderParameters } from './webrtc/rtpSenderParameters';
+import { overlayFrameRestriction, type FrameRestriction } from '../utils/overlayLayout';
 
 const MAX_VIDEO_SLOTS = 8;
+/** The cards are small: past 30 fps the overlay only adds encoder and decoder work. */
+const OVERLAY_MAX_FRAMERATE = 30;
+/** Loopback host candidates arrive at once; the offer never waits longer than this for them. */
+const ICE_GATHERING_TIMEOUT_MS = 300;
 
 function sidOf(p: ParticipantViewModel): string {
   return p.user.sessionId || p.user.id;
@@ -25,8 +36,17 @@ export class OverlayBridgeService {
   private isOpen = false;
   private isWebRtcReady = false;
   private localPeerConnection: RTCPeerConnection | null = null;
+  /**
+   * Names the current connection in every signal: the overlay pairs one
+   * connection with each session, and answers to a replaced one are dropped.
+   */
+  private linkSession: string | null = null;
+  private offeredSession: string | null = null;
   private videoSenders: RTCRtpSender[] = [];
   private pendingVideoUpdates = new WeakMap<RTCRtpSender, { track: MediaStreamTrack; task: Promise<void> }>();
+  private appliedEncodings = new WeakMap<RTCRtpSender, string>();
+  /** The overlay's own pixel ratio, reported with `scale`; until then, this window's. */
+  private overlayPixelRatio: number | null = null;
   private retiredVideoTracks = new WeakSet<MediaStreamTrack>();
   private cameraSubscriptions: Array<() => void> = [];
   private dummyTrack: MediaStreamTrack | null = null;
@@ -60,20 +80,13 @@ export class OverlayBridgeService {
     );
 
     this.unbindListeners.push(
-      window.api.onOverlaySignalReceived(async (signalJson) => {
-        if (!this.isOpen || !this.localPeerConnection) return;
-        try {
-          const signal = JSON.parse(signalJson);
-          if (signal.type === 'ready') {
-            await this.sendOffer();
-          } else if (signal.type === 'answer') {
-            await this.localPeerConnection.setRemoteDescription(new RTCSessionDescription(signal));
-            this.isWebRtcReady = true;
-            this.syncState();
-          }
-        } catch (e) {
-          console.warn('[OverlayBridge] Erro ao processar sinal de resposta:', e);
+      window.api.onOverlaySignalReceived((value) => {
+        const signal = overlaySignalSchema.safeParse(value);
+        if (!signal.success) {
+          console.warn('[OverlayBridge] Ignoring an invalid overlay signal.');
+          return;
         }
+        void this.handleOverlaySignal(signal.data);
       })
     );
 
@@ -289,6 +302,30 @@ export class OverlayBridgeService {
     return this.dummyTrack;
   }
 
+  /**
+   * Caps one slot's frame at what its card can show, and at 30 fps: the link is
+   * loopback, so nothing else would keep the encoder from sending every camera
+   * and screen at full resolution only to have the overlay shrink it (R-MEDIA-2).
+   */
+  private applyVideoEncoding(index: number, restriction: FrameRestriction): void {
+    const sender = this.videoSenders[index];
+    const connection = this.localPeerConnection;
+    if (!this.isWebRtcReady || !sender || !connection) return;
+    const key = `${restriction.maxWidth}x${restriction.maxHeight}`;
+    if (this.appliedEncodings.get(sender) === key) return;
+    this.appliedEncodings.set(sender, key);
+    updateRtpSenderParameters(sender, (parameters) => {
+      const [encoding] = parameters.encodings;
+      if (!encoding) return false;
+      encoding.maxFramerate = OVERLAY_MAX_FRAMERATE;
+      encoding.scaleResolutionDownTo = { ...restriction };
+      return true;
+    }).catch((error: unknown) => {
+      if (this.appliedEncodings.get(sender) === key) this.appliedEncodings.delete(sender);
+      if (this.localPeerConnection === connection) console.warn(`[OverlayBridge] Could not size video slot ${index}:`, error);
+    });
+  }
+
   private initLocalPeerConnection(): void {
     this.teardownLocalPeerConnection();
     const sync = () => this.throttledSyncState();
@@ -298,7 +335,8 @@ export class OverlayBridgeService {
     );
 
     try {
-      this.localPeerConnection = new RTCPeerConnection({ iceServers: [] });
+      const connection = new RTCPeerConnection({ iceServers: [] });
+      this.localPeerConnection = connection;
       this.isWebRtcReady = false;
       this.videoSenders = [];
 
@@ -308,59 +346,73 @@ export class OverlayBridgeService {
       // A offer é enviada quando o overlay emitir o sinal 'ready'.
       for (let i = 0; i < MAX_VIDEO_SLOTS; i++) {
         const dummyStream = new MediaStream([dummyTrack]);
-        const transceiver = this.localPeerConnection.addTransceiver(dummyTrack, {
+        const transceiver = connection.addTransceiver(dummyTrack, {
           direction: 'sendonly',
           streams: [dummyStream],
         });
         this.videoSenders.push(transceiver.sender);
       }
-      applyVideoCodecPreferences(this.localPeerConnection);
+      // Loopback: compression buys nothing, the encoder is the whole cost.
+      preferVideoCodec(connection, 'video/VP8');
+      const session = crypto.randomUUID();
+      this.linkSession = session;
+      this.offeredSession = null;
+      // An overlay already on screen kept its connection to the one just
+      // replaced (a reload of this window, or a second open): ask it to pair
+      // again. A starting overlay announces itself instead (R-MEDIA-2).
+      if (this.isOpen) void this.sendSignal({ kind: 'hello', session });
     } catch (e) {
       console.warn('[OverlayBridge] Falha ao inicializar RTCPeerConnection:', e);
     }
   }
 
-  /**
-   * Cria a offer SDP com candidatos ICE embutidos e envia ao overlay.
-   * Só deve ser chamado quando o overlay já estiver pronto (sinal 'ready').
-   */
-  private async sendOffer(): Promise<void> {
-    if (!this.localPeerConnection) return;
+  private sendSignal(signal: OverlaySignal): Promise<void> {
+    if (!window.api?.sendOverlaySignal) return Promise.resolve();
+    return window.api.sendOverlaySignal({ target: 'overlay', signal }).catch((error: unknown) => {
+      console.warn(`[OverlayBridge] Could not send the overlay ${signal.kind}:`, error);
+    });
+  }
 
+  private async handleOverlaySignal(signal: OverlaySignal): Promise<void> {
+    const connection = this.localPeerConnection;
+    const session = this.linkSession;
+    if (!this.isOpen || !connection || !session) return;
     try {
-      applyVideoCodecPreferences(this.localPeerConnection);
-      const offer = await this.localPeerConnection.createOffer({
-        offerToReceiveVideo: false,
-        offerToReceiveAudio: false,
-      });
-      await this.localPeerConnection.setLocalDescription(offer);
-
-      // Aguarda colheita completa dos candidatos host no localhost
-      await new Promise<void>((resolve) => {
-        if (this.localPeerConnection?.iceGatheringState === 'complete') {
-          resolve();
-        } else {
-          const handler = () => {
-            if (this.localPeerConnection?.iceGatheringState === 'complete') {
-              this.localPeerConnection?.removeEventListener('icegatheringstatechange', handler);
-              resolve();
-            }
-          };
-          this.localPeerConnection?.addEventListener('icegatheringstatechange', handler);
-          setTimeout(resolve, 300);
+      if (signal.kind === 'ready') {
+        if (signal.session === null && this.offeredSession === session) {
+          // An overlay that started over lost the connection it had answered.
+          this.initLocalPeerConnection();
+          return;
         }
-      });
-
-      const completeOffer = this.localPeerConnection.localDescription || offer;
-      if (window.api?.sendOverlaySignal) {
-        await window.api.sendOverlaySignal({
-          target: 'overlay',
-          signal: JSON.stringify(completeOffer),
-        });
+        // A reply to an older hello, or a repeat for a connection already offered.
+        if ((signal.session !== null && signal.session !== session) || this.offeredSession === session) return;
+        this.offeredSession = session;
+        await this.sendOffer(connection, session);
+      } else if (signal.kind === 'answer') {
+        if (signal.session !== session || connection.signalingState !== 'have-local-offer') return;
+        await connection.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
+        if (this.localPeerConnection !== connection) return;
+        this.isWebRtcReady = true;
+        this.syncState();
+      } else if (signal.kind === 'scale') {
+        if (signal.session !== session || signal.pixelRatio === this.overlayPixelRatio) return;
+        this.overlayPixelRatio = signal.pixelRatio;
+        this.syncState();
       }
     } catch (e) {
-      console.warn('[OverlayBridge] Falha ao enviar offer:', e);
+      console.warn('[OverlayBridge] Erro ao processar sinal do overlay:', e);
     }
+  }
+
+  /** Offers the current connection, with its ICE candidates, to the overlay that said it is ready. */
+  private async sendOffer(connection: RTCPeerConnection, session: string): Promise<void> {
+    const offer = await connection.createOffer();
+    if (this.localPeerConnection !== connection) return;
+    await connection.setLocalDescription(offer);
+    await waitForIceGatheringComplete(connection, ICE_GATHERING_TIMEOUT_MS);
+    const sdp = connection.localDescription?.sdp ?? offer.sdp;
+    if (this.localPeerConnection !== connection || !sdp) return;
+    await this.sendSignal({ kind: 'offer', session, sdp });
   }
 
   private teardownLocalPeerConnection(): void {
@@ -373,8 +425,12 @@ export class OverlayBridgeService {
       this.localPeerConnection = null;
     }
     this.isWebRtcReady = false;
+    this.linkSession = null;
+    this.offeredSession = null;
+    this.overlayPixelRatio = null;
     this.videoSenders = [];
     this.pendingVideoUpdates = new WeakMap();
+    this.appliedEncodings = new WeakMap();
     this.dummyTrack?.stop();
     this.dummyTrack = null;
   }
@@ -386,6 +442,8 @@ export class OverlayBridgeService {
     const call = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
     const callStore = voiceStore.voiceSessionKey ? call?.serverStore : serverStore;
     const callParticipants = voiceStore.voiceSessionKey ? call?.participants : participantManager;
+    // Avatar paths belong to the call's server, not to the one on screen.
+    const callBaseUrl = (voiceStore.voiceSessionKey ? call?.client : networkClient)?.getHttpBaseUrl() ?? '';
     if (!channelId || !callStore?.serverDetails || !callParticipants) return;
 
     const channel = callStore.serverDetails.channels.find((c) => c.id === channelId);
@@ -402,7 +460,16 @@ export class OverlayBridgeService {
       : participants;
 
     let nextSlotIndex = 0;
-
+    // What a card can show is all a slot needs to send (R-MEDIA-2), in the overlay's device pixels.
+    const card = getOverlayCardSize(config);
+    const fit = config.preserveAspectRatio !== false ? 'contain' : 'cover';
+    const pixelRatio = this.overlayPixelRatio ?? window.devicePixelRatio;
+    const assignSlot = (track: MediaStreamTrack): number => {
+      const index = nextSlotIndex++;
+      this.updateVideoSender(index, track);
+      this.applyVideoEncoding(index, overlayFrameRestriction(card, pixelRatio, fit, track.getSettings()));
+      return index;
+    };
     const participantStates: OverlayParticipantState[] = visibleParticipants.map((p) => {
       const isLocal = sidOf(p) === currentSessionId;
       const isCamOn = isLocal
@@ -434,10 +501,7 @@ export class OverlayBridgeService {
           const stream = isLocal ? videoService.getCameraState().stream : p.remoteStream;
           const videoTrack = stream?.getVideoTracks()[0] || null;
           if (videoTrack && videoTrack.readyState === 'live') {
-            videoSlotIndex = nextSlotIndex;
-
-            this.updateVideoSender(nextSlotIndex, videoTrack);
-            nextSlotIndex++;
+            videoSlotIndex = assignSlot(videoTrack);
           }
         }
 
@@ -453,14 +517,11 @@ export class OverlayBridgeService {
                     : p.remoteScreenStreams.get(shareId));
               const videoTrack = stream?.getVideoTracks()[0] || null;
               if (videoTrack && videoTrack.readyState === 'live') {
-                screenSlotIndexes[shareId] = nextSlotIndex;
+                screenSlotIndexes[shareId] = assignSlot(videoTrack);
                 const native = isLocal ? !!videoService.getNativeScreenCapture(shareId)
                   : p.voiceState?.nativeScreenShares?.some(source => source.shareId === shareId) === true;
                 const captureMode = native ? this.captureModeFor?.(sidOf(p), shareId) : 'normal';
                 if (captureMode) screenCaptureModes[shareId] = captureMode;
-
-                this.updateVideoSender(nextSlotIndex, videoTrack);
-                nextSlotIndex++;
               }
             }
           }
@@ -471,7 +532,7 @@ export class OverlayBridgeService {
         sessionId: sidOf(p),
         userId: p.user.id,
         displayName: callParticipants.displayName(p),
-        avatarUrl: getAvatarUrl(p.user.avatarUrl),
+        avatarUrl: resolveAvatarUrl(p.user.avatarUrl, callBaseUrl),
         isSpeaking,
         isMuted,
         isDeafened,

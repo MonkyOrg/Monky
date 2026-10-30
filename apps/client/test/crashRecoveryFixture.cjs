@@ -46,7 +46,7 @@ function compileRecovery(root) {
   const files = [
     ...['crashRecovery', 'crashDiagnostics', 'crashRecoveryPage', 'i18n'].map(name =>
       [path.join(client, 'src', 'main', `${name}.ts`), path.join('main', `${name}.js`)]),
-    ...['crashRecoveryPreload', 'preload'].map(name =>
+    ...['crashRecoveryPreload', 'preload', 'ipc'].map(name =>
       [path.join(client, 'src', 'preload', `${name}.ts`), path.join('preload', `${name}.js`)]),
     ...['ipc', 'bugReport'].map(name => [path.join(sharedSource, `${name}.ts`), path.join('shared', `${name}.js`)]),
   ];

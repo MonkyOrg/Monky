@@ -1,10 +1,12 @@
 /// <reference types="vite/client" />
 
-import { ElectronApi } from '../preload/preload';
+import type { ElectronApi } from '../preload/api';
 
 declare global {
   interface Window {
     api: ElectronApi;
+    /** Console helper that prints the voice engine status (`debugVoice()` in DevTools). */
+    debugVoice?: () => unknown;
   }
 
   // Chromium supports these output-routing APIs before our DOM typings.
@@ -15,6 +17,11 @@ declare global {
   interface AudioContext {
     readonly sinkId: string | { type: 'none' };
     setSinkId?(sinkId: string): Promise<void>;
+  }
+
+  // Chromium caps an encoding's resolution (RTCResolutionRestriction) before our DOM typings.
+  interface RTCRtpEncodingParameters {
+    scaleResolutionDownTo?: { maxWidth: number; maxHeight: number };
   }
 }
 

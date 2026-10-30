@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
-const { boundedCleanup } = require('./frameSink.cjs');
+const { within } = require('./asyncTools.cjs');
 const {
   NATIVE_SCREEN_TEXTURE_IPC, nativeScreenTexturePortInfoSchema, nativeScreenTextureChannelInfoSchema,
   nativeScreenTextureMessageSchema, nativeScreenTextureReceiptSchema,
@@ -124,8 +124,8 @@ class TextureChannel {
   close() {
     this.closing = true;
     this.requestClose();
-    return boundedCleanup(this.closed,
-      'Native texture channel cleanup timed out; GPU receipts remain owned.', this.timeoutMs);
+    return within(this.closed,
+      this.timeoutMs, 'Native texture channel cleanup timed out; GPU receipts remain owned.');
   }
 }
 
@@ -256,8 +256,8 @@ function registerTextureTransferReceiver(textures, ipcRenderer, receive, onError
   ipcRenderer.on(NATIVE_SCREEN_TEXTURE_IPC.port, listener);
   return async () => {
     ipcRenderer.removeListener(NATIVE_SCREEN_TEXTURE_IPC.port, listener);
-    await boundedCleanup(Promise.all([...channels.values()].map(channel => channel.drain())),
-      'Native renderer texture retirement timed out; GPU receipts remain pending.', 12000);
+    await within(Promise.all([...channels.values()].map(channel => channel.drain())),
+      12000, 'Native renderer texture retirement timed out; GPU receipts remain pending.');
   };
 }
 

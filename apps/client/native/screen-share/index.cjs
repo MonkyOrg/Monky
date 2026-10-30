@@ -1,6 +1,6 @@
 'use strict';
 
-const { loadRuntime, loadCaptureRuntime, loadThumbnailRuntime } = require('./runtime/runtimeFiles.cjs');
+const { loadRuntime, loadRuntimeAsync, loadCaptureRuntime, loadThumbnailRuntime } = require('./runtime/runtimeFiles.cjs');
 const { NativeThumbnailCapturer } = require('./runtime/nativeThumbnail.cjs');
 const { NativeScreenEndpoint } = require('./runtime/nativeEndpoint.cjs');
 const { NativeScreenPublisher } = require('./runtime/nativeScreenPublisher.cjs');
@@ -15,7 +15,7 @@ const { createMacScreenProvider } = require('./runtime/mac/index.cjs');
 const { assertMacCaptureBridgeClosed } = require('./runtime/mac/captureBridge.cjs');
 
 module.exports = {
-  loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription,
+  loadRuntime, loadRuntimeAsync, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription,
   createNativeScreenPresentation, NativePcmCaptureHub, registerNativeAudioPortReceiver, NativeScreenPreviewBridge,
   CaptureBridge, createCaptureBridge, validateCaptureTarget, loadCaptureRuntime, probeCaptureCapabilities,
   loadThumbnailRuntime, NativeThumbnailCapturer,

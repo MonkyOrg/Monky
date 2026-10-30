@@ -1,4 +1,4 @@
-import { LIMITS, Permission, TurnAvailability } from '@monky/shared';
+import { LIMITS, Permission, portSchema, TurnAvailability } from '@monky/shared';
 import { ANSI, color, ConfigKey, PERMISSION_OPTIONS } from './constants';
 import { t } from './i18n/index';
 import type { SfuPortProblem } from '../infrastructure/sfu/SfuManager';
@@ -65,6 +65,21 @@ export function parsePositiveInt(key: string, value: string): number {
     throw new Error(t('validation.positiveInt', { key, value }));
   }
   return parsed;
+}
+
+/**
+ * A server port, by the protocol's rule (`portSchema`): a whole number from
+ * 1024 to 65535, as the desktop app requires. Any positive number used to
+ * pass, and 70000 made the server's `listen` throw while PM2 restarted it
+ * forever.
+ */
+export function parsePort(value: string): number {
+  const normalized = value.trim();
+  const parsed = /^\d+$/.test(normalized) ? portSchema.safeParse(Number(normalized)) : null;
+  if (!parsed?.success) {
+    throw new Error(t('validation.port', { value, min: LIMITS.MIN_PORT, max: LIMITS.MAX_PORT }));
+  }
+  return parsed.data;
 }
 
 /**
@@ -141,9 +156,16 @@ export function parsePermissionNames(input: string): string[] {
       continue;
     }
 
+    if (namesAdministrator(token)) throw new Error(t('validation.administratorPermission'));
     throw new Error(t('validation.permission', { value: token }));
   }
   return [...selected];
+}
+
+/** ADMINISTRATOR by its enum name, its legacy English label or its label in the CLI language. */
+function namesAdministrator(token: string): boolean {
+  const value = token.toLowerCase();
+  return value === 'administrator' || value === permissionLabel('ADMINISTRATOR').toLowerCase();
 }
 
 export function normalizeRoleColor(value: string): string | null {

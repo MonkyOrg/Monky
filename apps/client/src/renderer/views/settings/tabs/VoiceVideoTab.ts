@@ -1,5 +1,4 @@
 import { settingsStore } from '../../../stores/settingsStore';
-import { audioProcessor } from '../../../core/AudioProcessor';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
@@ -13,6 +12,7 @@ import { CameraEffectsControl } from '../CameraEffectsControl';
 import { populateCameraDeviceSelect } from '../CameraDeviceSelection';
 import { appEvents } from '../../../core/EventBus';
 import { renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
+import { reportError } from '../../../utils/feedback';
 
 export class VoiceVideoTab {
   private unbindVadMeter: (() => void) | null = null;
@@ -156,7 +156,7 @@ export class VoiceVideoTab {
               </div>
             </div>
             <label class="toggle-switch" aria-label="${t('settings.pttSoundCue')}">
-              <input id="checkbox-ptt-sound" type="checkbox" ${settingsStore.pttSoundCue ? 'checked' : ''}>
+              <input id="checkbox-ptt-sound" type="checkbox" role="switch" ${settingsStore.pttSoundCue ? 'checked' : ''}>
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -254,7 +254,8 @@ export class VoiceVideoTab {
       this.unbindInputMode.push(() => card?.removeEventListener('click', selectMode));
     }
 
-    // PTT Release Delay Slider
+    // PTT Release Delay Slider: read when the key is released, so assigning it
+    // applies at once; it is saved where the slider stops.
     const sliderPttDelay = container.querySelector<HTMLInputElement>('#slider-ptt-delay');
     const pttDelayValue = container.querySelector<HTMLElement>('#ptt-delay-value');
     sliderPttDelay?.addEventListener('input', () => {
@@ -262,8 +263,9 @@ export class VoiceVideoTab {
       sliderPttDelay.style.setProperty('--slider-progress', `${(Math.min(2000, Math.max(0, val)) / 2000) * 100}%`);
       if (pttDelayValue) pttDelayValue.textContent = `${val} ms`;
       settingsStore.pttReleaseDelay = val;
-      settingsStore.save();
+      settingsStore.saveSoon();
     });
+    sliderPttDelay?.addEventListener('change', () => settingsStore.save());
 
     // PTT Sound Cue Checkbox
     const checkboxPttSound = container.querySelector<HTMLInputElement>('#checkbox-ptt-sound');
@@ -400,7 +402,7 @@ export class VoiceVideoTab {
           await selectAudioDevice(kind, select.value, selectionAbort.signal);
         } catch (error) {
           select.value = selectedAudioDevice(kind) === 'default' ? '' : selectedAudioDevice(kind);
-          if (status && !selectionAbort.signal.aborted) status.textContent = audioDeviceError(error);
+          if (!selectionAbort.signal.aborted) reportError(audioDeviceError(error), { field: select });
         } finally {
           if (!selectionAbort.signal.aborted) select.disabled = false;
         }
@@ -433,10 +435,10 @@ export class VoiceVideoTab {
       const val = parseInt(sliderVad.value, 10);
       sliderVad.style.setProperty('--slider-progress', `${(Math.min(160, Math.max(0, val)) / 160) * 100}%`);
       settingsStore.vadSensitivity = val;
-      settingsStore.save();
-      audioProcessor.setVadThreshold(val);
+      settingsStore.saveSoon();
       this.updateVadThresholdLine(container, val);
     });
+    sliderVad?.addEventListener('change', () => settingsStore.save());
 
     btnRefreshDevices?.addEventListener('click', async () => {
       await this.refreshDevices(container);

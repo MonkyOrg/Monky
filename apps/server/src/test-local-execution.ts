@@ -1332,3 +1332,136 @@ test('local execution bounded source reconciliation preserves unrelated referenc
   await f.accept(offer);
   assert.equal(f.service.counts.sources, 1);
 });
+
+type ConnectionChange = 'connection' | 'session' | 'identity';
+const CONNECTION_CHANGES: readonly ConnectionChange[] = ['connection', 'session', 'identity'];
+
+/** Another socket, another login on the same socket, or another identity on the same login. */
+function changeConnection(session: Session, change: ConnectionChange): void {
+  if (change === 'connection') session.ws = {};
+  else if (change === 'session') session.sessionId = `${session.isBot ? 'bot' : 'user'}:relogin`;
+  else if (session.isBot) session.botPublicKey = 'cd'.repeat(32);
+  else session.user = { id: randomUUID() };
+}
+
+/** Holds the caller authorization of the next admission, so the connection can change while it waits. */
+function holdCallerAuthorization(f: ReturnType<typeof fixture>) {
+  const gate = deferred<boolean>();
+  const entered = deferred<void>();
+  f.transport.authorizeCaller = () => { entered.resolve(); return gate.promise; };
+  return { entered: entered.promise, release: () => gate.resolve(true) };
+}
+
+/** A live task's access is admitted again, as on each of its messages, and the connection changes while that admission waits. */
+async function changeDuringTaskAdmission(f: ReturnType<typeof fixture>, session: Session, change: ConnectionChange): Promise<LocalTaskOffer> {
+  const offer = await f.request();
+  const held = holdCallerAuthorization(f);
+  const pass = f.service.reconcileAccess();
+  await settles(held.entered);
+  changeConnection(session, change);
+  held.release();
+  await settles(pass);
+  return offer;
+}
+
+/** A task request is admitted, and the connection changes while that admission waits. */
+async function changeDuringRequestAdmission(f: ReturnType<typeof fixture>, session: Session, change: ConnectionChange, requestId: string): Promise<void> {
+  const held = holdCallerAuthorization(f);
+  const request = f.service.handle(f.bot, MessageType.BOT_LOCAL_TASK_REQUEST,
+    { context: f.context().input, spec: { operation: 'youtube.resolve', url: URL } }, requestId);
+  await settles(held.entered);
+  changeConnection(session, change);
+  held.release();
+  await settles(request);
+}
+
+test('local execution ends a live task as a departure only for a replaced socket, and as revoked access for another login or identity', async (t) => {
+  const causes = {
+    bot: { connection: 'bot_disconnected', session: 'permission_revoked', identity: 'permission_revoked' },
+    executor: { connection: 'requester_disconnected', session: 'permission_revoked', identity: 'permission_revoked' },
+  } as const;
+  for (const endpoint of ['bot', 'executor'] as const) {
+    for (const change of CONNECTION_CHANGES) {
+      await t.test(`${endpoint} ${change}`, async (t) => {
+        const f = fixture(t);
+        const offer = await f.request();
+        changeConnection(endpoint === 'bot' ? f.bot : f.origin, change);
+        await settles(f.service.reconcileAccess());
+        assert.deepEqual(f.events(offer, f.origin).at(-1), { state: 'cancelled', taskId: offer.taskId, cause: causes[endpoint][change] });
+        assert.equal(f.service.counts.tasks, 0);
+      });
+    }
+  }
+});
+
+test('local execution reports another bot socket or login during an admission as a departure, and another bot identity as a refusal', async (t) => {
+  // Unlike the live-task check above, an admission takes another login on the bot's socket for a departure.
+  // Its refusal of another identity ends a live task as revoked access.
+  const causes = { connection: 'bot_disconnected', session: 'bot_disconnected', identity: 'permission_revoked' } as const;
+  for (const change of CONNECTION_CHANGES) {
+    await t.test(`live task, bot ${change}`, async (t) => {
+      const f = fixture(t);
+      const offer = await changeDuringTaskAdmission(f, f.bot, change);
+      assert.deepEqual(f.events(offer, f.origin).at(-1), { state: 'cancelled', taskId: offer.taskId, cause: causes[change] });
+      assert.equal(f.service.counts.tasks, 0);
+    });
+  }
+  // A refused request is answered only on the connection that sent it: another socket or login hears nothing.
+  for (const change of CONNECTION_CHANGES) {
+    await t.test(`request, bot ${change}`, async (t) => {
+      const f = fixture(t);
+      const requestId = `bot-${change}-while-pending`;
+      await changeDuringRequestAdmission(f, f.bot, change, requestId);
+      assert.deepEqual(f.errors, change === 'identity'
+        ? [{ session: f.bot, code: ProtocolErrorCode.PERMISSION_DENIED, reason: 'permission_denied', requestId }] : []);
+      assert.equal(f.sent.some((entry) => entry.message.type === MessageType.BOT_LOCAL_TASK_OFFER), false);
+      assert.equal(f.service.counts.tasks, 0);
+    });
+  }
+});
+
+test('local execution reports any change of the requester connection during an admission as its departure', async (t) => {
+  for (const change of CONNECTION_CHANGES) {
+    await t.test(`request, requester ${change}`, async (t) => {
+      const f = fixture(t);
+      const requestId = `requester-${change}-while-pending`;
+      await changeDuringRequestAdmission(f, f.origin, change, requestId);
+      assert.deepEqual(f.errors, [
+        { session: f.bot, code: ProtocolErrorCode.BOT_INTERACTION_EXPIRED, reason: 'requester_disconnected', requestId },
+      ]);
+      assert.equal(f.service.counts.tasks, 0);
+    });
+  }
+  // Also for a live task, whose own check takes another login or identity for revoked access.
+  for (const change of CONNECTION_CHANGES) {
+    await t.test(`live task, requester ${change}`, async (t) => {
+      const f = fixture(t);
+      const offer = await changeDuringTaskAdmission(f, f.origin, change);
+      assert.deepEqual(f.events(offer, f.origin).at(-1), { state: 'cancelled', taskId: offer.taskId, cause: 'requester_disconnected' });
+      assert.equal(f.service.counts.tasks, 0);
+    });
+  }
+});
+
+test('local execution accepts no task message from a connection whose socket, login or identity changed', async (t) => {
+  for (const endpoint of ['bot', 'executor'] as const) {
+    for (const change of CONNECTION_CHANGES) {
+      await t.test(`${endpoint} ${change}`, async (t) => {
+        const f = fixture(t);
+        const offer = await f.request();
+        const session = endpoint === 'bot' ? f.bot : f.origin;
+        changeConnection(session, change);
+        const events = f.events(offer, f.origin).length;
+        await settles(endpoint === 'bot'
+          ? f.service.handle(session, MessageType.BOT_LOCAL_TASK_CONTROL, { taskId: offer.taskId, revision: 0, action: 'cancel' })
+          : f.service.handle(session, MessageType.BOT_LOCAL_TASK_EVENT, { state: 'cancelled', taskId: offer.taskId, cause: 'requested' }));
+        assert.deepEqual(f.errors, [
+          { session, code: ProtocolErrorCode.PERMISSION_DENIED, reason: 'permission_denied', requestId: undefined },
+        ]);
+        // The refused message neither ends the task nor speaks for it.
+        assert.equal(f.events(offer, f.origin).length, events);
+        assert.equal(f.service.counts.tasks, 1);
+      });
+    }
+  }
+});

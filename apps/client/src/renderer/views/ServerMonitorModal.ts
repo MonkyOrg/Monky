@@ -1,12 +1,13 @@
-import { LOG_LEVELS, SERVER_MONITOR_LIMITS, type LogEntry, type LogLevel, type ServerMonitorStats } from '@monky/shared';
+import '../styles/serverMonitor.css';
+import { LOG_LEVELS, SERVER_MONITOR_LIMITS, type LogLevel, type ServerMonitorLogLine, type ServerMonitorStats } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { t, type TranslationKey } from '../i18n';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
-import { appEvents } from '../core/EventBus';
+import { openModal, type ModalShell } from '../utils/modalShell';
+import { copyText, reportError } from '../utils/feedback';
 import { RequestTimeoutError } from '../core/NetworkClient';
-import { sessionManager, type ServerSession } from '../core/SessionManager';
-import { currentEventOrigin } from '../core/sessionRouting';
+import type { ServerSession } from '../core/SessionManager';
+import { isVisibleSession, watchVisibleSession } from '../core/visibleSession';
 import { smoothScrollTo } from '../utils/scroll';
 import {
   LocalServerMonitorSource, RemoteServerMonitorSource, ServerMonitorError, ServerMonitorFeed,
@@ -22,33 +23,23 @@ const FAILURE_KEYS: Record<ServerMonitorFailure, TranslationKey> = {
   invalidResponse: 'serverMonitor.invalidResponse',
 };
 
-const LEVEL_COLORS: Record<LogLevel, string> = {
-  INFO: 'var(--text-secondary)',
-  WARN: 'var(--warning, #faa61a)',
-  ERROR: 'var(--danger)',
-};
-
 /** Explicit sources prevent remote failures from exposing a different local server. */
 export class ServerMonitorModal {
+  private shell: ModalShell | null = null;
   private modalEl: HTMLElement | null = null;
-  private entries: LogEntry[] = [];
+  private entries: ServerMonitorLogLine[] = [];
   private levelFilter: LogLevel | 'ALL' = 'ALL';
   private searchTerm = '';
   private autoScroll = true;
   private feed: ServerMonitorFeed | null = null;
   private cleanup: Array<() => void> = [];
-  private events: AbortController | null = null;
   private generation = 0;
-  private previousFocus: HTMLElement | null = null;
   private dropped = 0;
   private failureMessage: string | null = null;
   private loading = true;
 
   public async openRemote(session: ServerSession): Promise<void> {
-    const source = new RemoteServerMonitorSource(
-      session.client, session.serverStore,
-      () => sessionManager.getActive() === session && sessionManager.get(session.key) === session,
-    );
+    const source = new RemoteServerMonitorSource(session.client, session.serverStore, () => isVisibleSession(session));
     await this.openSource(source, session);
   }
 
@@ -67,51 +58,45 @@ export class ServerMonitorModal {
     this.dropped = 0;
     this.failureMessage = null;
     this.loading = true;
-    this.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    this.events = new AbortController();
-
-    this.modalEl = document.createElement('div');
-    this.modalEl.className = 'modal-backdrop';
-    this.modalEl.innerHTML = `
-      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="monitor-title"
-        aria-describedby="monitor-source" tabindex="-1" style="max-width: 860px; width: 92vw;">
+    const shell = openModal({
+      card: `
+      <div class="modal-card server-monitor-card" aria-labelledby="monitor-title"
+        aria-describedby="monitor-source" tabindex="-1">
         <div class="modal-header">
-          <div id="monitor-title" class="modal-title" style="display: flex; align-items: center; gap: 8px;">
-            <span class="material-symbols-outlined" aria-hidden="true" style="color: var(--accent-primary);">monitoring</span>
+          <div id="monitor-title" class="modal-title server-monitor-title">
+            <span class="material-symbols-outlined" aria-hidden="true">monitoring</span>
             <span>${t('serverMonitor.title')}</span>
           </div>
-          <button type="button" id="modal-close" class="modal-close-btn" aria-label="${t('common.close')}">&times;</button>
+          <button type="button" id="modal-close" class="modal-close-btn" data-modal-close aria-label="${t('common.close')}">&times;</button>
         </div>
 
-        <div id="monitor-source" style="font-size: 12px; color: var(--text-secondary);">
+        <div id="monitor-source" class="server-monitor-source">
           ${escapeHtml(session
             ? t('serverMonitor.remoteSource', { server: session.serverStore.serverDetails?.name ?? '' })
             : t('serverMonitor.localSource'))}
         </div>
-        <div style="font-size: 11px; color: var(--text-muted);">${t(session ? 'serverMonitor.remotePrivacy' : 'serverMonitor.clearHint')}</div>
-        <p id="monitor-error" role="alert" hidden style="color: var(--danger); margin: 0;"></p>
+        <div class="server-monitor-hint">${t(session ? 'serverMonitor.remotePrivacy' : 'serverMonitor.clearHint')}</div>
 
-        <div id="monitor-stats" aria-busy="true" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;">
+        <div id="monitor-stats" class="server-monitor-stats" aria-busy="true">
           ${this.renderStatsSkeleton()}
         </div>
 
-        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-          <div style="display: flex; gap: 4px;">
+        <div class="server-monitor-toolbar">
+          <div class="server-monitor-levels">
             ${(['ALL', ...LOG_LEVELS] as const)
               .map(
                 (level) => `
-                  <button type="button" class="btn btn-secondary btn-log-level" data-level="${level}"
-                    style="padding: 4px 10px; font-size: 11px; height: 26px;">
+                  <button type="button" class="btn btn-secondary server-monitor-level" data-level="${level}"
+                    aria-pressed="${level === this.levelFilter}">
                     ${level === 'ALL' ? t('serverMonitor.levelAll') : level}
                   </button>
                 `
               )
               .join('')}
           </div>
-          <input id="monitor-search" type="text" aria-label="${t('serverMonitor.searchPlaceholder')}" placeholder="${t('serverMonitor.searchPlaceholder')}"
-            style="flex: 1; min-width: 140px; font-size: 12px; padding: 5px 10px; height: 26px;">
-          <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); white-space: nowrap;">
-            <label for="monitor-autoscroll" style="cursor: pointer;">${t('serverMonitor.autoScroll')}</label>
+          <input id="monitor-search" class="server-monitor-search" type="text" aria-label="${t('serverMonitor.searchPlaceholder')}" placeholder="${t('serverMonitor.searchPlaceholder')}">
+          <div class="server-monitor-autoscroll">
+            <label for="monitor-autoscroll">${t('serverMonitor.autoScroll')}</label>
             <label class="toggle-switch toggle-switch-sm" aria-label="${t('serverMonitor.autoScroll')}">
               <input id="monitor-autoscroll" type="checkbox" role="switch" checked>
               <span class="toggle-slider"></span>
@@ -119,32 +104,31 @@ export class ServerMonitorModal {
           </div>
         </div>
 
-        <div id="monitor-logs" style="background: var(--bg-tertiary, #1e1f22); border: 1px solid var(--border-color); border-radius: var(--radius-md); height: 320px; overflow-y: auto; padding: 8px 10px; font-family: var(--font-mono); font-size: 11px; line-height: 1.6;">
+        <div id="monitor-logs" class="server-monitor-logs">
           ${renderLoadingSkeleton('lines', 6)}
         </div>
 
-        <div id="monitor-dropped" role="status" hidden style="font-size: 11px; color: var(--warning);"></div>
-        <div id="monitor-action-status" role="status" style="font-size: 11px; color: var(--text-secondary);"></div>
-        <div class="modal-footer" style="display: flex; gap: 8px;">
-          <span id="monitor-count" style="flex: 1; font-size: 11px; color: var(--text-muted); align-self: center;"></span>
-          <button type="button" id="btn-copy-logs" class="btn btn-secondary" disabled style="font-size: 12px; padding: 6px 12px;">
-            <span class="material-symbols-outlined md-16" style="margin-right: 4px;">content_copy</span>
+        <div id="monitor-dropped" class="server-monitor-dropped" role="status" hidden></div>
+        <div class="modal-footer server-monitor-footer">
+          <span id="monitor-count" class="server-monitor-count"></span>
+          <button type="button" id="btn-copy-logs" class="btn btn-secondary" disabled>
+            <span class="material-symbols-outlined md-16">content_copy</span>
             ${t('serverMonitor.copy')}
           </button>
-          <button type="button" id="btn-clear-logs" class="btn btn-secondary" disabled title="${t('serverMonitor.clearHint')}" style="font-size: 12px; padding: 6px 12px;">
-            <span class="material-symbols-outlined md-16" style="margin-right: 4px;">delete_sweep</span>
+          <button type="button" id="btn-clear-logs" class="btn btn-secondary" disabled title="${t('serverMonitor.clearHint')}">
+            <span class="material-symbols-outlined md-16">delete_sweep</span>
             ${t('serverMonitor.clearView')}
           </button>
         </div>
       </div>
-    `;
-
-    document.body.appendChild(this.modalEl);
-    enterModal(this.modalEl);
-    this.attachEvents();
-    this.updateLevelButtons();
-    this.modalEl.querySelector<HTMLButtonElement>('#modal-close')?.focus();
-    const modal = this.modalEl;
+    `,
+      initialFocus: '#modal-close',
+      onClose: () => { if (this.shell === shell) this.teardown(); },
+    });
+    this.shell = shell;
+    this.modalEl = shell.element;
+    this.attachEvents(shell.signal);
+    const modal = shell.element;
     const isCurrent = () => generation === this.generation && this.modalEl === modal;
     const feed = new ServerMonitorFeed(source, (update) => {
       if (isCurrent()) this.applyUpdate(update);
@@ -159,8 +143,8 @@ export class ServerMonitorModal {
       this.entries = [];
       this.dropped = 0;
       this.loading = false;
-      const errorEl = modal.querySelector<HTMLElement>('#monitor-error');
-      if (errorEl) { errorEl.textContent = this.failureMessage; errorEl.hidden = false; }
+      // Why it stopped goes to the alert toast; the view keeps saying that it stopped.
+      reportError(this.failureMessage);
       const statsEl = modal.querySelector<HTMLElement>('#monitor-stats');
       if (statsEl) {
         statsEl.setAttribute('aria-busy', 'false');
@@ -169,20 +153,7 @@ export class ServerMonitorModal {
       this.renderLogs();
     });
     this.feed = feed;
-    if (session) {
-      const revalidate = () => {
-        const origin = currentEventOrigin();
-        if (origin === null || origin === session.key) feed.revalidate();
-      };
-      this.cleanup.push(
-        appEvents.on('server.updated', revalidate),
-        appEvents.on('server.roles_updated', revalidate),
-        appEvents.on('network.status', revalidate),
-        appEvents.on('session.changed', () => {
-          if (sessionManager.getActive() !== session || sessionManager.get(session.key) !== session) this.close();
-        }),
-      );
-    }
+    if (session) this.cleanup.push(watchVisibleSession(session, () => feed.revalidate(), () => this.close(true)));
     await feed.start();
   }
 
@@ -212,12 +183,12 @@ export class ServerMonitorModal {
     return cards
       .map(
         (card) => `
-          <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 8px 10px;">
-            <div style="display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px;">
+          <div class="server-monitor-stat">
+            <div class="server-monitor-stat-label">
               <span class="material-symbols-outlined md-14">${card.icon}</span>
               ${card.label}
             </div>
-            <div id="stat-${card.id}" style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin-top: 2px;">${this.loading ? '<span class="skeleton loading-skeleton-value" aria-hidden="true"></span>' : '—'}</div>
+            <div id="stat-${card.id}" class="server-monitor-stat-value">${this.loading ? '<span class="skeleton loading-skeleton-value" aria-hidden="true"></span>' : '—'}</div>
           </div>
         `
       )
@@ -255,7 +226,7 @@ export class ServerMonitorModal {
     return `${seconds}s`;
   }
 
-  private getVisibleEntries(): LogEntry[] {
+  private getVisibleEntries(): ServerMonitorLogLine[] {
     const term = this.searchTerm.toLowerCase();
     return this.entries.filter((entry) => {
       if (this.levelFilter !== 'ALL' && entry.level !== this.levelFilter) return false;
@@ -297,7 +268,7 @@ export class ServerMonitorModal {
     }
 
     if (visible.length === 0) {
-      container.innerHTML = `<div style="color: var(--text-muted); text-align: center; padding: 16px;">${
+      container.innerHTML = `<div class="server-monitor-empty">${
         this.failureMessage ? t('serverMonitor.stopped')
           : this.entries.length === 0 ? t('serverMonitor.empty') : t('serverMonitor.noMatches')
       }</div>`;
@@ -306,16 +277,13 @@ export class ServerMonitorModal {
 
     const scrollTop = container.scrollTop;
     container.innerHTML = visible
-      .map((entry) => {
-        const time = this.formatTime(entry.timestamp);
-        return `
-          <div style="display: flex; gap: 8px; white-space: pre-wrap; word-break: break-word;">
-            <span style="color: var(--text-muted); flex-shrink: 0;">${escapeHtml(time)}</span>
-            <span style="color: ${LEVEL_COLORS[entry.level]}; flex-shrink: 0; font-weight: 600;">[${escapeHtml(entry.category)}]</span>
-            <span style="color: var(--text-primary);">${escapeHtml(entry.message)}</span>
+      .map((entry) => `
+          <div class="server-monitor-line">
+            <span class="server-monitor-time">${escapeHtml(this.formatTime(entry.timestamp))}</span>
+            <span class="server-monitor-category" data-level="${entry.level}">[${escapeHtml(entry.category)}]</span>
+            <span class="server-monitor-message">${escapeHtml(entry.message)}</span>
           </div>
-        `;
-      })
+        `)
       .join('');
 
     if (this.autoScroll) {
@@ -329,55 +297,21 @@ export class ServerMonitorModal {
     return date.toLocaleTimeString();
   }
 
-  private updateLevelButtons(): void {
+  private attachEvents(signal: AbortSignal): void {
     if (!this.modalEl) return;
-    this.modalEl.querySelectorAll<HTMLElement>('.btn-log-level').forEach((btn) => {
-      const isActive = btn.getAttribute('data-level') === this.levelFilter;
-      btn.setAttribute('aria-pressed', String(isActive));
-      btn.style.background = isActive ? 'var(--accent-primary)' : '';
-      btn.style.color = isActive ? '#fff' : '';
-      btn.style.borderColor = isActive ? 'var(--accent-primary)' : '';
-    });
-  }
+    const options = { signal };
 
-  private attachEvents(): void {
-    if (!this.modalEl || !this.events) return;
-    const modal = this.modalEl;
-    const generation = this.generation;
-    const options = { signal: this.events.signal };
-    modal.querySelector('#modal-close')?.addEventListener('click', () => this.close(), options);
-    modal.addEventListener('mousedown', (event) => {
-      if (event.target === modal) this.close();
-    }, options);
-    document.addEventListener('keydown', (event) => {
-      if (!handlesModalKey(modal, event)) return;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.close();
-      } else if (event.key === 'Tab') {
-        const focusable = Array.from(modal.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), [tabindex="0"]',
-        )).filter((element) => element.getClientRects().length > 0);
-        const target = event.shiftKey ? focusable.at(-1) : focusable[0];
-        const boundary = event.shiftKey ? focusable[0] : focusable.at(-1);
-        if (document.activeElement === boundary || !modal.contains(document.activeElement)) {
-          event.preventDefault();
-          target?.focus();
-        }
-      }
-    }, { ...options, capture: true });
-
-    this.modalEl.querySelectorAll<HTMLElement>('.btn-log-level').forEach((btn) => {
+    const levels = this.modalEl.querySelectorAll<HTMLButtonElement>('.server-monitor-level');
+    for (const btn of levels) {
       btn.addEventListener('click', () => {
-        const value = btn.getAttribute('data-level');
+        const value = btn.dataset.level;
         const level = value === 'ALL' ? 'ALL' : LOG_LEVELS.find((entry) => entry === value);
         if (!level) return;
         this.levelFilter = level;
-        this.updateLevelButtons();
+        for (const other of levels) other.setAttribute('aria-pressed', String(other === btn));
         this.renderLogs();
       }, options);
-    });
+    }
 
     const search = this.modalEl.querySelector<HTMLInputElement>('#monitor-search');
     search?.addEventListener('input', () => {
@@ -391,21 +325,11 @@ export class ServerMonitorModal {
       if (this.autoScroll) this.renderLogs();
     }, options);
 
-    this.modalEl.querySelector('#btn-copy-logs')?.addEventListener('click', async () => {
+    this.modalEl.querySelector('#btn-copy-logs')?.addEventListener('click', () => {
       const text = this.getVisibleEntries()
         .map((entry) => `${entry.timestamp} [${entry.category}] ${entry.message}`)
         .join('\n');
-      try {
-        await navigator.clipboard.writeText(text);
-        if (generation !== this.generation) return;
-        const status = modal.querySelector<HTMLElement>('#monitor-action-status');
-        if (status) status.textContent = t('serverMonitor.copied');
-      } catch (error) {
-        if (generation !== this.generation) return;
-        console.warn('[ServerMonitorModal] Could not copy logs', error);
-        const status = modal.querySelector<HTMLElement>('#monitor-action-status');
-        if (status) status.textContent = t('serverMonitor.copyFailed');
-      }
+      void copyText(text, { copied: t('serverMonitor.copied'), failed: t('serverMonitor.copyFailed') });
     }, options);
 
     this.modalEl.querySelector('#btn-clear-logs')?.addEventListener('click', () => {
@@ -421,19 +345,18 @@ export class ServerMonitorModal {
     for (const cleanup of this.cleanup.splice(0)) cleanup();
   }
 
-  public close(): void {
+  /** Another server's logs leave at once when it stops being the visible one; an ordinary close animates out. */
+  public close(immediate = false): void {
+    if (this.shell) this.shell.close('api', immediate);
+    else this.teardown();
+  }
+
+  private teardown(): void {
     this.generation++;
     this.stopMonitoring();
-    this.events?.abort();
-    this.events = null;
-    if (this.modalEl) {
-      exitModal(this.modalEl);
-      this.modalEl = null;
-    }
+    this.shell = null;
+    this.modalEl = null;
     this.entries = [];
-    const previousFocus = this.previousFocus;
-    this.previousFocus = null;
-    if (previousFocus?.isConnected) previousFocus.focus();
   }
 }
 

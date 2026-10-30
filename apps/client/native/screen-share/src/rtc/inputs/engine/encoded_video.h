@@ -3,8 +3,6 @@
 #include "engine_shared.h"
 #include "api/field_trials_view.h"
 
-#include <functional>
-
 namespace monky::native_rtc::engine {
 
 constexpr std::size_t kEncodedMaximumBytes = 8 * 1024 * 1024;
@@ -31,6 +29,5 @@ std::shared_ptr<VideoSource> CreateEncodedVideoSource(
     const std::shared_ptr<EncodedVideoContext>& context);
 
 void ValidateEncodedFrame(const MonkyEngineEncodedFrame& frame);
-void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check);
 
 }  // namespace monky::native_rtc::engine

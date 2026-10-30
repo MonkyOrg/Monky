@@ -32,6 +32,8 @@ class StickerService {
   private loadedFolder: string | null = null;
   /** Bumped on every load so a slow response can tell it has been superseded. */
   private loadToken = 0;
+  /** The last listing failed, which is not the same as an empty folder. */
+  private listingFailed = false;
 
   public getStickers(): StickerEntry[] {
     return this.stickers;
@@ -39,6 +41,14 @@ class StickerService {
 
   public hasFolder(): boolean {
     return Boolean(settingsStore.stickersFolderPath);
+  }
+
+  /**
+   * Main refuses a folder this computer never confirmed (D4), for example one
+   * restored from a backup. Reloading from a click lets Main ask the person.
+   */
+  public didListingFail(): boolean {
+    return this.listingFailed;
   }
 
   /**
@@ -59,9 +69,11 @@ class StickerService {
     const token = ++this.loadToken;
 
     let listed: StickerEntry[] = [];
+    let failed = false;
     try {
       listed = (await window.api?.listStickers?.(folder)) ?? [];
     } catch (e) {
+      failed = true;
       console.warn('Failed to list stickers:', e);
     }
 
@@ -72,6 +84,7 @@ class StickerService {
     if (token !== this.loadToken) return this.stickers;
 
     this.stickers = listed;
+    this.listingFailed = failed;
     if (sameFolder) {
       this.dropStaleCache();
     } else {
@@ -178,6 +191,7 @@ class StickerService {
 
   public reset(): void {
     this.stickers = [];
+    this.listingFailed = false;
     this.clearCache();
     this.loadedFolder = null;
     // Invalidates any listing still in flight, which would otherwise resurrect

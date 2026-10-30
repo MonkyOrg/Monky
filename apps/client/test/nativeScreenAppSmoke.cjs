@@ -17,7 +17,7 @@ const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { setTimeout: delay } = require('node:timers/promises');
 const { WebSocket } = require('ws');
-const { within } = require('../native/screen-share/runtime/nativeDeadline.cjs');
+const { within } = require('../native/screen-share/runtime/asyncTools.cjs');
 
 const repo = path.resolve(__dirname, '..', '..', '..');
 const clientRoot = path.join(repo, 'apps', 'client');
@@ -812,14 +812,15 @@ async function previewPixels(client, state, name) {
 async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60, screenCodec }) {
   const [{ openServerSession, joinCallOnSession, leaveCurrentCall }, { sessionManager }, { webRtcManager },
     { videoService }, { voiceStore }, { settingsStore }, { stopLocalScreenShares },
-    { screenAudioService }, { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService },
-    { applyAudioDevice, applyAudioOutputPreferences }, { audioProcessor }] = await Promise.all([
+    { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService },
+    { applyAudioDevice }, { routeAudioOutputs }, { audioProcessor }] = await Promise.all([
     import('/core/serverConnection.ts'), import('/core/SessionManager.ts'), import('/core/WebRtcManager.ts'),
     import('/core/VideoService.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
-    import('/core/screenShareControls.ts'), import('/core/ScreenAudioService.ts'), import('/i18n/index.ts'),
+    import('/core/screenShareControls.ts'), import('/i18n/index.ts'),
     import('/core/EventBus.ts'), import('/@fs/' + globalThis.monkyAppSharedPath),
     import('/core/OverlayBridgeService.ts'),
     import('/core/applyAudioDevice.ts'),
+    import('/core/audioOutputRouting.ts'),
     import('/core/AudioProcessor.ts'),
   ]);
   setLanguage('en');
@@ -832,7 +833,6 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   if (fourK) Object.assign(settingsStore.customProfile, {
     screenWidth: 3840, screenHeight: 2160, screenFps: fourK60 ? 60 : 120, screenBitrateKbps: 80000,
   });
-  settingsStore.preferredVideoCodec = 'h264';
   settingsStore.preferredScreenCodec = screenCodec === 'auto' ? 'h264' : screenCodec;
   settingsStore.screenEncodingStrategy = screenCodec === 'auto' ? 'automatic' : 'manual';
   if (settingsStore.screenEncodingMode !== 'hardware') throw new Error('The fresh application profile must default to Hardware encoding.');
@@ -1021,7 +1021,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         if (entries.length !== 1 || !entries[0].textContent.includes('Counter-Strike 2'))
           throw new Error('The game guide did not find its documented Counter-Strike alias.');
         document.querySelector('#game-capture-guide-close').click();
-        if (document.querySelector('#game-capture-guide') || document.activeElement !== guideButton
+        await wait(() => !document.querySelector('#game-capture-guide'), 'The game guide did not finish closing.');
+        if (document.activeElement !== guideButton
           || card()?.getAttribute('aria-pressed') !== 'true'
           || document.querySelector('#share-method-game')?.getAttribute('aria-pressed') !== 'true'
           || videoService.getNativeScreenCaptures().length !== 0)
@@ -1155,9 +1156,10 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     async output(sinkId) {
       const next = { selectedSpeakerId: sinkId, advancedAudioOutputs: false,
         audioOutputDevices: { ...settingsStore.audioOutputDevices } };
-      await applyAudioOutputPreferences(next);
-      Object.assign(settingsStore, next);
-      settingsStore.save();
+      await routeAudioOutputs(next, { commit: () => {
+        Object.assign(settingsStore, next);
+        settingsStore.save();
+      } });
     },
     inputDevice() {
       return audioProcessor.getRawMicrophoneStream()?.getAudioTracks()[0]?.getSettings().deviceId;
@@ -1374,7 +1376,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       unbindNativeErrors();
       unbind();
       await overlayBridgeService.deactivate();
-      await stopLocalScreenShares(screenAudioService);
+      await stopLocalScreenShares();
       await webRtcManager['nativeScreens'].close();
       leaveCurrentCall();
       settingsStore.screenSharePreviewPauseWhenUnfocused = initialPreviewPauseWhenUnfocused;

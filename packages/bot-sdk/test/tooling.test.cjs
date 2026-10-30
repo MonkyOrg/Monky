@@ -553,6 +553,7 @@ test('declared requirements default safely, stay bounded and never reuse runtime
     [{ ports: [{ ...GAMES_PORT, id: 'manifest' }] }, /reserved for the marketplace manifest/],
     [{ ports: [{ ...GAMES_PORT, portEnv: 'MONKY_SERVE_PORT' }] }, /reserved/],
     [{ ports: [{ ...GAMES_PORT, portEnv: 'MONKY_BOT_CLI_HOME' }] }, /reserved/],
+    [{ ports: [{ ...GAMES_PORT, publicUrlEnv: 'MONKY_SERVE_PUBLIC_URL' }] }, /reserved/],
     [{ settings: [{ env: 'NODE_OPTIONS', description: { 'pt-BR': 'x', en: 'x' } }] }, /reserved/],
     [{ ports: [GAMES_PORT, { ...GAMES_PORT, id: 'other', portEnv: 'A_PORT', hostEnv: undefined, publicUrlEnv: undefined }] }, /share a default port/],
     [{ ports: [GAMES_PORT, { ...GAMES_PORT, id: 'games', defaultPort: 7782, portEnv: 'B', hostEnv: undefined, publicUrlEnv: undefined }] }, /ids must be unique/],

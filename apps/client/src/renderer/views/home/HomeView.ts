@@ -3,6 +3,7 @@ import { t } from '../../i18n';
 import { dmStore } from '../../stores/dmStore';
 import { connectionStore } from '../../stores/connectionStore';
 import { escapeHtml } from '../../utils/html';
+import { animateEnter } from '../../utils/surfaceMotion';
 import { contextMenu } from '../ContextMenu';
 import { DmConversationView } from './DmConversationView';
 import { peerMenuItems, reportDmFailure } from './friendActions';
@@ -108,6 +109,7 @@ export class HomeView {
     const me = dmStore.snapshot.me?.publicKey;
     this.sidebar.setSelected(this.selectedPeer);
     this.sidebar.setPendingCount(dmStore.incomingRequests());
+    this.sidebar.setLoading(dmStore.loading);
     const conversations = dmStore.conversationList();
     if (this.selectedPeer && !conversations.some((conversation) => conversation.peer === this.selectedPeer)) {
       const peer = dmStore.peer(this.selectedPeer);
@@ -125,7 +127,10 @@ export class HomeView {
         preview: conversation.lastMessagePreview ? `${prefix}${conversation.lastMessagePreview}` : '',
       };
     }));
+    const replacingSkeleton = !dmStore.loading && !!this.sidebarContainer.querySelector('#home-dm-list > .loading-skeleton');
     this.sidebarContainer.innerHTML = this.sidebar.render();
+    const list = this.sidebarContainer.querySelector<HTMLElement>('#home-dm-list');
+    if (replacingSkeleton && list) animateEnter(list, 'view');
   }
 
   private renderCenter(): void {

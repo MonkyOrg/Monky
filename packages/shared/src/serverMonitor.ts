@@ -37,10 +37,9 @@ export const serverMonitorLogEntrySchema = z.object({
   sequence: counter.positive(),
   timestamp: z.string().max(32).datetime(),
   level: z.enum(['INFO', 'WARN', 'ERROR']),
-  category: z.enum([
-    'INFO', 'WARN', 'ERROR', 'SECURITY', 'NETWORK', 'DATABASE',
-    'WEBRTC', 'SFU', 'SOUNDBOARD', 'ATTACHMENT', 'BOT',
-  ]),
+  // An open identifier, unlike the closed LogCategory: a category added to a
+  // newer server must not make older clients reject the whole snapshot.
+  category: z.string().regex(/^[A-Z_]{1,32}$/),
   message: z.string().max(SERVER_MONITOR_LIMITS.MAX_MESSAGE_LENGTH),
 }).strict();
 
@@ -64,4 +63,6 @@ export const serverMonitorSnapshotSchema = z.object({
 export type ServerMonitorGetPayload = z.infer<typeof serverMonitorGetSchema>;
 export type ServerMonitorStats = z.infer<typeof serverMonitorStatsSchema>;
 export type ServerMonitorLogEntry = z.infer<typeof serverMonitorLogEntrySchema>;
+/** One line on the monitor, whether read from a remote snapshot or from the server this app hosts. */
+export type ServerMonitorLogLine = Omit<ServerMonitorLogEntry, 'sequence'>;
 export type ServerMonitorSnapshotPayload = z.infer<typeof serverMonitorSnapshotSchema>;

@@ -116,16 +116,31 @@ export function isBotVoiceSignalAllowed(
   });
 }
 
+/** A candidate a bot can dial: a host candidate on an IP address, never a name. */
+export const botVoiceIceCandidateSchema = z.object({
+  foundation: token, priority: z.number().int().nonnegative(),
+  ip: z.string().ip(), protocol: z.enum(['udp', 'tcp']),
+  port: z.number().int().min(1).max(65535), type: z.literal('host'),
+  tcpType: z.enum(['active', 'passive', 'so']).optional(),
+});
+export type BotVoiceIceCandidate = z.infer<typeof botVoiceIceCandidateSchema>;
+
+/**
+ * A candidate as the SFU announces it. Its address is whatever reached the
+ * server — a domain, a bracketed IPv6 literal — which the bot still has to
+ * resolve or unwrap before it can dial it.
+ */
+export const botVoiceAnnouncedCandidateSchema = botVoiceIceCandidateSchema.extend({
+  ip: z.string().min(1).max(255), address: z.string().min(1).max(255).optional(), type: z.string().max(16),
+});
+
 export const botVoiceTransportSchema = z.object({
   transportOptions: z.object({
     id,
     iceParameters: z.object({ usernameFragment: token, password: token, iceLite: z.boolean().optional() }),
-    iceCandidates: z.array(z.object({
-      foundation: token, priority: z.number().int().nonnegative(),
-      ip: z.string().ip(), protocol: z.enum(['udp', 'tcp']),
-      port: z.number().int().min(1).max(65535), type: z.literal('host'),
-      tcpType: z.enum(['active', 'passive', 'so']).optional(),
-    })).min(1).max(32),
+    // Checked one by one by the bot: a candidate it cannot use must not void
+    // the others, and a host with many networks announces more than it dials.
+    iceCandidates: z.array(z.unknown()).min(1).max(512),
     dtlsParameters: z.object({
       fingerprints: z.array(z.object({
         algorithm: z.enum(['sha-256', 'sha-384', 'sha-512', 'sha-224', 'sha-1']),

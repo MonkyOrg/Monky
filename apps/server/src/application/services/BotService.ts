@@ -23,8 +23,14 @@ import { BotRecord } from '../../domain/entities';
 import { IBotRepository, IServerRepository } from '../../domain/repositories';
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { Logger } from '../../infrastructure/logger/Logger';
+import { ResponseTooLargeError, readJsonWithLimit } from '../../infrastructure/network/boundedResponse';
 import { BotPermissionService } from './BotPermissionService';
 import type { BotStorageService } from './BotStorageService';
+
+/** The icon alone may take ~6.7 MB once LIMITS.MAX_AVATAR_SIZE is base64-encoded. */
+const MAX_MANIFEST_BYTES = Math.ceil(LIMITS.MAX_AVATAR_SIZE * 4 / 3) + 1024 * 1024;
+/** The bot only confirms its public key. */
+const MAX_REGISTRATION_RESPONSE_BYTES = 4 * 1024;
 
 type BotFailure = {
   success: false;
@@ -33,6 +39,7 @@ type BotFailure = {
   revokedBotId?: string;
 };
 type BotProfileResult = { success: true; bot: BotInfo } | BotFailure;
+type BotProfileUpdateResult = { success: true; bot: BotInfo; changed: boolean } | BotFailure;
 type BotCreateResult = { success: true; bot: BotInfo; token: string } | BotFailure;
 
 /**
@@ -123,6 +130,7 @@ export class BotService {
       Logger.error('BOT', 'Failed to create bot.', error);
       return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar o bot.' };
     }
+    this.permissions?.refresh(id);
     Logger.info('BOT', record.profilePending
       ? `Bot link (${id}) reserved by user ${createdByUserId}; waiting for the bot identity.`
       : `Bot "${record.name}" (${id}) linked by user ${createdByUserId}.`);
@@ -190,7 +198,8 @@ export class BotService {
     return record ? this.toBotInfo(record) : null;
   }
 
-  async updateProfile(botId: string, profile: unknown): Promise<BotProfileResult> {
+  /** `changed` is false when the bot announced the profile it already had. */
+  async updateProfile(botId: string, profile: unknown): Promise<BotProfileUpdateResult> {
     const parsed = botProfileUpdateSchema.safeParse(profile);
     if (!parsed.success) {
       return {
@@ -211,18 +220,25 @@ export class BotService {
       }
 
       const updates: Partial<BotRecord> = {};
-      if (parsed.data.name !== undefined) {
+      if (parsed.data.name !== undefined && (parsed.data.name !== record.name || record.profilePending)) {
         updates.name = parsed.data.name;
         updates.profilePending = false;
       }
       const avatarBase64 = parsed.data.avatarBase64;
       if (avatarBase64 === null) {
-        updates.avatarPath = null;
+        if (record.avatarPath !== null) updates.avatarPath = null;
       } else if (avatarBase64 !== undefined) {
-        const avatar = await this.saveProfileAvatar(avatarBase64);
+        const avatar = this.decodeProfileAvatar(avatarBase64);
         if (!avatar.success) return avatar;
-        updates.avatarPath = avatar.filename;
+        // Bots announce their avatar on every start: the same image keeps its
+        // file and URL, so no client downloads it again (BOTS-4).
+        if (!record.avatarPath || !this.avatarStorage.hasContent(record.avatarPath, avatar.buffer)) {
+          const saved = await this.storeProfileAvatar(avatar.buffer, avatar.extension);
+          if (!saved.success) return saved;
+          updates.avatarPath = saved.filename;
+        }
       }
+      if (Object.keys(updates).length === 0) return { success: true, bot: this.toBotInfo(record), changed: false };
 
       try {
         await this.botRepo.update(botId, updates);
@@ -234,7 +250,7 @@ export class BotService {
       if (updates.avatarPath !== undefined && record.avatarPath) {
         this.avatarStorage.deleteAvatar(record.avatarPath);
       }
-      return { success: true, bot: this.toBotInfo({ ...record, ...updates }) };
+      return { success: true, bot: this.toBotInfo({ ...record, ...updates }), changed: true };
     });
   }
 
@@ -245,6 +261,7 @@ export class BotService {
         return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Bot não encontrado.' };
       }
       await this.botRepo.delete(botId);
+      this.permissions?.refresh(botId);
       if (record.avatarPath) this.avatarStorage.deleteAvatar(record.avatarPath);
       // Its objects left the database with the bot row; the files follow.
       this.storage?.removeBot(botId);
@@ -300,15 +317,31 @@ export class BotService {
   private async fetchManifest(manifestUrl: string): Promise<{ success: true; manifest: BotManifest } | BotFailure> {
     let rawManifest: unknown;
     try {
-      // Lets a bot declare capabilities this server understands while older servers keep installing it.
-      const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(10_000), headers: {
-        [BOT_MANIFEST_FEATURES_HEADER]: createProtocolOffer('bot').features.join(','),
-      } });
-      if (!res.ok) {
-        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: `O bot não respondeu corretamente (HTTP ${res.status}). Verifique se a URL está correta e o bot está em execução.` };
+      const res = await fetch(manifestUrl, {
+        // Following a redirect could take the request to any host, including this server's own network.
+        redirect: 'manual',
+        signal: AbortSignal.timeout(10_000),
+        // Lets a bot declare capabilities this server understands while older servers keep installing it.
+        headers: { [BOT_MANIFEST_FEATURES_HEADER]: createProtocolOffer('bot').features.join(',') },
+      });
+      if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+        // A TLS proxy commonly answers http:// with a redirect to https://. Neither the
+        // target nor the status is echoed, so the reply cannot map someone else's network.
+        Logger.warn('BOT', `The bot manifest answered with a redirect (HTTP ${res.status}).`);
+        await res.body?.cancel().catch(() => undefined);
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'A URL do manifest redireciona para outro endereço. Informe o endereço final do manifest (por exemplo, com https://).' };
       }
-      rawManifest = await res.json();
-    } catch {
+      if (!res.ok) {
+        // The status stays in the log: echoing it would let bot managers probe internal URLs.
+        Logger.warn('BOT', `The bot manifest answered HTTP ${res.status}.`);
+        await res.body?.cancel().catch(() => undefined);
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O bot não respondeu corretamente. Verifique se a URL está correta e o bot está em execução.' };
+      }
+      rawManifest = await readJsonWithLimit(res, MAX_MANIFEST_BYTES);
+    } catch (error) {
+      if (error instanceof ResponseTooLargeError) {
+        return { success: false, errorCode: ProtocolErrorCode.BOT_INVALID_PROFILE, errorMessage: 'O manifest do bot passa do tamanho permitido. Verifique a URL e a foto do bot.' };
+      }
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Não foi possível conectar ao bot. Verifique se a URL está acessível e a porta está aberta no firewall.' };
     }
 
@@ -410,6 +443,7 @@ export class BotService {
       } catch (error) {
         const record = await this.botRepo.findById(created.bot.id);
         await this.botRepo.delete(created.bot.id);
+        permissionService.refresh(created.bot.id);
         if (record?.avatarPath) this.avatarStorage.deleteAvatar(record.avatarPath);
         Logger.error('BOT', 'Failed to persist bot permission declaration.', error);
         return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar as permissões do bot.' } satisfies BotFailure;
@@ -431,10 +465,12 @@ export class BotService {
           serverName,
           ...(serverWsUrl ? { serverUrl: serverWsUrl } : {}),
         }),
+        // Following a redirect would hand the token to whatever host it names.
+        redirect: 'error',
         signal: AbortSignal.timeout(10_000),
       });
       if (regRes.ok) {
-        const regBody: unknown = await regRes.json();
+        const regBody = await readJsonWithLimit(regRes, MAX_REGISTRATION_RESPONSE_BYTES);
         if (
           regBody !== null && typeof regBody === 'object' && 'publicKey' in regBody &&
           typeof regBody.publicKey === 'string' && /^[a-fA-F0-9]{64,128}$/.test(regBody.publicKey)
@@ -442,7 +478,9 @@ export class BotService {
           publicKey = regBody.publicKey;
         }
       } else {
-        registrationError = `O bot recusou o registro (HTTP ${regRes.status}). Verifique os logs do bot e se as versões do bot e do servidor são compatíveis.`;
+        Logger.warn('BOT', `The bot registration answered HTTP ${regRes.status}.`);
+        await regRes.body?.cancel().catch(() => undefined);
+        registrationError = 'O bot recusou o registro. Verifique os logs do bot e se as versões do bot e do servidor são compatíveis.';
       }
     } catch (error) {
       registrationError = 'Não foi possível concluir o registro no bot. Verifique a conexão, a porta e os logs do bot.';
@@ -532,31 +570,27 @@ export class BotService {
   }
 
   private async saveProfileAvatar(value: string): Promise<{ success: true; filename: string } | BotFailure> {
-    const invalid: BotFailure = {
-      success: false,
-      errorCode: ProtocolErrorCode.AVATAR_INVALID_TYPE,
-      errorMessage: 'Avatar inválido. Utilize uma imagem PNG, JPEG ou WebP em base64.',
-    };
-    let rawBase64 = value;
-    let declaredMime: string | undefined;
-    if (value.startsWith('data:')) {
-      const match = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(value);
-      if (!match) return invalid;
-      declaredMime = match[1];
-      rawBase64 = match[2];
+    const avatar = this.decodeProfileAvatar(value);
+    return avatar.success ? this.storeProfileAvatar(avatar.buffer, avatar.extension) : avatar;
+  }
+
+  private decodeProfileAvatar(value: string): { success: true; buffer: Buffer; extension: string } | BotFailure {
+    const image = this.avatarStorage.decodeImage(value);
+    if (!image.ok) return { success: false, errorCode: image.code, errorMessage: image.message };
+    // A bot names the type of its avatar itself, so a data URL that contradicts the bytes is a mistake to report.
+    if (image.declaredType && image.declaredType !== image.mimeType) {
+      return {
+        success: false,
+        errorCode: ProtocolErrorCode.AVATAR_INVALID_TYPE,
+        errorMessage: 'Avatar inválido. Utilize uma imagem PNG, JPEG ou WebP em base64.',
+      };
     }
-    if (!rawBase64 || rawBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(rawBase64)) return invalid;
-    const buffer = Buffer.from(rawBase64, 'base64');
-    if (buffer.length > LIMITS.MAX_AVATAR_SIZE) {
-      return { success: false, errorCode: ProtocolErrorCode.AVATAR_TOO_LARGE, errorMessage: 'Avatar excede o limite de tamanho.' };
-    }
-    if (buffer.toString('base64') !== rawBase64) return invalid;
-    const validation = this.avatarStorage.validateAvatarBuffer(buffer);
-    if (!validation.isValid || !validation.extension || (declaredMime && declaredMime !== validation.mimeType)) {
-      return { ...invalid, errorMessage: validation.error ?? invalid.errorMessage };
-    }
+    return { success: true, buffer: image.buffer, extension: image.extension };
+  }
+
+  private async storeProfileAvatar(buffer: Buffer, extension: string): Promise<{ success: true; filename: string } | BotFailure> {
     try {
-      return { success: true, filename: await this.avatarStorage.saveAvatar(buffer, validation.extension) };
+      return { success: true, filename: await this.avatarStorage.saveAvatar(buffer, extension) };
     } catch (error) {
       Logger.error('BOT', 'Failed to save bot avatar.', error);
       return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar o avatar do bot.' };

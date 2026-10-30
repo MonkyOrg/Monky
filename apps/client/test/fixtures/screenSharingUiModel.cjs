@@ -12,9 +12,11 @@ const shared = require('@monky/shared');
 const MONITOR_SOURCE_ID = `native-monitor:${'1'.repeat(64)}`;
 
 const renderer = path.resolve(__dirname, '..', '..', 'src', 'renderer');
+// The app's notices (toasts and dialogs it shows on its own) live in one module.
+const noticesModule = path.join(renderer, 'core', 'userNotices.ts');
 const compiled = new Map();
 function appEventHandlerSource(eventName) {
-  const filename = path.join(renderer, 'main.ts');
+  const filename = noticesModule;
   const cacheKey = `${filename}:${eventName}`;
   if (!compiled.has(cacheKey)) {
     const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.ES2022, true);
@@ -37,7 +39,7 @@ function appEventHandlerSource(eventName) {
 
 function appEventHandler(eventName, globals) {
   const exports = {};
-  vm.runInNewContext(appEventHandlerSource(eventName), { exports, ...globals }, { filename: path.join(renderer, 'main.ts') });
+  vm.runInNewContext(appEventHandlerSource(eventName), { exports, ...globals }, { filename: noticesModule });
   return exports.notify;
 }
 
@@ -181,6 +183,10 @@ class ModelElement {
   }
   contains(element) { return element === this || this.children.some(child => typeof child !== 'string' && child.contains(element)); }
   matches(selector) {
+    // Of the pseudo-classes, only the disabled state is modeled.
+    if (selector.includes(':not(:disabled)') && this.disabled) return false;
+    if (/(^|[^(]):disabled/.test(selector) && !this.disabled) return false;
+    selector = selector.replace(/:not\(:disabled\)|:disabled/g, '');
     const tag = /^[\w-]+/.exec(selector)?.[0];
     if (tag && tag.toUpperCase() !== this.tagName) return false;
     const rest = selector.replace(/^[\w-]+/, '');
@@ -224,12 +230,16 @@ class ModelElement {
   removeEventListener(type, callback) { this.listeners.get(type)?.delete(callback); }
   dispatchEvent(event) {
     Object.defineProperty(event, 'target', { configurable: true, value: this });
+    // Document listeners see events of connected elements: capture ones first, bubbling ones last.
+    const document = this.isConnected ? this.ownerDocument : null;
+    document?.dispatchToDocument?.(event, true);
     let current = this;
     while (current) {
       Object.defineProperty(event, 'currentTarget', { configurable: true, value: current });
       for (const listener of [...(current.listeners.get(event.type) ?? [])]) listener(event);
       current = event.bubbles && !event.cancelBubble ? current.parentElement : null;
     }
+    if (event.bubbles && !event.cancelBubble) document?.dispatchToDocument?.(event, false);
     return !event.defaultPrevented;
   }
   click() { if (!this.disabled && !this.closest('[inert]')) this.dispatchEvent(new Event('click', { bubbles: true, cancelable: true })); }
@@ -246,6 +256,21 @@ function fixture(language = 'en') {
   document.activeElement = document.body;
   document.querySelector = selector => document.body.querySelector(selector);
   document.querySelectorAll = selector => document.body.querySelectorAll(selector);
+  const documentListeners = { true: new Map(), false: new Map() };
+  document.addEventListener = (type, callback, options = {}) => {
+    if (options.signal?.aborted) return;
+    const phase = documentListeners[options === true || options.capture === true];
+    const listeners = phase.get(type) ?? new Set();
+    listeners.add(callback);
+    phase.set(type, listeners);
+    options.signal?.addEventListener('abort', () => listeners.delete(callback), { once: true });
+  };
+  document.removeEventListener = (type, callback, options = {}) => {
+    documentListeners[options === true || options.capture === true].get(type)?.delete(callback);
+  };
+  document.dispatchToDocument = (event, capture) => {
+    for (const listener of [...(documentListeners[capture].get(event.type) ?? [])]) listener(event);
+  };
   const storage = new Map(), modules = new Map(), traces = [], alerts = [], warnings = [], events = [], observers = [];
   const captures = new Map(), streams = new Map(), labels = new Map();
   // Stands in for the share dropdown: tests decide what the user picks.
@@ -255,8 +280,8 @@ function fixture(language = 'en') {
   const capabilities = { capture: true, captureAudio: true, receive: true, captureKinds: ['window', 'monitor', 'game'], backend: 'libobs-amf', reason: null };
   const controls = {
     capabilities: async () => capabilities, sources: async () => sources,
-    current: true, confirm: true, capturingAudio: false, settingsError: null, appliedShares: 0, screenPermission: async () => true,
-    start: null, stop: null, reapply: async () => {},
+    current: true, confirm: true, settingsError: null, appliedShares: 0, screenPermission: async () => true,
+    start: null, stop: null,
     openExternal: async () => ({ success: true }),
     encoding: async input => ({
       selection: { mode: input.encodingStrategy === 'automatic' ? 'hardware' : input.encodingMode,
@@ -267,7 +292,7 @@ function fixture(language = 'en') {
       hardware: { available: true, reason: null }, fallback: false,
     }),
   };
-  let saves = 0, enumerations = 0, cancelled = 0, sequence = 0, permissionChecks = 0;
+  let saves = 0, enumerations = 0, sequence = 0, permissionChecks = 0;
   const listeners = new Map();
   const appEvents = {
     on(event, listener) {
@@ -286,7 +311,7 @@ function fixture(language = 'en') {
       this.save();
     },
     qualityPreset: 'NORMAL', customProfile: { ...shared.QUALITY_PRESETS.NORMAL },
-    preferredVideoCodec: 'auto', preferredScreenCodec: 'h264', screenEncodingMode: 'hardware', screenEncodingStrategy: 'automatic',
+    preferredScreenCodec: 'h264', screenEncodingMode: 'hardware', screenEncodingStrategy: 'automatic',
     screenSharePreviewPauseWhenUnfocused: true,
     screenShareTelemetryEnabled: false, screenShareTelemetryPosition: 'top-right', screenShareTelemetryMode: 'simple',
     save() { saves++; appEvents.emit('settings.updated'); },
@@ -301,20 +326,13 @@ function fixture(language = 'en') {
     addScreenAudioShare(id) { if (!this.screenAudioShareIds.includes(id)) this.screenAudioShareIds.push(id); },
     removeScreenAudioShare(id) { this.screenAudioShareIds = this.screenAudioShareIds.filter(value => value !== id); },
   };
-  const screenAudioService = {
-    getIsCapturing: () => controls.capturingAudio, getIsTestTone: () => false,
-    stop: async () => { traces.push(['audio-stop']); controls.capturingAudio = false; },
-    start: async () => { throw new Error('Browser audio fallback must not run'); },
-  };
   const videoService = {
     getActiveSourceIds: () => new Set([...captures.values()].map(capture => capture.desktopSourceId)),
     getProfile: () => settingsStore.qualityPreset === 'CUSTOM' ? settingsStore.customProfile : shared.QUALITY_PRESETS[settingsStore.qualityPreset],
     getScreenStream: id => streams.get(id),
     getNativeScreenCapture: id => captures.get(id),
     getNativeScreenCaptures: () => [...captures.values()],
-    cancelPendingScreenShare: () => { cancelled++; },
     stopScreenShare: id => { traces.push(['video-stop', id]); streams.delete(id); captures.delete(id); labels.delete(id); },
-    startScreenShare: async () => { throw new Error('Chromium capture fallback must not run'); },
     setScreenShareLabel: (id, label) => { if (streams.has(id)) labels.set(id, label); },
     getScreenShareLabel: id => labels.get(id) ?? null,
   };
@@ -347,9 +365,8 @@ function fixture(language = 'en') {
       if (controls.settingsError) throw controls.settingsError;
     },
     setQualityPreset: value => { traces.push(['preset', value]); return Promise.resolve(controls.appliedShares); },
-    reapplyCodecPreferences: () => controls.reapply(),
   };
-  const stopLocalScreenShares = async (_, { shareIds, notify }) => {
+  const stopLocalScreenShares = async ({ shareIds, notify }) => {
     traces.push(['stop-shares', [...shareIds], notify]);
     if (controls.stop) await controls.stop(shareIds);
     for (const id of shareIds) {
@@ -357,6 +374,77 @@ function fixture(language = 'en') {
       voiceStore.screenShareIds = voiceStore.screenShareIds.filter(value => value !== id);
       voiceStore.removeScreenAudioShare(id);
     }
+  };
+  // Popups registered as surfaces of a control inside a modal: the shell leaves Escape to them.
+  const ownedSurfaces = new Map();
+  const modalBackdrops = () => document.querySelectorAll('.modal-backdrop').filter(element => !element.hidden);
+  // utils/modalShell on the model DOM. Its contract: the topmost modal owns Escape and Tab unless a popup it
+  // owns is open, [data-modal-close] and a press on the backdrop close it, the modal below stays inert while
+  // a child is open, focus starts inside and goes back on close, and `signal` ends every listener. The model
+  // has no capture phase, so the keyboard is read as it bubbles up to the backdrop, after the content.
+  const openModal = options => {
+    const element = document.createElement('div');
+    element.className = `modal-backdrop${options.backdropClass ? ` ${options.backdropClass}` : ''}`;
+    element.innerHTML = String(options.card);
+    const card = element.children.find(child => typeof child !== 'string');
+    const controller = new Controller();
+    const signal = controller.signal;
+    const parent = modalBackdrops().at(-1) ?? null;
+    const parentInert = parent?.inert ?? false;
+    const returnFocus = options.returnFocus === undefined ? document.activeElement : options.returnFocus;
+    const tabbable = () => card.querySelectorAll('button, input, a[href], [tabindex]').filter(control =>
+      !control.disabled && control.tabIndex >= 0 && control.checkVisibility() && !control.closest('[inert]'));
+    let closed = false;
+    const close = (reason = 'api', immediate = false) => {
+      if (closed) return true;
+      if (reason !== 'owner' && options.canClose && !options.canClose(reason)) return false;
+      closed = true;
+      controller.abort();
+      element.remove();
+      if (parent) parent.inert = parentInert;
+      if (returnFocus?.isConnected && !returnFocus.closest('[inert], [hidden]')) returnFocus.focus();
+      options.onClose?.(reason);
+      return true;
+    };
+    element.addEventListener('keydown', event => {
+      const ownsPopup = [...ownedSurfaces].some(([surface, anchor]) => surface.isConnected && !surface.hidden && element.contains(anchor));
+      if (event.defaultPrevented || modalBackdrops().at(-1) !== element || ownsPopup) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (options.closeOnEscape !== false) close('escape');
+      } else if (event.key === 'Tab') {
+        const controls = tabbable();
+        const index = controls.indexOf(document.activeElement);
+        if (index !== -1 && index !== (event.shiftKey ? 0 : controls.length - 1)) return;
+        event.preventDefault();
+        controls[event.shiftKey ? controls.length - 1 : 0]?.focus();
+      } else options.onKeydown?.(event);
+    }, { signal });
+    element.addEventListener('mousedown', event => {
+      if (event.target === element && options.closeOnBackdrop !== false) close('backdrop');
+    }, { signal });
+    card.addEventListener('click', event => {
+      const button = event.target.closest('[data-modal-close]');
+      if (button && card.contains(button) && !button.disabled) close('button');
+    }, { signal });
+    if (options.closeWithSession) {
+      const off = appEvents.on('session.changed', () => close('session', true));
+      signal.addEventListener('abort', off, { once: true });
+    }
+    document.body.appendChild(element);
+    if (parent) parent.inert = true;
+    if (options.signal?.aborted) close('owner', true);
+    else options.signal?.addEventListener('abort', () => close('owner', true), { once: true });
+    if (!closed && options.initialFocus !== false) {
+      const preferred = typeof options.initialFocus === 'string' ? card.querySelector(options.initialFocus)
+        : options.initialFocus instanceof ModelElement ? options.initialFocus : null;
+      preferred?.focus();
+      if (!preferred || document.activeElement !== preferred) {
+        const controls = tabbable();
+        (controls.find(control => !control.closest('.modal-header')) ?? controls[0] ?? card).focus();
+      }
+    }
+    return { element, card, signal, close, get closed() { return closed; } };
   };
   class Controller extends AbortController {
     constructor() { super(); setMaxListeners(0, this.signal); }
@@ -391,7 +479,6 @@ function fixture(language = 'en') {
   const stubs = {
     'core/NetworkClient': { networkClient: { getHttpBaseUrl: () => 'http://127.0.0.1:9999' } },
     'core/EventBus': { appEvents },
-    'core/ScreenAudioService': { screenAudioService },
     'core/VideoService': { videoService },
     'core/WebRtcManager': { webRtcManager },
     'stores/settingsStore': { settingsStore },
@@ -402,6 +489,15 @@ function fixture(language = 'en') {
         ? shared.SCREEN_SHARE_LIMITS.maximum : shared.SCREEN_SHARE_LIMITS.legacy,
       notifyScreenShareState: () => traces.push(['notify', [...voiceStore.screenShareIds]]),
       stopLocalScreenShares,
+      async discardUnpublishedScreen(call, stream) {
+        if (streams.get(stream.id) !== stream) return;
+        try {
+          if (call.isCurrent()) await stopLocalScreenShares({ shareIds: [stream.id] });
+          else videoService.stopScreenShare(stream.id);
+        } catch (cleanupError) {
+          warnings.push(['[ScreenShare] Failed to finish cancelled screen cleanup', cleanupError]);
+        }
+      },
     },
     'core/webrtc/NativeScreenController': {
       nativeScreenProfile(profile) {
@@ -450,14 +546,23 @@ function fixture(language = 'en') {
       animateEnter() {},
       cancelSurfaceMotion() {},
       removeWithMotion(element) { element.remove(); },
+      hideWithMotion(element, _kind, onHidden) { element.hidden = true; onHidden?.(); },
+      ownSurface(surface, anchor) {
+        ownedSurfaces.set(surface, anchor);
+        return () => ownedSurfaces.delete(surface);
+      },
     },
+    'utils/modalShell': { openModal },
   };
   const allowed = new Set([
     'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
-    'views/ScreenEncodingControls', 'core/screenEncoding',
+    'views/ScreenEncodingControls', 'core/screenEncoding', 'core/screenShareStart', 'views/screenShare/captureRules',
+    'views/ResourceAudiencePicker',
+    'utils/feedback', 'utils/screenShareFailure', 'core/ClientLogService',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
     'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/locales/botStorage', 'i18n/messageSearch',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits', 'utils/avatar', 'utils/colors',
+    'utils/serverAddress', 'utils/rovingFocus',
   ]);
   function load(name) {
     if (Object.hasOwn(stubs, name)) return stubs[name];
@@ -470,10 +575,13 @@ function fixture(language = 'en') {
     const module = { exports: {} };
     modules.set(name, module.exports);
     vm.runInNewContext(compiled.get(filename), {
-      module, exports: module.exports, document, window: { api, matchMedia: () => mediaQuery, setTimeout, clearTimeout },
+      module, exports: module.exports, document, window: {
+        api, matchMedia: () => mediaQuery, setTimeout, clearTimeout, innerWidth: 1280, innerHeight: 800,
+        addEventListener() {}, removeEventListener() {},
+      },
       localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
       navigator: { language, languages: [language] },
-      Element: ModelElement, HTMLElement: ModelElement, HTMLButtonElement: ModelElement, HTMLInputElement: ModelElement,
+      Node: ModelElement, Element: ModelElement, HTMLElement: ModelElement, HTMLButtonElement: ModelElement, HTMLInputElement: ModelElement,
       Event, DOMException, Error, crypto, btoa, AbortController: Controller, MutationObserver: Observer, ResizeObserver: Observer,
       CSS: { escape: value => value }, getComputedStyle: () => ({ rowGap: '8', opacity: '1', marginTop: '0', marginBottom: '0' }),
       requestAnimationFrame: callback => setImmediate(callback), cancelAnimationFrame: clearImmediate,
@@ -494,11 +602,13 @@ function fixture(language = 'en') {
   const i18n = load('i18n/index');
   i18n.setLanguage(language);
   const picker = new ScreenSharePickerModal(), quality = new QualityTab();
-  const mountQuality = () => {
+  const mountQuality = ({ active = true } = {}) => {
     const root = document.createElement('main');
     root.innerHTML = quality.renderHtml();
     document.body.appendChild(root);
     quality.attachEvents(root);
+    // Settings activates the tab only while it is shown; encoder checks wait for that.
+    if (active) quality.activate();
     return root;
   };
   return {
@@ -512,7 +622,7 @@ function fixture(language = 'en') {
       showAlert: stubs['views/Dialog'].showAlert,
     }),
     settingsStore, serverStore, voiceStore, streams, captures, labels, chooser, capabilities, createStream, traces, alerts, confirms, warnings, events, observers, mediaQuery,
-    get saves() { return saves; }, get enumerations() { return enumerations; }, get cancelled() { return cancelled; },
+    get saves() { return saves; }, get enumerations() { return enumerations; },
     get permissionChecks() { return permissionChecks; },
     close() { picker.close(); quality.cleanup(); document.body.replaceChildren(); },
   };

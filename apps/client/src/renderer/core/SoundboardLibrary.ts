@@ -2,12 +2,25 @@ import {
   SOUNDBOARD_EDIT_SAMPLE_RATE,
   type SoundboardFileFailure, type SoundboardFileResult, type SoundboardSavedFile,
 } from '@monky/shared';
-import { favoritesStore } from '../stores/favoritesStore';
-import { settingsStore } from '../stores/settingsStore';
+import { favoritesStore, soundFavoriteKey } from '../stores/favoritesStore';
 import { soundboardService, type SoundItem } from './SoundboardService';
-import { t } from '../i18n';
+import { moveSoundShortcut } from './soundboardShortcuts';
+import { getLanguage, t } from '../i18n';
+import { matchesSearch } from '../utils/search';
+import { sortFavoritesFirst } from '../utils/favoriteOrder';
 
 export class SoundboardLibraryError extends Error {}
+
+/** The sounds a list shows, in the soundboard and in the settings: the search, the favorites filter, favorites first. */
+export function visibleSounds(sounds: readonly SoundItem[], query: string, favoritesOnly: boolean): SoundItem[] {
+  const shown = sounds.filter(sound => (!favoritesOnly || favoritesStore.isSoundFavorite(sound.filePath))
+    && (!query.trim() || matchesSearch(sound.name, query)));
+  return sortFavoritesFirst(shown, sound => ({
+    favorite: favoritesStore.isSoundFavorite(sound.filePath),
+    name: sound.name,
+    identity: soundFavoriteKey(sound.filePath),
+  }), getLanguage());
+}
 
 export function soundboardFileValue<T>(result: SoundboardFileResult<T>): T {
   if (result.status === 'failed') throw new SoundboardLibraryError(soundboardFileMessage(result.reason));
@@ -32,16 +45,10 @@ export async function finishSoundboardMutation(sound: SoundItem, saved: Soundboa
   try { favoritesStore.moveSound(sound.filePath, saved?.filePath ?? null); }
   catch { preferencesSaved = false; }
   const newName = saved ? saved.fileName.slice(0, -sound.ext.length) : null;
-  const shortcuts = settingsStore.soundboardShortcuts;
-  if (shortcuts[sound.name] && !soundboardService.getSounds().some(item => item.filePath !== sound.filePath && item.name === sound.name)) {
-    const next = { ...shortcuts };
-    const shortcut = next[sound.name];
-    delete next[sound.name];
-    if (newName && !next[newName]) next[newName] = shortcut;
-    settingsStore.soundboardShortcuts = next;
-    try { settingsStore.save(); }
-    catch { preferencesSaved = false; }
-    await soundboardService.syncShortcuts();
+  // Another file of the same name (another extension) keeps the shortcut.
+  if (!soundboardService.getSounds().some(item => item.filePath !== sound.filePath && item.name === sound.name)) {
+    const shortcutSaved = await moveSoundShortcut(sound.name, newName);
+    preferencesSaved = preferencesSaved && shortcutSaved;
   }
   await soundboardService.loadSounds();
   return preferencesSaved;

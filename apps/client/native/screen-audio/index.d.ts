@@ -1,38 +1,15 @@
-export interface ScreenAudioOptions {
-  excludePid?: number;
-  /**
-   * Capture only the audio of the application owning this window.
-   * On Windows it is the HWND (resolved to a process tree); on macOS it is the
-   * CGWindowID (used as a ScreenCaptureKit window filter).
-   */
-  includeWindowId?: number;
-  sampleRate?: number;
-  channels?: number;
-}
-
-export interface StartResult {
-  success: boolean;
-  error?: string;
-}
-
-export interface StopResult {
-  success: boolean;
-}
-
+/**
+ * Whether this system can capture application audio: Windows 10 2004 (build 19041) or later,
+ * for WASAPI process loopback, or macOS 13 or later, for ScreenCaptureKit audio.
+ */
 export function isSupported(): boolean;
 
-export function start(
-  options: ScreenAudioOptions,
-  callback: (buffer: Buffer) => void
-): StartResult;
-
-export function stop(): StopResult;
-
-/** Returns the last error message from the capture thread (empty if none). */
-export function getLastError(): string;
-
-/** Returns the capture status: 0=idle, 1=starting, 2=capturing, 3=error */
-export function getStatus(): number;
+/**
+ * Why the compiled module did not load, or null when it did. Besides audio, Windows window, monitor,
+ * keyboard-layout and overlay-resize inspection depend on it: where this platform implements one of
+ * those functions, it then throws an `ERR_SCREEN_AUDIO_UNAVAILABLE` error whose `cause` is this error.
+ */
+export function getLoadError(): Error | null;
 
 /** Windows UI-thread only. A zero ratio removes the constraint; destruction also removes it. Dimensions are DIPs. */
 export function setWindowResizeAspect(handle: Buffer, ratio: number, extraWidth: number, extraHeight: number): void;
@@ -121,17 +98,17 @@ export interface PacketCaptureSession {
   readonly ready: Promise<PacketCaptureSnapshot>;
   /** Resolves after native acquisition/TSFN drain; cancels admission waits, not RTC processing. */
   readonly closed: Promise<PacketCaptureSnapshot>;
-  /** Idempotent, nonblocking; same promise as closed. Does not stop a legacy session. */
+  /** Idempotent, nonblocking; same promise as closed. */
   stop(): Promise<PacketCaptureSnapshot>;
   snapshot(): PacketCaptureSnapshot;
   getStats(): PacketCaptureSnapshot;
 }
 
 /**
- * Explicit opt-in, exclusive with start(). Up to eight packet sessions may run
- * at once, one per shared source (#253); which ones may coexist is the caller's
- * policy. Windows only; never invokes the
- * legacy resampler, microphone processing, platform ADM or output playback.
+ * Up to eight packet sessions may run at once, one per shared source (#253);
+ * which ones may coexist is the caller's policy. Windows (WASAPI process
+ * loopback) and macOS (ScreenCaptureKit); never resamples, never runs
+ * microphone processing, platform ADM or output playback.
  * At most 32 PCM delivery/admission credits of at most 1 MiB each. A packet
  * callback may return a Promise<void> to retain its credit until admission/copy,
  * not native processing retirement. Synchronous return releases it immediately;
@@ -162,7 +139,7 @@ export interface WindowOwner {
 /**
  * Lists visible windows with the application that owns them. Only implemented on
  * macOS, where Electron leaves `desktopCapturer`'s `appIcon` empty (#455); other
- * platforms return an empty array.
+ * platforms return an empty array. Throws on macOS when the module did not load.
  */
 export function listWindowOwners(): WindowOwner[];
 
@@ -208,7 +185,8 @@ export function getMonitorState(deviceId: string): NativeMonitorInfo | null;
 /**
  * Lists top-level windows with their raw Win32 attributes. Only implemented on
  * Windows, where the WGC capturer both leaks overlay/tool windows and omits
- * minimized ones (#560); other platforms return an empty array.
+ * minimized ones (#560); other platforms return an empty array. Throws on Windows
+ * when the module did not load, like the monitor enumeration.
  */
 export function listWindows(): NativeWindowInfo[];
 

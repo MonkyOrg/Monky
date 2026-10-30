@@ -8,8 +8,9 @@ import {
 import { LIMITS, LOCAL_EXECUTION_RUNTIME_LIMITS, localPlaylistResultFitsSpec } from '@monky/shared';
 import type { LocalToolPaths } from './LocalTools';
 import { LocalExecutionError } from './errors';
+import { workerDirectories } from './workerEnvironment';
 import {
-  parseWorkerCommand, workerDeferred, workerDirectories, workerError, workerId, workerResult, workerVersion,
+  parseWorkerCommand, workerDeferred, workerError, workerId, workerResult, workerVersion,
   WORKER_LIMITS, type WorkerOutcome, type WorkerReply, type WorkerStart,
 } from './workerProtocol';
 
@@ -300,7 +301,11 @@ async function main(): Promise<void> {
     disconnected: listener => { process.on('disconnect', listener); return () => process.off('disconnect', listener); },
   }, {
     id: workerId(process.env.MONKY_LOCAL_WORKER_ID),
-    source: paths => { ffmpeg = paths.ffmpeg; return new YouTubeSource(paths); },
+    source: paths => {
+      ffmpeg = paths.ffmpeg;
+      // Main verified these exact executables, digest and native probe, before starting this task.
+      return new YouTubeSource(paths, { toolsVerified: true });
+    },
     probe: checkMediaTool,
     verify: verifyContext,
     cleanupNative: async () => {

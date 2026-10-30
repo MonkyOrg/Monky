@@ -3,7 +3,7 @@
 const v8 = require('node:v8');
 const MAX_MESSAGE_BYTES = 5 * 1024 * 1024;
 const MAX_ORDINARY_CALLS = 128, MAX_RETIREMENT_CALLS = 64;
-const METHODS = new Set(['request', 'respond', 'cancel', 'submitFrame', 'submitEncodedFrame',
+const METHODS = new Set(['request', 'respond', 'cancel', 'submitEncodedFrame',
   'submitAudioPacket', 'grantAudioCredits', 'audioClockProbe', 'calibrateAudioClock',
   'setAudioOutputFeedback', 'releaseFrame', 'snapshot', 'close']);
 

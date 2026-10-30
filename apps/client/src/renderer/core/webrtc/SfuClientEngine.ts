@@ -12,7 +12,6 @@ import {
   SfuConsumePayload,
   SfuConsumedPayload,
   SfuConsumerClosedPayload,
-  SfuConsumerSetPausedPayload,
   SfuCreateWebRtcTransportPayload,
   SfuGetProducersPayload,
   SfuGetRouterRtpCapabilitiesPayload,
@@ -28,23 +27,27 @@ import { NetworkClient, ProtocolRequestError } from '../NetworkClient';
 import { clientLog } from '../ClientLogService';
 import { appEvents } from '../EventBus';
 import { currentEventOrigin } from '../sessionRouting';
-import { settingsStore } from '../../stores/settingsStore';
-import {
-  assertScreenCodecAccepted, selectScreenVideoCodecs, type PreferredVideoCodec,
-  shouldPreferHardwareEncoding, sortVideoCodecs,
-} from './codecPreferences';
+import { shouldPreferHardwareEncoding, sortVideoCodecs } from './codecPreferences';
 import { applyMediaEncodingPolicy, getMediaEncodingPolicy, type OutboundMediaKind } from './mediaEncodingPolicy';
 import { updateRtpSenderParameters } from './rtpSenderParameters';
-import { t } from '../../i18n';
+import { candidateRoute } from './rtcStats';
+
+/** Replies carry mediasoup structures as `unknown`; this engine reads them with mediasoup-client's types. */
+type RouterCapabilitiesResponse = Omit<SfuRouterRtpCapabilitiesPayload, 'rtpCapabilities'> & {
+  rtpCapabilities: mediasoupTypes.RtpCapabilities;
+};
+type TransportCreatedResponse = Omit<SfuWebRtcTransportCreatedPayload, 'transportOptions'> & {
+  transportOptions: mediasoupTypes.TransportOptions;
+};
+type ConsumedResponse = Omit<SfuConsumedPayload, 'rtpParameters'> & { rtpParameters: mediasoupTypes.RtpParameters };
 
 export interface SfuConsumerTrackEvent {
   producerSessionId: string;
   kind: 'audio' | 'video';
-  mediaType: 'mic' | 'camera' | 'screen_video' | 'screen_audio';
+  mediaType: 'mic' | 'camera';
   track: MediaStreamTrack;
   consumerId: string;
   producerId: string;
-  shareId?: string;
   rtpReceiver?: RTCRtpReceiver;
 }
 
@@ -52,9 +55,7 @@ export interface SfuClientEngineCallbacks {
   onHealthChanged: (health: VoiceConnectionHealth) => void;
   onRoster: (channelId: string, participants: VoiceRosterParticipant[]) => void;
   onConsumerTrack: (event: SfuConsumerTrackEvent) => void;
-  onConsumerClosed: (producerSessionId: string, mediaType: string, shareId?: string, track?: MediaStreamTrack) => void;
-  /** A missing shareId addresses the publisher's single shared screen-audio resource. */
-  isScreenWatched?: (producerSessionId: string, shareId?: string) => boolean;
+  onConsumerClosed: (producerSessionId: string, mediaType: string, track?: MediaStreamTrack) => void;
   /**
    * The SFU link is down. There is no degraded mode to fall back to, so the
    * manager answers this by rejoining the room until it comes back.
@@ -73,7 +74,6 @@ export class SfuClientEngine {
   private recvTransport: mediasoupTypes.Transport | null = null;
   private channelId: string | null = null;
   private producers: Map<string, mediasoupTypes.Producer> = new Map();
-  private pendingScreenProducers = new Map<string, object>();
   private pendingCameraProducer: object | null = null;
   private pendingMicProducer: object | null = null;
   // The manager resolves the profile; both transports use mediaEncodingPolicy.
@@ -81,9 +81,8 @@ export class SfuClientEngine {
   private qualityProfile: QualityProfile | null = null;
   private consumers: Map<string, mediasoupTypes.Consumer> = new Map();
   private pendingConsumers = new Map<string, object>();
-  private remoteProducers = new Map<string, SfuNewProducerPayload>();
-  /** Consumer tracking metadata: producerId -> { producerSessionId, mediaType, shareId, consumerId } */
-  private consumerMeta: Map<string, { producerSessionId: string; mediaType: string; shareId?: string; consumerId: string }> = new Map();
+  /** Consumer tracking metadata: producerId -> { producerSessionId, mediaType, consumerId } */
+  private consumerMeta: Map<string, { producerSessionId: string; mediaType: string; consumerId: string }> = new Map();
   private isConnecting: boolean = false;
   private isInitialized: boolean = false;
   /**
@@ -157,7 +156,7 @@ export class SfuClientEngine {
       clientLog.info('SFU', `Joining SFU room for channel ${channelId}`);
 
       // 1. Get router RTP capabilities
-      const routerCapsResp = await client.sendRequest<SfuRouterRtpCapabilitiesPayload>(
+      const routerCapsResp = await client.sendRequest<RouterCapabilitiesResponse>(
         MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES,
         { channelId } satisfies SfuGetRouterRtpCapabilitiesPayload,
         undefined,
@@ -184,7 +183,7 @@ export class SfuClientEngine {
 
       // 3. Create send transport
       console.log(`[SFU Client] Requesting createSendTransport from server...`);
-      const sendCreated = await client.sendRequest<SfuWebRtcTransportCreatedPayload>(
+      const sendCreated = await client.sendRequest<TransportCreatedResponse>(
         MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
         { channelId, direction: 'send' } satisfies SfuCreateWebRtcTransportPayload,
         undefined,
@@ -194,7 +193,7 @@ export class SfuClientEngine {
 
       this.logTransportCandidates('send', sendCreated.transportOptions);
 
-      this.sendTransport = this.device.createSendTransport(sendCreated.transportOptions as any);
+      this.sendTransport = this.device.createSendTransport(sendCreated.transportOptions);
       const sendTransport = this.sendTransport;
 
       sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -261,7 +260,7 @@ export class SfuClientEngine {
 
       // 4. Create recv transport
       console.log(`[SFU Client] Requesting createRecvTransport from server...`);
-      const recvCreated = await client.sendRequest<SfuWebRtcTransportCreatedPayload>(
+      const recvCreated = await client.sendRequest<TransportCreatedResponse>(
         MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
         { channelId, direction: 'recv' } satisfies SfuCreateWebRtcTransportPayload,
         undefined,
@@ -271,7 +270,7 @@ export class SfuClientEngine {
 
       this.logTransportCandidates('recv', recvCreated.transportOptions);
 
-      this.recvTransport = this.device.createRecvTransport(recvCreated.transportOptions as any);
+      this.recvTransport = this.device.createRecvTransport(recvCreated.transportOptions);
       const recvTransport = this.recvTransport;
 
       recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -381,15 +380,12 @@ export class SfuClientEngine {
   }
 
   /**
-   * Picks which codec to encode video with instead of letting mediasoup take the
-   * first one the router offers (#526).
-   *
-   * The router advertises AV1 first, and AV1 has no hardware encoder on most
-   * desktops — so a 1080p screen share was being encoded on the CPU, which is
-   * exactly what makes a game stutter while sharing. This honours the same
-   * preference the user picks for P2P calls.
+   * Picks which codec to encode the camera with instead of letting mediasoup
+   * take the first one the router offers (#526): the router advertises AV1
+   * first, and AV1 has no hardware encoder on most desktops. This follows the
+   * same automatic order as P2P calls.
    */
-  private pickVideoCodec(screen = false): mediasoupTypes.RtpCodecCapability | undefined {
+  private pickVideoCodec(): mediasoupTypes.RtpCodecCapability | undefined {
     // Receive capabilities are not evidence that this device can encode the
     // same profile. mediasoup exposes the negotiated send set separately.
     const codecs = this.device?.sendRtpCapabilities?.codecs ?? [];
@@ -397,11 +393,7 @@ export class SfuClientEngine {
     const videoCodecs = codecs.filter(
       (codec) => codec.kind === 'video' && !/\/(rtx|red|ulpfec|flexfec)/i.test(codec.mimeType)
     );
-    const [best] = (screen ? selectScreenVideoCodecs : sortVideoCodecs)(
-      videoCodecs,
-      settingsStore?.preferredVideoCodec ?? 'auto',
-      shouldPreferHardwareEncoding()
-    );
+    const [best] = sortVideoCodecs(videoCodecs, shouldPreferHardwareEncoding());
     return best;
   }
 
@@ -440,6 +432,14 @@ export class SfuClientEngine {
       return null;
     }
     this.closeProducer('mic', false);
+    // An ended capture track is a local device problem, not a broken link.
+    // Reported as a transport failure, it sent the call into a rejoin whose
+    // every rung published the same dead track again (R-VOICE-12).
+    if (track.readyState !== 'live') {
+      clientLog.warn('SFU', 'The microphone track ended before publication; the call stays listen-only');
+      this.notifyIfHealthy();
+      return null;
+    }
     const operation = {};
     const client = this.client;
     const channelId = this.channelId;
@@ -485,6 +485,8 @@ export class SfuClientEngine {
         if (error instanceof ProtocolRequestError && error.code === ProtocolErrorCode.PERMISSION_DENIED) {
           clientLog.warn('SFU', 'Microphone publication refused while Speak is denied in this channel');
           this.microphoneDenied = true;
+        } else if (track.readyState !== 'live') {
+          clientLog.warn('SFU', 'The microphone track ended during publication; the call stays listen-only');
         } else {
           clientLog.error('SFU', 'Failed to produce mic track', { error: error instanceof Error ? error.message : String(error) });
           this.microphoneSetupFailed = true;
@@ -548,110 +550,6 @@ export class SfuClientEngine {
     }
   }
 
-  public assertScreenShareSupported(): void {
-    if (!this.sendTransport || !this.canProduceKind('video')) throw new Error(t('screenCodec.reconnecting'));
-    this.pickVideoCodec(true);
-  }
-
-  public async produceScreenVideo(track: MediaStreamTrack, shareId: string): Promise<mediasoupTypes.Producer> {
-    this.assertScreenShareSupported();
-    try {
-      const preferred = settingsStore.preferredVideoCodec;
-      const chosenCodec = this.pickVideoCodec(true);
-      const producer = await this.produceScreenTrack(track, shareId, {
-        mediaType: 'screen_video', preferred, codec: chosenCodec,
-      });
-      console.log(`[SFU Client] Produced screen video track ${track.id} shareId ${shareId} with producerId ${producer.id}`);
-      // #566 diagnostics: capture the codec chosen for the SFU screen producer
-      // so the SFU side of a SFU -> P2P transition can be compared with the
-      // P2P offer codec order.
-      clientLog.info('SFU', `Produced screen video track ${track.id} shareId ${shareId} with producerId ${producer.id}`, {
-        preferred: settingsStore?.preferredVideoCodec ?? 'auto',
-        qualityPreset: settingsStore?.qualityPreset,
-        chosenCodec: chosenCodec?.mimeType ?? '(mediasoup default)',
-      });
-      return producer;
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') throw err;
-      console.error('[SFU Client] Failed to produce screen video track:', err);
-      clientLog.error('SFU', 'Failed to produce screen video track', { error: err instanceof Error ? err.message : String(err) });
-      throw err;
-    }
-  }
-
-  public async produceScreenAudio(track: MediaStreamTrack, shareId: string): Promise<mediasoupTypes.Producer | null> {
-    if (!this.sendTransport || !this.canProduceKind('audio')) return null;
-    try {
-      const producer = await this.produceScreenTrack(track, shareId, { mediaType: 'screen_audio' });
-      console.log(`[SFU Client] Produced screen audio track ${track.id} shareId ${shareId} with producerId ${producer.id}`);
-      clientLog.info('SFU', `Produced screen audio track ${track.id} shareId ${shareId} with producerId ${producer.id}`);
-      return producer;
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') return null;
-      console.error('[SFU Client] Failed to produce screen audio track:', err);
-      clientLog.error('SFU', 'Failed to produce screen audio track', { error: err instanceof Error ? err.message : String(err) });
-      return null;
-    }
-  }
-
-  private async produceScreenTrack(
-    track: MediaStreamTrack,
-    shareId: string,
-    options: { mediaType: 'screen_audio' } | {
-      mediaType: 'screen_video'; preferred: PreferredVideoCodec; codec?: mediasoupTypes.RtpCodecCapability;
-    },
-  ): Promise<mediasoupTypes.Producer> {
-    const key = `${options.mediaType}:${shareId}`;
-    const operation = {};
-    const client = this.client;
-    const channelId = this.channelId;
-    this.closeProducer(key);
-    this.pendingScreenProducers.set(key, operation);
-    try {
-      const video = options.mediaType === 'screen_video';
-      const producer = await this.produceTrack(video ? 'screen' : 'audio', {
-        track,
-        appData: { mediaType: options.mediaType, shareId },
-        ...(video ? { codec: options.codec } : { codecOptions: { opusStereo: true } }),
-      });
-      const isCurrent = () => this.pendingScreenProducers.get(key) === operation
-        && !producer.closed && track.readyState !== 'ended';
-      const discard = () => {
-        producer.close();
-        if (channelId) client.send(MessageType.SFU_PRODUCER_CLOSED, { channelId, producerId: producer.id } satisfies SfuProducerClosedPayload);
-      };
-      if (!isCurrent()) {
-        discard();
-        throw new DOMException('Screen producer was stopped or replaced', 'AbortError');
-      }
-      this.producers.set(key, producer);
-      producer.on('transportclose', () => {
-        if (this.producers.get(key) === producer) this.producers.delete(key);
-      });
-      try {
-        if (video) assertScreenCodecAccepted(producer.rtpParameters?.codecs.map(codec => codec.mimeType) ?? [], options.preferred);
-        await this.applyProducerQuality(key, producer);
-        if (!isCurrent() || this.producers.get(key) !== producer) {
-          throw new DOMException('Screen producer was stopped or replaced', 'AbortError');
-        }
-        return producer;
-      } catch (error) {
-        if (this.producers.get(key) === producer) {
-          this.producers.delete(key);
-          discard();
-        }
-        throw error;
-      }
-    } catch (error) {
-      if (this.pendingScreenProducers.get(key) !== operation || track.readyState === 'ended') {
-        throw new DOMException('Screen producer was stopped or replaced', 'AbortError');
-      }
-      throw error;
-    } finally {
-      if (this.pendingScreenProducers.get(key) === operation) this.pendingScreenProducers.delete(key);
-    }
-  }
-
   /** Store the shared policy before publishing and reapply it to existing senders. */
   public async applyQualityParams(preset: QualityPresetType, profile: QualityProfile): Promise<void> {
     this.qualityPreset = preset;
@@ -666,8 +564,7 @@ export class SfuClientEngine {
     if (!profile) return;
     const sender = producer.rtpSender;
     if (!sender) return;
-    const kind: OutboundMediaKind = key === 'mic' || key.startsWith('screen_audio')
-      ? 'audio' : key.startsWith('screen_video') ? 'screen' : 'camera';
+    const kind: OutboundMediaKind = key === 'mic' ? 'audio' : 'camera';
     const policy = getMediaEncodingPolicy(kind, this.qualityPreset, profile);
     const isCurrent = () => this.producers.get(key) === producer && !producer.closed && this.qualityProfile === profile;
     try {
@@ -685,10 +582,6 @@ export class SfuClientEngine {
   public async replaceTrack(key: string, track: MediaStreamTrack | null): Promise<boolean> {
     const producer = this.producers.get(key);
     if (!producer) return false;
-    if (track && key.startsWith('screen_video:')) {
-      await this.produceScreenVideo(track, key.slice('screen_video:'.length));
-      return true;
-    }
     try {
       await producer.replaceTrack({ track });
       return this.producers.get(key) === producer && !producer.closed;
@@ -705,7 +598,6 @@ export class SfuClientEngine {
       this.microphoneDenied = false;
     }
     if (key === 'camera') this.pendingCameraProducer = null;
-    this.pendingScreenProducers.delete(key);
     const producer = this.producers.get(key);
     if (producer) {
       try {
@@ -722,30 +614,9 @@ export class SfuClientEngine {
     if (key === 'mic' && notifyHealth && this.channelId) this.notifyIfHealthy();
   }
 
-  private shouldConsume(producer: SfuNewProducerPayload): boolean {
-    if ('nativeScreen' in producer.appData && producer.appData.nativeScreen) return false;
-    if (producer.appData.mediaType === 'screen_video') {
-      return typeof producer.appData.shareId === 'string'
-        && (this.callbacks.isScreenWatched?.(producer.producerSessionId, producer.appData.shareId) ?? false);
-    }
-    if (producer.appData.mediaType === 'screen_audio') {
-      return this.callbacks.isScreenWatched?.(producer.producerSessionId) ?? false;
-    }
-    return true;
-  }
-
-  public async syncScreenSubscriptions(): Promise<void> {
-    const tasks: Promise<void>[] = [];
-    for (const [producerId, producer] of this.remoteProducers) {
-      if (!this.shouldConsume(producer)) this.closeRemoteConsumer(producerId);
-      else tasks.push(this.consumeRemoteProducer(producer));
-    }
-    await Promise.all(tasks);
-  }
-
   private async consumeRemoteProducer(producerData: SfuNewProducerPayload): Promise<void> {
-    // Native renditions use their own authenticated transport/receiver owner.
-    if ('nativeScreen' in producerData.appData && producerData.appData.nativeScreen) return;
+    // Screens use their own authenticated transport/receiver owner (NativeScreenController).
+    if (producerData.appData.mediaType !== 'mic' && producerData.appData.mediaType !== 'camera') return;
     if (!this.recvTransport || !this.device || !this.channelId) {
       console.warn(`[SFU Client] Cannot consume: recvTransport=${!!this.recvTransport}, device=${!!this.device}, channelId=${this.channelId}`);
       return;
@@ -758,8 +629,6 @@ export class SfuClientEngine {
       console.log(`[SFU Client] Skipping consumption of our own producer ${producerId}`);
       return;
     }
-    this.remoteProducers.set(producerId, producerData);
-    if (!this.shouldConsume(producerData)) return;
 
     if (this.consumers.has(producerId) || this.pendingConsumers.has(producerId)) {
       console.log(`[SFU Client] Already consuming producer ${producerId}`);
@@ -776,14 +645,13 @@ export class SfuClientEngine {
     const pending = {};
     this.pendingConsumers.set(producerId, pending);
     this.notifyIfHealthy();
-    const isCurrent = () => epoch === this.joinEpoch && this.pendingConsumers.get(producerId) === pending
-      && this.shouldConsume(producerData);
+    const isCurrent = () => epoch === this.joinEpoch && this.pendingConsumers.get(producerId) === pending;
     let serverConsumerId: string | undefined;
     try {
       console.log(`[SFU Client] Consuming remote producer ${producerId} (${kind}, mediaType: ${appData?.mediaType}) from session ${producerSessionId}...`);
       clientLog.info('SFU', `Consuming producer ${producerId} (${kind}) from session ${producerSessionId}`);
 
-      const consumed = await client.sendRequest<SfuConsumedPayload | SfuProducerClosedPayload>(
+      const consumed = await client.sendRequest<ConsumedResponse | SfuProducerClosedPayload>(
         MessageType.SFU_CONSUME,
         {
           channelId,
@@ -823,7 +691,6 @@ export class SfuClientEngine {
       this.consumerMeta.set(producerId, {
         producerSessionId,
         mediaType: appData.mediaType,
-        shareId: appData.shareId,
         consumerId: consumer.id,
       });
 
@@ -840,25 +707,15 @@ export class SfuClientEngine {
         this.handleRemoteProducerClosed(producerId);
       });
 
-      const mediaType = (appData.mediaType || (kind === 'audio' ? 'mic' : 'camera')) as SfuConsumerTrackEvent['mediaType'];
-
       this.callbacks.onConsumerTrack({
         producerSessionId,
         kind,
-        mediaType,
+        mediaType: appData.mediaType,
         track: consumer.track,
         consumerId: consumer.id,
         producerId,
-        shareId: appData.shareId,
         rtpReceiver: consumer.rtpReceiver,
       });
-      // Server screen consumers are born paused: a cancelled setup has never
-      // delivered RTP, even if its WebSocket/SDP work completes after Stop.
-      if (isCurrent() && (mediaType === 'screen_video' || mediaType === 'screen_audio')) {
-        client.send(MessageType.SFU_CONSUMER_SET_PAUSED, {
-          channelId, consumerId: consumer.id, paused: false,
-        } satisfies SfuConsumerSetPausedPayload);
-      }
     } catch (err) {
       const reportFailure = isCurrent();
       if (reportFailure) this.consumerSetupFailed = true;
@@ -876,7 +733,6 @@ export class SfuClientEngine {
   }
 
   private handleRemoteProducerClosed(producerId: string): void {
-    this.remoteProducers.delete(producerId);
     this.closeRemoteConsumer(producerId);
   }
 
@@ -895,27 +751,9 @@ export class SfuClientEngine {
       } catch {}
     }
     if (meta) {
-      this.callbacks.onConsumerClosed(meta.producerSessionId, meta.mediaType, meta.shareId, consumer?.track);
+      this.callbacks.onConsumerClosed(meta.producerSessionId, meta.mediaType, consumer?.track);
     }
     if (this.channelId) this.notifyIfHealthy();
-  }
-
-  public async setConsumerPaused(producerId: string, paused: boolean): Promise<void> {
-    const producer = this.remoteProducers.get(producerId);
-    if (!paused && (!producer || !this.shouldConsume(producer))) return;
-    const consumer = this.consumers.get(producerId);
-    if (consumer && this.channelId) {
-      if (paused) {
-        consumer.pause();
-      } else {
-        consumer.resume();
-      }
-      this.client.send(MessageType.SFU_CONSUMER_SET_PAUSED, {
-        channelId: this.channelId,
-        consumerId: consumer.id,
-        paused,
-      } satisfies SfuConsumerSetPausedPayload);
-    }
   }
 
   public getConsumerReceiver(producerSessionId: string, mediaType: string = 'mic'): RTCRtpReceiver | null {
@@ -953,11 +791,6 @@ export class SfuClientEngine {
     return this.producers.get('camera')?.track ?? null;
   }
 
-  public getScreenSender(shareId: string): RTCRtpSender | null {
-    const producer = this.producers.get(`screen_video:${shareId}`);
-    return producer?.rtpSender ?? null;
-  }
-
   public getReceiverForTrack(trackId: string): RTCRtpReceiver | null {
     for (const consumer of this.consumers.values()) {
       if (consumer.track.id === trackId) {
@@ -967,21 +800,14 @@ export class SfuClientEngine {
     return null;
   }
 
+  /** Round trip to the server over the worse connected transport, read from the pair carrying media. */
   public async getPing(): Promise<number | null> {
     const pings: number[] = [];
     for (const transport of [this.sendTransport, this.recvTransport]) {
       if (!transport || transport.connectionState !== 'connected') continue;
       try {
-        const stats = await transport.getStats();
-        for (const report of stats.values()) {
-          if (report.type === 'candidate-pair' && (report.state === 'succeeded' || report.nominated)) {
-            const rtt = report.currentRoundTripTime ?? report.roundTripTime;
-            if (typeof rtt === 'number' && Number.isFinite(rtt) && rtt >= 0) {
-              pings.push(Math.round(rtt * 1000));
-              break;
-            }
-          }
-        }
+        const rttMs = candidateRoute(await transport.getStats())?.rttMs;
+        if (rttMs !== null && rttMs !== undefined) pings.push(rttMs);
       } catch {
         // A closing send transport must not hide a still-live receive RTT.
       }
@@ -994,7 +820,6 @@ export class SfuClientEngine {
     this.channelId = null;
     this.pendingMicProducer = null;
     this.pendingCameraProducer = null;
-    this.pendingScreenProducers.clear();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
     for (const unsub of this.unsubscribeEvents) {
@@ -1014,7 +839,6 @@ export class SfuClientEngine {
     }
     this.consumers.clear();
     this.pendingConsumers.clear();
-    this.remoteProducers.clear();
     this.consumerMeta.clear();
 
     if (this.sendTransport) {
@@ -1058,8 +882,7 @@ export class SfuClientEngine {
 
   private isIdle(): boolean {
     return this.sendTransportState === 'new' && this.recvTransportState === 'new'
-      && !this.pendingMicProducer && !this.pendingCameraProducer
-      && this.pendingScreenProducers.size === 0 && this.pendingConsumers.size === 0;
+      && !this.pendingMicProducer && !this.pendingCameraProducer && this.pendingConsumers.size === 0;
   }
 
   /**

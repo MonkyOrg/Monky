@@ -1,5 +1,5 @@
-import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, VoiceRestrictions, canAccessChannel, hasPermission } from '@monky/shared';
-import { appEvents, EventBus } from '../core/EventBus';
+import { ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceRestrictions, canAccessChannel, hasPermission, type ServerSettingsUpdatedPayload } from '@monky/shared';
+import { appEvents, type AppEventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
 import type { ChannelCategory } from '@monky/shared';
@@ -11,7 +11,7 @@ export class ServerStore {
    * the app-wide bus; the others hold a silent one so their updates stay
    * invisible until the user switches to them (#400).
    */
-  public bus: EventBus = appEvents;
+  public bus: AppEventBus = appEvents;
   public serverDetails: ServerDetails | null = null;
   public currentUser: UserSummary | null = null;
   public voiceRestrictions: VoiceRestrictions = { serverMuted: false, serverDeafened: false, permissionMuted: false };
@@ -88,11 +88,12 @@ export class ServerStore {
 
   /**
    * Includes offline members, but only readers of the selected channel.
-   * Orders online members first, then alphabetically, excluding self.
+   * Orders online members first, then alphabetically, excluding self. Bots are
+   * never mentionable: "@Lucas Bot" mentions a member called Lucas.
    */
   public getMentionableUsers(channelId: string): UserSummary[] {
     const list = Array.from(this.knownMembers.values()).filter((user) =>
-      user.id !== this.currentUser?.id && this.canUserReadChannel(user.id, channelId));
+      !user.isBot && user.id !== this.currentUser?.id && this.canUserReadChannel(user.id, channelId));
     return list.sort((a, b) => {
       const aOnline = a.status !== 'DISCONNECTED' ? 0 : 1;
       const bOnline = b.status !== 'DISCONNECTED' ? 0 : 1;
@@ -165,6 +166,11 @@ export class ServerStore {
     } catch { return false; }
   }
 
+  /**
+   * Only the sidebar shows which categories are collapsed, and it applies the
+   * change itself: the rest of the app has nothing to redraw, nor anything to
+   * ask the server for, when one folds (R-SHELL-11).
+   */
   public toggleCategoryCollapsed(categoryId: string): void {
     const key = this.categoryCollapseKey();
     if (!key) return;
@@ -177,7 +183,6 @@ export class ServerStore {
     } catch {
       clientLog.warn('SERVER_HOST', 'Could not persist category collapse state');
     }
-    this.bus.emit('server.updated');
   }
 
   public removeChannel(channelId: string): void {
@@ -300,71 +305,40 @@ export class ServerStore {
     }
   }
 
-  public updateServerMeta(
-    name: string,
-    hasPassword: boolean,
-    allowSoundboard?: boolean,
-    iconUrl?: string | null,
-    attachmentStorage?: AttachmentStorageInfo,
-    maxUsers?: number,
-    turnEnabled?: boolean,
-    allowEveryoneMention?: boolean,
-    allowMessageEdit?: boolean,
-    voiceMode?: VoiceMode,
-    showRoleBadgesToEveryone?: boolean,
-    maxMessageLength?: number,
-    messageDeleteUndoSeconds?: number,
-    recentSoundCacheEnabled?: boolean,
-    recentSoundCacheLimit?: number,
-    dmRelayEnabled?: boolean,
-    afk?: { channelId?: string | null; timeoutSeconds?: number },
-  ): void {
-    if (this.serverDetails) {
-      if (maxMessageLength !== undefined) this.serverDetails.maxMessageLength = maxMessageLength;
-      if (afk?.channelId !== undefined) this.serverDetails.afkChannelId = afk.channelId;
-      if (afk?.timeoutSeconds !== undefined) this.serverDetails.afkTimeoutSeconds = afk.timeoutSeconds;
-      this.serverDetails.name = name;
-      this.serverDetails.hasPassword = hasPassword;
-      if (allowSoundboard !== undefined) {
-        this.serverDetails.allowSoundboard = allowSoundboard;
-      }
-      if (iconUrl !== undefined) {
-        this.serverDetails.iconUrl = iconUrl;
-      }
-      if (attachmentStorage !== undefined) {
-        this.serverDetails.attachmentStorage = attachmentStorage;
-      }
-      if (maxUsers !== undefined) {
-        this.serverDetails.maxUsers = maxUsers;
-      }
-      if (turnEnabled !== undefined) {
-        this.serverDetails.turnEnabled = turnEnabled;
-      }
-      if (allowEveryoneMention !== undefined) {
-        this.serverDetails.allowEveryoneMention = allowEveryoneMention;
-      }
-      if (allowMessageEdit !== undefined) {
-        this.serverDetails.allowMessageEdit = allowMessageEdit;
-      }
-      if (messageDeleteUndoSeconds !== undefined) this.serverDetails.messageDeleteUndoSeconds = messageDeleteUndoSeconds;
-      if (recentSoundCacheEnabled !== undefined) this.serverDetails.recentSoundCacheEnabled = recentSoundCacheEnabled;
-      if (recentSoundCacheLimit !== undefined) this.serverDetails.recentSoundCacheLimit = recentSoundCacheLimit;
-      if (dmRelayEnabled !== undefined) this.serverDetails.dmRelayEnabled = dmRelayEnabled;
-      if (voiceMode !== undefined) {
-        this.serverDetails.voiceMode = voiceMode;
-      }
-      if (showRoleBadgesToEveryone !== undefined) {
-        this.serverDetails.showRoleBadgesToEveryone = showRoleBadgesToEveryone;
-      }
-      this.bus.emit('server.updated');
-      this.bus.emit('server.meta_updated', this.serverDetails);
-    }
+  /**
+   * Applies a SERVER_SETTINGS_UPDATED. Name and password always come; every
+   * other setting only when the server sent it, so a server that does not know
+   * a setting leaves the value from login untouched.
+   */
+  public applySettings(settings: ServerSettingsUpdatedPayload): void {
+    const details = this.serverDetails;
+    if (!details) return;
+    details.name = settings.name;
+    details.hasPassword = settings.hasPassword;
+    if (settings.maxMessageLength !== undefined) details.maxMessageLength = settings.maxMessageLength;
+    if (settings.afkChannelId !== undefined) details.afkChannelId = settings.afkChannelId;
+    if (settings.afkTimeoutSeconds !== undefined) details.afkTimeoutSeconds = settings.afkTimeoutSeconds;
+    if (settings.allowSoundboard !== undefined) details.allowSoundboard = settings.allowSoundboard;
+    if (settings.iconUrl !== undefined) details.iconUrl = settings.iconUrl;
+    if (settings.attachmentStorage !== undefined) details.attachmentStorage = settings.attachmentStorage;
+    if (settings.maxUsers !== undefined) details.maxUsers = settings.maxUsers;
+    if (settings.turnEnabled !== undefined) details.turnEnabled = settings.turnEnabled;
+    if (settings.allowEveryoneMention !== undefined) details.allowEveryoneMention = settings.allowEveryoneMention;
+    if (settings.allowMessageEdit !== undefined) details.allowMessageEdit = settings.allowMessageEdit;
+    if (settings.messageDeleteUndoSeconds !== undefined) details.messageDeleteUndoSeconds = settings.messageDeleteUndoSeconds;
+    if (settings.recentSoundCacheEnabled !== undefined) details.recentSoundCacheEnabled = settings.recentSoundCacheEnabled;
+    if (settings.recentSoundCacheLimit !== undefined) details.recentSoundCacheLimit = settings.recentSoundCacheLimit;
+    if (settings.dmRelayEnabled !== undefined) details.dmRelayEnabled = settings.dmRelayEnabled;
+    if (settings.voiceMode !== undefined) details.voiceMode = settings.voiceMode;
+    if (settings.showRoleBadgesToEveryone !== undefined) details.showRoleBadgesToEveryone = settings.showRoleBadgesToEveryone;
+    this.bus.emit('server.updated');
+    this.bus.emit('server.meta_updated', details);
   }
 
   /**
    * Refreshes what the host can do about the relay (#438).
    *
-   * Separate from `updateServerMeta` because this is not a setting somebody
+   * Separate from `applySettings` because this is not a setting somebody
    * chose: it is the host reporting a capability that may have changed on its
    * own — switching the relay on installs coturn, and from then on the answer
    * from login is stale.
@@ -601,16 +575,19 @@ const PERMISSIONS = Object.values(Permission).filter((value): value is Permissio
 /**
  * What the current member can reach, as a comparable value: equal results mean
  * no server or channel permission of theirs, nor their own roles (which decide
- * private audiences), was granted or revoked.
+ * private audiences), was granted or revoked. `channelIds` limits it to those
+ * channels, so channels created or removed elsewhere leave it as it was.
  */
 export function accessSignature(
   server: Pick<ServerStore, 'serverDetails' | 'currentUser' | 'hasPermission'> & { userRoles?: UserRoleSummary[] },
+  channelIds?: readonly string[],
 ): string {
   const user = server.currentUser;
   if (!server.serverDetails || !user) return '';
   const granted = (channelId?: string) =>
     PERMISSIONS.reduce((mask, permission) => server.hasPermission(permission, channelId) ? mask | permission : mask, 0);
-  const channels = server.serverDetails.channels.map((channel) => `${channel.id}:${granted(channel.id)}`).sort();
+  const channels = server.serverDetails.channels.filter((channel) => !channelIds || channelIds.includes(channel.id))
+    .map((channel) => `${channel.id}:${granted(channel.id)}`).sort();
   const roleIds = [...(server.userRoles?.find((entry) => entry.userId === user.id)?.roleIds ?? [])].sort();
   return JSON.stringify([granted(), roleIds, channels]);
 }

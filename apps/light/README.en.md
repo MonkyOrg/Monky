@@ -82,9 +82,17 @@ Enter one JSON object per line in the terminal, using the received channel ID:
 {"command":"quit"}
 ```
 
-`enabled:false` undoes mute/deafen. Server restrictions still apply. `stats`
+`enabled:false` undoes mute/deafen. Server restrictions still apply, and so does
+the channel's Speak permission: without it, the microphone stays closed.
+`voice-policy` carries the policy in force (`muted`, `deafened`, `serverMuted`,
+`serverDeafened`, `permissionMuted`, `suppressMicrophone`, and
+`suppressPlayback`), in the same shape as the `policy` of `state`. `stats`
 queries devices and RTP on demand; the core does not periodically collect
-telemetry. EOF, Ctrl+C, and `quit` close the connection and media.
+telemetry. EOF, Ctrl+C, and `quit` close the connection and media. On Windows,
+closing the console window or losing whoever reads the events also leaves the
+call and logs out of the server; in the latter case the process exits with code 1.
+Closing the console exits with code 0, also on Windows 10 and Windows Server
+2022, which shut a closed console down before Light finishes logging out.
 
 ### Audio devices
 
@@ -137,7 +145,8 @@ rendering between activations. It carries:
 
 - the session and call state, with the current channel;
 - the server voice channels, with the current one marked, and `Leave the channel`;
-- mute and deafen, marked and disabled when the server imposed them;
+- mute and deafen, marked and disabled when the server imposed them or the
+  channel does not allow speaking;
 - `Audio devices`, with input, output, and `System default`;
 - `Reconnect now` and `Quit Monky Light`.
 
@@ -277,19 +286,46 @@ identifier.
 
 `ApplicationLoop` serializes events and deadlines on one thread with a bounded
 queue. With no work or deadline, it waits for notification rather than polling.
+Messages this client never reads, such as soundboard audio (up to ~4 MiB each),
+are dropped by type before entering the queue. If network input outgrows its
+share of the queue because the core fell behind (for example, with the console
+blocked), a message is lost: the core opens a new connection and returns to the
+call instead of ending the process.
 `ConsoleControl` delivers input lines and shutdown signals; its destruction
-cancels blocked reads before releasing callbacks.
+cancels blocked reads before releasing callbacks. On Windows, closing the
+console window holds the process while the core leaves the call and logs out;
+main itself then ends the process, with its own exit code.
 
 `ProtocolSession` confirms admission before creating media, reconciles the
 participant roster, and correlates replies by connection, generation, ID, and
-type. Reconnecting preserves identity; kicks cancel the intent to rejoin.
-P2P/SFU transitions follow the server protocol without hidden fallback.
+type. Reconnecting preserves identity; kicks cancel the intent to rejoin, and a
+server move is followed only during a call or an admission to one, with a single
+join of the new room and no `VOICE_LEAVE` for the old one, as the full client
+does. While a join awaits its answer, a notice that Light left the room it asked
+for can only concern an earlier stay (a leave the server processed first, as
+when leaving and rejoining the same room, or the room the join of a crossed move
+took it out of), and does not end the admission: the join's own answer decides.
+If the requested room leaves Light's list before that answer, Light gives up on
+it with `VOICE_LEAVE`, so the server keeps no membership an earlier move's join
+created. The same goes for an admission answering a join already given up on,
+such as one a kick crossed: with no other join or call under way, Light sends
+`VOICE_LEAVE`. Since the server ends a call in whatever room it is, that
+`VOICE_LEAVE` never goes out with another join on its way. P2P/SFU transitions
+follow the server protocol without hidden fallback. Protocol reading is tolerant
+(`protocol_reader`): only the fields Light uses are required, and new values of
+the lists the server extends (channel types, status, call health, signal types)
+never refuse the session. Only `VOICE` channels take a call.
 
 `VoiceEngine` retains the ADM, audio processing, and WebRTC factory only during
-a call. Mute stops actual capture; deafen stops capture and playback. A P2P
-participant's SDP/ICE failures are isolated to that participant. Screen audio
-is not mistaken for microphone audio, and another session of the same user's
-audio is not played.
+a call. Mute stops actual capture; deafen stops capture and playback. Without
+the channel's Speak permission the microphone stays closed; in P2P, audio from
+someone who may not speak is not played either. A P2P participant's SDP/ICE
+failures are isolated to that participant. In SFU, so is a microphone that
+cannot be received: the consumer the server created is closed and the call goes
+on. If the server refuses the microphone, the call keeps receiving until the
+next policy change. SFU transport recovery starts over whenever the call is
+healthy again. Screen audio is not mistaken for microphone audio, and another
+session of the same user's audio is not played.
 
 Full-client offers may include video even when Light only wants voice. The
 pinned SDK requires nonempty video capabilities during this negotiation:
@@ -325,8 +361,17 @@ npm run test:light:voice
 This builds the core/server and exercises decoded PCM between native clients
 and between native/Chromium over P2P and SFU. It includes three participants,
 voice policies, room switching, reconnects, kicks, topology changes, invalid
-signaling, and pending/denied microphone permission. Chromium belongs only to
-the interoperability scenario and uses synthetic sources and fake devices.
+signaling, and pending/denied microphone permission. It also includes two
+crossed moves, into rooms Light sees and rooms it cannot see (and from a seen
+room into a hidden one, where the move is lost without leaving a membership on
+the server), a kick that crosses the join behind a move, leaving and rejoining
+the same room inside one round trip, a server with a forum and an idle AFK call,
+a channel without Speak, SFU consume and produce failures, transport drops in a
+row, a core that falls behind, events nobody reads and, on Windows, a closed
+console, with and without the interface, also as Windows 10 and Windows Server
+2022 close it. That last one uses a pseudoconsole, which never opens a window.
+Chromium belongs only to the interoperability scenario and uses synthetic
+sources and fake devices.
 
 To **explicitly exercise the physical microphone** on Windows or Mac:
 

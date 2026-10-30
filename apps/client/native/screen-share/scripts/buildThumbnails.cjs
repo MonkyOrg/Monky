@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { root, execute, write, fingerprint, regularFiles, verify } = require('./buildTools.cjs');
+const { root, execute, write, fingerprint, regularFiles, verify, withBuildLock } = require('./buildTools.cjs');
 const windows = require('./windowsToolchain.cjs');
 const quote = value => {
   assert.equal(/["%!\r\n]/u.test(value), false);
@@ -28,12 +28,13 @@ function options(argv) {
 function build(config) {
   assert.equal(process.platform, 'win32'); assert.equal(process.arch, 'x64');
   const toolchain = windows.resolveWindowsToolchain(config), env = windows.msvcEnvironment(toolchain);
-  const source = path.join(root, 'src', 'thumbnail');
+  const source = path.join(root, 'src', 'thumbnail'), shared = path.join(root, 'src', 'win');
   const sourceFiles = regularFiles(source).map(file => ({ path: file, ...fingerprint(path.join(source, file)) }));
+  // Windows helpers shared with the capture host.
+  const sharedSourceFiles = regularFiles(shared).map(file => ({ path: file, ...fingerprint(path.join(shared, file)) }));
   const sourceRecipe = fingerprint(__filename);
   fs.mkdirSync(config.buildDirectory, { recursive: true });
-  const lock = path.join(config.buildDirectory, 'thumbnail.lock'), handle = fs.openSync(lock, 'wx');
-  try {
+  return withBuildLock(path.join(config.buildDirectory, 'thumbnail.lock'), () => {
     const commands = [];
     for (const [name, input, output] of [
       ['host', 'host.cpp', 'monky-screen-thumbnail.exe'],
@@ -66,15 +67,16 @@ function build(config) {
     assert.ok(Date.now() - started >= 4000 && Date.now() - started < 8000);
     contracts.watchdog = { deviceFree: true, forcedOwnProcessExit: 124, maximumLifetimeMs: 4500 };
     for (const file of sourceFiles) verify(path.join(source, file.path), file);
+    for (const file of sharedSourceFiles) verify(path.join(shared, file.path), file);
     verify(__filename, sourceRecipe);
     const host = path.join(config.buildDirectory, 'monky-screen-thumbnail.exe');
     write(path.join(config.output, 'monky-screen-thumbnail.exe'), fs.readFileSync(host));
     const report = { schemaVersion: 1, host: { path: 'monky-screen-thumbnail.exe', ...fingerprint(host) },
-      sourceFiles, sourceRecipe, contracts, commands, staticCrt: true };
+      sourceFiles, sharedSourceFiles, sourceRecipe, contracts, commands, staticCrt: true };
     write(path.join(config.output, 'thumbnail-build.json'), JSON.stringify(report, null, 2) + '\n');
     console.log(JSON.stringify(report));
     return report;
-  } finally { fs.closeSync(handle); fs.unlinkSync(lock); }
+  });
 }
 module.exports = { build, options };
 if (require.main === module) {

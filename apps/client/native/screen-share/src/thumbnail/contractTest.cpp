@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include "contract.h"
 #include "lifetime.h"
+#include "../win/monitorIdentityChecks.h"
 #include <iostream>
 using namespace monky::thumbnail;
 int main(int argc, char** argv) {
@@ -42,7 +43,7 @@ int main(int argc, char** argv) {
     check(window.window && window.hwnd == 123 && window.pid == 456 && window.creation == 123456789);
     const auto monitor = Parse({L"--monitor", L"\\\\?\\DISPLAY#OWNED", L"\\\\.\\DISPLAY2",
         L"-1920", L"-100", L"1920", L"1080", L"640", L"360"});
-    check(!monitor.window && monitor.left == -1920 && monitor.top == -100 && monitor.width == 1920);
+    check(!monitor.window && monitor.monitor.x == -1920 && monitor.monitor.y == -100 && monitor.monitor.width == 1920);
     for (auto text : {L"", L"0", L"-1", L"+1", L"01", L"1.0", L"1e3", L" 1", L"1 ", L"18446744073709551616"})
       rejects([&] { Parse({L"--window", L"123", L"456", text, L"320", L"180"}); });
     for (auto text : {L"0", L"641", L"999999999999999999999999999"})
@@ -70,6 +71,10 @@ int main(int argc, char** argv) {
     for (unsigned index = 0; index < 10; ++index) { Lifetime lifetime; }
     check(GetProcessHandleCount(GetCurrentProcess(), &after));
     check(before == after);
+    monky::win::checks::RunMonitorIdentityChecks([&](bool value, const char* message) {
+      if (!value) std::cerr << message << '\n';
+      check(value);
+    });
     std::cout << "{\"deviceFree\":true,\"checks\":" << checks << "}\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

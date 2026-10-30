@@ -26,6 +26,7 @@ function isolate(t, language = 'en') {
   const output = [];
   t.mock.method(console, 'log', (...values) => output.push(values.join(' ')));
   t.mock.method(console, 'error', (...values) => output.push(values.join(' ')));
+  t.mock.method(pm2, 'listPm2Processes', () => []);
   t.mock.method(pm2, 'findLegacyProcessFor', () => null);
   t.mock.method(pm2, 'requirePm2', () => true);
   return output;

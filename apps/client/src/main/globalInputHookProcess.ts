@@ -1,9 +1,18 @@
 import { utilityProcess, type BrowserWindow, type UtilityProcess } from 'electron';
 import path from 'path';
 import { globalInputHook as localInputHook } from './globalInputHook';
+import { sendEvent, windowContents } from './ipc/registry';
 import type { ShortcutCommand, ShortcutConfiguration, ShortcutOperation, ShortcutWorkerMessage, ShortcutWorkerRequest } from './shortcutWorkerProtocol';
 
 const RESPONSE_TIMEOUT_MS = 10_000;
+/**
+ * A worker that keeps crashing (a hook blocked by an anti-cheat, antivirus or driver) is restarted
+ * after 1 s, then twice as late each time up to a minute, instead of once per second forever.
+ */
+const RESTART_DELAY_MS = 1000;
+const MAX_RESTART_DELAY_MS = 60_000;
+/** A crash after this much healthy uptime is a new incident and restarts promptly again. */
+const STABLE_UPTIME_MS = 30_000;
 
 /**
  * Chromium's WebRTC keyboard monitor hides focused-window input from a hook in
@@ -17,6 +26,8 @@ export class GlobalInputHookProcess {
   private resolveReady: ((ok: boolean) => void) | null = null;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private consecutiveCrashes = 0;
+  private readySince: number | null = null;
   private nextId = 0;
   private readonly pending = new Map<number, {
     resolve: (ok: boolean) => void;
@@ -62,6 +73,7 @@ export class GlobalInputHookProcess {
         if (message.type === 'ready') {
           if (this.startupTimer) clearTimeout(this.startupTimer);
           this.startupTimer = null;
+          this.readySince = Date.now();
           this.resolveReady?.(true);
           this.resolveReady = null;
         } else if (message.type === 'event') {
@@ -95,6 +107,9 @@ export class GlobalInputHookProcess {
     if (this.child !== child) return;
     this.child = null;
     this.ready = null;
+    const stable = this.readySince !== null && Date.now() - this.readySince >= STABLE_UPTIME_MS;
+    this.consecutiveCrashes = stable ? 1 : this.consecutiveCrashes + 1;
+    this.readySince = null;
     if (this.startupTimer) clearTimeout(this.startupTimer);
     this.startupTimer = null;
     this.resolveReady?.(false);
@@ -105,12 +120,13 @@ export class GlobalInputHookProcess {
     }
     this.pending.clear();
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('ptt:state-changed', false);
+      sendEvent(windowContents(this.mainWindow), 'ptt:state-changed', false);
       if (this.retained) {
+        const delay = Math.min(MAX_RESTART_DELAY_MS, RESTART_DELAY_MS * 2 ** (this.consecutiveCrashes - 1));
         this.restartTimer = setTimeout(() => {
           this.restartTimer = null;
           void this.ensureWorker();
-        }, 1000);
+        }, delay);
         this.restartTimer.unref();
       }
     }
@@ -153,8 +169,10 @@ export class GlobalInputHookProcess {
     this.retained = null;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = null;
+    if (child) this.workerStopped(child);
+    // An intentional stop is not a crash: a later window starts without backoff.
+    this.consecutiveCrashes = 0;
     if (!child) return;
-    this.workerStopped(child);
     try {
       this.send(child, { type: 'shutdown' });
       const timer = setTimeout(() => child.kill(), 1000);

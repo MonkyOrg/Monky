@@ -1,8 +1,10 @@
 #include "application_loop.hpp"
 #include "platform/console_control.hpp"
 
+#include <chrono>
 #include <iostream>
 #include <string_view>
+#include <thread>
 
 int main(int argc, char* argv[]) {
   try {
@@ -25,11 +27,15 @@ int main(int argc, char* argv[]) {
         });
       },
     });
-    if (argc == 2 && std::string_view(argv[1]) == "--stop-with-open-input") {
+    const std::string_view mode = argc == 2 ? std::string_view(argv[1]) : std::string_view();
+    if (mode == "--stop-with-open-input") {
       loop.post([&] { loop.stop(); });
     }
     std::cout << "ready\n" << std::flush;
     loop.run([] { return monky::light::ApplicationLoop::Deadline{}; }, [](auto) {});
+    // Where the core leaves the call and logs out. A closed console must keep
+    // the process alive meanwhile, and still let it end through main.
+    if (mode == "--slow-teardown") std::this_thread::sleep_for(std::chrono::milliseconds(500));
     return exitCode;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

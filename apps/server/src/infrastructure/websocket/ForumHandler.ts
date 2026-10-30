@@ -1,16 +1,17 @@
 import {
   MessageType, ProtocolErrorCode, forumUpdatePostSchema,
-  type ForumPost, type ProtocolMessage, type ForumPostSaved, type ServerAuditChange,
+  type ForumPost, type ServerMessage, type ForumPostSaved, type ServerAuditChange,
 } from '@monky/shared';
 import { ForumError, type ForumService } from '../../application/services/ForumService';
 import type { BotInteractionSession } from './BotInteractionHandler';
 import type { RateLimiter } from '../security/RateLimiter';
 import { Logger } from '../logger/Logger';
+import { toProtocolError } from './protocolErrors';
 
 interface ForumTransport {
   isCurrent(session: BotInteractionSession): boolean;
   version(): number | null;
-  send(session: BotInteractionSession, message: ProtocolMessage): void;
+  send(session: BotInteractionSession, message: ServerMessage): void;
   changed(result: ForumPostSaved): Promise<void>;
   /** Moderation of someone else's post, or pinning and locking, which only managers do. */
   audit?(session: BotInteractionSession, action: 'forum.update' | 'forum.delete', post: ForumPost, changes: ServerAuditChange[]): Promise<void>;
@@ -49,13 +50,8 @@ export class ForumHandler {
       }
       if (this.transport.isCurrent(session)) this.transport.send(session, { type: MessageType.FORUM_POST_SAVED, payload: result, requestId });
     } catch (error) {
-      if (!(error instanceof ForumError)) Logger.error('NETWORK', 'Forum operation failed.', error);
-      if (this.transport.isCurrent(session)) this.transport.send(session, {
-        type: MessageType.SERVER_ERROR, requestId, payload: {
-          code: error instanceof ForumError ? error.code : ProtocolErrorCode.INTERNAL_ERROR,
-          message: error instanceof ForumError ? error.message : 'Forum operation failed.',
-        },
-      });
+      const reply = toProtocolError(error, { message: 'Forum operation failed.', category: 'NETWORK' });
+      if (this.transport.isCurrent(session)) this.transport.send(session, { type: MessageType.SERVER_ERROR, requestId, payload: reply });
     }
   }
 

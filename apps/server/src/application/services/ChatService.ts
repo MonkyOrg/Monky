@@ -7,7 +7,7 @@ import {
   ProtocolErrorCode,
   Permission,
   attachmentCaptionSchema,
-  hasEveryoneMention,
+  MentionMatcher,
   messageContentSchema,
   createMessageContentSchema,
   messageBlocksSchema,
@@ -29,7 +29,7 @@ import {
   type MessageForward,
 } from '@monky/shared';
 import { z } from 'zod';
-import { BotRecord, MentionRecord, MessageRecord } from '../../domain/entities';
+import { BotRecord, MentionRecord, MessageRecord, NativePollRecord } from '../../domain/entities';
 import {
   IChannelRepository,
   IMentionRepository,
@@ -48,6 +48,27 @@ export type BotMessageResult =
 
 function isMessageChannel(type: string): boolean {
   return type === 'TEXT' || type === 'VOICE';
+}
+
+/**
+ * Which messages one reader may see, for the length of one call. Each channel
+ * is checked once and the polls of a page are looked up together, instead of a
+ * dozen reads for every message (S-APP-5).
+ */
+interface MessageViewer {
+  canView(record: MessageRecord): Promise<boolean>;
+  visible(records: MessageRecord[]): Promise<MessageRecord[]>;
+}
+
+/**
+ * The newest `limit` messages, oldest first, plus the older ones sharing the
+ * oldest kept millisecond: that timestamp is the client's next
+ * `beforeTimestamp`, which would skip them (S-APP-11).
+ */
+function newestPage(messages: MessageRecord[], limit: number): MessageRecord[] {
+  let start = Math.max(0, messages.length - limit);
+  while (start > 0 && messages[start - 1].createdAt === messages[start].createdAt) start--;
+  return messages.slice(start);
 }
 
 const forwardRequestSchema = z.object({ sourceMessageId: messageReferenceSchema.optional() }).strict();
@@ -70,6 +91,12 @@ export class ChatService {
      */
     private canUserAccessChannel: (userId: string, channelId: string, permission?: Permission) => Promise<boolean>,
     private canUserReadMessages: (userId: string, channelId: string) => Promise<boolean>,
+    /**
+     * The members among `userIds` who may read a channel, checked together so
+     * that an @everyone mention costs the same few reads with any number of
+     * members (S-APP-5).
+     */
+    private readersOf: (channelId: string, userIds: string[]) => Promise<ReadonlySet<string>>,
     private readonly polls?: NativePollService,
   ) {}
 
@@ -106,6 +133,11 @@ export class ChatService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
     }
     const existing = messageId ? await this.messageRepo.findById(messageId) : null;
+    // Posts arrive as CHAT_MESSAGE, which the client announces to whoever they mention, so
+    // they record those mentions too, once. Command responses are shown without a cue.
+    const mentioned = existing || botCommand ? [] : await this.mentionedMembers(bot.id, channelId,
+      [parsed.data, ...Object.values(variants.data ?? {}).filter((text): text is string => text !== undefined)],
+      server?.allowEveryoneMention !== false);
     if (!await this.canUserAccessChannel(accessUserId, channelId, Permission.SEND_MESSAGES)) {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Publicação não permitida neste canal.' };
     }
@@ -128,7 +160,7 @@ export class ChatService {
       replyToMessageId,
       localizations: variants.data,
     };
-    const persisted = await this.messageRepo.createBotMessage(record);
+    const persisted = await this.messageRepo.createBotMessage(record, ChatService.mentionRows(record, mentioned));
     if (!persisted) {
       return { success: false, errorCode: ProtocolErrorCode.UNAUTHORIZED, errorMessage: 'Bot indisponível.' };
     }
@@ -141,10 +173,47 @@ export class ChatService {
   }
 
   private async canViewMessage(viewerUserId: string | undefined, record: MessageRecord): Promise<boolean> {
-    if (viewerUserId && !await this.canUserReadMessages(viewerUserId, record.channelId)) return false;
-    if (!viewerUserId || !this.polls) return true;
-    const poll = this.polls.repository.findByMessageId(record.id);
-    return !poll || await this.polls.canView(viewerUserId, poll);
+    return this.messageViewer(viewerUserId).canView(record);
+  }
+
+  private messageViewer(viewerUserId: string | undefined): MessageViewer {
+    // Internal reads without a reader see everything.
+    if (!viewerUserId) return { canView: async () => true, visible: async (records) => records };
+    const userId = viewerUserId;
+    const readable = new Map<string, Promise<boolean>>();
+    const polls = new Map<string, NativePollRecord | null>();
+    const canView = async (record: MessageRecord): Promise<boolean> => {
+      let allowed = readable.get(record.channelId);
+      if (!allowed) {
+        allowed = this.canUserReadMessages(userId, record.channelId);
+        readable.set(record.channelId, allowed);
+      }
+      if (!await allowed) return false;
+      if (!this.polls) return true;
+      let poll = polls.get(record.id);
+      if (poll === undefined) {
+        poll = this.polls.repository.findByMessageId(record.id) ?? null;
+        polls.set(record.id, poll);
+      }
+      return !poll || await this.polls.canView(userId, poll);
+    };
+    return {
+      canView,
+      visible: async (records) => {
+        const unknown = records.filter((record) => !polls.has(record.id));
+        if (this.polls && unknown.length > 0) {
+          for (const record of unknown) polls.set(record.id, null);
+          for (const poll of this.polls.repository.findByMessageIds(unknown.map((record) => record.id))) {
+            polls.set(poll.messageId, poll);
+          }
+        }
+        const visible: MessageRecord[] = [];
+        for (const record of records) {
+          if (await canView(record)) visible.push(record);
+        }
+        return visible;
+      },
+    };
   }
 
   private async isValidReply(
@@ -192,7 +261,9 @@ export class ChatService {
     return { source: `#${sourceChannel.name}`.slice(0, MESSAGE_FORWARD_SOURCE_MAX_LENGTH), createdAt: source.createdAt };
   }
 
-  private async resolveBlocks(record: MessageRecord, viewerUserId?: string): Promise<ResolvedMessageBlock[] | undefined> {
+  private async resolveBlocks(
+    record: MessageRecord, viewerUserId?: string, viewer = this.messageViewer(viewerUserId),
+  ): Promise<ResolvedMessageBlock[] | undefined> {
     if (!record.blocks || record.deletedAt) return undefined;
     const resolved: ResolvedMessageBlock[] = [];
     for (const block of record.blocks) {
@@ -200,17 +271,19 @@ export class ChatService {
         resolved.push(block);
         continue;
       }
-      const reply = await this.resolveReply({ ...record, replyToMessageId: block.messageId }, viewerUserId);
+      const reply = await this.resolveReply({ ...record, replyToMessageId: block.messageId }, viewerUserId, viewer);
       if (reply) resolved.push({ ...block, reply });
     }
     return resolved.length > 0 ? resolved : undefined;
   }
 
-  private async resolveReply(record: MessageRecord, viewerUserId?: string): Promise<MessageReply | undefined> {
+  private async resolveReply(
+    record: MessageRecord, viewerUserId?: string, viewer = this.messageViewer(viewerUserId),
+  ): Promise<MessageReply | undefined> {
     if (!record.replyToMessageId || record.deletedAt) return undefined;
     const original = await this.messageRepo.findById(record.replyToMessageId);
     // A dangling/cross-channel reference must never reveal any original data.
-    if (original && original.channelId === record.channelId && !await this.canViewMessage(viewerUserId, original)) {
+    if (original && original.channelId === record.channelId && !await viewer.canView(original)) {
       return undefined;
     }
     if (!original || original.channelId !== record.channelId || original.deletedAt) {
@@ -405,7 +478,8 @@ export class ChatService {
       forwarded,
     };
 
-    const mentions = await this.collectMentions(user.id, channelId, messageRecord);
+    const mentions = ChatService.mentionRows(messageRecord,
+      await this.mentionedMembers(user.id, channelId, [messageRecord.content], server?.allowEveryoneMention !== false));
     if (!await this.canUserAccessChannel(userId, channelId, Permission.SEND_MESSAGES) ||
         attachmentIds?.length && !await this.canUserAccessChannel(userId, channelId, Permission.ATTACH_FILES)) {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Envio não permitido neste canal.' };
@@ -601,56 +675,52 @@ export class ChatService {
   public async expireDeletedMessages(): Promise<void> {
     const now = Date.now();
     const messageIds = await this.messageRepo.listExpiredDeletionMessageIds(now);
+    // Swept every few seconds; an undo backup only expires with its message (S-APP-3).
+    if (messageIds.length === 0) return;
     this.polls?.deleteForMessages(messageIds);
+    // Before the purge below stops listing them, so a failure is retried on the next sweep.
+    await this.attachmentService.purgeForMessages(messageIds);
     await this.messageRepo.purgeExpiredDeletions(now);
   }
 
   /**
-   * Detects @-mentions in a message and persists an unread mention row for every
-   * mentioned user except the author (#14). Matching mirrors the client dropup:
-   * a case-insensitive substring `@<nickname>` (nicknames may contain spaces, so
-   * a token split is not reliable). Returns the list of mentioned user ids so the
-   * caller can notify online users in real time.
+   * The members a message mentions (#14), among those who may read its channel, never
+   * its author. `MentionMatcher` is the same rule the client uses for the cue, the @
+   * badge and the highlight, over the same names — members only, so presence never
+   * changes who a message mentions — and whoever is pinged sees the mention marked.
+   * Whoever any of `texts` mentions counts: a bot may word a post differently in
+   * each language.
    *
    * `@todos` / `@everyone` mentions everyone who can see the channel, when the
    * server allows it (#464).
    */
-  private async collectMentions(
+  private async mentionedMembers(
     authorId: string,
     channelId: string,
-    message: MessageRecord
-  ): Promise<MentionRecord[]> {
-    const lowerContent = message.content.toLowerCase();
-    if (!lowerContent.includes('@')) return [];
+    texts: readonly string[],
+    allowEveryone: boolean,
+  ): Promise<string[]> {
+    const written = texts.filter(text => text.includes('@'));
+    if (!written.length) return [];
 
     const allUsers = await this.userRepo.listAll();
-    const mentions: MentionRecord[] = [];
+    const matcher = new MentionMatcher(allUsers.map(candidate => candidate.nickname), { everyone: allowEveryone });
+    const found = written.flatMap(text => matcher.find(text));
+    if (!found.length) return [];
+    const mentionsEveryone = found.some(mention => mention.everyone);
+    const named = new Set(found.map(mention => mention.name.toLowerCase()));
 
-    let mentionsEveryone = hasEveryoneMention(message.content);
-    if (mentionsEveryone) {
-      const server = await this.serverRepo.getServer();
-      if (server?.allowEveryoneMention === false) mentionsEveryone = false;
-    }
+    const candidates = allUsers.filter(candidate => candidate.id !== authorId
+      && (mentionsEveryone || named.has(candidate.nickname.trim().toLowerCase())));
+    const readers = await this.readersOf(channelId, candidates.map(candidate => candidate.id));
+    return candidates.filter(candidate => readers.has(candidate.id)).map(candidate => candidate.id);
+  }
 
-    for (const candidate of allUsers) {
-      if (candidate.id === authorId) continue;
-
-      const nickname = candidate.nickname.trim().toLowerCase();
-      if (!mentionsEveryone && !(nickname && lowerContent.includes('@' + nickname))) continue;
-      if (!(await this.canUserReadMessages(candidate.id, channelId))
-        || !(await this.canUserAccessChannel(candidate.id, channelId))) continue;
-
-      const mention: MentionRecord = {
-        id: uuidv4(),
-        userId: candidate.id,
-        channelId,
-        messageId: message.id,
-        createdAt: message.createdAt,
-      };
-      mentions.push(mention);
-    }
-
-    return mentions;
+  /** The unread mention rows (#14) a stored message leaves for these members. */
+  private static mentionRows(message: MessageRecord, userIds: readonly string[]): MentionRecord[] {
+    return userIds.map(userId => ({
+      id: uuidv4(), userId, channelId: message.channelId, messageId: message.id, createdAt: message.createdAt,
+    }));
   }
 
   /** Clears unread mentions for a user in a channel when they open it (#14). */
@@ -668,27 +738,26 @@ export class ChatService {
     const boundedLimit = Number.isFinite(limit)
       ? Math.max(1, Math.min(LIMITS.MAX_HISTORY_MESSAGES_INITIAL, Math.floor(limit)))
       : LIMITS.MAX_HISTORY_MESSAGES_INITIAL;
+    const viewer = this.messageViewer(viewerUserId);
     const target = aroundMessageId ? await this.messageRepo.findById(aroundMessageId) : null;
-    if (aroundMessageId && (!target || target.channelId !== channelId ||
-        !await this.canViewMessage(viewerUserId, target))) return [];
+    if (aroundMessageId && (!target || target.channelId !== channelId || !await viewer.canView(target))) return [];
     const rawMessages = target
       ? [...(boundedLimit > 1
         ? await this.messageRepo.listByChannel(channelId, LIMITS.MAX_HISTORY_MESSAGES_INITIAL, target.createdAt)
         : []), target]
       : await this.messageRepo.listByChannel(channelId, LIMITS.MAX_HISTORY_MESSAGES_INITIAL, beforeTimestamp);
-    const visible: MessageRecord[] = [];
-    for (const message of rawMessages) {
-      if (await this.canViewMessage(viewerUserId, message)) visible.push(message);
-    }
-    return this.hydrateMessages(visible.slice(-boundedLimit), viewerUserId);
+    return this.hydrateVisible(newestPage(await viewer.visible(rawMessages), boundedLimit), viewerUserId, viewer);
   }
 
   /** Shared by history and search so replies, blocks and deleted content have one policy. */
   public async hydrateMessages(rawMessages: MessageRecord[], viewerUserId?: string): Promise<ChatMessage[]> {
-    const visibleMessages: MessageRecord[] = [];
-    for (const message of rawMessages) {
-      if (await this.canViewMessage(viewerUserId, message)) visibleMessages.push(message);
-    }
+    const viewer = this.messageViewer(viewerUserId);
+    return this.hydrateVisible(await viewer.visible(rawMessages), viewerUserId, viewer);
+  }
+
+  private async hydrateVisible(
+    visibleMessages: MessageRecord[], viewerUserId: string | undefined, viewer: MessageViewer,
+  ): Promise<ChatMessage[]> {
     const uniqueUserIds = [...new Set(visibleMessages.map((m) => m.userId))];
     const users = await this.userRepo.findByIds(uniqueUserIds);
     const userMap = new Map(users.map((u) => [u.id, u]));
@@ -724,8 +793,8 @@ export class ChatService {
         deletedByUserId: m.deletedByUserId,
         deleteUndoUntil: m.deleteUndoUntil,
         reactions: reactionsByMessage.get(m.id) ?? [],
-        reply: await this.resolveReply(m, viewerUserId),
-        blocks: await this.resolveBlocks(m, viewerUserId),
+        reply: await this.resolveReply(m, viewerUserId, viewer),
+        blocks: await this.resolveBlocks(m, viewerUserId, viewer),
         poll: pollsByMessage.get(m.id),
         ...(m.forwarded ? { forwarded: m.forwarded } : {}),
       };

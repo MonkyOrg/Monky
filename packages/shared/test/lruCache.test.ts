@@ -1,58 +1,54 @@
-import assert from 'node:assert';
-import { LruCache } from '../dist/index.js';
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { LruCache } from '../src/index.js';
 
-console.log('=== Início dos Testes de LruCache ===');
+test('LruCache returns stored values and reports its size', () => {
+  const cache = new LruCache<string, number>(3, 10000);
+  cache.set('a', 1);
+  cache.set('b', 2);
+  assert.equal(cache.get('a'), 1);
+  assert.equal(cache.get('b'), 2);
+  assert.equal(cache.get('c'), undefined);
+  assert.equal(cache.size, 2);
+});
 
-// 1. Basic get/set
-const cache = new LruCache<string, number>(3, 10000);
-cache.set('a', 1);
-cache.set('b', 2);
-assert.strictEqual(cache.get('a'), 1);
-assert.strictEqual(cache.get('b'), 2);
-assert.strictEqual(cache.get('c'), undefined);
-assert.strictEqual(cache.size, 2);
-console.log('✔ get / set básicos funcionam');
+test('LruCache evicts the least recently used entry at capacity', () => {
+  const cache = new LruCache<string, string>(2, 10000);
+  cache.set('k1', 'v1');
+  cache.set('k2', 'v2');
+  assert.equal(cache.get('k1'), 'v1');
+  cache.set('k3', 'v3');
+  assert.equal(cache.get('k1'), 'v1');
+  assert.equal(cache.get('k2'), undefined, 'k2 was the least recently used entry');
+  assert.equal(cache.get('k3'), 'v3');
+  assert.equal(cache.size, 2);
+});
 
-// 2. LRU Eviction
-const lru = new LruCache<string, string>(2, 10000);
-lru.set('k1', 'v1');
-lru.set('k2', 'v2');
-assert.strictEqual(lru.get('k1'), 'v1'); // k1 accessed, k2 is oldest
-lru.set('k3', 'v3'); // should evict k2
+test('LruCache keeps an entry until its exact expiry time and drops it 1 ms later', t => {
+  // A simulated clock: a busy runner cannot age the entry between two lines of the test.
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000 });
+  const cache = new LruCache<string, string>(5, 50);
+  cache.set('read', 'value');
+  cache.set('checked', 'value');
+  t.mock.timers.tick(50);
+  assert.equal(cache.get('read'), 'value', 'An entry is still valid at exactly its expiry time');
+  assert.equal(cache.has('checked'), true, 'An entry is still valid at exactly its expiry time');
+  t.mock.timers.tick(1);
+  assert.equal(cache.get('read'), undefined);
+  assert.equal(cache.has('checked'), false);
+  assert.equal(cache.size, 0, 'Reading an expired entry removes it');
+});
 
-assert.strictEqual(lru.get('k1'), 'v1');
-assert.strictEqual(lru.get('k2'), undefined);
-assert.strictEqual(lru.get('k3'), 'v3');
-assert.strictEqual(lru.size, 2);
-console.log('✔ Descarte LRU funciona corretamente');
-
-// 3. TTL Expiry
-async function testTtl() {
-  const ttlCache = new LruCache<string, string>(5, 50);
-  ttlCache.set('temp', 'value');
-  assert.strictEqual(ttlCache.has('temp'), true);
-  assert.strictEqual(ttlCache.get('temp'), 'value');
-
-  await new Promise((resolve) => setTimeout(resolve, 60));
-
-  assert.strictEqual(ttlCache.has('temp'), false);
-  assert.strictEqual(ttlCache.get('temp'), undefined);
-  console.log('✔ Expiração passiva por TTL funciona');
-}
-
-// 4. Utility methods
-const utilCache = new LruCache<string, number>(5, 10000);
-utilCache.set('x', 10);
-utilCache.set('y', 20);
-assert.strictEqual(utilCache.has('x'), true);
-assert.strictEqual(utilCache.has('z'), false);
-assert.strictEqual(utilCache.delete('x'), true);
-assert.strictEqual(utilCache.has('x'), false);
-assert.strictEqual(utilCache.size, 1);
-utilCache.clear();
-assert.strictEqual(utilCache.size, 0);
-console.log('✔ Métodos has, delete e clear funcionam');
-
-testTtl().then(() => {
-  console.log('=== Todos os testes do LruCache passaram com sucesso! ===');
+test('LruCache has, delete and clear manage entries explicitly', () => {
+  const cache = new LruCache<string, number>(5, 10000);
+  cache.set('x', 10);
+  cache.set('y', 20);
+  assert.equal(cache.has('x'), true);
+  assert.equal(cache.has('z'), false);
+  assert.equal(cache.delete('x'), true);
+  assert.equal(cache.has('x'), false);
+  assert.equal(cache.size, 1);
+  cache.clear();
+  assert.equal(cache.size, 0);
+  assert.throws(() => new LruCache<string, number>(0), /maxEntries must be greater than 0/);
 });

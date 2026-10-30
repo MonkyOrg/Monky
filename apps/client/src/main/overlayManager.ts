@@ -1,20 +1,20 @@
-import { BrowserWindow, screen } from 'electron';
+import { BrowserWindow, screen, type WebContents } from 'electron';
 import { setWindowResizeAspect } from '@monky/screen-audio';
 import path from 'path';
-import { pathToFileURL } from 'url';
 import {
   OVERLAY_DEFAULT_WIDTH,
   OVERLAY_DEFAULT_HEIGHT,
   getOverlayCardSize,
+  overlaySignalPayloadSchema,
 } from '@monky/shared';
 import type {
   OverlayBounds,
   OverlayCardLayout,
   OverlayConfig,
   OverlayPosition,
-  OverlaySignalPayload,
   OverlaySyncState,
 } from '@monky/shared';
+import { sendEvent, windowContents } from './ipc/registry';
 
 const DEFAULT_OVERLAY_WIDTH = OVERLAY_DEFAULT_WIDTH;
 const DEFAULT_OVERLAY_HEIGHT = OVERLAY_DEFAULT_HEIGHT;
@@ -41,6 +41,11 @@ export class OverlayManager {
 
   public isOpen(): boolean {
     return !!this.overlayWindow && !this.overlayWindow.isDestroyed();
+  }
+
+  /** The overlay's page while it is open: the only one its IPC policy admits besides the main window. */
+  public contents(): WebContents | null {
+    return windowContents(this.overlayWindow);
   }
 
   public isScreenShareSource(sourceId: string): boolean {
@@ -90,7 +95,8 @@ export class OverlayManager {
       backgroundColor: '#00000000',
       show: false,
       webPreferences: {
-        preload: path.join(__dirname, '../preload/preload.js'),
+        // A dedicated preload: the overlay only draws the call (E-MAIN-1).
+        preload: path.join(__dirname, '../preload/overlayPreload.js'),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: false,
@@ -104,16 +110,11 @@ export class OverlayManager {
     this.overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     this.overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-    if (process.env.VITE_DEV_SERVER_URL) {
-      const devUrl = new URL(process.env.VITE_DEV_SERVER_URL);
-      devUrl.searchParams.set('overlay', '1');
-      this.overlayWindow.loadURL(devUrl.toString());
-    } else {
-      const distHtmlPath = path.join(__dirname, '../../dist/index.html');
-      const fileUrl = pathToFileURL(distHtmlPath);
-      fileUrl.searchParams.set('overlay', '1');
-      this.overlayWindow.loadURL(fileUrl.toString());
-    }
+    // Its own page (overlay.html): the overlay never loads the app (R-MEDIA-3).
+    const loaded = process.env.VITE_DEV_SERVER_URL
+      ? this.overlayWindow.loadURL(new URL('overlay.html', process.env.VITE_DEV_SERVER_URL).toString())
+      : this.overlayWindow.loadFile(path.join(__dirname, '../../dist/overlay.html'));
+    loaded.catch((error: unknown) => console.warn('[Overlay] Could not load the overlay page:', error));
 
     this.overlayWindow.once('ready-to-show', () => {
       if (this.overlayWindow === openedWindow && !openedWindow.isDestroyed()) {
@@ -221,7 +222,7 @@ export class OverlayManager {
         point.y < b.y + b.height;
       if (inside || inside !== this.isHovered) {
         this.isHovered = inside;
-        this.overlayWindow.webContents.send('overlay:hover-changed', inside, { x: point.x - b.x, y: point.y - b.y });
+        sendEvent(windowContents(this.overlayWindow), 'overlay:hover-changed', inside, { x: point.x - b.x, y: point.y - b.y });
       }
     }, 120);
   }
@@ -237,7 +238,7 @@ export class OverlayManager {
   private setResizing(resizing: boolean): void {
     if (this.isResizing === resizing) return;
     this.isResizing = resizing;
-    this.overlayWindow?.webContents.send('overlay:resize-state-changed', resizing);
+    sendEvent(windowContents(this.overlayWindow), 'overlay:resize-state-changed', resizing);
   }
 
   public setConfig(configPartial: Partial<OverlayConfig>): void {
@@ -333,16 +334,12 @@ export class OverlayManager {
     return { ...this.currentConfig.bounds };
   }
 
-  public sendSignal(payload: OverlaySignalPayload): void {
-    if (payload.target === 'overlay') {
-      if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-        this.overlayWindow.webContents.send('overlay:signal-received', payload.signal);
-      }
-    } else if (payload.target === 'main') {
-      if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-        this.mainWindow.webContents.send('overlay:signal-received', payload.signal);
-      }
-    }
+  /** Relays the video link negotiation between the main window and the overlay (R-MEDIA-2). */
+  public sendSignal(input: unknown): void {
+    const payload = overlaySignalPayloadSchema.safeParse(input);
+    if (!payload.success) throw new Error('Invalid overlay signal.');
+    const window = payload.data.target === 'overlay' ? this.overlayWindow : this.mainWindow;
+    sendEvent(windowContents(window), 'overlay:signal-received', payload.data.signal);
   }
 
   public sendSyncState(state: OverlaySyncState): void {
@@ -351,23 +348,17 @@ export class OverlayManager {
         this.resizeAspect = undefined;
         this.updateResizeAspect();
       }
-      this.overlayWindow.webContents.send('overlay:sync-state-received', state);
+      sendEvent(windowContents(this.overlayWindow), 'overlay:sync-state-received', state);
     }
   }
 
   private notifyStateChanged(isOpen: boolean): void {
-    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('overlay:state-changed', isOpen);
-    }
+    sendEvent(windowContents(this.mainWindow), 'overlay:state-changed', isOpen);
   }
 
   private notifyConfigUpdated(config: OverlayConfig): void {
-    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('overlay:config-updated', config);
-    }
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      this.overlayWindow.webContents.send('overlay:config-updated', config);
-    }
+    sendEvent(windowContents(this.mainWindow), 'overlay:config-updated', config);
+    sendEvent(windowContents(this.overlayWindow), 'overlay:config-updated', config);
   }
 
   private getInitialBounds(config: OverlayConfig): OverlayBounds {

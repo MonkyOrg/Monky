@@ -61,6 +61,7 @@ function fixture(t) {
     } };
     if (name.endsWith('voiceStore')) return { voiceStore: { getEffectiveDeafened: () => false } };
     if (name.endsWith('audioPreferences')) return { normalizeAudioOutputId: value => value };
+    if (name.endsWith('audioOutputRouting')) return { effectiveAudioOutput: () => 'default' };
     if (name.endsWith('AudioOutputSink')) return { setAudioOutputSink: async (target, value) => {
       if (target.setSinkId) await target.setSinkId(value);
     } };

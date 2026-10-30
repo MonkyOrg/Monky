@@ -1,9 +1,11 @@
-import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NativePollRecord, NativePollVoterRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NativePollRecord, NativePollVoterRecord, NewServerRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
 import type { BotSelector } from '@monky/shared';
 import type { BotSettingsRecord } from './entities';
 
 export interface IBotPermissionRepository {
   findById(botId: string): import('@monky/shared').BotPermissions | undefined;
+  /** Every bot with its stored state, keyed by bot id. */
+  listAll(): Map<string, import('@monky/shared').BotPermissions>;
   save(botId: string, permissions: import('@monky/shared').BotPermissions): void;
   transaction<T>(operation: () => T): T;
 }
@@ -55,7 +57,7 @@ export interface IBotSelectorRepository {
 
 export interface IServerRepository {
   getServer(): Promise<ServerRecord | null>;
-  createServer(server: ServerRecord): Promise<void>;
+  createServer(server: NewServerRecord): Promise<void>;
   updateServer(server: Partial<ServerRecord>): Promise<void>;
 }
 
@@ -130,7 +132,8 @@ export interface IMessageRepository {
   createChatMessage(message: MessageRecord, attachmentIds: string[], mentions: MentionRecord[]): Promise<{
     message: MessageRecord; created: boolean;
   } | null>;
-  createBotMessage(message: MessageRecord): Promise<MessageRecord | null>;
+  /** Stores a bot post with its mentions; a retry returns the first copy without recording them again. */
+  createBotMessage(message: MessageRecord, mentions?: MentionRecord[]): Promise<MessageRecord | null>;
   setReaction(messageId: string, userId: string, emoji: string, add: boolean): Promise<'changed' | 'unchanged' | 'limit' | 'invalid'>;
   listReactions(messageIds: string[]): Promise<import('./entities').MessageReactionRecord[]>;
   create(message: MessageRecord): Promise<void>;
@@ -195,6 +198,13 @@ export interface IAttachmentRepository {
   deleteById(id: string): Promise<void>;
   /** All on-disk filenames still referenced by non-evicted rows (reconciliation). */
   listActiveFilenames(): Promise<string[]>;
+  /** Everything posted in a channel and, for a forum, in its topics. */
+  listByChannelWithTopics(channelId: string): Promise<AttachmentRecord[]>;
+  /**
+   * Rows nothing can show anymore: their channel (or a topic's forum) is gone,
+   * or their message is gone or deleted beyond its undo window at `now`.
+   */
+  listUnreachable(now: number): Promise<AttachmentRecord[]>;
 }
 
 export interface IRoleRepository {

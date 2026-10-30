@@ -4,11 +4,13 @@ const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { root, execute, write, fingerprint, verify, regularFiles } = require('./buildTools.cjs');
+const { root, execute, write, fingerprint, verify, regularFiles, withBuildLock } = require('./buildTools.cjs');
 const windowsToolchain = require('./windowsToolchain.cjs');
 
 const vendor = path.join(root, 'src', 'vendor', 'obs');
 const source = path.join(root, 'src', 'capture');
+// Windows helpers shared with the thumbnail host.
+const shared = path.join(root, 'src', 'win');
 const inputs = require(path.join(vendor, 'sources.json'));
 const runtimeInputs = require(path.join(vendor, 'runtime-inputs.json'));
 const additionalInputs = require(path.join(source, 'runtime-additions.json'));
@@ -48,6 +50,7 @@ function build(config) {
   const stock = fs.realpathSync(config.stock), dependencies = fs.realpathSync(config.dependencies);
   const stockPath = relative => path.join(stock, ...relative.split('\\'));
   const sourceFiles = regularFiles(source).map(relative => ({ path: relative, ...fingerprint(path.join(source, relative)) }));
+  const sharedSourceFiles = regularFiles(shared).map(relative => ({ path: relative, ...fingerprint(path.join(shared, relative)) }));
   for (const file of inputs.files) verify(path.join(vendor, file.path), file);
   for (const file of inputs.dependencies.files) verify(path.join(dependencies, file.path), file);
   assert.equal(additionalInputs.obsVersion, inputs.version);
@@ -60,8 +63,7 @@ function build(config) {
   assert.ok(fs.existsSync(job), 'Build the RTC toolchain before the capture host.');
   const buildDirectory = config.buildDirectory ?? path.join(root, 'build', 'capture-production');
   fs.mkdirSync(buildDirectory, { recursive: true });
-  const lock = path.join(buildDirectory, 'capture.lock'), handle = fs.openSync(lock, 'wx');
-  try {
+  return withBuildLock(path.join(buildDirectory, 'capture.lock'), () => {
     const commands = [];
     const run = (name, executable, args) => {
       const output = execute(executable, args, { cwd: buildDirectory, env, capture: true });
@@ -283,6 +285,7 @@ function build(config) {
     for (const file of inputs.files) verify(path.join(vendor, file.path), file);
     for (const file of runtime) verify(runtimeSource(file.path), file);
     for (const file of sourceFiles) verify(path.join(source, file.path), file);
+    for (const file of sharedSourceFiles) verify(path.join(shared, file.path), file);
     const bin = config.output ?? path.join(root, 'bin', 'win32-x64');
     for (const file of runtime) write(path.join(bin, 'obs', ...file.path.split('\\')), fs.readFileSync(runtimeSource(file.path)));
     for (const probe of ['obs-amf-test.exe', 'obs-nvenc-test.exe'])
@@ -299,7 +302,7 @@ function build(config) {
     }
     const report = {
       schemaVersion: 5, obsVersion: inputs.version, obsRevision: inputs.revision, runtime, av1Runtime,
-      sourceFiles,
+      sourceFiles, sharedSourceFiles,
       sourceBindingRecipe: fingerprint(path.join(__dirname, 'captureSourceBindings.cjs')),
       crt: { version: crt.version, files: redistributables },
       host: { path: 'monky-screen-capture.exe', ...fingerprint(executable) },
@@ -319,9 +322,7 @@ function build(config) {
     console.log(JSON.stringify({ captureBuilt: true, checks: contracts.checks, runtimeFiles: runtime.length,
       runtimeBytes: runtime.reduce((sum, file) => sum + file.bytes, 0), host: report.host, module: report.module }));
     return report;
-  } finally {
-    fs.closeSync(handle); fs.unlinkSync(lock);
-  }
+  });
 }
 
 module.exports = { options, build };

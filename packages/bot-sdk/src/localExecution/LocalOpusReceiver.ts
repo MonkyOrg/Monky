@@ -1,7 +1,7 @@
 import { RTCPeerConnection, SessionDescription, type RTCDataChannel } from 'werift';
 import {
   LOCAL_EXECUTION_PROTOCOL_LIMITS, LOCAL_MEDIA_FORMAT, LOCAL_MEDIA_MAX_RECORD_BYTES, LOCAL_MEDIA_PROTOCOL,
-  advanceLocalMediaFlow, assertLocalMediaChannel, createLocalMediaFlowState, decodeLocalMediaRecord,
+  advanceLocalMediaFlow, assertLocalMediaChannel, createLocalMediaFlowState, decodeLocalMediaRecord, deferred,
   encodeLocalMediaRecord, isLocalMediaSdp, localMediaGenerationSchema, localMediaSignalSchema,
   type BotVoiceAuth, type LocalMediaRecord, type LocalMediaSignal,
 } from '@monky/shared';
@@ -31,13 +31,12 @@ const toError = (error: unknown): Error => error instanceof Error ? error : new 
 /** A private, data-only answerer, independent of the bot's room audio publisher. */
 export class LocalOpusReceiver {
   readonly frames: AsyncIterable<Uint8Array>;
-  readonly drained: Promise<void>;
+  private readonly drain = deferred<void>();
+  readonly drained = this.drain.promise;
   private readonly options: LocalOpusReceiverOptions;
   private readonly pc: RTCPeerConnection;
   private readonly subscriptions: (() => void)[] = [];
   private readonly timer: ReturnType<typeof setTimeout>;
-  private resolveDrained!: () => void;
-  private rejectDrained!: (error: Error) => void;
   private channel?: RTCDataChannel;
   private flow = createLocalMediaFlowState();
   private packets: Uint8Array[] = [];
@@ -68,10 +67,6 @@ export class LocalOpusReceiver {
     this.pc = new RTCPeerConnection({
       iceServers: media.iceServers, bundlePolicy: 'max-bundle',
       codecs: { audio: [], video: [] }, maxMessageSize: LOCAL_MEDIA_MAX_RECORD_BYTES,
-    });
-    this.drained = new Promise<void>((resolve, reject) => {
-      this.resolveDrained = resolve;
-      this.rejectDrained = reject;
     });
     // A transport can fail before the parent has attached its playback consumer.
     void this.drained.catch(() => undefined);
@@ -294,7 +289,7 @@ export class LocalOpusReceiver {
     if (drained || finalSequence === null || playedFrames !== finalSequence ||
         consumedFrames !== finalSequence || this.packets.length) return;
     this.sendRecord({ kind: 'drainAck', finalSequence });
-    this.resolveDrained();
+    this.drain.resolve();
   }
 
   private sendSignal(signal: LocalMediaSignal['signal']): void {
@@ -430,7 +425,7 @@ export class LocalOpusReceiver {
     for (const job of this.signalQueue) job.reject(cancelled);
     this.signalQueue = [];
     if (reason) {
-      this.rejectDrained(reason);
+      this.drain.reject(reason);
       this.pendingRead?.reject(reason);
     } else {
       this.pendingRead?.resolve({ done: true, value: undefined });

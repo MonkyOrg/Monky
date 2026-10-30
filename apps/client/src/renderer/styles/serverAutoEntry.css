@@ -31,11 +31,6 @@
   flex-shrink: 0;
 }
 
-.server-auto-entry-control input:focus-visible + .toggle-slider {
-  outline: 2px solid var(--accent-primary);
-  outline-offset: 3px;
-}
-
 .server-auto-entry-control input:disabled + .toggle-slider {
   opacity: 0.5;
   cursor: not-allowed;

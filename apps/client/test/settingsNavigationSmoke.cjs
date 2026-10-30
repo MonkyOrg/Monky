@@ -93,6 +93,7 @@ if (!process.versions.electron) {
     if (overlayWindowOnly) {
       const { runOverlayWindowSmoke, runOverlayConfigPositionSmoke } = require('./overlayWindowSmoke.cjs');
       const { runOverlayParticipantSmoke } = require('./overlayParticipantSmoke.cjs');
+      const { runOverlayLinkSmoke } = require('./overlayLinkSmoke.cjs');
       let checks = 0;
       for (const [width, height] of [[600, 400], [340, 240]]) {
         window.setContentSize(width, height);
@@ -110,7 +111,8 @@ if (!process.versions.electron) {
             (await window.webContents.capturePage()).toPNG());
         }
       }
-      console.log(`Overlay window: ${checks} checks passed, frame/resize/drag/controls, no media capture`);
+      checks += await evaluate(`(${runOverlayLinkSmoke.toString()})()`);
+      console.log(`Overlay window: ${checks} checks passed, frame/resize/drag/controls, video link negotiation and frame cap`);
       await finish(0);
       return;
     }
@@ -539,20 +541,36 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     language.setLanguage('pt-BR');
     mountAbout();
     const sourceButton = root.querySelector('#btn-source-code');
-    const linkError = root.querySelector('#license-link-error');
+    // Links that do not open are explained in the shared alert toast (#490), never retried in a window the app denies.
+    const linkFailure = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+    const dismissLinkFailure = () => linkFailure()?.querySelector('.chat-copy-toast-close').click();
+    const windowOpen = window.open;
+    let windowOpens = 0;
+    window.open = () => { windowOpens++; return null; };
     window.api.openExternal = async () => ({ success: false });
     sourceButton.click();
     await wait();
-    check(!linkError.hidden && linkError.getAttribute('role') === 'alert' &&
-      linkError.textContent === language.t('settings.sourceCodeOpenFailed'),
-    'Source navigation failure is visible and localized, without a silent browser fallback');
+    check(linkFailure()?.getAttribute('role') === 'alert' && linkFailure().textContent.includes(language.t('settings.sourceCodeOpenFailed'))
+      && !root.querySelector('[role="alert"]'),
+    'Source navigation failure is explained in the alert toast, without a silent browser fallback');
+    dismissLinkFailure();
+    let refusedUrl = '';
+    window.api.openExternal = async url => { refusedUrl = url; return { success: false }; };
+    root.querySelector('#btn-report-bug').click();
+    await wait();
+    check(refusedUrl && linkFailure()?.textContent.includes(language.t('settings.linkOpenFailed', { url: refusedUrl }))
+      && windowOpens === 0, 'A community link that does not open is explained too, instead of a denied window.open');
+    dismissLinkFailure();
+    window.open = windowOpen;
     const delayedSource = deferred();
     window.api.openExternal = () => delayedSource.promise;
     sourceButton.click();
     about.cleanup();
     delayedSource.reject(new Error('Late source navigation failure'));
     await wait();
-    check(linkError.hidden, 'A late navigation failure cannot modify an About binding after cleanup');
+    check(!root.querySelector('[role="alert"]') && linkFailure()?.textContent.includes(language.t('settings.sourceCodeOpenFailed')),
+      'A late navigation failure leaves the closed About tab untouched and is still explained');
+    dismissLinkFailure();
     window.api.openExternal = async url => { opened.push(url); return { success: true }; };
     let button = mountAbout();
     check(button.tagName === 'BUTTON' && button.type === 'button' && button.disabled && button.textContent === '…',
@@ -597,13 +615,14 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     clipboardWork = async () => { throw new Error('Clipboard denied'); };
     button.click();
     await wait();
-    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])') &&
-    document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-message')?.textContent === language.t('versionCopy.failed'),
-    'Clipboard rejection reports a localized error, never success');
+    const successToast = () => document.querySelector('.chat-copy-toast:not(.chat-copy-toast--danger):not([data-ui-closing])');
+    check(!successToast() && linkFailure()?.getAttribute('role') === 'alert'
+      && linkFailure().textContent.includes(language.t('versionCopy.failed')) && !document.querySelector('.modal-backdrop:not([data-ui-closing])'),
+    'Clipboard rejection reports a localized error in the alert toast, never success');
     superseded.resolve();
     await wait();
-    check(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'An older clipboard completion cannot replace a newer failure with success');
-    document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card [data-action="confirm"]').click();
+    check(!successToast() && linkFailure(), 'An older clipboard completion cannot replace a newer failure with success');
+    dismissLinkFailure();
 
     const closingCopy = deferred();
     clipboardWork = () => closingCopy.promise;
@@ -693,15 +712,19 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     check(text().includes(fragments[0].en) && requests.at(-1) === `v${version}` && document.querySelector('#changelog-retry').hidden,
       'Retry fetches the same version and replaces the error with real notes');
     window.api.openExternal = async () => ({ success: false });
+    document.querySelector('.chat-copy-toast')?.remove();
     document.querySelector('#changelog-github').click();
     await wait();
-    check(!document.querySelector('[data-el="link-error"]').hidden &&
-      document.querySelector('[data-el="link-error"]').textContent === language.t('changelog.openFailed'),
-    'Opening GitHub failures are visible, not silently retried in another browser path');
+    const githubFailure = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+    check(githubFailure?.getAttribute('role') === 'alert' && githubFailure.textContent.includes(language.t('changelog.openFailed'))
+      && !document.querySelector('[data-el="link-error"]'),
+    'Opening GitHub failures are explained in the alert toast, not silently retried in another browser path');
     window.api.openExternal = async url => { opened.push(url); return { success: true }; };
+    githubFailure.querySelector('.chat-copy-toast-close').click();
     document.querySelector('#changelog-github').click();
     await wait();
-    check(document.querySelector('[data-el="link-error"]').hidden, 'Successful GitHub retry clears the stale error');
+    check(!document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])') && opened.at(-1)?.includes('github.com'),
+      'A successful GitHub retry opens the page without another error');
     modal.close();
 
     const getNotes = window.api.getReleaseNotes;
@@ -1007,6 +1030,44 @@ async function runSettingsNavigationSmoke() {
     anchor.remove();
   }
 
+  // D4: a sticker folder Main refuses to list is shown as unavailable, never as an empty folder.
+  const [{ stickerService }, { settingsStore: stickerSettings }] = await Promise.all([
+    import('/core/StickerService.ts'), import('/stores/settingsStore.ts'),
+  ]);
+  const savedApi = window.api, savedStickerFolder = stickerSettings.stickersFolderPath;
+  const stickerAnchor = document.createElement('button');
+  document.body.append(stickerAnchor);
+  const stickerPicker = new EmojiPicker({ container: document.body, anchor: stickerAnchor, floating: true,
+    onSelectEmoji() {}, onSelectSticker() {} });
+  try {
+    language.setLanguage('pt-BR');
+    let listing = async () => { throw new Error('This sticker folder was not confirmed on this computer.'); };
+    window.api = { listStickers: folder => listing(folder) };
+    stickerSettings.stickersFolderPath = 'C:\\Figurinhas restauradas';
+    stickerService.reset();
+    await stickerPicker.open();
+    document.querySelector('.emoji-picker:not([data-ui-closing]) [data-picker-tab="stickers"]').click();
+    const stickerBody = () => document.querySelector('.emoji-picker:not([data-ui-closing]) .emoji-picker-body').textContent;
+    await settled(() => !stickerBody().includes(language.t('emojiPicker.loadingStickers')));
+    check(stickerBody().includes(language.t('emojiPicker.folderUnavailableTitle'))
+      && !stickerBody().includes(language.t('emojiPicker.emptyFolderTitle')),
+    'A refused sticker folder is shown as unavailable, not as an empty folder');
+    const reload = document.querySelector('.emoji-picker:not([data-ui-closing]) .emoji-picker-refresh-btn');
+    check(reload && document.querySelector('.emoji-picker:not([data-ui-closing]) .emoji-picker-folder-btn'),
+      'Reload (which may confirm the folder) and choosing another folder stay available');
+    listing = async () => [];
+    reload.click();
+    await settled(() => stickerBody().includes(language.t('emojiPicker.emptyFolderTitle')));
+    check(!stickerBody().includes(language.t('emojiPicker.folderUnavailableTitle')),
+      'A listing that succeeds again clears the unavailable state');
+  } finally {
+    stickerPicker.destroy();
+    stickerAnchor.remove();
+    window.api = savedApi;
+    stickerSettings.stickersFolderPath = savedStickerFolder;
+    stickerService.reset();
+  }
+
   language.setLanguage('pt-BR');
   const appModal = new SettingsModal();
   for (const tab of Object.values(appModal)) {
@@ -1038,8 +1099,23 @@ async function runSettingsNavigationSmoke() {
       }
     }
   };
+  // Every switch is announced as a switch, with a name, and shows where the keyboard is (#490).
+  const unnamedSwitches = modalRoot => [...modalRoot.querySelectorAll('.toggle-switch input')].filter((input) => {
+    const named = input.getAttribute('aria-label')?.trim()
+      || (input.getAttribute('aria-labelledby') ?? '').split(/\s+/).some(id => document.getElementById(id)?.textContent.trim())
+      || [...(input.labels ?? [])].some(label => label.textContent.trim());
+    return input.getAttribute('role') !== 'switch' || !named;
+  }).map(input => input.id || input.className || input.outerHTML.slice(0, 80));
   await appModal.open();
-  await verifyTabs(document.querySelector('.modal-backdrop--settings'), 'app');
+  const appRoot = document.querySelector('.modal-backdrop--settings');
+  await verifyTabs(appRoot, 'app');
+  const appUnnamed = unnamedSwitches(appRoot);
+  check(appRoot.querySelectorAll('.toggle-switch input').length > 10 && !appUnnamed.length,
+    `Every settings switch is a named switch (${appUnnamed.join(', ')})`);
+  const focusedSwitch = appRoot.querySelector('#checkbox-update-beta');
+  focusedSwitch.focus({ focusVisible: true });
+  check(focusedSwitch.matches(':focus-visible') && getComputedStyle(focusedSwitch.closest('.toggle-switch').querySelector('.toggle-slider')).outlineStyle === 'solid',
+    'A switch reached by the keyboard shows its focus');
   appModal.close();
   check(!document.querySelector('.settings-section-nav'), 'Closing app settings cleans up its section navigation');
   for (const section of ['camera', 'noise-suppression']) {
@@ -1066,6 +1142,9 @@ async function runSettingsNavigationSmoke() {
   serverModal.open();
   const serverRoot = document.querySelector('.modal-backdrop');
   await verifyTabs(serverRoot, 'server');
+  const serverUnnamed = unnamedSwitches(serverRoot);
+  check(serverRoot.querySelectorAll('.toggle-switch input').length > 5 && !serverUnnamed.length,
+    `Every server settings switch is a named switch (${serverUnnamed.join(', ')})`);
   serverRoot.querySelector('[data-tab="bots"]').click();
   await wait();
   check(JSON.stringify(Array.from(serverRoot.querySelectorAll('.settings-section-nav[aria-hidden="false"] .settings-section-link'))

@@ -1,9 +1,8 @@
 import dns from 'dns';
-import http from 'http';
-import https from 'https';
-import net from 'net';
+import type { IncomingMessage } from 'http';
 import { LruCache } from '@monky/shared';
-import { isPrivateAddress, isPrivateHostname } from './privateAddress';
+import { isLocalHost, isPublicAddress } from './net/addressPolicy';
+import { httpGet } from './net/httpGet';
 
 export interface LinkPreviewMetadata {
   url: string;
@@ -23,15 +22,21 @@ interface HtmlFetchResult {
 
 const FETCH_TIMEOUT_MS = 5_000;
 const MAX_HTML_BYTES = 50 * 1024;
-const MAX_REDIRECTS = 5;
+const MAX_OEMBED_BYTES = 64 * 1024;
 const previewCache = new LruCache<string, LinkPreviewMetadata | null>(200, 1000 * 60 * 60);
 
-/**
- * Checks if a hostname points to localhost, loopback, private RFC 1918 subnets,
- * or cloud metadata/link-local addresses to prevent SSRF vulnerabilities.
- */
-function isPrivateOrLocalHost(hostname: string): boolean {
-  return isPrivateHostname(hostname) || isPrivateAddress(hostname);
+/** The first `maxBytes` of a body; the rest is never downloaded. */
+async function readPrefix(body: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of body) {
+    if (!Buffer.isBuffer(chunk)) continue;
+    const slice = chunk.subarray(0, maxBytes - size);
+    chunks.push(slice);
+    size += slice.length;
+    if (size >= maxBytes) break;
+  }
+  return Buffer.concat(chunks, size);
 }
 
 function detectEmbedProvider(url: string): 'youtube' | 'spotify' | null {
@@ -53,63 +58,47 @@ function extractSpotifyInfo(url: string): { type: string; id: string } | null {
 }
 
 async function fetchOEmbed(rawUrl: string, provider: 'youtube' | 'spotify'): Promise<LinkPreviewMetadata | null> {
-  const endpoint = provider === 'youtube'
+  const endpoint = new URL(provider === 'youtube'
     ? `https://www.youtube.com/oembed?url=${encodeURIComponent(rawUrl)}&format=json`
-    : `https://open.spotify.com/oembed?url=${encodeURIComponent(rawUrl)}`;
+    : `https://open.spotify.com/oembed?url=${encodeURIComponent(rawUrl)}`);
 
-  return await new Promise<LinkPreviewMetadata | null>((resolve) => {
-    let settled = false;
-    const complete = (result: LinkPreviewMetadata | null) => {
-      if (settled) return;
-      settled = true;
-      resolve(result);
-    };
-
-    const request = https.get(endpoint, { headers: { 'User-Agent': 'Monky-App' } }, (response) => {
-      if (response.statusCode !== 200) {
-        response.resume();
-        complete(null);
-        return;
-      }
-
-      const chunks: Buffer[] = [];
-      response.on('data', (chunk: Buffer) => chunks.push(chunk));
-      response.on('end', () => {
-        try {
-          const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-
-          let embedUrl: string | undefined;
-          // YouTube is intentionally not embedded: its player rejects the app's
-          // file:// origin (errors 152/153), so YouTube links keep the regular
-          // rich preview and open in the default browser like any other link
-          // (#266).
-          if (provider === 'spotify') {
-            const info = extractSpotifyInfo(rawUrl);
-            if (info) {
-              embedUrl = `https://open.spotify.com/embed/${info.type}/${info.id}`;
-            }
-          }
-
-          complete({
-            url: rawUrl,
-            title: data.title || '',
-            description: data.author_name ? `${data.author_name}` : undefined,
-            image: data.thumbnail_url || undefined,
-            siteName: data.provider_name || (provider === 'youtube' ? 'YouTube' : 'Spotify'),
-            favicon: undefined,
-            embedType: embedUrl ? provider : undefined,
-            embedUrl,
-          });
-        } catch {
-          complete(null);
-        }
-      });
-      response.on('error', () => complete(null));
+  try {
+    // The provider's own host only, redirects included.
+    const response = await httpGet(endpoint, {
+      allows: (url) => url.protocol === 'https:' && url.host === endpoint.host,
+      idleTimeoutMs: FETCH_TIMEOUT_MS, headers: { 'User-Agent': 'Monky-App' },
     });
+    if (response.status !== 200) {
+      response.body.resume();
+      return null;
+    }
+    const data = JSON.parse((await readPrefix(response.body, MAX_OEMBED_BYTES)).toString('utf8'));
 
-    request.setTimeout(FETCH_TIMEOUT_MS, () => request.destroy());
-    request.on('error', () => complete(null));
-  });
+    let embedUrl: string | undefined;
+    // YouTube is intentionally not embedded: its player rejects the app's
+    // file:// origin (errors 152/153), so YouTube links keep the regular
+    // rich preview and open in the default browser like any other link
+    // (#266).
+    if (provider === 'spotify') {
+      const info = extractSpotifyInfo(rawUrl);
+      if (info) {
+        embedUrl = `https://open.spotify.com/embed/${info.type}/${info.id}`;
+      }
+    }
+
+    return {
+      url: rawUrl,
+      title: data.title || '',
+      description: data.author_name ? `${data.author_name}` : undefined,
+      image: data.thumbnail_url || undefined,
+      siteName: data.provider_name || (provider === 'youtube' ? 'YouTube' : 'Spotify'),
+      favicon: undefined,
+      embedType: embedUrl ? provider : undefined,
+      embedUrl,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchLinkPreview(rawUrl: string): Promise<LinkPreviewMetadata | null> {
@@ -118,7 +107,7 @@ export async function fetchLinkPreview(rawUrl: string): Promise<LinkPreviewMetad
 
   try {
     const parsed = new URL(normalizedUrl);
-    if (isPrivateOrLocalHost(parsed.hostname)) {
+    if (isLocalHost(parsed.hostname)) {
       return null;
     }
   } catch {
@@ -185,7 +174,7 @@ const publicOnlyLookup: typeof dns.lookup = ((
     }
 
     const addresses = Array.isArray(address) ? address : [{ address: address as string, family: family as number }];
-    const allowed = addresses.filter((entry) => !isPrivateAddress(entry.address));
+    const allowed = addresses.filter((entry) => isPublicAddress(entry.address));
     if (allowed.length === 0) {
       done(Object.assign(new Error(`Blocked private address for ${hostname}`), { code: 'EACCES' }));
       return;
@@ -199,109 +188,27 @@ const publicOnlyLookup: typeof dns.lookup = ((
   });
 }) as typeof dns.lookup;
 
-async function fetchHtml(url: string, redirects = 0): Promise<HtmlFetchResult | null> {
-  if (redirects > MAX_REDIRECTS) return null;
-
+async function fetchHtml(url: string): Promise<HtmlFetchResult | null> {
   try {
-    const parsed = new URL(url);
-    if (isPrivateOrLocalHost(parsed.hostname)) {
+    // Public hosts only: by name before each request, and by the address the connection actually uses.
+    const response = await httpGet(new URL(url), {
+      allows: (target) => !isLocalHost(target.hostname),
+      lookup: publicOnlyLookup,
+      idleTimeoutMs: FETCH_TIMEOUT_MS,
+      headers: { Accept: 'text/html,application/xhtml+xml', 'Accept-Encoding': 'identity', 'User-Agent': 'Monky-App' },
+    });
+    const contentType = (response.headers['content-type'] ?? '').toLowerCase();
+    if (response.status !== 200 || !contentType.includes('text/html')) {
+      response.body.resume();
       return null;
     }
+    const html = (await readPrefix(response.body, MAX_HTML_BYTES)).toString('utf8');
+    const finalUrl = new URL(response.url);
+    finalUrl.hash = '';
+    return { html, finalUrl: finalUrl.toString() };
   } catch {
     return null;
   }
-
-  return await new Promise<HtmlFetchResult | null>((resolve) => {
-    let settled = false;
-    const complete = (result: HtmlFetchResult | null) => {
-      if (settled) return;
-      settled = true;
-      resolve(result);
-    };
-
-    const transport = url.startsWith('https:') ? https : http;
-    const request = transport.get(
-      url,
-      {
-        headers: {
-          Accept: 'text/html,application/xhtml+xml',
-          'Accept-Encoding': 'identity',
-          'User-Agent': 'Monky-App',
-        },
-        lookup: publicOnlyLookup,
-      },
-      (response) => {
-        const status = response.statusCode ?? 0;
-        if (status >= 300 && status < 400) {
-          const locationHeader = response.headers.location;
-          const location = Array.isArray(locationHeader) ? locationHeader[0] : locationHeader;
-          response.resume();
-
-          const redirectUrl = resolveUrl(location, url);
-          if (!redirectUrl) {
-            complete(null);
-            return;
-          }
-
-          void fetchHtml(redirectUrl, redirects + 1).then(complete);
-          return;
-        }
-
-        if (status !== 200) {
-          response.resume();
-          complete(null);
-          return;
-        }
-
-        const contentTypeHeader = response.headers['content-type'];
-        const contentType = (Array.isArray(contentTypeHeader) ? contentTypeHeader[0] : contentTypeHeader || '').toLowerCase();
-        if (!contentType.includes('text/html')) {
-          response.resume();
-          complete(null);
-          return;
-        }
-
-        const chunks: Buffer[] = [];
-        let totalBytes = 0;
-
-        const finishWithChunks = () => {
-          const html = Buffer.concat(chunks, totalBytes).toString('utf8');
-          complete({ html, finalUrl: url });
-        };
-
-        response.on('data', (chunk: Buffer) => {
-          if (settled) return;
-
-          const remainingBytes = MAX_HTML_BYTES - totalBytes;
-          if (remainingBytes <= 0) {
-            finishWithChunks();
-            response.destroy();
-            return;
-          }
-
-          const slice = chunk.length > remainingBytes ? chunk.subarray(0, remainingBytes) : chunk;
-          if (slice.length > 0) {
-            chunks.push(slice);
-            totalBytes += slice.length;
-          }
-
-          if (totalBytes >= MAX_HTML_BYTES) {
-            finishWithChunks();
-            response.destroy();
-          }
-        });
-
-        response.on('end', finishWithChunks);
-        response.on('aborted', () => complete(null));
-        response.on('error', () => complete(null));
-      }
-    );
-
-    request.setTimeout(FETCH_TIMEOUT_MS, () => {
-      request.destroy(new Error('Link preview timeout'));
-    });
-    request.on('error', () => complete(null));
-  });
 }
 
 function parseLinkPreview(html: string, pageUrl: string): LinkPreviewMetadata | null {
@@ -444,8 +351,7 @@ function resolveUrl(rawUrl: string | null | undefined, baseUrl?: string): string
     // Um IP privado escrito na própria URL nem chega a virar requisição (#372).
     // O caso do domínio que resolve para um endereço interno é barrado depois,
     // no lookup.
-    const host = resolved.hostname.replace(/^\[|\]$/g, '');
-    if (net.isIP(host) ? isPrivateAddress(host) : isPrivateHostname(host)) {
+    if (isLocalHost(resolved.hostname)) {
       return null;
     }
 

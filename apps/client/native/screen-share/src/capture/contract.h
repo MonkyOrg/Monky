@@ -1,12 +1,17 @@
 #pragma once
 
 #include "abi.h"
+#include "../rtc/inputs/native_core/annex_b.h"
+#include "../rtc/inputs/native_core/av1_levels.h"
 #include "../rtc/inputs/native_core/av1_obu.h"
+#include "../rtc/inputs/native_core/h264_levels.h"
+#include "../win/monitorIdentity.h"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <span>
@@ -79,19 +84,9 @@ inline void ValidateEncoderBitrateRange(std::int64_t value, std::int64_t minimum
 
 inline std::uint32_t RequiredCaptureH264Level(const VideoConfiguration& video) {
   ValidateVideoConfiguration(video);
-  struct Limit { std::uint32_t level, macroblocksPerSecond, frameMacroblocks, bitrateKbps; };
-  // ITU-T H.264 Table A-1, Main profile; the opt-in product ceiling is 80 Mbps.
-  constexpr Limit limits[] = {
-    {10, 1485, 99, 64}, {11, 3000, 396, 192}, {12, 6000, 396, 384}, {13, 11880, 396, 768},
-    {20, 11880, 396, 2000}, {21, 19800, 792, 4000}, {22, 20250, 1620, 4000}, {30, 40500, 1620, 10000},
-    {31, 108000, 3600, 14000}, {32, 216000, 5120, 20000}, {40, 245760, 8192, 20000},
-    {41, 245760, 8192, 50000}, {42, 522240, 8704, 50000}, {50, 589824, 22080, 135000},
-    {51, 983040, 36864, 240000}, {52, 2073600, 36864, 240000}, {60, 4177920, 139264, 240000},
-  };
-  const std::uint64_t columns = (video.width + 15) / 16, rows = (video.height + 15) / 16;
-  for (const auto limit : limits)
-    if (columns * rows <= limit.frameMacroblocks && columns * rows * video.fps <= limit.macroblocksPerSecond &&
-        columns * columns <= 8ull * limit.frameMacroblocks && rows * rows <= 8ull * limit.frameMacroblocks &&
+  // Main profile; the opt-in product ceiling is 80 Mbps.
+  for (const auto& limit : screen_video::kH264Levels)
+    if (screen_video::H264LevelAdmits(limit, video.width, video.height, video.fps) &&
         video.bitrateKbps <= limit.bitrateKbps) return limit.level;
   throw ContractError("ERR_SCREEN_CAPTURE_H264", "Selected rendition exceeds H264 Main Level 6");
 }
@@ -100,19 +95,11 @@ inline std::uint32_t RequiredCaptureAv1Level(const VideoConfiguration& video, st
   ValidateVideoConfiguration(video);
   Require(ceilingKbps >= video.bitrateKbps && ceilingKbps <= kMaximumBitrateKbps && ceilingKbps % 50 == 0,
           "Invalid capture bitrate ceiling", "ERR_SCREEN_CAPTURE_VIDEO");
-  struct Limit { std::uint32_t index, pixels, width, height; std::uint64_t rate; std::uint32_t bitrateKbps; };
-  // AV1 Annex A, Main Tier. Budget the whole adaptive range, not the startup bitrate.
-  constexpr Limit limits[] = {
-    {0, 147456, 2048, 1152, 4423680, 1500}, {1, 278784, 2816, 1584, 8363520, 3000},
-    {4, 665856, 4352, 2448, 19975680, 6000}, {5, 1065024, 5504, 3096, 31950720, 10000},
-    {8, 2359296, 6144, 3456, 70778880, 12000}, {9, 2359296, 6144, 3456, 141557760, 20000},
-    {12, 8912896, 8192, 4352, 267386880, 30000}, {13, 8912896, 8192, 4352, 534773760, 40000},
-    {14, 8912896, 8192, 4352, 1069547520, 60000}, {17, 35651584, 16384, 8704, 2139095040, 100000},
-  };
+  // Main Tier. Budget the whole adaptive range, not the startup bitrate.
   const std::uint64_t pixels = std::uint64_t{video.width} * video.height;
-  for (const auto& limit : limits)
-    if (pixels <= limit.pixels && video.width <= limit.width && video.height <= limit.height &&
-        pixels * video.fps <= limit.rate && ceilingKbps <= limit.bitrateKbps) return limit.index;
+  for (const auto& limit : screen_video::kAv1Levels)
+    if (pixels <= limit.pictureSize && video.width <= limit.width && video.height <= limit.height &&
+        pixels * video.fps <= limit.displayRate && ceilingKbps <= limit.bitrateKbps) return limit.index;
   throw ContractError("ERR_SCREEN_CAPTURE_AV1", "Selected rendition exceeds AV1 Main Tier level bounds");
 }
 
@@ -205,9 +192,6 @@ inline std::wstring StockProbePath(std::wstring_view hostExecutable, std::wstrin
           "ERR_SCREEN_CAPTURE_RUNTIME_PATH");
   return result;
 }
-inline std::wstring StockAmfProbePath(std::wstring_view hostExecutable) {
-  return StockProbePath(hostExecutable, L"obs-amf-test.exe");
-}
 
 enum class Method { Wgc, GameHook };
 inline const char* MethodName(Method method) { return method == Method::Wgc ? "wgc" : "game-hook"; }
@@ -255,26 +239,11 @@ inline const char* SourceId(CaptureKind kind) {
   return kind == CaptureKind::Monitor ? "monitor_capture" : kind == CaptureKind::Game ? "game_capture" : "window_capture";
 }
 
-struct MonitorIdentity {
-  std::wstring deviceId, deviceName;
-  std::int32_t x = 0, y = 0;
-  std::uint32_t width = 0, height = 0;
-};
+using MonitorIdentity = ::monky::win::MonitorIdentity;
 
 inline void ValidateMonitorIdentity(const MonitorIdentity& monitor) {
-  Require(monitor.deviceId.starts_with(L"\\\\?\\DISPLAY#") && monitor.deviceId.size() < 128 &&
-          monitor.deviceId.size() > 12 && monitor.deviceName.starts_with(L"\\\\.\\DISPLAY") &&
-          monitor.deviceName.size() > 11 && monitor.deviceName.size() < 32 &&
-          monitor.width > 0 && monitor.width <= 32768 && monitor.height > 0 && monitor.height <= 32768 &&
-          static_cast<std::int64_t>(monitor.x) + monitor.width <= INT32_MAX &&
-          static_cast<std::int64_t>(monitor.y) + monitor.height <= INT32_MAX,
+  Require(::monky::win::ValidMonitorIdentity(monitor),
           "An exact monitor device interface, name and physical bounds are required", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
-  for (const auto character : monitor.deviceId)
-    Require(character >= 0x20 && character < 0x7f, "Monitor interface identity must be bounded ASCII",
-            "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
-  for (const auto character : monitor.deviceName.substr(11))
-    Require(character >= L'0' && character <= L'9', "Invalid display device name", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
-  Require(monitor.deviceName[11] != L'0', "Invalid display device name", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
 }
 
 struct Arguments {
@@ -605,6 +574,39 @@ class Lifecycle {
   }
 };
 
+inline bool ValidUtf8(std::string_view text) {
+  for (std::size_t i = 0; i < text.size();) {
+    const auto c = static_cast<unsigned char>(text[i++]);
+    if (c < 0x80) continue;
+    const unsigned count = c >= 0xc2 && c <= 0xdf ? 1u : c >= 0xe0 && c <= 0xef ? 2u :
+        c >= 0xf0 && c <= 0xf4 ? 3u : 0u;
+    if (count == 0 || i + count > text.size()) return false;
+    std::uint32_t cp = c & (count == 1 ? 0x1fu : count == 2 ? 0x0fu : 0x07u);
+    for (unsigned j = 0; j < count; ++j) {
+      const auto next = static_cast<unsigned char>(text[i++]);
+      if ((next & 0xc0u) != 0x80u) return false;
+      cp = (cp << 6) | (next & 0x3fu);
+    }
+    if (cp < (count == 1 ? 0x80u : count == 2 ? 0x800u : 0x10000u) ||
+        cp > 0x10ffffu || (cp >= 0xd800u && cp <= 0xdfffu)) return false;
+  }
+  return true;
+}
+
+// UTF-8 of a bounded UTF-16 value. By default an unpaired surrogate is refused: identity strings (paths, class,
+// executable) are never approximated.
+inline std::string Utf8(std::wstring_view text, DWORD flags = WC_ERR_INVALID_CHARS) {
+  Require(text.size() <= 32768, "UTF-16 value exceeds bound", "ERR_SCREEN_CAPTURE_TEXT");
+  if (text.empty()) return {};
+  const auto length = static_cast<int>(text.size());
+  const int needed = WideCharToMultiByte(CP_UTF8, flags, text.data(), length, nullptr, 0, nullptr, nullptr);
+  Require(needed > 0, "Cannot encode UTF-16 value as UTF-8", "ERR_SCREEN_CAPTURE_TEXT");
+  std::string result(static_cast<std::size_t>(needed), '\0');
+  Require(WideCharToMultiByte(CP_UTF8, flags, text.data(), length, result.data(), needed,
+      nullptr, nullptr) == needed, "UTF-8 conversion failed", "ERR_SCREEN_CAPTURE_TEXT");
+  return result;
+}
+
 struct SourceKey {
   std::string title, className, executable;
   bool operator==(const SourceKey&) const = default;
@@ -627,6 +629,73 @@ inline void ValidateHookEvidence(const SourceKey& selected, const SourceKey& obs
   ValidateKey(selected); ValidateKey(observed);
   Require(SameWindowKind(selected, observed), "Stock get_hooked class or executable differs from the explicitly selected source",
           "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
+}
+
+// One stock window-list entry joins the escaped title, class and executable, so no entry, and no title that can
+// match one, is longer than this.
+constexpr std::size_t kMaxWindowSetting = 4096;
+
+// The selected window's title as UTF-8, converted like stock OBS converts the titles of its window list, without
+// WC_ERR_INVALID_CHARS (libobs/util/utf8.c). An unpaired surrogate, which a page or app can put in its title and a
+// cut of a long title can leave, becomes U+FFFD there and here, so the title still matches its stock entry.
+inline std::string WindowTitleUtf8(std::wstring_view title) {
+  Require(!title.empty(), "Selected window must have a nonempty title", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
+  return Utf8(title, 0);
+}
+
+// A window title is only a label, so a long one is cut at a UTF-8 character boundary to fit the selection key.
+inline std::string WindowTitleLabel(std::string_view title, std::size_t maximum = 512) {
+  if (title.size() <= maximum) return std::string(title);
+  auto end = maximum;
+  while (end > 0 && (static_cast<unsigned char>(title[end]) & 0xc0u) == 0x80u) --end;
+  return std::string(title.substr(0, end));
+}
+
+// One entry of the stock window list: its encoded setting, and its key when it decoded within bounds.
+struct WindowListEntry {
+  std::string encoded;
+  std::optional<SourceKey> key;
+};
+
+// For stock values that may legitimately exceed a bound, such as other windows' titles: absent, not an error.
+inline std::optional<std::string> OptionalString(const char* value, std::size_t maximum) {
+  if (!value) return std::nullopt;
+  const auto length = strnlen_s(value, maximum + 1);
+  if (length > maximum) return std::nullopt;
+  std::string result(value, length);
+  if (!ValidUtf8(result)) return std::nullopt;
+  return result;
+}
+
+// The key of one decoded stock entry. Its parts are another window's strings: one that does not fit its bound or is
+// not UTF-8 leaves that entry without a key, and never fails the selection.
+inline std::optional<SourceKey> WindowEntryKey(const char* title, const char* className, const char* executable) {
+  auto observedTitle = OptionalString(title, kMaxWindowSetting);
+  auto observedClass = OptionalString(className, 256), observedExecutable = OptionalString(executable, 260);
+  if (!observedTitle || !observedClass || !observedExecutable) return std::nullopt;
+  return SourceKey{std::move(*observedTitle), std::move(*observedClass), std::move(*observedExecutable)};
+}
+
+// Picks the stock setting of the bound window; the HWND, not this setting, selects what is captured. The list holds
+// every window, minimized ones included, so an entry that cannot be decoded within bounds (another window's very
+// long title) only means it is not the selected one. The live title is preferred over the selected label: the window
+// may have been renamed since selection, or its title may be longer than the label.
+inline std::string SelectWindowSetting(std::span<const WindowListEntry> entries, const SourceKey& selected,
+                                       const std::optional<std::string>& liveTitle) {
+  std::string labelled, current;
+  const auto remember = [](std::string& slot, const std::string& encoded) {
+    Require(slot.empty() || slot == encoded, "Selected window has inconsistent property encodings",
+            "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
+    slot = encoded;
+  };
+  for (const auto& entry : entries) {
+    if (entry.encoded.empty() || !entry.key || !SameWindowKind(*entry.key, selected)) continue;
+    if (entry.key->title == selected.title) remember(labelled, entry.encoded);
+    if (liveTitle && entry.key->title == *liveTitle) remember(current, entry.encoded);
+  }
+  Require(!current.empty() || !labelled.empty(), "Selected window key is absent from stock source properties",
+          "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
+  return current.empty() ? labelled : current;
 }
 
 inline void ValidateEncoderAdmission(bool registeredH264, bool passTexture, bool matchingDevice, bool nv12Textures,
@@ -719,37 +788,27 @@ inline void ValidateSps(std::span<const std::uint8_t> nal, const VideoConfigurat
 
 struct AnnexBInfo { bool sps = false, pps = false, accessUnit = false, idr = false; };
 
-inline std::size_t StartCodeBytes(std::span<const std::uint8_t> data, std::size_t i) {
-  if (i + 3 <= data.size() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) return 3;
-  if (i + 4 <= data.size() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1) return 4;
-  return 0;
-}
-
+// Leading zero bytes before the first start code are padding, not AVCC. The visitor also receives each NAL's
+// position in `bytes`, for the AMF parameter-set rewrite.
 template <typename Visitor>
 inline void VisitAnnexB(std::span<const std::uint8_t> bytes, Visitor visit) {
   Require(!bytes.empty() && bytes.size() <= kMaxPacketBytes, "H264 buffer exceeds packet bound or is empty",
           "ERR_SCREEN_CAPTURE_H264");
-  std::size_t cursor = 0, units = 0;
-  while (cursor < bytes.size() && StartCodeBytes(bytes, cursor) == 0) {
+  std::size_t cursor = 0;
+  while (cursor < bytes.size() && screen_video::AnnexBStartCode(bytes, cursor) == 0) {
     Require(bytes[cursor++] == 0, "Expected Annex B start code, not AVCC", "ERR_SCREEN_CAPTURE_H264");
   }
   Require(cursor < bytes.size(), "H264 buffer contains no NAL", "ERR_SCREEN_CAPTURE_H264");
-  while (cursor < bytes.size()) {
-    const auto prefix = StartCodeBytes(bytes, cursor);
-    Require(prefix != 0 && ++units <= 4096, "Malformed or excessive Annex B NAL units", "ERR_SCREEN_CAPTURE_H264");
-    const auto begin = cursor + prefix;
-    auto end = begin;
-    while (end < bytes.size() && StartCodeBytes(bytes, end) == 0) ++end;
-    auto payloadEnd = end;
-    while (payloadEnd > begin && bytes[payloadEnd - 1] == 0) --payloadEnd;
-    Require(payloadEnd > begin && (bytes[begin] & 0x80u) == 0, "Empty or forbidden H264 NAL header", "ERR_SCREEN_CAPTURE_H264");
-    const auto nal = bytes.subspan(begin, payloadEnd - begin);
+  const auto walked = screen_video::ForEachAnnexBNal(bytes.subspan(cursor), 4096, [&](std::span<const std::uint8_t> nal) {
+    Require((nal.front() & 0x80u) == 0, "Empty or forbidden H264 NAL header", "ERR_SCREEN_CAPTURE_H264");
     const auto type = nal.front() & 0x1fu;
     Require(type >= 1 && type <= 12 && type != 2 && type != 3 && type != 4,
             "Unsupported H264 NAL type", "ERR_SCREEN_CAPTURE_H264");
-    visit(nal, begin, payloadEnd);
-    cursor = end;
-  }
+    const auto begin = static_cast<std::size_t>(nal.data() - bytes.data());
+    visit(nal, begin, begin + nal.size());
+  });
+  Require(walked != screen_video::AnnexBError::kEmptyNal, "Empty or forbidden H264 NAL header", "ERR_SCREEN_CAPTURE_H264");
+  Require(walked == screen_video::AnnexBError::kNone, "Malformed or excessive Annex B NAL units", "ERR_SCREEN_CAPTURE_H264");
 }
 
 inline AnnexBInfo InspectAnnexB(std::span<const std::uint8_t> bytes, const VideoConfiguration& video) {
@@ -893,6 +952,31 @@ inline std::vector<std::uint8_t> CompleteH264Keyframe(std::span<const std::uint8
   return result;
 }
 
+// An AV1 keyframe that a viewer can start from. The encoder may emit the sequence header only with its first
+// keyframe, which preview can consume before a viewer joins: a keyframe without one gets the encoder's current header
+// (`extraData`). `validate` checks the sequence header against the configured video; the header that was used is
+// returned with the keyframe, as the prefix of the packet buffer.
+struct Av1Keyframe {
+  std::vector<std::uint8_t> sequenceHeader, bytes;
+};
+template <typename Validate>
+Av1Keyframe CompleteAv1Keyframe(std::span<const std::uint8_t> packet, std::span<const std::uint8_t> extraData,
+                                Validate&& validate) {
+  const auto picture = screen_video::InspectAv1(packet);
+  Av1Keyframe result;
+  if (picture.sequence) result.sequenceHeader = picture.sequence_header;
+  else result.sequenceHeader.assign(extraData.begin(), extraData.end());
+  validate(std::span<const std::uint8_t>(result.sequenceHeader));
+  const auto header = screen_video::InspectAv1(result.sequenceHeader);
+  Require(header.sequence && !header.picture && picture.picture && picture.keyframe,
+          "AV1 keyframe requires a valid sequence header", "ERR_SCREEN_CAPTURE_AV1");
+  if (!picture.sequence) result.bytes = result.sequenceHeader;
+  Require(result.bytes.size() <= kMaxPacketBytes - packet.size(), "AV1 keyframe exceeds packet bound",
+          "ERR_SCREEN_CAPTURE_AV1");
+  result.bytes.insert(result.bytes.end(), packet.begin(), packet.end());
+  return result;
+}
+
 struct PacketInput {
   std::span<const std::uint8_t> bytes;
   std::int64_t pts = 0, dts = 0;
@@ -975,25 +1059,6 @@ class PacketStatistics {
   std::optional<Packet> first_, last_;
   std::uint64_t count_ = 0, outputBytes_ = 0, keyframes_ = 0;
 };
-
-inline bool ValidUtf8(std::string_view text) {
-  for (std::size_t i = 0; i < text.size();) {
-    const auto c = static_cast<unsigned char>(text[i++]);
-    if (c < 0x80) continue;
-    const unsigned count = c >= 0xc2 && c <= 0xdf ? 1u : c >= 0xe0 && c <= 0xef ? 2u :
-        c >= 0xf0 && c <= 0xf4 ? 3u : 0u;
-    if (count == 0 || i + count > text.size()) return false;
-    std::uint32_t cp = c & (count == 1 ? 0x1fu : count == 2 ? 0x0fu : 0x07u);
-    for (unsigned j = 0; j < count; ++j) {
-      const auto next = static_cast<unsigned char>(text[i++]);
-      if ((next & 0xc0u) != 0x80u) return false;
-      cp = (cp << 6) | (next & 0x3fu);
-    }
-    if (cp < (count == 1 ? 0x80u : count == 2 ? 0x800u : 0x10000u) ||
-        cp > 0x10ffffu || (cp >= 0xd800u && cp <= 0xdfffu)) return false;
-  }
-  return true;
-}
 
 inline std::string ObsApiPath(std::string_view windowsUtf8Path) {
   Require(windowsUtf8Path.size() >= 4 && windowsUtf8Path.size() <= 960 && ValidUtf8(windowsUtf8Path) &&
@@ -1269,44 +1334,6 @@ inline std::string RetirementJson(const Retirement& value) {
       ",\"sourceReleased\":" + Boolean(value.sourceReleased) +
       ",\"encoderReleased\":" + Boolean(value.encoderReleased) +
       ",\"obsShutdownReturned\":" + Boolean(value.obsShutdownReturned) + "}";
-}
-
-inline std::string SerializeEvent(const Common& common, Method method, const VideoConfiguration& video,
-                                  std::string_view type, std::uint64_t sequence,
-                                  const Observation& observation, const SourceKey& selected,
-                                  const std::optional<SourceKey>& hooked, const Retirement* retirement = nullptr) {
-  const bool prepared = type == "prepared", stopped = type == "stopped";
-  Require(prepared || stopped || type == "ready" || type == "stats", "Unknown JSONL event type");
-  Require(prepared ? sequence == 0 && observation.state == ObservationState::Prepared : sequence > 0,
-          "Event sequence/state mismatch");
-  Require(stopped ? observation.state == ObservationState::Stopped && retirement && RetirementComplete(*retirement) :
-      retirement == nullptr, "STOPPED requires complete retirement");
-  if (type == "ready") Require(observation.state == ObservationState::Running, "READY lacks running observation");
-  if (type == "stats") Require(observation.state == ObservationState::Prepared ||
-      observation.state == ObservationState::Running, "STATS is outside prepared/running");
-  if (hooked) ValidateHookEvidence(selected, *hooked);
-  Require(!observation.sourceAttached || hooked.has_value(), "Attached source lacks observed get_hooked tuple");
-  if (prepared) Require(!hooked, "PREPARED cannot invent hooked evidence");
-  auto result = CommonJson(common, type, sequence) + ",\"configuration\":" + ConfigurationJson(method, video) +
-      ",\"observation\":" + ObservationJson(observation, common.qpc) + ",\"sourceKey\":" + KeyJson(selected) +
-      ",\"hookedKey\":" + (hooked ? KeyJson(*hooked) : "null");
-  if (stopped) {
-    result += ",\"retirement\":" + RetirementJson(*retirement);
-  }
-  return FinishLine(std::move(result));
-}
-
-inline std::string SerializeError(const Common& common, Method method, const VideoConfiguration& video, std::uint64_t sequence,
-                                  const Observation& observation, const SourceKey& selected,
-                                  const std::optional<SourceKey>& hooked, std::string_view code, std::string_view message,
-                                  const Retirement& retirement) {
-  Require(observation.state == ObservationState::Failed && !code.empty() && code.size() <= 96 &&
-          !message.empty() && message.size() <= 1024, "Invalid bounded error envelope");
-  return FinishLine(CommonJson(common, "error", sequence) + ",\"configuration\":" + ConfigurationJson(method, video) +
-      ",\"observation\":" + ObservationJson(observation, common.qpc) + ",\"sourceKey\":" + KeyJson(selected) +
-      ",\"hookedKey\":" + (hooked ? KeyJson(*hooked) : "null") +
-      ",\"error\":{\"code\":" + JsonString(code) + ",\"message\":" + JsonString(message) + "}" +
-      ",\"retirement\":" + RetirementJson(retirement));
 }
 
 class OutputBudget {

@@ -110,6 +110,17 @@ async function runLoadingSmoke(language) {
     return { promise, resolve, reject };
   };
   const flush = async () => { for (let index = 0; index < 20; index++) await Promise.resolve(); };
+  // A closed modal fades out (exitModal), already inert and hidden from assistive technology.
+  // What a person can still see and use is in the modals that are not leaving.
+  const live = selector => document.querySelector(`.modal-backdrop:not([data-ui-closing]) ${selector}`);
+  const until = async (condition, message) => {
+    for (let attempt = 0; attempt < 150; attempt++) {
+      if (condition()) return;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error(message);
+  };
+  const eventually = async (condition, message) => { await until(condition, message); checks++; };
   const [{ setLanguage, t }, { ScreenSharePickerModal }, { appEvents }, { webRtcManager }] = await Promise.all([
     import('/i18n/index.ts'), import('/views/ScreenSharePickerModal.ts'), import('/core/EventBus.ts'),
     import('/core/WebRtcManager.ts'),
@@ -137,7 +148,7 @@ async function runLoadingSmoke(language) {
   let closed = 0;
   const offOpen = appEvents.on('modal.screenshare_picker_opened', () => opened++);
   const offClose = appEvents.on('modal.screenshare_picker_closed', () => closed++);
-  const panel = () => document.querySelector('#share-sources-panel');
+  const panel = () => live('#share-sources-panel');
   const pending = () => {
     check(!!panel(), 'the picker must be in the DOM before capabilities or enumeration resolve');
     check(panel().getAttribute('aria-busy') === 'true', 'pending sources are announced as busy');
@@ -180,8 +191,11 @@ async function runLoadingSmoke(language) {
       'the explicit hook method retains the same candidate window and explains compatibility');
     document.querySelector('#share-tab-window').click();
     picker.close();
-    check(closed === 1 && !panel(), 'close retires the picker');
+    const leaving = document.querySelector('#share-sources-panel')?.closest('.modal-backdrop');
+    check(closed === 1 && !panel() && leaving?.inert && leaving.getAttribute('aria-hidden') === 'true',
+      'close retires the picker at once: what fades out is inert and hidden from assistive technology');
     check(!('sources' in picker.sourceState), 'closing releases the source thumbnails instead of retaining them in the singleton');
+    await eventually(() => !leaving.isConnected, 'the closed picker leaves the document when its exit motion ends');
 
     availability = deferred();
     opening = picker.open();
@@ -303,8 +317,8 @@ async function runLoadingSmoke(language) {
     reopenedCard.click();
     check(!document.querySelector('#btn-share').disabled && !reopenedCard.querySelector('.skeleton')
       && reopenedCard.querySelector('.source-thumbnail--minimized')
-      && document.querySelector('#share-preview-error').textContent === t('screenShare.previewsFailed'),
-    'Preview failure is explicit and localized without disabling a valid source.');
+      && document.querySelector('.chat-copy-toast[role="alert"] .chat-copy-toast-label')?.textContent === t('screenShare.previewsFailed'),
+    'Preview failure is explained in the alert toast, localized, without disabling a valid source.');
     picker.close();
 
     delete window.api.getDesktopSources;
@@ -325,15 +339,8 @@ async function runLoadingSmoke(language) {
     offClose();
     webRtcManager.getNativeScreenCapabilities = originalCapabilities;
   }
-  check(!panel(), 'all picker instances and placeholders are removed');
+  await eventually(() => !document.querySelector('#share-sources-panel'), 'all picker instances and placeholders are removed');
 
-  const until = async (condition, message) => {
-    for (let attempt = 0; attempt < 150; attempt++) {
-      if (condition()) return;
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    throw new Error(message);
-  };
   const [{ SoundboardModal }, { soundboardService }, { SoundboardTab }, { settingsStore }] = await Promise.all([
     import('/views/SoundboardModal.ts'), import('/core/SoundboardService.ts'),
     import('/views/settings/tabs/SoundboardTab.ts'), import('/stores/settingsStore.ts'),
@@ -448,7 +455,7 @@ async function runLoadingSmoke(language) {
     const oldDevices = devices;
     const oldAutoStart = autoStart;
     document.querySelector('#btn-settings-close').click();
-    check(!document.querySelector('.modal-backdrop--settings'), 'settings can close while native data is pending');
+    check(!document.querySelector('.modal-backdrop--settings:not([data-ui-closing])'), 'settings can close while native data is pending');
     devices = deferred();
     autoStart = deferred();
     version = deferred();
@@ -545,7 +552,7 @@ async function runLoadingSmoke(language) {
     check(httpStarted, 'WebSocket failure uses the existing HTTP metadata fallback');
     invite.close();
     await httpOpening;
-    check(httpAborted && !document.querySelector('#invite-ip-control'), 'close aborts the HTTP fallback instead of leaving a background request');
+    check(!live('#invite-ip-control') && httpAborted, 'close aborts the HTTP fallback instead of leaving a background request');
   } finally {
     invite.close();
     Object.assign(client, saved);
@@ -570,13 +577,13 @@ async function runLoadingSmoke(language) {
     check(await opening === null, 'cropper cancels during image loading');
     check(pendingImage.onload === null && pendingImage.onerror === null, 'cancel detaches pending image callbacks');
     pendingImage.dispatchEvent(new Event('load'));
-    check(!document.querySelector('.crop-modal-card'), 'late image load does not resurrect the cropper');
+    check(!live('.crop-modal-card'), 'late image load does not resurrect the cropper');
   } finally { window.Image = OriginalImage; }
   let cropping = openImageCropper(imageUrl);
-  await until(() => !document.querySelector('[data-action="confirm"]')?.disabled, 'image decode did not finish');
-  check(document.querySelector('.crop-loading').hidden, 'decoded image replaces its skeleton');
-  check(document.querySelector('.crop-viewport').getAttribute('aria-busy') === 'false', 'crop viewport exits loading');
-  document.querySelector('[data-action="confirm"]').click();
+  await until(() => !live('[data-action="confirm"]')?.disabled, 'image decode did not finish');
+  check(live('.crop-loading').hidden, 'decoded image replaces its skeleton');
+  check(live('.crop-viewport').getAttribute('aria-busy') === 'false', 'crop viewport exits loading');
+  live('[data-action="confirm"]').click();
   const cropped = await cropping;
   check(cropped.startsWith('data:image/png;base64,'), 'crop still exports PNG');
   const decoded = new OriginalImage();
@@ -585,10 +592,10 @@ async function runLoadingSmoke(language) {
   await ready;
   check(decoded.naturalWidth === 512 && decoded.naturalHeight === 512, 'crop output stays exactly 512 by 512');
   cropping = openImageCropper('data:image/png;base64,not-an-image');
-  await until(() => document.querySelector('.crop-loading [role="alert"]'), 'invalid image did not show an error');
-  check(document.querySelector('[data-action="confirm"]').disabled, 'failed image stays unavailable for confirmation');
-  document.querySelector('[data-action="cancel"]').click();
+  await until(() => live('.crop-loading [role="alert"]'), 'invalid image did not show an error');
+  check(live('[data-action="confirm"]').disabled, 'failed image stays unavailable for confirmation');
+  live('[data-action="cancel"]').click();
   check(await cropping === null, 'invalid image is not silently returned as a successful crop');
-  check(!document.querySelector('.modal-backdrop'), 'all exercised loading surfaces are removed');
+  await eventually(() => !document.querySelector('.modal-backdrop'), 'all exercised loading surfaces are removed');
   return checks;
 }

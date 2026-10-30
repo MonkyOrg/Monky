@@ -33,7 +33,7 @@
     "locale": 0,
     "hash": "seguranca-tofu-trust-on-first-use",
     "route": "/bots-conexao#seguranca-tofu-trust-on-first-use",
-    "title": "Segurança: TOFU (Trust On First Use)"
+    "title": "Segurança: token e identidade"
   },
   {
     "locale": 0,
@@ -207,7 +207,7 @@
     "locale": 1,
     "hash": "security-tofu-trust-on-first-use",
     "route": "/en/bots-conexao#security-tofu-trust-on-first-use",
-    "title": "Security: TOFU (Trust On First Use)"
+    "title": "Security: token and identity"
   },
   {
     "locale": 1,

@@ -1,96 +1,57 @@
-import { createCipheriv, createDecipheriv, pbkdf2Sync, randomBytes } from 'crypto';
+import {
+  SECRET_PASSWORD_MIN_LENGTH,
+  SecretEnvelopeError,
+  openSecretEnvelope,
+  sealSecretEnvelope,
+  type SecretEnvelopeErrorCode,
+  type SecretEnvelopeKind,
+} from '@monky/shared';
+import { mt, type MainTranslationKey } from './i18n';
 
 /**
- * Password-protected envelope shared by the identity export and the servers /
- * settings backup (#472).
- *
- * Both carry secrets — the identity carries the private key, the backup carries
- * the passwords of saved servers — so they get the exact same treatment:
- * PBKDF2-SHA256 to stretch the password and AES-256-GCM to seal the payload,
- * with the tag catching any tampering. Keeping a single implementation is what
- * stops one of the two from silently drifting into weaker parameters.
+ * Main-process side of the password-sealed envelope (#472) that protects the
+ * identity export and the servers/settings backup. Its format, KDF and
+ * password policy live in `@monky/shared`, shared with `monky create` (#490);
+ * this file only words the failures in the app language.
  */
+const MESSAGES: Record<SecretEnvelopeKind, Record<SecretEnvelopeErrorCode, MainTranslationKey>> = {
+  identity: {
+    invalid: 'secret.identityInvalid',
+    invalid_content: 'secret.identityInvalid',
+    unsupported: 'secret.identityUnsupported',
+    wrong_password: 'secret.identityWrongPassword',
+    missing_password: 'secret.passwordMissing',
+    too_short: 'secret.passwordTooShort',
+    too_common: 'secret.passwordTooCommon',
+  },
+  backup: {
+    invalid: 'secret.backupInvalid',
+    invalid_content: 'secret.backupInvalid',
+    unsupported: 'secret.backupUnsupported',
+    wrong_password: 'secret.backupWrongPassword',
+    missing_password: 'secret.passwordMissing',
+    too_short: 'secret.passwordTooShort',
+    too_common: 'secret.passwordTooCommon',
+  },
+};
 
-const PBKDF2_ITERATIONS = 210_000;
-
-/** Marks a servers/settings backup file (#472). */
-export const BACKUP_ENVELOPE_PREFIX = 'MONKY-BACKUP:';
-
-interface Envelope {
-  version: 1;
-  salt: string;
-  iv: string;
-  tag: string;
-  ciphertext: string;
+export function secretEnvelopeError(error: unknown, kind: SecretEnvelopeKind): Error {
+  if (!(error instanceof SecretEnvelopeError)) return error instanceof Error ? error : new Error(String(error));
+  return new Error(mt(MESSAGES[kind][error.code], { min: String(SECRET_PASSWORD_MIN_LENGTH) }));
 }
 
-function deriveKey(password: string, salt: Buffer): Buffer {
-  if (!password.trim()) {
-    throw new Error('Informe uma senha para proteger o conteúdo.');
-  }
-  return pbkdf2Sync(password, salt, PBKDF2_ITERATIONS, 32, 'sha256');
-}
-
-/** Encrypts `plaintext` and returns `<prefix><base64 envelope>`. */
-export function sealEnvelope(plaintext: string, password: string, prefix: string): string {
-  const salt = randomBytes(16);
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', deriveKey(password, salt), iv);
-  const ciphertext = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()]);
-  const envelope: Envelope = {
-    version: 1,
-    salt: salt.toString('hex'),
-    iv: iv.toString('hex'),
-    tag: cipher.getAuthTag().toString('hex'),
-    ciphertext: ciphertext.toString('hex'),
-  };
-
-  return `${prefix}${Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64')}`;
-}
-
-/**
- * Reverses {@link sealEnvelope}. Throws `invalidMessage` when the payload is not
- * an envelope at all and `wrongPasswordMessage` when it is one but does not
- * open, so the caller can tell "wrong file" from "wrong password".
- */
-export function openEnvelope(
-  payload: string,
-  password: string,
-  prefix: string,
-  invalidMessage: string,
-  wrongPasswordMessage: string
-): string {
-  const normalized = payload.trim();
-  if (!normalized.startsWith(prefix)) {
-    throw new Error(invalidMessage);
-  }
-
-  let envelope: Envelope;
+export async function sealBackup(contents: string, password: string): Promise<string> {
   try {
-    envelope = JSON.parse(
-      Buffer.from(normalized.slice(prefix.length), 'base64').toString('utf8')
-    ) as Envelope;
-  } catch {
-    throw new Error(invalidMessage);
+    return await sealSecretEnvelope(contents, password, 'backup');
+  } catch (error) {
+    throw secretEnvelopeError(error, 'backup');
   }
+}
 
-  if (!envelope?.salt || !envelope?.iv || !envelope?.tag || !envelope?.ciphertext) {
-    throw new Error(invalidMessage);
-  }
-
-  const decipher = createDecipheriv(
-    'aes-256-gcm',
-    deriveKey(password, Buffer.from(envelope.salt, 'hex')),
-    Buffer.from(envelope.iv, 'hex')
-  );
-  decipher.setAuthTag(Buffer.from(envelope.tag, 'hex'));
-
+export async function openBackup(payload: string, password: string): Promise<string> {
   try {
-    return Buffer.concat([
-      decipher.update(Buffer.from(envelope.ciphertext, 'hex')),
-      decipher.final(),
-    ]).toString('utf8');
-  } catch {
-    throw new Error(wrongPasswordMessage);
+    return await openSecretEnvelope(payload, password, 'backup');
+  } catch (error) {
+    throw secretEnvelopeError(error, 'backup');
   }
 }

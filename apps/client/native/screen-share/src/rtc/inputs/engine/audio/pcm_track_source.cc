@@ -92,11 +92,16 @@ void PcmTrackSource::Deliver(const NormalizedBlock& block) {
     }
   }
   if (timestamp) {
-    if (timestamp->time_millis < 0 ||
-        std::uint64_t(timestamp->time_millis) > kMaxSafeInteger ||
-        (last_rtc_capture_ms_ && timestamp->time_millis <= *last_rtc_capture_ms_))
-      throw AudioError(Failure::Clock, "Capture mapper returned an unsafe or regressing RTC timestamp");
-    last_rtc_capture_ms_ = timestamp->time_millis;
+    if (timestamp->time_millis < 0 || std::uint64_t(timestamp->time_millis) > kMaxSafeInteger)
+      throw AudioError(Failure::Clock, "Capture mapper returned an unsafe RTC timestamp");
+    // The mapping only moves forward in microseconds, so after the aligner corrects its offset two blocks can land
+    // in the same millisecond. Like a dropped clock mapping, that block goes out without an absolute time.
+    if (last_rtc_capture_ms_ && timestamp->time_millis <= *last_rtc_capture_ms_) {
+      timestamp.reset();
+      ++unavailable_clock_observations_;
+    } else {
+      last_rtc_capture_ms_ = timestamp->time_millis;
+    }
   }
   std::lock_guard lock(delivery_mutex_);
   observer_.OnBlock(block, timestamp, enabled_);

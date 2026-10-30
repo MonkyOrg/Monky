@@ -1,6 +1,7 @@
 import limiterUrl from '../audio/soundboardLimiter.worklet.js?url&no-inline';
 import { settingsStore } from '../stores/settingsStore';
 import { setAudioOutputSink } from './AudioOutputSink';
+import { effectiveAudioOutput, registerAudioOutputConsumer } from './audioOutputRouting';
 
 interface SoundboardGraph {
   context: AudioContext;
@@ -8,6 +9,8 @@ interface SoundboardGraph {
   gate: GainNode;
   limiter: AudioWorkletNode | null;
   failure: Error | null;
+  /** Stops following the general output when the graph closes. */
+  unfollowOutput: () => void;
 }
 
 interface SoundboardSource {
@@ -15,12 +18,15 @@ interface SoundboardSource {
   release: (drain?: boolean) => void;
 }
 
+/**
+ * The one output of every soundboard sound: each element is captured by the
+ * graph, so only the graph's context picks the device (the general output).
+ */
 export class SoundboardAudioOutput {
   private graph: SoundboardGraph | null = null;
   private ready: Promise<SoundboardGraph> | null = null;
   private sources = new Map<HTMLAudioElement, SoundboardSource>();
   private volume = 1;
-  private sinkId = settingsStore.selectedSpeakerId;
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
   private preparations = 0;
 
@@ -32,7 +38,12 @@ export class SoundboardAudioOutput {
     const mixer = context.createGain();
     mixer.channelCount = 2;
     mixer.channelCountMode = 'explicit';
-    const graph: SoundboardGraph = { context, mixer, gate: context.createGain(), limiter: null, failure: null };
+    const graph: SoundboardGraph = {
+      context, mixer, gate: context.createGain(), limiter: null, failure: null,
+      unfollowOutput: registerAudioOutputConsumer(async () => {
+        if (this.graph === graph) await setAudioOutputSink(context, effectiveAudioOutput('general'));
+      }),
+    };
     this.graph = graph;
     this.setVolume(this.volume);
     this.ready = (async () => {
@@ -71,7 +82,7 @@ export class SoundboardAudioOutput {
       limiter.connect(graph.gate);
       graph.gate.connect(context.destination);
       this.updateLimiter();
-      await setAudioOutputSink(context, this.sinkId);
+      await setAudioOutputSink(context, effectiveAudioOutput('general'));
       return graph;
     })();
     return this.ready;
@@ -148,11 +159,6 @@ export class SoundboardAudioOutput {
     ceiling.value = settingsStore.soundboardLoudnessLimit;
   }
 
-  public async setSinkId(sinkId: string): Promise<void> {
-    this.sinkId = sinkId;
-    if (this.graph) await setAudioOutputSink(this.graph.context, sinkId);
-  }
-
   private closeIfIdle(drain = false): void {
     if (this.sources.size || this.preparations || !this.graph) return;
     if (this.closeTimer) clearTimeout(this.closeTimer);
@@ -167,6 +173,7 @@ export class SoundboardAudioOutput {
     const graph = this.graph;
     this.graph = null;
     this.ready = null;
+    graph.unfollowOutput();
     this.onIntensity(null);
     graph.mixer.disconnect();
     graph.gate.disconnect();

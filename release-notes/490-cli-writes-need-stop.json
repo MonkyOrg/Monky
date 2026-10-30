@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Comandos do CLI que alteram dados (admin, cargos, configurações) pedem para parar o servidor antes, em vez de terem a mudança desfeita em silêncio. A atualização automática não liga mais servidores que estavam parados.",
+  "en": "CLI commands that change data (admin, roles, settings) ask you to stop the server first instead of having the change silently undone. Auto-update no longer starts servers that were stopped."
+}

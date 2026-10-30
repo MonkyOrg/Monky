@@ -8,31 +8,37 @@ const vm = require('node:vm');
 const zlib = require('node:zlib');
 const ts = require('typescript');
 const shared = require('@monky/shared');
+const { loadMain, fakeIpcMain } = require('./mainModules.cjs');
 
 const root = path.join(__dirname, '..');
 const skillsDirectory = path.join(root, 'hosting-skills');
 
-function loadModule({ dialog = {}, app = {}, handlers = new Map(), warnings = [] } = {}) {
-  const source = fs.readFileSync(path.join(root, 'src', 'main', 'hostingSkills.ts'), 'utf8');
-  const output = ts.transpileModule(source, {
+function transpiled(name) {
+  const source = fs.readFileSync(path.join(root, 'src', 'main', `${name}.ts`), 'utf8');
+  return ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
+}
+
+/** The real ZIP writer, which needs nothing from Electron. */
+function loadZipWriter() {
   const exports = {};
-  vm.runInNewContext(output, {
-    exports, Buffer, __dirname: path.join(root, 'dist-electron', 'main'),
-    console: { warn: (...args) => warnings.push(args) },
+  vm.runInNewContext(transpiled('zipWriter'), {
+    exports, Buffer, Error,
     require: name => {
-      if (name === '@monky/shared') return shared;
-      if (['node:fs/promises', 'node:path', 'node:zlib'].includes(name)) return require(name);
-      if (name === './i18n') return { mt: key => key };
-      if (name === 'electron') return {
-        app, dialog,
-        ipcMain: { handle: (channel, handler) => handlers.set(channel, handler), removeHandler: channel => handlers.delete(channel) },
-      };
+      if (['node:fs', 'node:zlib'].includes(name)) return require(name);
       throw new Error(`Unexpected import: ${name}`);
     },
   });
   return exports;
+}
+
+function loadModule({ dialog = {}, app = {}, warnings = [] } = {}) {
+  return loadMain('hostingSkills', {
+    packages: { electron: { app, dialog } },
+    local: { i18n: { mt: key => key } },
+    globals: { console: { warn: (...args) => warnings.push(args) } },
+  });
 }
 
 /** Independent reader: checks both headers, the CRC and that every byte is accounted for. */
@@ -116,7 +122,7 @@ test('malformed hosting skills are rejected', async () => {
 });
 
 test('the ZIP writer produces archives standard tools can read', t => {
-  const { createZip } = loadModule();
+  const { createZip } = loadZipWriter();
   const files = [
     { path: 'monky-server-lan/SKILL.md', data: Buffer.from('# Olá, Monky 🐵\n'.repeat(50)) },
     { path: 'monky-server-lan/notes/empty.txt', data: Buffer.alloc(0) },
@@ -145,18 +151,22 @@ test('the ZIP writer produces archives standard tools can read', t => {
 test('hosting skill IPC validates sender and id, saves the zip, handles cancel/failure and tears down', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-hosting-skill-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const handlers = new Map(), dialogs = [], warnings = [];
-  const frame = {}, contents = { mainFrame: frame };
+  const dialogs = [], warnings = [];
+  const frame = {}, contents = { mainFrame: frame, isDestroyed: () => false };
   const window = { webContents: contents, isDestroyed: () => false };
   const event = { sender: contents, senderFrame: frame };
   let selection = { canceled: false, filePath: path.join(directory, 'skill.zip') };
   let dialogGate;
-  const { setupHostingSkillIpc, composeHostingSkill } = loadModule({
-    handlers, warnings,
+  const { registerHostingSkillIpc, composeHostingSkill } = loadModule({
+    warnings,
     app: { getPath: name => { assert.equal(name, 'downloads'); return directory; } },
     dialog: { showSaveDialog: async (_owner, options) => { dialogs.push(options); return dialogGate ? await dialogGate : selection; } },
   });
-  const dispose = setupHostingSkillIpc(window);
+  const { IpcRegistry } = loadMain('ipc/registry', { globals: { console: { warn: (...args) => warnings.push(args) } } });
+  const ipc = fakeIpcMain();
+  const handlers = ipc.handlers;
+  const registry = new IpcRegistry(ipc, { main: () => contents, overlay: () => null });
+  registerHostingSkillIpc(registry, window);
   const handler = handlers.get(shared.HOSTING_SKILL_IPC);
 
   for (const sender of [{ ...event, sender: {} }, { ...event, senderFrame: {} }]) {
@@ -186,7 +196,7 @@ test('hosting skill IPC validates sender and id, saves the zip, handles cancel/f
   dialogGate = new Promise(resolve => { release = resolve; });
   const pending = handler(event, 'lan');
   assert.equal((await handler(event, 'lan')).status, 'failed', 'one save dialog at a time');
-  dispose();
+  registry.dispose();
   const discarded = path.join(directory, 'discarded.zip');
   release({ canceled: false, filePath: discarded });
   assert.equal((await pending).status, 'cancelled');

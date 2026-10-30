@@ -115,7 +115,6 @@ rtc_library("monky_qualified_mf_core") {
     "inputs/native_core/decoded_frame.cc",
     "inputs/native_core/h264_bitstream.cc",
     "inputs/native_core/mf_h264_decoder.cc",
-    "inputs/native_core/mf_h264_encoder.cc",
   ]
   suppressed_configs = [
     "//build/config/compiler:no_exceptions",
@@ -131,7 +130,6 @@ rtc_library("monky_qualified_mf_core") {
     "d3d11.lib",
     "dxgi.lib",
     "dxguid.lib",
-    "d3dcompiler.lib",
     "mfplat.lib",
     "mfuuid.lib",
     "strmiids.lib",
@@ -150,7 +148,6 @@ rtc_library("monky_mf_rtc_adapters") {
     "inputs/adapters/codec_policy.cc",
     "inputs/adapters/mf_rtc_common.cc",
     "inputs/adapters/mf_rtc_policy.cc",
-    "inputs/adapters/mf_rtc_encoder.cc",
     "inputs/adapters/mf_rtc_decoder.cc",
   ]
   suppressed_configs = [
@@ -181,9 +178,6 @@ rtc_shared_library("monky_screen_rtc") {
   sources = [
     "inputs/engine/engine.cc",
   ]
-  if (is_win) {
-    sources += [ "inputs/abi/rtc_link_probe.cc", "inputs/abi/adapter_policy_probe.cc" ]
-  }
   defines = [ "MONKY_RTC_BUILDING_DLL" ]
   suppressed_configs = [
     "//build/config/compiler:no_exceptions",
@@ -232,7 +226,7 @@ rtc_library("monky_rtc_engine_core") {
     "inputs/engine/transport_parameters.cc",
   ]
   if (is_win) {
-    sources += [ "inputs/engine/gpu_source.cc", "inputs/engine/presentation/exporter.cc" ]
+    sources += [ "inputs/engine/presentation/exporter.cc" ]
   } else {
     sources += [ "inputs/engine/presentation/mac_exporter.mm" ]
     cflags_objcc = [ "-fobjc-arc" ]
@@ -288,10 +282,13 @@ group("all") {
 }
 
 rtc_executable("monky_rtc_engine_contract_probe") {
-  sources = [
-    "inputs/engine/contract_probe.cc",
-    "inputs/abi/adapter_policy_probe.cc",
-  ]
+  sources = [ "inputs/engine/contract_probe.cc" ]
+  if (is_win) {
+    sources += [
+      "inputs/abi/adapter_policy_probe.cc",
+      "inputs/adapters/mf_rtc_decoder_checks.cc",
+    ]
+  }
   suppressed_configs = [
     "//build/config/compiler:no_exceptions",
     "//build/config/compiler:no_rtti",
@@ -319,10 +316,15 @@ rtc_executable("monky_rtc_engine_contract_probe") {
     "//video:video",
     "//video:video_stream_buffer_controller",
   ]
-  ldflags = [
-    "/DELAYLOAD:mfplat.dll",
-    "/threads:4",
-  ]
+  if (is_win) {
+    ldflags = [
+      "/DELAYLOAD:mfplat.dll",
+      "/threads:4",
+    ]
+  } else {
+    # libmonky_av1.dylib is loaded through its @rpath install name from beside the probe.
+    ldflags = [ "-Wl,-rpath,@executable_path/." ]
+  }
 }
 
 rtc_executable("monky_msvc_job") {

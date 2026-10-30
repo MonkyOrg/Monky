@@ -1,8 +1,10 @@
-import { Permission, Role } from '@monky/shared';
+import { Permission } from '@monky/shared';
 import { serverStore } from '../../../stores/serverStore';
 import { getAvatarUrl } from '../../../utils/avatar';
-import { escapeHtml } from '../../../utils/html';
+import { escapeHtml, html, trustedHtml } from '../../../utils/html';
+import { renderRoleOption } from '../../../utils/roleOption';
 import { renderRoleTags } from '../../../utils/roleTags';
+import { canManageAdmins } from '../../memberActions';
 import { t } from '../../../i18n';
 
 const VISIBLE_ROLE_TAGS = 2;
@@ -35,18 +37,6 @@ export function filterServerMembers(root: ParentNode): void {
     count.hidden = !query;
     count.textContent = query ? t('roles.membersShown', { shown, total: rows.length }) : '';
   }
-}
-
-function renderRoleOption(role: Role, isAssigned: boolean): string {
-  return `
-    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-      <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
-        <span style="width: 8px; height: 8px; border-radius: 50%; background: ${role.color || 'var(--text-muted)'}; flex-shrink: 0;"></span>
-        <span style="font-size: 12px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(role.name)}</span>
-      </div>
-      <span class="material-symbols-outlined md-16" style="color: ${isAssigned ? 'var(--accent-primary)' : 'transparent'};">${isAssigned ? 'check' : 'check'}</span>
-    </div>
-  `;
 }
 
 export class ServerMembersTab {
@@ -95,6 +85,7 @@ export class ServerMembersTab {
     // Admin is toggled through its own action, never listed as a role (#265).
     const manageableRoles = roles.filter((role) => !role.isDefault && !serverStore.isAdminRole(role));
     const adminRole = serverStore.getAdminRole();
+    const canToggleAdmin = canManageAdmins(serverStore);
     const members = serverStore.getHumanMembersInDisplayOrder().sort((a, b) => a.nickname.localeCompare(b.nickname));
     const canKickMembers = serverStore.hasPermission(Permission.KICK_MEMBERS);
 
@@ -106,26 +97,26 @@ export class ServerMembersTab {
       const isAdmin = Boolean(adminRole && serverStore.getUserRoleIds(member.id).includes(adminRole.id));
       const isOwner = member.id === serverStore.ownerId;
 
-      return `
-        <tr data-member-name="${escapeHtml(member.nickname)}">
+      return html`
+        <tr data-member-name="${member.nickname}">
           <td>
             <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
-              <img src="${avatar}" alt="${escapeHtml(member.nickname)}" data-fallback="avatar" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-color); flex-shrink: 0;">
+              <img src="${avatar}" alt="${member.nickname}" data-fallback="avatar" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-color); flex-shrink: 0;">
               <div style="min-width: 0; display: flex; flex-direction: column; gap: 4px;">
                 <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0;">
-                  <span style="font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(member.nickname)}</span>
-                  ${member.id === serverStore.currentUser?.id ? `<span class="member-badge-you">${t('common.you')}</span>` : ''}
-                  ${isOwner ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
-                  ${member.status === 'DISCONNECTED' ? `<span class="member-badge-offline">${t('roles.offlineBadge')}</span>` : ''}
-                  ${isAdmin ? `<span class="member-badge-you" style="background: rgba(88, 101, 242, 0.18); color: var(--accent-primary);">${t('roles.adminBadge')}</span>` : ''}
+                  <span style="font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis;">${member.nickname}</span>
+                  ${member.id === serverStore.currentUser?.id ? html`<span class="member-badge-you">${t('common.you')}</span>` : ''}
+                  ${isOwner ? html`<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
+                  ${member.status === 'DISCONNECTED' ? html`<span class="member-badge-offline">${t('roles.offlineBadge')}</span>` : ''}
+                  ${isAdmin ? html`<span class="member-badge-you" style="background: rgba(88, 101, 242, 0.18); color: var(--accent-primary);">${t('roles.adminBadge')}</span>` : ''}
                 </div>
               </div>
             </div>
           </td>
           <td>
             ${userRoles.length
-              ? renderRoleTags(userRoles, VISIBLE_ROLE_TAGS)
-              : `<span style="font-size: 11px; color: var(--text-muted);">${t('roles.noExtraRoles')}</span>`}
+              ? trustedHtml(renderRoleTags(userRoles, VISIBLE_ROLE_TAGS))
+              : html`<span style="font-size: 11px; color: var(--text-muted);">${t('roles.noExtraRoles')}</span>`}
           </td>
           <td style="text-align: right;">
             <div class="settings-action-menu-wrap">
@@ -133,12 +124,12 @@ export class ServerMembersTab {
                 <span class="material-symbols-outlined md-18">more_horiz</span>
               </button>
               <div class="settings-action-menu">
-                ${canKickMembers ? `
+                ${canKickMembers ? html`
                   <button type="button" class="settings-action-menu-item danger" data-member-action="kick" data-user-id="${member.id}" ${isOwner ? 'disabled' : ''}>
                     ${t('userMenu.kickMember')}
                   </button>
                 ` : ''}
-                ${adminRole ? `
+                ${adminRole && canToggleAdmin ? html`
                   <button type="button" class="settings-action-menu-item" data-member-action="toggle-admin" data-user-id="${member.id}" data-role-id="${adminRole.id}" ${isOwner ? 'disabled' : ''}>
                     <span class="material-symbols-outlined md-16">${isAdmin ? 'remove_moderator' : 'shield_person'}</span>
                     <span>${isAdmin ? t('userMenu.removeAdmin') : t('userMenu.promoteToAdmin')}</span>
@@ -149,16 +140,13 @@ export class ServerMembersTab {
                     <span>${t('userMenu.rolesSubmenu')}</span>
                     <span class="material-symbols-outlined md-16">chevron_left</span>
                   </button>
-                  ${manageableRoles.length ? `
+                  ${manageableRoles.length ? html`
                     <div class="settings-action-submenu">
-                      ${manageableRoles.map((role) => {
-                        const assigned = serverStore.getUserRoleIds(member.id).includes(role.id);
-                        return `
-                          <button type="button" class="settings-action-menu-item" data-member-action="toggle-role" data-user-id="${member.id}" data-role-id="${role.id}" ${isOwner ? 'disabled' : ''}>
-                            ${renderRoleOption(role, assigned)}
-                          </button>
-                        `;
-                      }).join('')}
+                      ${manageableRoles.map((role) => html`
+                        <button type="button" class="settings-action-menu-item" data-member-action="toggle-role" data-user-id="${member.id}" data-role-id="${role.id}" ${isOwner ? 'disabled' : ''}>
+                          ${trustedHtml(renderRoleOption(role, serverStore.getUserRoleIds(member.id).includes(role.id)))}
+                        </button>
+                      `)}
                     </div>
                   ` : ''}
                 </div>

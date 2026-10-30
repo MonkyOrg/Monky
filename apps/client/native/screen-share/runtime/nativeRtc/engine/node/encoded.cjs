@@ -9,14 +9,12 @@ function validateCapabilities(value, platform = process.platform) {
   for (const [name, expected] of Object.entries({
     abiVersion: 2, contractRevision: 8, externallyEncodedH264: true, externallyEncodedAV1: true, encodedInputCopied: true,
     encodedFeedback: true, encodedProfileLevelId: '4d003c', encodedBitrateCeilingBps: 80000000,
-    pairedCaptureClock: true, p2pReceiverRouting: true, inputLeaseCorrelation: true,
+    pairedCaptureClock: true, p2pReceiverRouting: true,
     decodedOutput: platform === 'darwin' ? 'NV12_IOSURFACE_LEASE' : 'NV12_SHARED_NT_LEASE',
     runtimeQualified: false, hardwareExecutionObserved: null,
   })) assert.equal(Object.getOwnPropertyDescriptor(value, name)?.value, expected, `Native encoded capability mismatch: ${name}`);
-  if (platform === 'darwin') {
-    assert.equal(value.inputFormat, null, 'macOS publishing accepts encoded video, not Windows GPU handles.');
-    assert.equal(value.inputTimebase, 'mach-host-us');
-  }
+  assert.equal(value.inputFormat, null, 'Native publishing accepts encoded video, not raw GPU input.');
+  if (platform === 'darwin') assert.equal(value.inputTimebase, 'mach-host-us');
   return value;
 }
 

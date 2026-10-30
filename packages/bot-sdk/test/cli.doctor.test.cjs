@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
 const path = require('node:path');
+const readline = require('node:readline');
 const zlib = require('node:zlib');
 const { once } = require('node:events');
 const { test } = require('node:test');
@@ -13,6 +14,7 @@ const cliConfig = require('../dist/cli/config');
 const consent = require('../dist/cli/consent');
 const keys = require('../dist/cli/keys');
 const pm2 = require('../dist/cli/pm2');
+const prompts = require('../dist/cli/prompts');
 const readiness = require('../dist/cli/manifestReadiness');
 const environment = require('../dist/cli/profileEnvironment');
 const serverDiagnostic = require('../dist/cli/serverDiagnostic');
@@ -262,7 +264,8 @@ test('readiness accepts only a valid manifest served by this bot for the configu
     response.writeHead(200, headers);
     response.end(JSON.stringify({
       requestedCapabilities: [], name: behavior === 'renamed' ? 'Other Name' : 'Sound Bot',
-      registrationUrl: `http://${behavior === 'wrong-host' ? 'other.example.test' : 'bot.example.test'}:${port}/register`,
+      registrationUrl: behavior === 'proxied' ? 'https://bot.example.test/register'
+        : `http://${behavior === 'wrong-host' ? 'other.example.test' : 'bot.example.test'}:${port}/register`,
     }));
   });
   server.listen(0, '127.0.0.1');
@@ -277,8 +280,40 @@ test('readiness accepts only a valid manifest served by this bot for the configu
   await assert.rejects(readiness.verifyManifest(config, pair.publicKeyHex, '0.0.0.0', 'en'), /another bot identity/);
   behavior = 'wrong-host';
   await assert.rejects(readiness.verifyManifest(config, pair.publicKeyHex, '0.0.0.0', 'en'), /registration URL/);
+
+  // Behind a TLS proxy, start and doctor expect the configured public URL instead of host and port.
+  const proxied = cliConfig.marketplaceConfig(context, {
+    botName: 'Sound Bot', servePort: config.servePort, publicHost: 'bot.example.test', publicUrl: 'https://Bot.Example.test:443/',
+  });
+  assert.equal(proxied.publicUrl, 'https://bot.example.test');
+  behavior = 'proxied';
+  assert.deepEqual(await readiness.verifyManifest(proxied, pair.publicKeyHex, '0.0.0.0', 'en'),
+    { url: 'https://bot.example.test/manifest', nameMatches: true });
+  await assert.rejects(readiness.verifyManifest(config, pair.publicKeyHex, '0.0.0.0', 'en'), /public host and port/);
+  behavior = 'valid';
+  await assert.rejects(readiness.verifyManifest(proxied, pair.publicKeyHex, '0.0.0.0', 'en'), /MONKY_SERVE_PUBLIC_URL/,
+    'An entry that ignores the public URL is named as the cause');
   const closed = cliConfig.marketplaceConfig(context, { servePort: await freePort(), publicHost: 'bot.example.test' });
   await assert.rejects(readiness.waitForManifest(closed, pair.publicKeyHex, '0.0.0.0', 'en', 'sound-bot', 400), /did not become ready/);
+});
+
+test('an SDK bot given the configured public URL passes the readiness check', async (t) => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state });
+  const pair = keys.loadOrCreateBotKeys(path.join(f.root, 'identity'));
+  const client = new BotClient({ publicKey: pair.publicKeyHex, requestedCapabilities: [] });
+  t.after(() => client.close());
+  const config = cliConfig.marketplaceConfig(context, {
+    botName: 'Sound Bot', servePort: await freePort(), publicHost: 'bot.example.test', publicUrl: 'https://bot.example.test',
+  });
+  const env = require('../dist/cli/runner').createRuntimeEnvironment(config, pair.publicKeyHex, {}).values;
+  // What the documented entry does with the runner environment.
+  await client.serve({
+    name: env.MONKY_BOT_NAME, port: Number(env.MONKY_SERVE_PORT), host: '127.0.0.1',
+    publicHost: env.MONKY_SERVE_PUBLIC_HOST, publicUrl: env.MONKY_SERVE_PUBLIC_URL || undefined,
+  });
+  assert.deepEqual(await readiness.verifyManifest(config, pair.publicKeyHex, '127.0.0.1', 'en'),
+    { url: 'https://bot.example.test/manifest', nameMatches: true });
 });
 
 async function fakeMonkyServer(t, respond) {
@@ -460,6 +495,69 @@ test('unattended updates skip a release that changes the declared access and kee
   assert.equal(releases.readPackageManifestFromTarball(path.join(globalRoot, '@example', 'update.tgz')).monkyBot.requirements.ports[0].id, 'games');
 });
 
+test('an interactive update asks in the arrow menu: the version first, then any new access', async (t) => {
+  const root = fs.mkdtempSync(path.join(__dirname, '.monky-sdk-cli-confirm-update-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
+  const globalRoot = path.join(root, 'global', 'node_modules');
+  const bot = path.join(globalRoot, '@example', 'sound-bot');
+  const declaration = { cliName: 'sound-bot', displayName: 'Sound Bot', entry: 'dist/index.js', modes: ['manual'] };
+  json(path.join(bot, 'package.json'), {
+    name: '@example/sound-bot', version: '1.2.3', type: 'commonjs',
+    monkyBot: { ...declaration, updateSource: { type: 'file', path: '../update.tgz' } },
+  });
+  fs.mkdirSync(path.join(bot, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(bot, 'dist', 'index.js'), 'module.exports = {};');
+  withEnv(t, { MONKY_BOT_CLI_HOME: path.join(root, 'state') });
+  for (const stream of [process.stdin, process.stdout]) {
+    const descriptor = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+    Object.defineProperty(stream, 'isTTY', { configurable: true, value: true });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(stream, 'isTTY', descriptor);
+      else delete stream.isTTY;
+    });
+  }
+  const context = cliConfig.createCliContext(bot);
+  const config = cliConfig.manualConfig(context, { botDir: path.join(root, 'runtime'), botToken: 'token' });
+  cliConfig.writeConfig(context, config);
+  consent.writeHostConsent(context.homeDir, 'accepted', consent.hostConsentFingerprint(context.project.definition), config.botDir);
+  const candidate = { ...declaration, requirements: { ports: [GAMES] } };
+  createTarball(path.join(globalRoot, '@example', 'update.tgz'), { name: '@example/sound-bot', version: '1.2.4', monkyBot: candidate });
+  const installs = [];
+  t.mock.method(toolingProcess, 'runNpm', (args) => {
+    if (args[0] === 'root') return globalRoot;
+    installs.push(args);
+    const pkg = JSON.parse(fs.readFileSync(path.join(bot, 'package.json'), 'utf8'));
+    json(path.join(bot, 'package.json'), { ...pkg, version: '1.2.4', monkyBot: { ...pkg.monkyBot, requirements: candidate.requirements } });
+    return '';
+  });
+  t.mock.method(pm2, 'findProcess', () => null);
+  t.mock.method(readline, 'createInterface', () => assert.fail('confirmations use the arrow menu, not typed answers'));
+  const asked = [];
+  let answers = [];
+  t.mock.method(prompts, 'askCliConfirm', async (_locale, question, defaultYes) => {
+    asked.push({ question, defaultYes });
+    assert.ok(answers.length, `Unexpected confirmation: ${question}`);
+    return answers.shift();
+  });
+  const lines = captureLogs(t);
+
+  answers = [false];
+  await updates.updateCommand(context, []);
+  assert.match(lines.join('\n'), /Atualização cancelada/);
+  answers = [true, false];
+  await updates.updateCommand(context, []);
+  assert.match(lines.join('\n'), /Atualização não instalada; o bot atual continua rodando/);
+  assert.equal(installs.length, 0, 'declining the new access installs nothing');
+  answers = [true, true];
+  await updates.updateCommand(context, []);
+  assert.equal(installs.length, 1);
+  assert.deepEqual(asked.map((entry) => entry.defaultYes), [true, true, false, true, false],
+    'the version defaults to yes; new access is never approved by default');
+  assert.match(asked[0].question, /Atualizar sound-bot para 1\.2\.4\?/);
+  assert.match(asked[2].question, /Autorizar esses acessos e instalar\?/);
+  assert.equal(consent.hostConsentStatus(context.homeDir, config.botDir, consent.candidateHostConsent(candidate).fingerprint).ok, true);
+});
+
 test('profiles written by a former standalone CLI are read with defaults and inherit consent', async (t) => {
   const f = fixture(t, { requirements: undefined });
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
@@ -494,4 +592,28 @@ test('requirements lists what to open and configure even before setup', async (t
   const ports = view.effectivePorts(context, cliConfig.marketplaceConfig(context, { servePort: 80, publicHost: 'Bot.Example.test' }), {});
   assert.deepEqual(ports.map((port) => port.publicOrigin), ['http://bot.example.test', 'http://bot.example.test:7781'],
     'origins are canonical, as the server validates them');
+  const proxied = view.effectivePorts(context, cliConfig.marketplaceConfig(context, {
+    servePort: 7780, publicHost: 'bot.example.test', publicUrl: 'https://bot.example.test',
+  }), {});
+  assert.deepEqual(proxied.map((port) => port.publicOrigin), ['https://bot.example.test', 'http://bot.example.test:7781'],
+    'doctor tests the manifest through the TLS proxy, and declared ports through the public host');
+});
+
+test('doctor and config env set judge a public URL by the same rule', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  captureLogs(t);
+  const view = require('../dist/cli/requirementsView');
+  const context = cliConfig.createCliContext(f.bot);
+  const config = cliConfig.marketplaceConfig(context, { servePort: 7780, publicHost: 'bot.example.test' });
+  for (const value of ['http://games.example.test:80/', 'https://games.example.test:443', 'http://games.example.test/play']) {
+    await assert.rejects(runBotCli(f.bot, ['config', 'env', 'set', 'FIXTURE_GAMES_PUBLIC_URL', value]), /sem credenciais, caminho/);
+    const games = view.effectivePorts(context, config, { FIXTURE_GAMES_PUBLIC_URL: value }).find((port) => port.id === 'games');
+    assert.equal(games.publicOrigin, null, value);
+    assert.match(games.invalid?.en ?? '', /FIXTURE_GAMES_PUBLIC_URL is not an http\(s\) URL/, value);
+  }
+  const accepted = view.effectivePorts(context, config, { FIXTURE_GAMES_PUBLIC_URL: 'https://Games.Example.test/' })
+    .find((port) => port.id === 'games');
+  assert.equal(accepted.publicOrigin, 'https://games.example.test');
+  assert.equal(accepted.invalid, undefined);
 });

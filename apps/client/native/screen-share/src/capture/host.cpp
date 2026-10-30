@@ -24,678 +24,14 @@
 #include <mutex>
 #include <thread>
 
+#include "win32.h"
+#include "target.h"
+#include "runtimeIntegrity.h"
+
 namespace {
 using namespace monky::screen_capture;
+namespace win = monky::win;
 using Microsoft::WRL::ComPtr;
-
-class Handle {
- public:
-  explicit Handle(HANDLE handle = nullptr) : handle_(handle) {}
-  ~Handle() { Close(); }
-  Handle(const Handle&) = delete;
-  Handle& operator=(const Handle&) = delete;
-  Handle(Handle&& other) noexcept : handle_(other.Take()) {}
-  Handle& operator=(Handle&& other) noexcept {
-    if (this != &other) { Close(); handle_ = other.Take(); }
-    return *this;
-  }
-  HANDLE Get() const { return handle_; }
-  HANDLE Take() { const auto value = handle_; handle_ = nullptr; return value; }
-  explicit operator bool() const { return handle_ && handle_ != INVALID_HANDLE_VALUE; }
- private:
-  void Close() { if (*this) CloseHandle(handle_); handle_ = nullptr; }
-  HANDLE handle_;
-};
-
-std::string Hex(std::uint32_t value) {
-  char text[11]{};
-  std::snprintf(text, sizeof(text), "0x%08x", static_cast<unsigned>(value));
-  return text;
-}
-
-void CheckWin(BOOL result, const char* code, const char* message) {
-  if (!result) throw ContractError(code, std::string(message) + ": " + Hex(GetLastError()));
-}
-
-std::string Utf8(std::wstring_view text) {
-  Require(text.size() <= 32768, "UTF-16 value exceeds bound", "ERR_SCREEN_CAPTURE_TEXT");
-  if (text.empty()) return {};
-  const auto length = static_cast<int>(text.size());
-  const int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), length, nullptr, 0, nullptr, nullptr);
-  Require(needed > 0, "Cannot encode UTF-16 value as UTF-8", "ERR_SCREEN_CAPTURE_TEXT");
-  std::string result(static_cast<std::size_t>(needed), '\0');
-  CheckWin(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), length, result.data(), needed,
-      nullptr, nullptr) == needed, "ERR_SCREEN_CAPTURE_TEXT", "UTF-8 conversion failed");
-  return result;
-}
-
-std::string ObsPath(std::wstring_view windowsPath) {
-  Require(SafeAbsolutePath(windowsPath), "OBS API path was not admitted as an ordinary absolute Windows path",
-          "ERR_SCREEN_CAPTURE_MODULE_PATH");
-  return ObsApiPath(Utf8(windowsPath));
-}
-
-std::wstring HostImagePath() {
-  std::array<wchar_t, 32768> image{};
-  const DWORD length = GetModuleFileNameW(nullptr, image.data(), static_cast<DWORD>(image.size()));
-  Require(length > 0 && length < image.size(), "Cannot bind the native host image path",
-          "ERR_SCREEN_CAPTURE_RUNTIME_PATH");
-  return {image.data(), length};
-}
-
-std::string BoundedString(const char* value, std::size_t maximum) {
-  Require(value != nullptr, "Missing stock string", "ERR_SCREEN_CAPTURE_ABI");
-  const auto length = strnlen_s(value, maximum + 1);
-  Require(length <= maximum, "Stock string exceeds its bound", "ERR_SCREEN_CAPTURE_ABI");
-  const std::string result(value, length);
-  Require(ValidUtf8(result), "Stock identity is not valid UTF-8", "ERR_SCREEN_CAPTURE_ABI");
-  return result;
-}
-
-std::uint64_t FileTimeValue(FILETIME time) {
-  return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
-}
-
-std::uint64_t ProcessCreation(HANDLE process) {
-  FILETIME created{}, exited{}, kernel{}, user{};
-  CheckWin(GetProcessTimes(process, &created, &exited, &kernel, &user),
-      "ERR_SCREEN_CAPTURE_PROCESS_IDENTITY", "Cannot query process creation time");
-  const auto value = FileTimeValue(created);
-  Require(value > 0, "Process creation time is zero", "ERR_SCREEN_CAPTURE_PROCESS_IDENTITY");
-  return value;
-}
-
-std::uint64_t Qpc() {
-  LARGE_INTEGER value{};
-  CheckWin(QueryPerformanceCounter(&value), "ERR_SCREEN_CAPTURE_CLOCK", "QPC failed");
-  Require(value.QuadPart > 0, "QPC is not positive", "ERR_SCREEN_CAPTURE_CLOCK");
-  return static_cast<std::uint64_t>(value.QuadPart);
-}
-
-std::uint64_t QpcFrequency() {
-  LARGE_INTEGER value{};
-  CheckWin(QueryPerformanceFrequency(&value), "ERR_SCREEN_CAPTURE_CLOCK", "QPC frequency failed");
-  Require(value.QuadPart > 0, "QPC frequency is not positive", "ERR_SCREEN_CAPTURE_CLOCK");
-  return static_cast<std::uint64_t>(value.QuadPart);
-}
-
-void WriteAll(HANDLE file, std::span<const std::uint8_t> bytes, const char* code) {
-  while (!bytes.empty()) {
-    const auto amount = static_cast<DWORD>((std::min)(bytes.size(), std::size_t{1048576}));
-    DWORD written = 0;
-    CheckWin(WriteFile(file, bytes.data(), amount, &written, nullptr), code, "WriteFile failed");
-    Require(written > 0 && written <= amount, "WriteFile made no valid progress", code);
-    bytes = bytes.subspan(written);
-  }
-}
-
-void WriteText(HANDLE file, std::string_view text, const char* code) {
-  WriteAll(file, {reinterpret_cast<const std::uint8_t*>(text.data()), text.size()}, code);
-}
-
-std::wstring WindowTitle(HWND window) {
-  const int length = GetWindowTextLengthW(window);
-  Require(length > 0 && length <= 512, "Selected window must have a bounded nonempty title",
-      "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-  std::wstring value(static_cast<std::size_t>(length) + 1, L'\0');
-  const int copied = GetWindowTextW(window, value.data(), static_cast<int>(value.size()));
-  Require(copied == length, "Selected title changed during observation", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-  value.resize(static_cast<std::size_t>(copied));
-  return value;
-}
-
-std::wstring WindowClass(HWND window) {
-  std::array<wchar_t, 257> text{};
-  const auto length = GetClassNameW(window, text.data(), static_cast<int>(text.size()));
-  Require(length > 0 && length < 256, "Cannot observe bounded window class", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-  return {text.data(), static_cast<std::size_t>(length)};
-}
-
-std::wstring ExecutableBasename(HANDLE process) {
-  std::array<wchar_t, 32768> path{};
-  DWORD length = static_cast<DWORD>(path.size());
-  CheckWin(QueryFullProcessImageNameW(process, 0, path.data(), &length),
-      "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY", "Cannot query selected process image");
-  const std::wstring_view image(path.data(), length);
-  const auto separator = image.find_last_of(L'\\');
-  Require(separator != std::wstring_view::npos, "Process image has no basename", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-  return std::wstring(image.substr(separator + 1));
-}
-
-bool SameOrdinal(std::wstring_view a, std::wstring_view b) {
-  return CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
-}
-
-struct Target {
-  CaptureKind kind = CaptureKind::Window;
-  HMONITOR monitor = nullptr;
-  MonitorIdentity monitorIdentity;
-  HWND window = nullptr;
-  std::uint32_t pid = 0;
-  std::uint64_t creation = 0;
-  Handle process{};
-  SourceKey key;
-  std::wstring title, className, executable;
-
-  void Verify() const {
-    if (kind == CaptureKind::Monitor) {
-      // Runs every capture tick, so it only reads cached monitor metadata. The device interface read can
-      // wait behind another program's registry writes while holding the system display lock, freezing
-      // every screen; VerifyUnique performs it on admission, start and reported display changes.
-      MONITORINFOEXW info{}; info.cbSize = sizeof(info);
-      Require(monitor && GetMonitorInfoW(monitor, &info) && monitorIdentity.deviceName == info.szDevice,
-              "Selected monitor was disconnected or its device identity changed; reselect explicitly",
-              "ERR_SCREEN_CAPTURE_MONITOR_LOST");
-      Require(info.rcMonitor.left == monitorIdentity.x && info.rcMonitor.top == monitorIdentity.y &&
-              info.rcMonitor.right - info.rcMonitor.left == static_cast<LONG>(monitorIdentity.width) &&
-              info.rcMonitor.bottom - info.rcMonitor.top == static_cast<LONG>(monitorIdentity.height),
-              "Selected monitor bounds or resolution changed; reselect explicitly",
-              "ERR_SCREEN_CAPTURE_MONITOR_CHANGED");
-      return;
-    }
-    DWORD current = 0;
-    Require(IsWindow(window) && GetWindowThreadProcessId(window, &current) != 0 && current == pid &&
-        WaitForSingleObject(process.Get(), 0) == WAIT_TIMEOUT && ProcessCreation(process.Get()) == creation,
-        "Selected HWND/PID/creation time is no longer live", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
-    Require(GetAncestor(window, GA_ROOT) == window,
-        "Selected window is no longer top-level", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
-    // The title is not identity: a browser renames its window on every page while it is still the same source.
-    Require(WindowClass(window) == className && ExecutableBasename(process.Get()) == executable,
-        "Selected window class or executable changed; reselection is required", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
-  }
-
-  bool Paused() const { return kind != CaptureKind::Monitor && (!IsWindowVisible(window) || IsIconic(window)); }
-
-  struct Monitors {
-    const MonitorIdentity* expected;
-    HMONITOR matched = nullptr;
-    std::size_t visited = 0, matches = 0;
-    bool failed = false;
-  };
-  static BOOL CALLBACK EnumerateMonitor(HMONITOR handle, HDC, LPRECT, LPARAM parameter) noexcept {
-    auto& context = *reinterpret_cast<Monitors*>(parameter);
-    if (++context.visited > 64) { context.failed = true; return FALSE; }
-    MONITORINFOEXW info{}; info.cbSize = sizeof(info);
-    DISPLAY_DEVICEW device{}; device.cb = sizeof(device);
-    if (!GetMonitorInfoW(handle, &info) ||
-        !EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME)) {
-      context.failed = true; return FALSE;
-    }
-    if (context.expected->deviceId == device.DeviceID) { ++context.matches; context.matched = handle; }
-    return TRUE;
-  }
-
-  void VerifyUnique() const {
-    Verify();
-    if (kind == CaptureKind::Monitor) {
-      MONITORINFOEXW info{}; info.cbSize = sizeof(info);
-      DISPLAY_DEVICEW device{}; device.cb = sizeof(device);
-      Require(GetMonitorInfoW(monitor, &info) &&
-              EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) &&
-              monitorIdentity.deviceId == device.DeviceID,
-              "Selected monitor was disconnected or its device identity changed; reselect explicitly",
-              "ERR_SCREEN_CAPTURE_MONITOR_LOST");
-      Monitors context{&monitorIdentity};
-      Require(EnumDisplayMonitors(nullptr, nullptr, EnumerateMonitor, reinterpret_cast<LPARAM>(&context)) &&
-              !context.failed && context.matches == 1 && context.matched == monitor,
-              "Monitor interface no longer identifies the one selected physical display",
-              "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
-      Verify();
-      return;
-    }
-  }
-};
-
-Target BindTarget(const Arguments& arguments) {
-  Target value;
-  value.kind = arguments.kind;
-  if (arguments.kind == CaptureKind::Monitor) {
-    value.monitorIdentity = arguments.monitor;
-    Target::Monitors context{&value.monitorIdentity};
-    Require(EnumDisplayMonitors(nullptr, nullptr, Target::EnumerateMonitor, reinterpret_cast<LPARAM>(&context)) &&
-            !context.failed && context.matches == 1,
-            "Selected monitor interface is absent or ambiguous; no ordinal/primary fallback is allowed",
-            "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
-    value.monitor = context.matched;
-    value.VerifyUnique();
-    return value;
-  }
-  value.window = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(arguments.hwnd));
-  value.pid = arguments.processId;
-  value.process = Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, value.pid));
-  Require(static_cast<bool>(value.process), "Cannot bind selected process", "ERR_SCREEN_CAPTURE_PROCESS_IDENTITY");
-  value.creation = ProcessCreation(value.process.Get());
-  Require(arguments.expectedCreation == 0 || arguments.expectedCreation == value.creation,
-          "Selected process creation time changed since selection", "ERR_SCREEN_CAPTURE_PROCESS_IDENTITY");
-  value.title = WindowTitle(value.window); value.className = WindowClass(value.window);
-  value.executable = ExecutableBasename(value.process.Get());
-  Require(arguments.kind != CaptureKind::Game || (value.pid != GetCurrentProcessId() && !SameOrdinal(value.className, L"dwm")),
-          "Game Capture cannot bind the compositor or capture helper", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-  value.key = {Utf8(value.title), Utf8(value.className), Utf8(value.executable)};
-  ValidateKey(value.key);
-  value.VerifyUnique();
-  return value;
-}
-
-// Tells a monitor capture when its full identity must be read again. Windows broadcasts display and device
-// changes to top-level windows, so a hidden one on the host STA receives them while PumpMessages runs; a cheap
-// snapshot of cached monitor metadata also catches changes whose broadcast was missed.
-class DisplayChanges {
- public:
-  DisplayChanges() = default;
-  DisplayChanges(const DisplayChanges&) = delete;
-  DisplayChanges& operator=(const DisplayChanges&) = delete;
-  ~DisplayChanges() { if (window_) DestroyWindow(window_); }
-
-  void Start() {
-    const auto instance = GetModuleHandleW(nullptr);
-    WNDCLASSEXW windowClass{};
-    windowClass.cbSize = sizeof(windowClass);
-    windowClass.lpfnWndProc = Procedure;
-    windowClass.hInstance = instance;
-    windowClass.lpszClassName = L"MonkyScreenCaptureDisplayChanges";
-    Require(RegisterClassExW(&windowClass) != 0, "Cannot register the display change observer",
-        "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
-    window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, windowClass.lpszClassName, L"", WS_POPUP,
-        0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
-    Require(window_ != nullptr, "Cannot create the display change observer", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
-    snapshot_ = Snapshot();
-  }
-
-  // Consumes any reported or observed change since the previous call.
-  bool Changed() {
-    auto current = Snapshot();
-    const bool changed = pending_.exchange(false) || current != snapshot_;
-    snapshot_ = std::move(current);
-    return changed;
-  }
-
- private:
-  struct Monitor {
-    HMONITOR handle = nullptr;
-    LONG left = 0, top = 0, right = 0, bottom = 0;
-    std::wstring device;
-    bool operator==(const Monitor&) const = default;
-  };
-  struct Collection { std::vector<Monitor> monitors; bool failed = false; };
-
-  static LRESULT CALLBACK Procedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
-    if (message == WM_DISPLAYCHANGE || (message == WM_DEVICECHANGE && wParam == DBT_DEVNODES_CHANGED))
-      pending_.store(true);
-    return DefWindowProcW(window, message, wParam, lParam);
-  }
-  static BOOL CALLBACK Collect(HMONITOR handle, HDC, LPRECT, LPARAM parameter) noexcept {
-    auto& collection = *reinterpret_cast<Collection*>(parameter);
-    MONITORINFOEXW info{}; info.cbSize = sizeof(info);
-    if (collection.monitors.size() >= 64 || !GetMonitorInfoW(handle, &info)) { collection.failed = true; return FALSE; }
-    try {
-      collection.monitors.push_back({handle, info.rcMonitor.left, info.rcMonitor.top, info.rcMonitor.right,
-          info.rcMonitor.bottom, info.szDevice});
-    } catch (...) { collection.failed = true; return FALSE; }
-    return TRUE;
-  }
-  // GetMonitorInfoW reads cached topology without the device registry, so it is safe on every check.
-  static std::vector<Monitor> Snapshot() {
-    Collection collection;
-    if (!EnumDisplayMonitors(nullptr, nullptr, Collect, reinterpret_cast<LPARAM>(&collection)) || collection.failed)
-      collection.monitors.clear();
-    return std::move(collection.monitors);
-  }
-
-  inline static std::atomic<bool> pending_{false};
-  HWND window_ = nullptr;
-  std::vector<Monitor> snapshot_;
-};
-
-struct Parent { Handle process; DWORD pid = 0; std::uint64_t creation = 0; };
-
-Parent BindParent() {
-  const DWORD own = GetCurrentProcessId();
-  Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
-  Require(static_cast<bool>(snapshot), "Cannot inspect helper ancestry", "ERR_SCREEN_CAPTURE_PARENT");
-  PROCESSENTRY32W entry{}; entry.dwSize = sizeof(entry);
-  CheckWin(Process32FirstW(snapshot.Get(), &entry), "ERR_SCREEN_CAPTURE_PARENT", "Cannot read helper ancestry");
-  Parent parent;
-  do {
-    if (entry.th32ProcessID == own) { parent.pid = entry.th32ParentProcessID; break; }
-  } while (Process32NextW(snapshot.Get(), &entry));
-  Require(parent.pid != 0 && parent.pid != own, "Helper parent identity is unavailable", "ERR_SCREEN_CAPTURE_PARENT");
-  parent.process = Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, parent.pid));
-  Require(static_cast<bool>(parent.process) && WaitForSingleObject(parent.process.Get(), 0) == WAIT_TIMEOUT,
-      "Helper parent is not live", "ERR_SCREEN_CAPTURE_PARENT");
-  parent.creation = ProcessCreation(parent.process.Get());
-  Require(parent.creation <= ProcessCreation(GetCurrentProcess()), "Helper parent PID was reused", "ERR_SCREEN_CAPTURE_PARENT");
-  return parent;
-}
-
-void CheckComponents(const std::wstring& path, bool directory) {
-  Require(SafeAbsolutePath(path), "Unsafe absolute path", "ERR_SCREEN_CAPTURE_PATH");
-  for (std::size_t end = 3; end <= path.size(); ++end) {
-    if (end != path.size() && path[end] != L'\\') continue;
-    const auto prefix = path.substr(0, end);
-    const DWORD attributes = GetFileAttributesW(prefix.c_str());
-    const bool requireDirectory = end < path.size() || directory;
-    Require(attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
-        static_cast<bool>(attributes & FILE_ATTRIBUTE_DIRECTORY) == requireDirectory,
-        "Path contains a missing, redirected or wrong-kind component", "ERR_SCREEN_CAPTURE_PATH");
-  }
-}
-
-void CheckRealPath(HANDLE handle, const std::wstring& expected) {
-  std::array<wchar_t, 32768> text{};
-  const auto length = GetFinalPathNameByHandleW(handle, text.data(), static_cast<DWORD>(text.size()), FILE_NAME_NORMALIZED);
-  Require(length > 4 && length < text.size(), "Cannot obtain bounded realpath", "ERR_SCREEN_CAPTURE_PATH");
-  const std::wstring_view actual(text.data(), length);
-  Require(actual.starts_with(L"\\\\?\\") && SamePath(actual.substr(4), expected),
-      "Handle realpath does not match the explicit canonical path", "ERR_SCREEN_CAPTURE_PATH");
-}
-
-BY_HANDLE_FILE_INFORMATION FileInfo(HANDLE handle) {
-  BY_HANDLE_FILE_INFORMATION info{};
-  CheckWin(GetFileInformationByHandle(handle, &info), "ERR_SCREEN_CAPTURE_PATH", "Cannot inspect opened file");
-  return info;
-}
-
-Handle OpenRegular(const std::wstring& path) {
-  CheckComponents(path, false);
-  Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-  Require(static_cast<bool>(file), "Cannot lock ordinary input file", "ERR_SCREEN_CAPTURE_PATH");
-  const auto info = FileInfo(file.Get());
-  Require(!(info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
-      info.nNumberOfLinks == 1, "Input file is redirected or hardlinked", "ERR_SCREEN_CAPTURE_PATH");
-  CheckRealPath(file.Get(), path);
-  return file;
-}
-
-class Sha256 {
- public:
-  Sha256() {
-    Require(BCryptOpenAlgorithmProvider(&algorithm_, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0,
-        "Cannot open SHA256 provider", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-  }
-  ~Sha256() { if (algorithm_) BCryptCloseAlgorithmProvider(algorithm_, 0); }
-  Sha256(const Sha256&) = delete;
-  Sha256& operator=(const Sha256&) = delete;
-
-  std::string File(HANDLE file, std::uint64_t expectedBytes) const {
-    const auto before = FileInfo(file);
-    Require(((static_cast<std::uint64_t>(before.nFileSizeHigh) << 32) | before.nFileSizeLow) == expectedBytes,
-        "Pinned file size changed", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-    LARGE_INTEGER zero{};
-    CheckWin(SetFilePointerEx(file, zero, nullptr, FILE_BEGIN), "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY", "Cannot rewind hash input");
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    Require(BCryptCreateHash(algorithm_, &hash, nullptr, 0, nullptr, 0, 0) >= 0,
-        "Cannot create SHA256 hash", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-    try {
-      std::array<std::uint8_t, 65536> bytes{};
-      std::uint64_t offset = 0;
-      while (offset < expectedBytes) {
-        const auto count = static_cast<DWORD>((std::min)(expectedBytes - offset, static_cast<std::uint64_t>(bytes.size())));
-        DWORD read = 0;
-        CheckWin(ReadFile(file, bytes.data(), count, &read, nullptr), "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY", "Cannot hash stock file");
-        Require(read > 0 && BCryptHashData(hash, bytes.data(), read, 0) >= 0,
-            "Truncated stock file or SHA256 failure", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-        offset += read;
-      }
-      std::array<std::uint8_t, 32> digest{};
-      Require(BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0) >= 0,
-          "SHA256 finish failed", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-      BCryptDestroyHash(hash); hash = nullptr;
-      const auto after = FileInfo(file);
-      Require(before.nFileSizeHigh == after.nFileSizeHigh && before.nFileSizeLow == after.nFileSizeLow &&
-          FileTimeValue(before.ftLastWriteTime) == FileTimeValue(after.ftLastWriteTime),
-          "Stock input changed during hashing", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-      constexpr char hex[] = "0123456789abcdef";
-      std::string result;
-      for (const auto byte : digest) { result += hex[byte >> 4]; result += hex[byte & 15]; }
-      return result;
-    } catch (...) {
-      if (hash) BCryptDestroyHash(hash);
-      throw;
-    }
-  }
- private:
-  BCRYPT_ALG_HANDLE algorithm_ = nullptr;
-};
-
-void EnsureDataParents(const std::wstring& directory, std::wstring_view relative) {
-  for (std::size_t i = 0; i < relative.size(); ++i) {
-    if (relative[i] != L'\\') continue;
-    const auto path = directory + L"\\" + std::wstring(relative.substr(0, i));
-    if (!CreateDirectoryW(path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
-      CheckWin(FALSE, "ERR_SCREEN_CAPTURE_RUN_DIRECTORY", "Cannot create private data parent");
-    CheckComponents(path, true);
-  }
-}
-
-class OwnedRun {
- public:
-  OwnedRun(const Arguments& arguments, DWORD parentPid) : directory(arguments.runDirectory), runId(arguments.runId) {
-    ValidateRunPath(arguments);
-    CheckComponents(directory, true);
-    directoryHandle_ = Handle(CreateFileW(directory.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-    Require(static_cast<bool>(directoryHandle_), "Cannot bind owned run directory", "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
-    CheckRealPath(directoryHandle_.Get(), directory);
-    WIN32_FIND_DATAW item{};
-    const HANDLE find = FindFirstFileW((directory + L"\\*").c_str(), &item);
-    Require(find != INVALID_HANDLE_VALUE, "Cannot inspect run directory", "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
-    bool empty = true;
-    do {
-      const std::wstring_view name(item.cFileName);
-      if (name != L"." && name != L"..") empty = false;
-    } while (FindNextFileW(find, &item));
-    const DWORD enumerationError = GetLastError();
-    FindClose(find);
-    Require(enumerationError == ERROR_NO_MORE_FILES && empty, "Run directory must be newly created and empty",
-        "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
-    const auto markerPath = directory + L"\\.monky-screen-capture-owner";
-    marker_ = Handle(CreateFileW(markerPath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-    Require(static_cast<bool>(marker_), "Cannot exclusively create run ownership marker", "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
-    CheckRealPath(marker_.Get(), markerPath);
-    Require(FileInfo(marker_.Get()).nNumberOfLinks == 1, "Ownership marker must be ordinary", "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
-    markerText_ = "{\"schemaVersion\":1,\"runId\":" + JsonString(runId) +
-        ",\"helperProcessId\":" + std::to_string(GetCurrentProcessId()) +
-        ",\"parentProcessId\":" + std::to_string(parentPid) + "}\n";
-    WriteText(marker_.Get(), markerText_, "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
-    CheckWin(FlushFileBuffers(marker_.Get()), "ERR_SCREEN_CAPTURE_RUN_DIRECTORY", "Cannot persist run ownership");
-    ValidatePathEvidence({true, true, true, empty, true, markerText_.find(runId) != std::string::npos});
-    CreatePrivateDirectory(L"config");
-    CreatePrivateDirectory(L"data");
-  }
-
-  void Verify() const {
-    CheckComponents(directory, true);
-    CheckRealPath(directoryHandle_.Get(), directory);
-    CheckRealPath(marker_.Get(), directory + L"\\.monky-screen-capture-owner");
-    LARGE_INTEGER zero{};
-    CheckWin(SetFilePointerEx(marker_.Get(), zero, nullptr, FILE_BEGIN), "ERR_SCREEN_CAPTURE_RUN_DIRECTORY", "Cannot verify ownership nonce");
-    std::array<char, 1024> bytes{};
-    DWORD count = 0;
-    CheckWin(ReadFile(marker_.Get(), bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr),
-        "ERR_SCREEN_CAPTURE_RUN_DIRECTORY", "Cannot read ownership nonce");
-    Require(std::string_view(bytes.data(), count) == markerText_, "Run ownership nonce changed", "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
-  }
-
-  void CreatePrivateDirectory(std::wstring_view relative) const {
-    const auto path = directory + L"\\" + std::wstring(relative);
-    CheckWin(CreateDirectoryW(path.c_str(), nullptr), "ERR_SCREEN_CAPTURE_RUN_DIRECTORY", "Cannot exclusively create private directory");
-    CheckComponents(path, true);
-  }
-
-  void EnsureParents(std::wstring_view relative) const {
-    EnsureDataParents(directory, relative);
-  }
-
-  std::wstring directory;
-  std::string runId;
- private:
-  Handle directoryHandle_, marker_;
-  std::string markerText_;
-};
-
-template <typename Function>
-Function Symbol(HMODULE module, const char* name) {
-  const auto address = GetProcAddress(module, name);
-  if (!address) throw ContractError("ERR_SCREEN_CAPTURE_ABI", std::string("Missing pinned export: ") + name);
-  static_assert(sizeof(Function) == sizeof(address));
-  Function function;
-  std::memcpy(&function, &address, sizeof(function));
-  return function;
-}
-
-struct Libraries {
-  abi::Api api;
-  decltype(&MonkyAv1Validate) validateAv1 = nullptr;
-  // Retain every explicit image reference, search cookie, and input lock until
-  // process exit. obs_shutdown alone is not evidence of driver/hook GPU drain.
-  std::vector<HMODULE> images;
-  std::vector<Handle> inputs;
-  std::wstring captureDataDirectory;
-  DLL_DIRECTORY_COOKIE cookie = nullptr;
-
-  Handle OpenPinned(const std::wstring& path, const RuntimePin& pin, const Sha256& hash) {
-    auto file = OpenRegular(path);
-    Require(hash.File(file.Get(), pin.bytes) == pin.sha256,
-        "Capture data SHA256 differs from its compiled pin", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-    return file;
-  }
-
-  Handle CacheCaptureData(const std::wstring& source, const RuntimePin& pin, const Sha256& hash, const OwnedRun& run) {
-    EnsureDataParents(captureDataDirectory, pin.relative);
-    const auto destination = captureDataDirectory + L"\\" + pin.relative;
-    if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) return OpenPinned(destination, pin, hash);
-    Require(GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND,
-        "Cannot inspect pinned capture data cache", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-    const auto staging = run.directory + L"\\hook-data-copy";
-    CheckWin(CopyFileW(source.c_str(), staging.c_str(), TRUE), "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY",
-        "Cannot exclusively stage pinned capture data");
-    { const auto verified = OpenPinned(staging, pin, hash); }
-    if (!MoveFileExW(staging.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
-      // Another helper may have published the same pin. Never replace an image
-      // that a game can still have mapped after the original helper exits.
-      auto published = OpenPinned(destination, pin, hash);
-      CheckWin(DeleteFileW(staging.c_str()), "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY", "Cannot retire owned cache staging file");
-      return published;
-    }
-    return OpenPinned(destination, pin, hash);
-  }
-
-  void VerifyAndCopy(const Arguments& arguments, const OwnedRun& run) {
-    CheckComponents(arguments.runtime, true);
-    captureDataDirectory = CaptureDataCacheDirectory(run.directory, kCaptureDataDigest);
-    if (!CreateDirectoryW(captureDataDirectory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
-      CheckWin(FALSE, "ERR_SCREEN_CAPTURE_RUN_DIRECTORY", "Cannot create pinned capture data cache");
-    CheckComponents(captureDataDirectory, true);
-    Handle cache(CreateFileW(captureDataDirectory.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-    Require(static_cast<bool>(cache), "Cannot bind pinned capture data cache", "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
-    CheckRealPath(cache.Get(), captureDataDirectory);
-    inputs.push_back(std::move(cache));
-    Sha256 hash;
-    for (const auto& pin : kRuntimeFiles) {
-      const auto source = arguments.runtime + L"\\" + pin.relative;
-      auto input = OpenRegular(source);
-      Require(hash.File(input.Get(), pin.bytes) == pin.sha256, "Required stock file SHA256 differs from its pin",
-          "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-      inputs.push_back(std::move(input));
-      const std::wstring_view relative(pin.relative);
-      if (relative == L"bin\\64bit\\obs-amf-test.exe" || relative == L"bin\\64bit\\obs-nvenc-test.exe") {
-        auto probe = OpenRegular(StockProbePath(HostImagePath(), relative.substr(10)));
-        Require(hash.File(probe.Get(), pin.bytes) == pin.sha256,
-            "Adjacent stock hardware probe differs from the compiled runtime pin", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-        inputs.push_back(std::move(probe));
-      }
-      if (relative.starts_with(L"data\\obs-plugins\\win-capture\\")) {
-        inputs.push_back(CacheCaptureData(source, pin, hash, run));
-      } else if (relative.starts_with(L"data\\")) {
-        run.EnsureParents(relative);
-        const auto destination = run.directory + L"\\" + pin.relative;
-        CheckWin(CopyFileW(source.c_str(), destination.c_str(), TRUE), "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY",
-            "Cannot exclusively snapshot private module/core data");
-        auto copy = OpenRegular(destination);
-        Require(hash.File(copy.Get(), pin.bytes) == pin.sha256, "Private data snapshot SHA256 changed",
-            "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-        inputs.push_back(std::move(copy));
-      }
-    }
-  }
-
-  HMODULE LoadImage(const Arguments& arguments, const wchar_t* relative) {
-    const auto path = arguments.runtime + L"\\" + relative;
-    bool pinned = false;
-    for (const auto& pin : kRuntimeFiles) if (std::wstring_view(pin.relative) == relative) pinned = true;
-    Require(pinned, "Library is outside the compiled required-file pin set", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
-    const auto image = LoadLibraryExW(path.c_str(), nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
-    if (!image) throw ContractError("ERR_SCREEN_CAPTURE_LIBRARY_LOAD", "Cannot load verified private stock library: " + Hex(GetLastError()));
-    images.push_back(image);
-    return image;
-  }
-
-  void LoadCore(const Arguments& arguments) {
-    CheckWin(SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS),
-        "ERR_SCREEN_CAPTURE_DLL_SEARCH", "Cannot restrict helper DLL search");
-    cookie = AddDllDirectory((arguments.runtime + L"\\bin\\64bit").c_str());
-    Require(cookie != nullptr, "Cannot add private stock dependency directory", "ERR_SCREEN_CAPTURE_DLL_SEARCH");
-    const auto core = LoadImage(arguments, L"bin\\64bit\\obs.dll");
-    if (IsAv1(arguments.encoder)) {
-      const auto image = HostImagePath();
-      const auto path = image.substr(0, image.find_last_of(L'\\') + 1) + L"monky_av1.dll";
-      inputs.push_back(OpenPinned(path, kAv1Runtime, Sha256{}));
-      const auto av1 = LoadLibraryExW(path.c_str(), nullptr,
-          LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-      Require(av1 != nullptr, "Cannot load verified AV1 runtime", "ERR_SCREEN_CAPTURE_LIBRARY_LOAD");
-      images.push_back(av1);
-      validateAv1 = Symbol<decltype(validateAv1)>(av1, "MonkyAv1Validate");
-    }
-    LoadImage(arguments, L"bin\\64bit\\libobs-d3d11.dll");
-    LoadImage(arguments, L"bin\\64bit\\libobs-winrt.dll");
-#define LOAD_API(name) api.name = Symbol<decltype(api.name)>(core, #name)
-    LOAD_API(obs_startup); LOAD_API(obs_shutdown); LOAD_API(obs_get_version_string);
-    LOAD_API(base_set_log_handler); LOAD_API(obs_add_data_path);
-    LOAD_API(obs_reset_video); LOAD_API(obs_get_video_info); LOAD_API(obs_get_video);
-    LOAD_API(obs_get_total_frames); LOAD_API(obs_get_lagged_frames); LOAD_API(obs_nv12_tex_active);
-    LOAD_API(obs_enter_graphics); LOAD_API(obs_leave_graphics); LOAD_API(gs_get_device_obj);
-    LOAD_API(obs_open_module); LOAD_API(obs_init_module); LOAD_API(obs_post_load_modules); LOAD_API(obs_queue_task);
-    LOAD_API(obs_get_module); LOAD_API(obs_get_module_file_name); LOAD_API(obs_get_module_binary_path);
-    LOAD_API(obs_get_module_data_path); LOAD_API(obs_module_get_config_path);
-    LOAD_API(obs_get_main_canvas); LOAD_API(obs_get_canvas_by_uuid); LOAD_API(obs_canvas_get_uuid);
-    LOAD_API(obs_canvas_get_flags); LOAD_API(obs_canvas_release); LOAD_API(obs_canvas_get_video);
-    LOAD_API(obs_canvas_get_video_info); LOAD_API(obs_canvas_set_channel); LOAD_API(obs_canvas_get_channel);
-    LOAD_API(obs_load_private_source); LOAD_API(obs_obj_is_private);
-    LOAD_API(obs_source_create_private); LOAD_API(obs_source_release);
-    LOAD_API(obs_source_set_enabled); LOAD_API(obs_source_get_width); LOAD_API(obs_source_get_height);
-    LOAD_API(obs_source_get_proc_handler); LOAD_API(obs_get_source_properties);
-    LOAD_API(obs_source_get_display_name);
-    LOAD_API(obs_scene_from_source); LOAD_API(obs_scene_get_source); LOAD_API(obs_scene_add);
-    LOAD_API(obs_sceneitem_get_source); LOAD_API(obs_scene_release);
-    LOAD_API(obs_sceneitem_set_pos); LOAD_API(obs_sceneitem_set_alignment); LOAD_API(obs_sceneitem_set_bounds_type);
-    LOAD_API(obs_sceneitem_set_bounds_alignment); LOAD_API(obs_sceneitem_set_bounds);
-    LOAD_API(obs_data_create); LOAD_API(obs_data_create_from_json); LOAD_API(obs_data_release); LOAD_API(obs_data_set_string);
-    LOAD_API(obs_data_set_int); LOAD_API(obs_data_set_bool); LOAD_API(obs_data_get_string);
-    LOAD_API(obs_data_get_int); LOAD_API(obs_data_get_bool);
-    LOAD_API(obs_properties_destroy); LOAD_API(obs_properties_get); LOAD_API(obs_properties_apply_settings);
-    LOAD_API(obs_property_get_type); LOAD_API(obs_property_enabled); LOAD_API(obs_property_list_format);
-    LOAD_API(obs_property_list_item_count); LOAD_API(obs_property_list_item_disabled);
-    LOAD_API(obs_property_list_item_string); LOAD_API(obs_property_list_item_int);
-    LOAD_API(obs_property_int_min); LOAD_API(obs_property_int_max); LOAD_API(obs_property_int_step);
-    LOAD_API(obs_encoder_defaults); LOAD_API(obs_get_encoder_properties); LOAD_API(obs_get_encoder_codec);
-    LOAD_API(obs_get_encoder_type); LOAD_API(obs_get_encoder_caps); LOAD_API(obs_video_encoder_create);
-    LOAD_API(obs_encoder_update); LOAD_API(obs_encoder_release); LOAD_API(obs_encoder_set_video); LOAD_API(obs_encoder_video);
-    LOAD_API(obs_encoder_active); LOAD_API(obs_encoder_get_extra_data);
-    LOAD_API(obs_encoder_get_settings); LOAD_API(obs_encoder_get_id); LOAD_API(obs_encoder_get_last_error);
-    LOAD_API(obs_register_output_s); LOAD_API(obs_output_create); LOAD_API(obs_output_release);
-    LOAD_API(obs_output_start); LOAD_API(obs_output_force_stop); LOAD_API(obs_output_active);
-    LOAD_API(obs_output_set_video_encoder); LOAD_API(obs_output_get_video_encoder); LOAD_API(obs_output_can_begin_data_capture);
-    LOAD_API(obs_output_initialize_encoders); LOAD_API(obs_output_begin_data_capture); LOAD_API(obs_output_end_data_capture);
-    LOAD_API(proc_handler_call); LOAD_API(calldata_get_data); LOAD_API(calldata_get_string); LOAD_API(bfree);
-    LOAD_API(ms_build_window_strings); LOAD_API(ms_find_window); LOAD_API(ms_find_window_top_level);
-#undef LOAD_API
-  }
-};
 
 struct DataRef {
   abi::Api& api;
@@ -940,26 +276,20 @@ class Host {
         if (!normalizedParameters.bytes.empty()) parameterSets = normalizedParameters.bytes;
         // Preview may have consumed the first headers before a viewer joins.
         if (IsAv1(host.capability_.encoder)) {
-          const auto picture = monky::screen_video::InspectAv1({delivered.data, delivered.size});
-          if (picture.sequence) {
-            av1Sequence = picture.sequence_header;
-            parameterSets = av1Sequence;
-          }
-          char error[512]{};
-          const bool validated = host.libraries_.validateAv1 &&
-              host.libraries_.validateAv1(parameterSets.data(), parameterSets.size(),
-                  host.arguments_.video.width, host.arguments_.video.height, error, sizeof(error));
-          Require(validated, (std::string(error[0] ? error : "AV1 sequence validation is unavailable") +
-              "; encoder=" + EncoderId(host.capability_.encoder) +
-              " bitrateKbps=" + std::to_string(host.live_->Bitrate()) +
-              " ceilingKbps=" + std::to_string(host.arguments_.bitrateCeilingKbps)).c_str(), "ERR_SCREEN_CAPTURE_AV1");
-          const auto header = monky::screen_video::InspectAv1(parameterSets);
-          Require(header.sequence && !header.picture && picture.picture && picture.keyframe,
-                  "AV1 keyframe requires a valid sequence header", "ERR_SCREEN_CAPTURE_AV1");
-          if (!picture.sequence) independentKeyframe.assign(parameterSets.begin(), parameterSets.end());
-          Require(independentKeyframe.size() <= kMaxPacketBytes - delivered.size,
-                  "AV1 keyframe exceeds packet bound", "ERR_SCREEN_CAPTURE_AV1");
-          independentKeyframe.insert(independentKeyframe.end(), delivered.data, delivered.data + delivered.size);
+          auto keyframe = CompleteAv1Keyframe({delivered.data, delivered.size}, parameterSets,
+              [&](std::span<const std::uint8_t> sequence) {
+            char error[512]{};
+            const bool validated = host.libraries_.validateAv1 &&
+                host.libraries_.validateAv1(sequence.data(), sequence.size(),
+                    host.arguments_.video.width, host.arguments_.video.height, error, sizeof(error));
+            Require(validated, (std::string(error[0] ? error : "AV1 sequence validation is unavailable") +
+                "; encoder=" + EncoderId(host.capability_.encoder) +
+                " bitrateKbps=" + std::to_string(host.live_->Bitrate()) +
+                " ceilingKbps=" + std::to_string(host.arguments_.bitrateCeilingKbps)).c_str(), "ERR_SCREEN_CAPTURE_AV1");
+          });
+          av1Sequence = std::move(keyframe.sequenceHeader);
+          parameterSets = av1Sequence;
+          independentKeyframe = std::move(keyframe.bytes);
         } else {
           independentKeyframe = CompleteH264Keyframe({delivered.data, delivered.size}, parameterSets, host.arguments_.video);
         }
@@ -1276,38 +606,28 @@ class Host {
         "Window property has unexpected format", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
     const auto count = api().obs_property_list_item_count(property);
     Require(count <= kMaxWindowCandidates, "Window property exceeds bound", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-    // The bound HWND selects the captured window; this tuple only seeds the stock setting. The window may have been
-    // renamed since selection (a browser loading a page), so its current title is accepted and preferred.
-    std::optional<SourceKey> live;
+    std::optional<std::string> liveTitle;
     try {
-      live = SourceKey{Utf8(WindowTitle(target_.window)), target_.key.className, target_.key.executable};
+      liveTitle = WindowTitle(target_.window);
     } catch (const ContractError&) {}
-    std::string selected, current;
-    const auto remember = [](std::string& slot, const std::string& encoded) {
-      Require(slot.empty() || slot == encoded, "Selected window has inconsistent property encodings",
-          "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-      slot = encoded;
-    };
+    std::vector<WindowListEntry> entries;
+    entries.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
       if (api().obs_property_list_item_disabled(property, i)) continue;
-      const auto encoded = BoundedString(api().obs_property_list_item_string(property, i), 4096);
-      if (encoded.empty()) continue;
+      auto encoded = OptionalString(api().obs_property_list_item_string(property, i), kMaxWindowSetting);
+      if (!encoded || encoded->empty()) continue;
       char* className = nullptr; char* title = nullptr; char* executable = nullptr;
-      api().ms_build_window_strings(encoded.c_str(), &className, &title, &executable);
+      api().ms_build_window_strings(encoded->c_str(), &className, &title, &executable);
+      WindowListEntry entry{std::move(*encoded)};
       try {
-        if (className && title && executable) {
-          const SourceKey observed{BoundedString(title, 512), BoundedString(className, 256), BoundedString(executable, 260)};
-          if (observed == target_.key) remember(selected, encoded);
-          if (live && observed == *live) remember(current, encoded);
-        }
+        entry.key = WindowEntryKey(title, className, executable);
       } catch (...) {
         api().bfree(className); api().bfree(title); api().bfree(executable); throw;
       }
       api().bfree(className); api().bfree(title); api().bfree(executable);
+      entries.push_back(std::move(entry));
     }
-    Require(!current.empty() || !selected.empty(), "Selected window key is absent from stock source properties",
-        "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-    return current.empty() ? selected : current;
+    return SelectWindowSetting(entries, target_.key, liveTitle);
   }
   void SourceSettings() {
     Require(!arguments_.encoderProbe, "Encoder probing cannot enumerate source settings", "ERR_SCREEN_CAPTURE_PROBE_ISOLATION");
@@ -1323,7 +643,7 @@ class Host {
       const auto selected = WindowSetting(properties.value);
       // This tuple configures the source; the bound HWND, not its title, selects the captured window.
       api().obs_data_set_string(sourceSettings_, "window", selected.c_str());
-      Require(BoundedString(api().obs_data_get_string(sourceSettings_, "window"), 4096) == selected,
+      Require(BoundedString(api().obs_data_get_string(sourceSettings_, "window"), kMaxWindowSetting) == selected,
           "Bound window setting readback differs", "ERR_SCREEN_CAPTURE_SETTINGS");
       SetInteger(properties.value, sourceSettings_, "priority", 1, true);
       if (api().obs_properties_get(properties.value, "capture_audio"))
@@ -1501,7 +821,7 @@ class Host {
     } else if (!arguments_.encoderProbe && arguments_.kind == CaptureKind::Monitor) {
       using Bind = bool (*)(std::uint64_t, const char*, const char*, std::int32_t, std::int32_t, std::uint32_t, std::uint32_t);
       const auto& monitor = arguments_.monitor;
-      Require(Symbol<Bind>(image, "monky_bind_monitor_target")(reinterpret_cast<std::uintptr_t>(target_.monitor),
+      Require(Symbol<Bind>(image, "monky_bind_monitor_target")(reinterpret_cast<std::uintptr_t>(target_.Monitor()),
           Utf8(monitor.deviceId).c_str(), Utf8(monitor.deviceName).c_str(), monitor.x, monitor.y, monitor.width, monitor.height),
           "Monitor capture could not bind the selected physical display", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
       invalidateMonitorIdentity_ = Symbol<void (*)()>(image, "monky_invalidate_monitor_identity");
@@ -1777,7 +1097,7 @@ class Host {
   void CheckProbeIsolation() {
     Require(arguments_.encoderProbe, "Unexpected source-free probe isolation check");
     std::lock_guard lock(bufferMutex_);
-    ValidateEncoderProbeIsolation(target_.window || target_.monitor || target_.process,
+    ValidateEncoderProbeIsolation(target_.window || target_.Monitor() || target_.process,
         source_ != nullptr, scene_ != nullptr, live_ != nullptr,
         encoder_ && api().obs_encoder_active(encoder_), output_ && api().obs_output_active(output_),
         observation_.outputPackets);

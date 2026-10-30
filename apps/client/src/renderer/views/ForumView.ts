@@ -1,17 +1,18 @@
-import { LIMITS, MessageType, Permission, type AttachmentMeta, type ForumListResult, type ForumPost, type ForumPostSaved } from '@monky/shared';
-import type { NetworkClient } from '../core/NetworkClient';
+import { LIMITS, MessageType, Permission, ProtocolErrorCode, type AttachmentMeta, type ForumListResult, type ForumPost, type ForumPostSaved } from '@monky/shared';
+import { ProtocolRequestError, type NetworkClient } from '../core/NetworkClient';
 import { accessSignature, type ServerStore } from '../stores/serverStore';
 import { t, getLanguage } from '../i18n';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, html } from '../utils/html';
 import { openCommunityModal } from './CommunityModal';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
 import { uploadAttachment, type UploadHandle } from '../core/AttachmentUploader';
 import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { showConfirm } from './Dialog';
-import { fileIconName, formatBytes } from '../utils/attachment';
+import { fileIconName, formatBytes, resolveAttachmentUrl } from '../utils/attachment';
 import { imageCarouselNavigationButton, moveImageCarousel } from './ImageCarousel';
 import { showErrorToast } from './CopyToast';
+import { useAppValidation } from '../utils/feedback';
 import { openFileInputPicker } from '../utils/buttonLoading';
 
 interface ForumAttachmentSelection {
@@ -21,7 +22,53 @@ interface ForumAttachmentSelection {
   previewUrl?: string;
 }
 
+/** A count or limit the server reported, or 0 when it is not a whole, non-negative number. */
+function wholeNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** A post as the server lists it; dates must be real so the list can show them. */
+function isForumPost(value: unknown): value is ForumPost {
+  return isRecord(value) && typeof value.channelId === 'string' && typeof value.forumId === 'string'
+    && typeof value.title === 'string' && typeof value.authorId === 'string' && typeof value.preview === 'string'
+    && Number.isFinite(value.createdAt) && Number.isFinite(value.updatedAt)
+    && typeof value.pinned === 'boolean' && typeof value.locked === 'boolean' && typeof value.closed === 'boolean';
+}
+
+/** Events where the forum may read something else; the server sends the role list whenever anyone logs in. */
+const ACCESS_EVENTS = [MessageType.CHANNEL_DELETED, MessageType.CHANNEL_UPDATED, MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST]
+  .map(type => `message.${type}`);
+
+/** The channel a message, reaction or channel event is about. */
+function eventChannelId(event: string, payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const source = event === `message.${MessageType.CHAT_MESSAGE_UPDATED}` ? payload.message
+    : event === `message.${MessageType.CHANNEL_UPDATED}` ? payload.channel
+      : [MessageType.CHAT_MESSAGE, MessageType.CHAT_REACTION_ADDED, MessageType.CHAT_REACTION_REMOVED, MessageType.CHANNEL_DELETED]
+        .some(type => event === `message.${type}`) ? payload : null;
+  if (!isRecord(source)) return null;
+  const id = event === `message.${MessageType.CHANNEL_UPDATED}` ? source.id : source.channelId;
+  return typeof id === 'string' ? id : null;
+}
+
 export class ForumView {
+  /** The most pages a refresh asks for, however many are on screen. */
+  private static readonly REFRESH_PAGES = 3;
+  /**
+   * A refresh waits this long per request of the previous one, from its last request.
+   * With at most 3 requests each, refreshes then make at most 10 requests in any 10 s:
+   * the server allows each person 30, all devices together, to list, post and edit.
+   */
+  private static readonly REFRESH_SPACING_MS = 1250;
+  /** The server's forum request window: what it turned away is asked again after it. */
+  private static readonly REFRESH_RETRY_MS = 10_000;
+  /** A page that failed waits this long to be asked again, twice as long at each failure in a row. */
+  private static readonly APPEND_RETRY_MS = 2_000;
+  private static readonly APPEND_RETRY_MAX_MS = 30_000;
   private readonly lifetime = new AbortController();
   private readonly unbind: () => void;
   private readonly modals = new Set<(immediate?: boolean) => void>();
@@ -30,12 +77,36 @@ export class ForumView {
   private sort: 'latest' | 'newest' | 'oldest' = 'latest';
   private generation = 0;
   private next = 0;
+  /** Pages of posts on screen, and how many posts the server puts in a full one. */
+  private pages = 0;
+  private pageSize = 0;
   private more = false;
   private disposed = false;
   private loaded = false;
   private loading: 'initial' | 'refresh' | 'append' | null = null;
   private lazyObserver: IntersectionObserver | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  /** What the timer will load: a new list never turns into a refresh of the old one. */
+  private pendingLoad: 'replace' | 'refresh' | null = null;
+  /** Activity during a load: a refresh follows it. */
+  private refreshAgain = false;
+  /** The reader is past the pages a refresh would keep: it waits until they are back. */
+  private refreshDeferred = false;
+  private lastRefreshAt = Number.NEGATIVE_INFINITY;
+  private lastRefreshCost = 0;
+  /** Posts on screen that moved down or out of the server's list, each moving the ones after it up a place. */
+  private shifts = 0;
+  /**
+   * Posts on screen that lost their newest message, with `shifts` as of the last time. The time
+   * they show is no longer theirs, so any message deleted in them next may be the newest one.
+   * Only a list read that began afterwards shows their time again: a save may carry an older copy.
+   */
+  private readonly staleTimes = new Map<string, number>();
+  /** Set while the list asks for no further page, because the last one failed. */
+  private appendPause: ReturnType<typeof setTimeout> | undefined;
+  private appendFailures = 0;
+  /** Search and order of the posts on screen. */
+  private shownList = '';
   private composerClose: ((immediate?: boolean) => void) | null = null;
   /** Access and forum settings the listed posts were loaded under. */
   private access: string;
@@ -79,8 +150,7 @@ export class ForumView {
     root.querySelector<HTMLInputElement>('[data-forum-search]')?.addEventListener('input', event => {
       if (!(event.target instanceof HTMLInputElement)) return;
       this.query = event.target.value;
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = setTimeout(() => { void this.load(); }, 300);
+      this.scheduleLoad('replace', 300);
     }, { signal: this.lifetime.signal });
     root.querySelector<HTMLInputElement>('[data-forum-search]')?.addEventListener('keydown', event => {
       if (event.key !== 'Enter' || !event.shiftKey || !this.server.hasPermission(Permission.SEND_MESSAGES, this.channelId)) return;
@@ -90,82 +160,267 @@ export class ForumView {
     root.querySelector<HTMLSelectElement>('[data-forum-sort]')?.addEventListener('change', event => {
       if (!(event.target instanceof HTMLSelectElement)) return;
       const value = event.target.value;
-      if (value === 'latest' || value === 'newest' || value === 'oldest') { this.sort = value; void this.load(false, true); }
+      if (value === 'latest' || value === 'newest' || value === 'oldest') { this.sort = value; void this.load('replace', true); }
     }, { signal: this.lifetime.signal });
     const scroller = root.querySelector<HTMLElement>('.forum-list-content');
     const sentinel = root.querySelector<HTMLElement>('[data-forum-sentinel]');
     if (scroller && sentinel) {
       this.lazyObserver = new IntersectionObserver(entries => {
-        if (entries.some(entry => entry.isIntersecting) && this.more && !this.loading) void this.load(true);
+        if (entries.some(entry => entry.isIntersecting) && this.more && !this.loading) void this.load('append');
       }, { root: scroller, rootMargin: '0px 0px 360px' });
       this.lazyObserver.observe(sentinel);
     }
+    scroller?.addEventListener('scroll', () => {
+      if (!this.refreshDeferred || this.readsPastRefresh()) return;
+      this.refreshDeferred = false;
+      this.scheduleLoad('refresh', 0);
+    }, { passive: true, signal: this.lifetime.signal });
     this.unbind = client.onEvent((event, payload) => {
       if (event === 'network.status' && payload !== 'CONNECTED') { this.destroy(); root.replaceChildren(); return; }
-      if ([MessageType.CHANNEL_DELETED, MessageType.CHANNEL_UPDATED, MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST]
-        .some(type => event === `message.${type}`)) {
-        // Answers to requests sent before this change are discarded either way. Only lost access or an
-        // edit to this forum also drops the shown list and its modals; otherwise they stay until the refresh below.
+      if (ACCESS_EVENTS.includes(event)) {
         const access = this.accessKey();
-        const accessChanged = access !== this.access;
-        this.access = access;
-        this.generation++;
-        if (accessChanged) {
+        if (access !== this.access) {
+          // Lost or gained access to this forum, or the forum itself changed: answers to
+          // requests sent before are discarded, along with the shown list and its modals.
+          this.access = access;
+          this.generation++;
           this.loaded = false;
           this.loading = null;
           this.next = 0;
+          this.pages = 0;
+          this.refreshDeferred = false;
           this.more = false;
           this.posts = [];
+          this.staleTimes.clear();
+          this.shownList = '';
           this.renderPosts();
           this.syncLazyState();
           for (const close of [...this.modals]) close(true);
+          if (server.getChannel(channelId) && server.hasPermission(Permission.READ_MESSAGES, channelId)) this.scheduleLoad('replace', 250);
+          return;
         }
-        if (!server.getChannel(channelId) || !server.hasPermission(Permission.READ_MESSAGES, channelId)) return;
       }
-      if ([MessageType.FORUM_POST_SAVED, MessageType.CHAT_MESSAGE, MessageType.CHAT_MESSAGE_UPDATED,
-        MessageType.CHAT_REACTION_ADDED, MessageType.CHAT_REACTION_REMOVED,
-        MessageType.CHANNEL_UPDATED, MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST]
-        .some(type => event === `message.${type}`)) {
-        clearTimeout(this.refreshTimer);
-        this.refreshTimer = setTimeout(() => { void this.load(); }, 250);
+      // Only activity in this forum's posts changes the list; the rest of the server does not.
+      if (event === `message.${MessageType.FORUM_POST_SAVED}`) {
+        if (!isRecord(payload) || !isForumPost(payload.post) || payload.post.forumId !== channelId) return;
+        this.applySavedPost(payload.post, payload.deleted === true);
+      } else {
+        const post = eventChannelId(event, payload);
+        if (!post || !this.isPost(post)) return;
+        if (event === `message.${MessageType.CHANNEL_DELETED}`) this.removePost(post);
+        else if (event === `message.${MessageType.CHAT_MESSAGE_UPDATED}` && this.lostNewestMessage(post, payload)) {
+          this.shiftUp();
+          this.staleTimes.set(post, this.shifts);
+        }
       }
+      this.scheduleLoad('refresh', 250);
     });
     void this.load();
   }
 
   private accessKey(): string {
-    return JSON.stringify([accessSignature(this.server), this.server.getChannel(this.channelId) ?? null]);
+    // Posts follow the forum's permissions, so channels elsewhere never change what it lists.
+    return JSON.stringify([accessSignature(this.server, [this.channelId]), this.server.getChannel(this.channelId) ?? null]);
   }
 
-  private async load(append = false, animateReorder = false): Promise<void> {
-    if (this.disposed || (append && (this.loading || !this.more))) return;
+  private isPost(channelId: string): boolean {
+    return this.posts.some(post => post.channelId === channelId) || this.server.getChannel(channelId)?.forumId === this.channelId;
+  }
+
+  /** A saved post updates its card at once; new posts arrive with the refresh. */
+  private applySavedPost(post: ForumPost, deleted: boolean): void {
+    if (deleted) { this.removePost(post.channelId); return; }
+    const index = this.posts.findIndex(shown => shown.channelId === post.channelId);
+    if (index >= 0) {
+      if (this.movesDown(this.posts[index], post)) this.shiftUp();
+      this.posts[index] = post;
+      this.renderPosts();
+    } else if (!this.more && this.loaded) {
+      // Ordered oldest first, a new post lands after everything already loaded.
+      this.more = true;
+      this.syncLazyState();
+    }
+  }
+
+  private removePost(channelId: string): void {
+    const index = this.posts.findIndex(post => post.channelId === channelId);
+    if (index < 0) return;
+    this.posts.splice(index, 1);
+    this.shiftUp();
+    this.renderPosts();
+  }
+
+  /**
+   * A post on screen moved down or out of the server's list, so the posts after it moved
+   * up a place: the next page starts one earlier. When the post is still within the pages
+   * shown, that page begins with a post already listed, which the list leaves out.
+   */
+  private shiftUp(): void {
+    this.next = Math.max(0, this.next - 1);
+    this.shifts++;
+  }
+
+  /** Whether a post on screen may now be lower in the server's list, or out of it. */
+  private movesDown(shown: ForumPost, saved: ForumPost): boolean {
+    return shown.pinned && !saved.pinned
+      || this.sort === 'latest' && saved.updatedAt < shown.updatedAt
+      // A new title may no longer match the search.
+      || !!this.query.trim() && saved.title !== shown.title;
+  }
+
+  /**
+   * In the latest order, a post on screen moves down when its newest message is deleted. The time
+   * it shows is then no longer its own, so any message deleted in it next may be the newest one.
+   */
+  private lostNewestMessage(channelId: string, payload: unknown): boolean {
+    const shown = this.posts.find(post => post.channelId === channelId);
+    const message = isRecord(payload) && isRecord(payload.message) ? payload.message : null;
+    return this.sort === 'latest' && !!shown && !!message?.deletedAt && (this.staleTimes.has(channelId)
+      || typeof message.createdAt === 'number' && message.createdAt >= shown.updatedAt);
+  }
+
+  private scheduleLoad(mode: 'replace' | 'refresh', delay: number): void {
+    if (mode === 'refresh') {
+      // A load waiting or on its way shows this change too. Restarting the wait would
+      // put the refresh off for as long as the forum stays busy.
+      if (this.pendingLoad) return;
+      if (this.loading) { this.refreshAgain = true; return; }
+      if (this.deferRefresh()) return;
+    }
+    this.pendingLoad = mode;
+    const wait = mode === 'refresh'
+      ? Math.max(delay, this.lastRefreshAt + this.lastRefreshCost * ForumView.REFRESH_SPACING_MS - performance.now())
+      : delay;
+    clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      const pending = this.pendingLoad ?? 'refresh';
+      this.pendingLoad = null;
+      // A page the reader asked for meanwhile arrives first.
+      if (pending === 'refresh' && this.loading) { this.refreshAgain = true; return; }
+      void this.load(pending);
+    }, wait);
+  }
+
+  /**
+   * A refresh keeps only the pages it reloads: past them the next page starts where
+   * the server's list is now, so no post is skipped or listed twice. Dropping posts
+   * the reader is looking at would pull the list from under them, so then the
+   * refresh waits for them to scroll back.
+   */
+  private deferRefresh(): boolean {
+    this.refreshDeferred = this.readsPastRefresh();
+    return this.refreshDeferred;
+  }
+
+  private readsPastRefresh(): boolean {
+    if (this.pages <= ForumView.REFRESH_PAGES || !this.pageSize) return false;
+    const scroller = this.root.querySelector<HTMLElement>('.forum-list-content');
+    const dropped = this.root.querySelector<HTMLElement>('[data-forum-posts]')?.children[ForumView.REFRESH_PAGES * this.pageSize];
+    return !!scroller && !!dropped && dropped.getBoundingClientRect().top < scroller.getBoundingClientRect().bottom;
+  }
+
+  /**
+   * `replace` shows the first page of a new list; `append` adds the next page;
+   * `refresh` reloads the pages on screen, up to `REFRESH_PAGES`. Activity in a post
+   * never sends the reader back to the top, and a post that moved, even out of the pages
+   * shown, never makes the next page skip another one.
+   */
+  private async load(mode: 'replace' | 'refresh' | 'append' = 'replace', animateReorder = false): Promise<void> {
+    const append = mode === 'append';
+    if (this.disposed || (append && (this.loading || !this.more || this.appendPause))) return;
+    if (mode === 'replace') {
+      clearTimeout(this.refreshTimer);
+      this.pendingLoad = null;
+    }
     if (!this.server.hasPermission(Permission.READ_MESSAGES, this.channelId)) {
       this.renderPosts();
       return;
     }
+    const { query, sort } = this;
+    const list = JSON.stringify([query, sort]);
+    // Another search or order starts from its first page.
+    const sameList = mode === 'refresh' && list === this.shownList;
+    if (sameList && this.deferRefresh()) return;
+    const pagesToLoad = sameList ? Math.min(Math.max(1, this.pages), ForumView.REFRESH_PAGES) : 1;
     const generation = ++this.generation;
+    const shifts = this.shifts;
     this.loading = append ? 'append' : this.loaded ? 'refresh' : 'initial';
     this.syncLazyState();
+    let retry = false;
     try {
-      const response = await this.client.sendRequest<ForumListResult>(MessageType.FORUM_LIST, {
-        channelId: this.channelId, query: this.query, sort: this.sort, offset: append ? this.next : 0,
-      });
-      if (this.disposed || generation !== this.generation) return;
-      this.posts = append ? [...new Map([...this.posts, ...response.posts].map(post => [post.channelId, post])).values()] : response.posts;
-      this.next = response.nextOffset;
+      const posts = append ? [...this.posts] : [];
+      let offset = append ? this.next : 0;
+      let fetched = 0;
+      let response: ForumListResult;
+      do {
+        if (mode === 'refresh') {
+          this.lastRefreshAt = performance.now();
+          this.lastRefreshCost = fetched + 1;
+        }
+        response = await this.client.sendRequest<ForumListResult>(MessageType.FORUM_LIST, {
+          channelId: this.channelId, query, sort, offset,
+        });
+        if (this.disposed || generation !== this.generation) return;
+        if (response.hasMore) this.pageSize = response.posts.length;
+        posts.push(...response.posts);
+        offset = response.nextOffset;
+        fetched++;
+      } while (response.hasMore && fetched < pagesToLoad);
+      // The reader scrolled past the pages kept while they loaded.
+      if (sameList && fetched < this.pages && this.deferRefresh()) return;
+      // A post above this page moved down or out while it was read, so the page may start a
+      // post late: it is asked for again where the following posts are now.
+      if (append && shifts !== this.shifts) return;
+      this.posts = [...new Map(posts.map(post => [post.channelId, post])).values()];
+      // A read that began after a post lost its newest message shows its time again; an
+      // append, only for the posts on its page.
+      const read = new Set(response.posts.map(post => post.channelId));
+      for (const [id, counted] of this.staleTimes) if (counted <= shifts && (!append || read.has(id))) this.staleTimes.delete(id);
+      // These pages may have been read before posts moved down or out: the next page then
+      // starts that many places earlier.
+      this.next = Math.max(0, response.nextOffset - (this.shifts - shifts));
       this.more = response.hasMore;
+      this.pages = append ? this.pages + 1 : fetched;
+      this.appendFailures = 0;
+      if (!append) this.refreshDeferred = false;
+      this.shownList = list;
       this.loaded = true;
       this.renderPosts(animateReorder);
     } catch (failure) {
       if (this.disposed || generation !== this.generation) return;
       console.warn('[Forum] Could not load posts.', failure);
-      showErrorToast(failure instanceof Error ? failure.message : t('community.actionFailed'));
+      const rateLimited = failure instanceof ProtocolRequestError && failure.code === ProtocolErrorCode.RATE_LIMITED;
+      // A refresh runs on its own: one the server turns away for now is tried again
+      // once its window has passed, without interrupting the reader.
+      retry = mode === 'refresh' && rateLimited;
+      if (!retry) showErrorToast(failure instanceof Error ? failure.message : t('community.actionFailed'));
+      // Asked again right away, the next page would fail the same way at every frame the
+      // list is at its end. It waits instead: the server's window when it said so, which
+      // a turned-away refresh also spent, or longer at each failure in a row.
+      if (append) this.appendFailures++;
+      if (append || rateLimited) {
+        this.pauseAppends(rateLimited ? ForumView.REFRESH_RETRY_MS
+          : Math.min(ForumView.APPEND_RETRY_MAX_MS, ForumView.APPEND_RETRY_MS * 2 ** (this.appendFailures - 1)));
+      }
     } finally {
       if (!this.disposed && generation === this.generation) {
         this.loading = null;
         this.syncLazyState();
+        if (retry || this.refreshAgain) {
+          this.refreshAgain = false;
+          this.scheduleLoad('refresh', retry ? ForumView.REFRESH_RETRY_MS : 250);
+        }
       }
     }
+  }
+
+  /** The list asks for no further page for a while, then looks again whether the reader is at its end. */
+  private pauseAppends(ms: number): void {
+    clearTimeout(this.appendPause);
+    this.appendPause = setTimeout(() => {
+      this.appendPause = undefined;
+      this.syncLazyState();
+    }, ms);
   }
 
   private syncLazyState(): void {
@@ -177,7 +432,7 @@ export class ForumView {
     if (empty) empty.hidden = this.loading === 'initial';
     if (loading) loading.hidden = this.loading !== 'initial' && this.loading !== 'append';
     if (sentinel) {
-      const hidden = this.loading !== null || !this.more;
+      const hidden = this.loading !== null || !this.more || this.appendPause !== undefined;
       const revealed = sentinel.hidden && !hidden;
       sentinel.hidden = hidden;
       // Intersection changes are sampled per rendering frame. A page can load within one frame,
@@ -205,27 +460,34 @@ export class ForumView {
       ? new Map([...container.querySelectorAll<HTMLElement>('[data-forum-id]')]
         .map(row => [row.dataset.forumId, row.getBoundingClientRect()] as const))
       : new Map<string | undefined, DOMRect>();
-    container.innerHTML = this.posts.length ? this.posts.map(post =>
-      `<article class="forum-post-row" data-forum-id="${escapeHtml(post.channelId)}">
+    container.innerHTML = this.posts.length ? this.posts.map(post => {
+      // Everything here comes from the server: counters only ever render as whole numbers, the rest as text.
+      const replies = wholeNumber(post.replyCount);
+      const reactions = wholeNumber(post.reactionCount);
+      const author = this.server.knownMembers.get(post.authorId)?.nickname;
+      const thumbnail = resolveAttachmentUrl(post.thumbnailUrl, this.client.getHttpBaseUrl());
+      return html`<article class="forum-post-row" data-forum-id="${post.channelId}">
         <button type="button" class="forum-post-open" data-forum-open>
           <span class="forum-post-summary">
-          ${this.server.knownMembers.get(post.authorId)?.nickname ? `<small class="forum-post-author">${escapeHtml(this.server.knownMembers.get(post.authorId)!.nickname)}</small>` : ''}
-          <h3>${post.pinned ? `<span class="material-symbols-outlined md-16" aria-label="${t('forum.pinned')}">keep</span>` : ''}${escapeHtml(post.title)}</h3>
-          <p>${escapeHtml(post.preview)}</p><small class="forum-post-stats">
-            <span title="${escapeHtml(t('forum.replies', { count: post.replyCount }))}"><span class="material-symbols-outlined md-16">chat_bubble</span>${post.replyCount}</span>
-            <span title="${escapeHtml(t('forum.reactions', { count: post.reactionCount ?? 0 }))}"><span class="material-symbols-outlined md-16">add_reaction</span>${post.reactionCount ?? 0}</span>
-            <time datetime="${new Date(post.updatedAt).toISOString()}">${escapeHtml(new Date(post.updatedAt).toLocaleString(getLanguage()))}</time>
-            ${post.locked ? `<span class="forum-post-state"><span class="material-symbols-outlined md-14">lock</span>${t('forum.locked')}</span>` : ''}
-            ${post.closed ? `<span class="forum-post-state"><span class="material-symbols-outlined md-14">check_circle</span>${t('forum.closed')}</span>` : ''}</small></span>
-          ${post.thumbnailUrl ? `<img class="forum-post-thumbnail" src="${escapeHtml(this.client.getHttpBaseUrl() + post.thumbnailUrl)}" alt="">` : ''}
+          ${author ? html`<small class="forum-post-author">${author}</small>` : ''}
+          <h3>${post.pinned ? html`<span class="material-symbols-outlined md-16" aria-label="${t('forum.pinned')}">keep</span>` : ''}${post.title}</h3>
+          <p>${post.preview}</p><small class="forum-post-stats">
+            <span title="${t('forum.replies', { count: replies })}"><span class="material-symbols-outlined md-16">chat_bubble</span>${replies}</span>
+            <span title="${t('forum.reactions', { count: reactions })}"><span class="material-symbols-outlined md-16">add_reaction</span>${reactions}</span>
+            <time datetime="${new Date(post.updatedAt).toISOString()}">${new Date(post.updatedAt).toLocaleString(getLanguage())}</time>
+            ${post.locked ? html`<span class="forum-post-state"><span class="material-symbols-outlined md-14">lock</span>${t('forum.locked')}</span>` : ''}
+            ${post.closed ? html`<span class="forum-post-state"><span class="material-symbols-outlined md-14">check_circle</span>${t('forum.closed')}</span>` : ''}</small></span>
+          ${thumbnail ? html`<img class="forum-post-thumbnail" src="${thumbnail}" alt="">` : ''}
         </button>
         <button type="button" class="forum-post-menu" data-forum-menu aria-label="${t('common.moreOptions')}"><span class="material-symbols-outlined md-18">more_horiz</span></button>
-        </article>`).join('') : this.query
+        </article>`;
+    }).join('') : this.query
       ? `<div class="forum-empty-state forum-empty-state--search"><span class="material-symbols-outlined">search_off</span><p>${t('forum.noResults')}</p></div>`
-      : `<div class="forum-empty-state"><span class="material-symbols-outlined forum-empty-icon">forum</span>
+      // The channel name comes from whoever may manage channels, so it only ever lands as text.
+      : html`<div class="forum-empty-state"><span class="material-symbols-outlined forum-empty-icon">forum</span>
           <strong>${t('forum.emptyTitle')}</strong>
           <p>${t('forum.emptyDescription', { channel: this.server.getChannel(this.channelId)?.name ?? t('forum.title') })}</p>
-        </div>`;
+        </div>`.toString();
     if (reorderMotion) {
       const rows = [...container.querySelectorAll<HTMLElement>('[data-forum-id]')];
       for (const [index, row] of rows.entries()) {
@@ -333,8 +595,11 @@ export class ForumView {
       </footer>
     </form>`;
     const title = modal.content.querySelector<HTMLInputElement>('input[name=title]')!;
+    const renameForm = modal.content.querySelector('form')!;
+    // A missing title is explained in the app's language, not in the browser's balloon.
+    useAppValidation(renameForm, modal.signal);
     modal.content.querySelector('[data-rename-cancel]')?.addEventListener('click', () => modal.close(), { signal: modal.signal });
-    modal.content.querySelector('form')?.addEventListener('submit', event => {
+    renameForm.addEventListener('submit', event => {
       event.preventDefault();
       void modal.run(async () => {
         const next = title.value.trim();
@@ -401,10 +666,12 @@ export class ForumView {
       for (const upload of uploads) upload.cancel();
       for (const attachment of selected) if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
     }, { once: true });
+    // The server's limit only reaches the attribute as a whole number, as in ChatComposer.
+    const messageLimit = wholeNumber(this.server.serverDetails?.maxMessageLength);
     modal.content.innerHTML = `<form>
       <div class="forum-composer-title"><input class="input-field" aria-label="${t('forum.postTitle')}" placeholder="${t('forum.postTitle')}" name="title" required maxlength="100" value="${escapeHtml(this.query)}">
         <button type="button" class="btn btn-secondary" data-post-close aria-label="${t('common.close')}"><span class="material-symbols-outlined md-20">close</span></button></div>
-      <textarea class="input-field" aria-label="${t('forum.message')}" placeholder="${t('forum.message')}" name="content" required rows="3" ${this.server.serverDetails?.maxMessageLength ? `maxlength="${this.server.serverDetails.maxMessageLength}"` : ''}></textarea>
+      <textarea class="input-field" aria-label="${t('forum.message')}" placeholder="${t('forum.message')}" name="content" required rows="3" ${messageLimit > 0 ? `maxlength="${messageLimit}"` : ''}></textarea>
       ${this.server.hasPermission(Permission.ATTACH_FILES, this.channelId) ? `
         <input type="file" data-post-media-input aria-label="${t('forum.addMedia')}" accept="image/*,video/*" multiple hidden>
         <input type="file" data-post-file-input aria-label="${t('forum.addFiles')}" multiple hidden>
@@ -539,7 +806,9 @@ export class ForumView {
     }, { signal: modal.signal });
     const detach = attachInputEmojiPicker(content ?? title, modal.content.querySelector<HTMLElement>('[data-post-emoji]')!);
     modal.signal.addEventListener('abort', detach, { once: true });
-    modal.content.querySelector('form')!.addEventListener('submit', event => {
+    const postForm = modal.content.querySelector('form')!;
+    useAppValidation(postForm, modal.signal);
+    postForm.addEventListener('submit', event => {
       event.preventDefault();
       void modal.run(async () => {
         const submit = modal.content.querySelector<HTMLButtonElement>('button[type=submit]')!;
@@ -588,6 +857,7 @@ export class ForumView {
     this.lazyObserver?.disconnect();
     this.lazyObserver = null;
     clearTimeout(this.refreshTimer);
+    clearTimeout(this.appendPause);
     for (const close of [...this.modals]) close(true);
     const composer = this.root.querySelector<HTMLElement>('[data-forum-composer]');
     if (composer) cancelVisibilityMotion(composer);

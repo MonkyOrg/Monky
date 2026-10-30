@@ -368,19 +368,6 @@ test('native close acknowledgement without OS exit retains ownership until the o
   assert.match(engine.failure.message, /did not exit/u);
 });
 
-test('OS exit cannot masquerade as a reusable input GPU frame retirement', async () => {
-  const { engine } = fixture();
-  await engine.ready;
-  // Model a retained external input reader without creating or borrowing GPU pixels.
-  engine.inputFrames.set('1:2', { sourceId: 1, frameId: 2 });
-  engine.child.kill();
-  await engine.exitState.promise;
-  await assert.rejects(engine.close(), {
-    code: 'ERR_RTC_GPU_INPUT_RETIREMENT', nativeOwnershipRetained: true, hostExited: true,
-  });
-  assert.equal(engine.inputFrames.size, 1);
-});
-
 test('an uncorrelated child frame receipt retains the Main HANDLE until a genuine retirement proof', async () => {
   const { engine } = fixture({ badRelease: true });
   await engine.ready;

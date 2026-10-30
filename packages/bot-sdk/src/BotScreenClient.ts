@@ -2,10 +2,12 @@ import {
   MessageType, botScreenCreateSchema, botScreenRefSchema, botScreenPatchSchema,
   botScreenSchema, botScreenListSchema, botScreenListResultSchema, botScreenActionEventSchema, botScreenRemovedSchema,
   type BotScreen, type BotScreenRef, type BotScreenCreate, type BotScreenPatch, type BotScreenActionEvent, type BotScreenRemoved,
+  type ClientMessageArgs,
 } from '@monky/shared';
 
 export interface BotScreenAdapter {
-  request(serverId: string, type: MessageType, payload: unknown): Promise<unknown>;
+  /** Sends [type, payload] to the server and resolves with its acknowledgement. */
+  request(serverId: string, ...message: ClientMessageArgs): Promise<unknown>;
   report(serverId: string, event: BotScreenActionEvent): void;
   removed(serverId: string, event: BotScreenRemoved): void;
   error(serverId: string, error: Error): void;

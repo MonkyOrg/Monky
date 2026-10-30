@@ -6,6 +6,7 @@ import {
   AUDIO_OUTPUT_CATEGORIES, copyAudioOutputPreferences, type AudioOutputCategory, type AudioOutputPreferences,
 } from '../../utils/audioPreferences';
 import { renderLoadingSkeleton } from '../../utils/loadingSkeleton';
+import { setSurfaceVisible } from '../../utils/surfaceVisibility';
 
 const labels: Record<AudioOutputCategory, TranslationKey> = {
   voice: 'audioOutputs.voice',
@@ -25,7 +26,7 @@ export class AudioOutputControls {
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
           <label for="toggle-advanced-audio-outputs">${t('audioOutputs.advanced')}</label>
           <label class="toggle-switch" aria-label="${t('audioOutputs.advanced')}">
-            <input id="toggle-advanced-audio-outputs" type="checkbox" aria-controls="advanced-audio-outputs" ${settingsStore.advancedAudioOutputs ? 'checked' : ''}>
+            <input id="toggle-advanced-audio-outputs" type="checkbox" role="switch" aria-controls="advanced-audio-outputs" ${settingsStore.advancedAudioOutputs ? 'checked' : ''}>
             <span class="toggle-slider"></span>
           </label>
         </div>
@@ -62,7 +63,7 @@ export class AudioOutputControls {
     const sync = () => {
       toggle.checked = settingsStore.advancedAudioOutputs;
       toggle.disabled = this.busy;
-      panel.hidden = !settingsStore.advancedAudioOutputs;
+      setSurfaceVisible(panel, settingsStore.advancedAudioOutputs, 'panel');
       reset.hidden = !AUDIO_OUTPUT_CATEGORIES.some((category) => settingsStore.audioOutputDevices[category] !== null);
       reset.disabled = this.busy;
       for (const category of AUDIO_OUTPUT_CATEGORIES) {
@@ -83,6 +84,7 @@ export class AudioOutputControls {
       } catch (error) {
         if (!abort.signal.aborted) {
           console.error('[AudioOutputs] Could not apply output preferences:', error);
+          // Stays until a recovery succeeds: it explains why routing is blocked, next to the reset that fixes it.
           status.textContent = audioDeviceError(error);
         }
       } finally {

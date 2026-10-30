@@ -132,6 +132,21 @@ test('permission restoration enables correction; a queued retry clears an earlie
   assert.equal((await f.operations.run('role', 'Role', Permission.MANAGE_ROLES, async () => {})).ok, true);
 });
 
+test('each failure is announced once, when it happens, and a success announces nothing', async () => {
+  const announced: string[] = [];
+  const operations = new ServerSettingsOperations({
+    validate: () => {},
+    changed: () => {},
+    errorMessage: (error) => error instanceof Error ? error.message : 'Apply failed',
+    failed: (failure) => announced.push(`${failure.key}:${failure.label}:${failure.message}`),
+  });
+  await operations.run('name', 'Name', Permission.MANAGE_SERVER, async () => { throw new Error('Taken'); });
+  await operations.run('name', 'Name', Permission.MANAGE_SERVER, async () => 'Renamed');
+  operations.reportError('session', 'Settings', 'Session changed');
+  assert.deepEqual(announced, ['name:Name:Taken', 'session:Settings:Session changed']);
+  assert.deepEqual(operations.failures.map(failure => failure.key), ['session'], 'the retried edit no longer counts as failed');
+});
+
 function server(overrides: Partial<ServerDetails> = {}): ServerDetails {
   return {
     id: 'server', name: 'Server', createdAt: 1, maxUsers: 0,

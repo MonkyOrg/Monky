@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Uma oscilação passageira do relógio da captura, um espectador AV1 de nível menor ou um quadro recebido inválido não encerram mais a transmissão inteira.",
+  "en": "A brief capture-clock glitch, a lower-level AV1 viewer or an invalid received frame no longer ends the whole stream."
+}

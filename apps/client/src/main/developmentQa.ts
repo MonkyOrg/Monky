@@ -1,7 +1,7 @@
 import { BrowserWindow, ipcMain } from 'electron';
 import fs from 'fs';
 import path from 'path';
-import { developmentQaConfigSchema, developmentQaReportSchema, DEVELOPMENT_QA_IPC, type DevelopmentQaConfig } from '@monky/shared';
+import { developmentQaConfigSchema, developmentQaReportSchema, developmentQaRunName, DEVELOPMENT_QA_IPC, type DevelopmentQaConfig } from '@monky/shared';
 
 export function configureDevelopmentQaMedia(
   commandLine: Pick<Electron.CommandLine, 'appendSwitch'>,
@@ -41,7 +41,7 @@ export function loadDevelopmentQa(options: {
   if (!envelope || typeof envelope !== 'object' || !('ownerPid' in envelope) || envelope.ownerPid !== options.parentPid ||
       !('config' in envelope)) throw new Error('Prepared QA configuration does not belong to this launcher.');
   const config = developmentQaConfigSchema.parse(envelope.config);
-  if (path.basename(root) !== `${config.scenario}-${config.runId}`) throw new Error('Prepared QA run identity does not match its directory.');
+  if (path.basename(root) !== developmentQaRunName(config.runId)) throw new Error('Prepared QA run identity does not match its directory.');
   return config;
 }
 

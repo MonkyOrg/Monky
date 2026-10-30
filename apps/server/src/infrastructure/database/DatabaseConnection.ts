@@ -3,6 +3,7 @@ import path from 'path';
 import { Logger } from '../logger/Logger';
 import { type DatabaseCloseOptions, type DatabaseOpenOptions, IDatabaseDriver, SqlJsDriver } from './SqliteWrapper';
 import { ServerResourceScope } from '../lifecycle/ServerResourceScope';
+import { FOREIGN_KEY_INTEGRITY_MIGRATION, logPrivateResourcesToReview } from './privateResourceReview';
 
 export class DatabaseConnection {
   private db: IDatabaseDriver;
@@ -17,12 +18,11 @@ export class DatabaseConnection {
     resources.defer('SQLite migrations', () => driver.close({ discardChanges: true }));
     // Note: sql.js runs entirely in-memory (WASM) and is persisted to disk via
     // a manual, debounced export. WAL journal_mode is therefore meaningless here
-    // and would be silently ignored, so we do not set it. foreign_keys is still
-    // requested to enforce referential integrity when supported by the build.
+    // and would be silently ignored, so we do not set it. Foreign keys are
+    // enforced by the driver itself, which reapplies them after every export.
     try {
       const conn = new DatabaseConnection(driver);
       if (!options.readOnly) {
-        driver.pragma('foreign_keys = ON');
         conn.runMigrations();
       }
       return conn;
@@ -66,7 +66,7 @@ export class DatabaseConnection {
     // DROP TABLE with foreign keys enabled would cascade-delete dependent rows.
     // PRAGMA foreign_keys is a no-op inside a transaction, so it must be toggled
     // here, outside of the per-migration transactions below.
-    this.db.pragma('foreign_keys = OFF');
+    this.db.setForeignKeys(false);
     try {
       for (const file of pending) {
         Logger.info('DATABASE', `Applying migration ${file}`);
@@ -76,9 +76,11 @@ export class DatabaseConnection {
           this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(file, Date.now());
         })();
         Logger.info('DATABASE', `Migration ${file} applied successfully`);
+        // Only the run that repairs the audiences reports what to review, against that schema.
+        if (file === FOREIGN_KEY_INTEGRITY_MIGRATION) logPrivateResourcesToReview(this.db);
       }
     } finally {
-      this.db.pragma('foreign_keys = ON');
+      this.db.setForeignKeys(true);
     }
   }
 

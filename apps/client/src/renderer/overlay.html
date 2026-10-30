@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <!-- The overlay's own page (R-MEDIA-3): it draws the call and nothing else, so
+       its policy is the app's (E-MAIN-3) minus what the overlay never does.
+       Scripts come only from the app itself; avatars come from servers on any
+       http(s) host or inline; video arrives as a MediaStream, which needs no
+       source. The loopback ws: is only the Vite dev server's reload channel. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self'; connect-src 'self' ws://localhost:* ws://127.0.0.1:*; font-src 'self' data:; worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monky Overlay</title>
+  <link rel="stylesheet" href="./styles/fonts.css">
+  <link rel="stylesheet" href="./styles/theme.css">
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="./overlay.ts"></script>
+</body>
+</html>

@@ -176,6 +176,20 @@ async function runSmoke(window, setPhase) {
   setPhase('edit, reply and attachments');
   checks += await fixture('testEditReplyAndDrop()');
 
+  setPhase('incremental feed');
+  checks += await fixture('testIncrementalFeed()');
+
+  setPhase('reply jump');
+  const motion = value => cdp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+  await motion('no-preference');
+  checks += await fixture('testReplyJump(false)');
+  await motion('reduce');
+  checks += await fixture('testReplyJump(true)');
+  await motion('no-preference');
+
+  setPhase('draft across conversations');
+  checks += await fixture('testDraft()');
+
   setPhase('lifecycle');
   checks += await fixture('testLifecycle()');
   return checks;
@@ -309,17 +323,23 @@ async function installFixture() {
   ];
   const ok = value => Promise.resolve({ ok: true, value });
   const calls = { send: [], edit: [] };
+  // Another friend, to open a second conversation.
+  const otherPeer = 'b'.repeat(64);
+  /** What the main process tells the renderer; set once the DM store subscribes. */
+  let storeEvent = () => { throw new Error('The DM store did not subscribe to events'); };
   const handlers = {
     snapshot: () => ok({ me: { publicKey: me }, peers: [{ publicKey: peer, nickname: 'Amigo', avatar: null, relation: 'friend',
+      blocked: false, friendSince: 1, requestedAt: null, maxFileBytes: 50 * 1024 * 1024 },
+    { publicKey: otherPeer, nickname: 'Outro', avatar: null, relation: 'friend',
       blocked: false, friendSince: 1, requestedAt: null, maxFileBytes: 50 * 1024 * 1024 }],
     conversations: [{ peer, lastMessageAt: now, lastMessagePreview: '', lastMessageAuthor: me, unread: 0, hidden: false, readOnly: false }],
     settings: { maxFileBytes: 50 * 1024 * 1024 } }),
-    conversation: () => ok({ peer, messages, hasMore: false, peerReadAt: 0 }),
+    conversation: key => ok({ peer: key, messages: key === peer ? messages : [], hasMore: false, peerReadAt: 0 }),
     readAttachment: () => ok({ data: png, mime: 'image/png' }),
     sendMessage: input => { calls.send.push(input); return ok({}); },
     editMessage: (_peer, id, content) => { calls.edit.push({ id, content }); return ok({}); },
     pendingPeers: () => ok([]),
-    onEvent: () => () => {},
+    onEvent: callback => { storeEvent = callback; return () => {}; },
   };
   const editorCommands = [];
   window.api = {
@@ -333,7 +353,7 @@ async function installFixture() {
   const dmRoot = document.createElement('div');
   dmRoot.style.cssText = 'flex:1;min-height:0;display:flex;flex-direction:column;';
   root.appendChild(dmRoot);
-  const view = new DmConversationView(peer);
+  let view = new DmConversationView(peer);
   view.mount(dmRoot);
   await until(() => document.querySelector('.chat-message-row[data-message-id="photo"]'), 'The DM history did not render');
   await document.fonts.ready;
@@ -391,6 +411,7 @@ async function installFixture() {
     window.getSelection().addRange(range);
   };
   const toast = () => document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent ?? null;
+  const alertToast = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
   const waitForToast = async text => {
     await until(() => toast() === text, `Expected the "${text}" confirmation, got ${JSON.stringify(toast())}`);
     return true;
@@ -403,9 +424,9 @@ async function installFixture() {
     await settle();
   };
   const unstageAll = async () => {
-    const count = document.querySelectorAll('#chat-attachment-tray [data-dm-unstage]').length;
+    const count = document.querySelectorAll('#chat-attachment-tray [data-tray-remove]').length;
     // Each removal redraws the tray, so the next button is looked up again.
-    for (let index = 0; index < count; index++) find('#chat-attachment-tray [data-dm-unstage]').click();
+    for (let index = 0; index < count; index++) find('#chat-attachment-tray [data-tray-remove]').click();
     await new Promise(resolve => setTimeout(resolve, 400));
   };
 
@@ -541,7 +562,7 @@ async function installFixture() {
       const formatted = await last();
       expect(formatted.kind === 'formatted' && formatted.text === expected.text && formatted.html.includes('data-monky-clipboard'),
         'Copy with formatting writes rich text that pastes back as Markdown');
-      find('.chat-message-row[data-message-id="mine"] [data-dm-action="copy"]').click();
+      find('.chat-message-row[data-message-id="mine"] [data-message-action="copy"]').click();
       expect(await waitForToast('Copiado!') && (await last()).text === 'Mensagem minha', 'The hover copy button copies formatted text with feedback');
       expect(keydown(focusRow('peer-rich'), 'c', { ctrlKey: true }), 'Ctrl+C on a focused message is handled');
       await settle();
@@ -559,12 +580,14 @@ async function installFixture() {
       await clickMenuItem('Copiar sem formatação');
       expect((await last()).text === 'Texto editado', 'The edited marker of grouped messages is not copied');
       writeMode = 'reject';
-      find('.chat-message-row[data-message-id="mine"] [data-dm-action="copy"]').click();
-      await until(() => dialog(), 'A failed copy did not explain itself');
-      expect(dialog().querySelector('.dialog-message').textContent === 'Não foi possível copiar a mensagem.' && toast() === null,
-        'A clipboard failure is reported instead of being swallowed');
+      find('.chat-message-row[data-message-id="mine"] [data-message-action="copy"]').click();
+      await until(() => alertToast(), 'A failed copy did not explain itself');
+      expect(alertToast().querySelector('.chat-copy-toast-label').textContent === 'Não foi possível copiar a mensagem.' && !dialog()
+        && !document.querySelector('.chat-copy-toast:not(.chat-copy-toast--danger):not([data-ui-closing])'),
+        'A clipboard failure is reported in the alert toast instead of being swallowed or confirmed');
       writeMode = 'resolve';
-      await dismissAlert();
+      alertToast().querySelector('.chat-copy-toast-close').click();
+      await settle();
       find('.chat-message-row[data-message-id="mine-code"] .md-code-copy').click();
       await until(() => find('.chat-message-row[data-message-id="mine-code"] .md-code-copy-label').textContent === 'Copiado!',
         'The code block copy button did not confirm the copy');
@@ -601,7 +624,7 @@ async function installFixture() {
       'While editing, Send becomes Save and attachments step aside');
       expect(keydown(content(), 'Escape') && input().value === 'rascunho' && send().textContent.trim().endsWith('Enviar')
         && find('#chat-edit-composer').hidden, 'Escape cancels the edit and restores the unsent draft');
-      find('.chat-message-row[data-message-id="mine"] [data-dm-action="edit"]').click();
+      find('.chat-message-row[data-message-id="mine"] [data-message-action="edit"]').click();
       await settle();
       input().value = 'Mensagem corrigida';
       expect(keydown(content(), 'Enter'), 'Enter saves the edit');
@@ -633,6 +656,152 @@ async function installFixture() {
       expect(!chat.classList.contains('chat-drag-over') && find('#chat-attachment-tray').textContent.includes('arrastado.txt'),
         'Dropping stages the files and hides the overlay');
       await unstageAll();
+      // Files over the friend's limit stay marked in the tray, one alert names them all, and they never go (#490).
+      const friend = dmStore.peer(peer);
+      const savedLimit = friend.maxFileBytes;
+      friend.maxFileBytes = 4;
+      const batch = new DataTransfer();
+      for (const [name, text] of [['grande-1.txt', 'grande demais'], ['grande-2.txt', 'também grande'], ['ok.txt', 'abc']]) {
+        batch.items.add(new File([text], name, { type: 'text/plain' }));
+      }
+      await resetComposer('Com anexos');
+      expect(paste(content(), batch), 'A batch of files pasted into the DM is attached');
+      await settle();
+      const alertLabel = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-label')?.textContent;
+      const names = new Intl.ListFormat(language.getLanguage(), { type: 'conjunction' }).format(['"grande-1.txt"', '"grande-2.txt"']);
+      expect(alertLabel === language.t('dm.errorFilesTooLarge', { nickname: 'Amigo', size: '4 B', names }),
+        `Every file over the friend's limit is named in one alert: ${alertLabel}`);
+      const staged = [...document.querySelectorAll('#chat-attachment-tray .tray-item')]
+        .map(item => [item.title, item.classList.contains('is-error')]);
+      expect(JSON.stringify(staged) === JSON.stringify([['grande-1.txt', true], ['grande-2.txt', true], ['ok.txt', false]]),
+        `Files over the limit stay marked in the tray: ${JSON.stringify(staged)}`);
+      const sends = calls.send.length;
+      keydown(content(), 'Enter');
+      await until(() => calls.send.length === sends + 1 && input().value === '', 'The message with attachments was not sent');
+      expect(JSON.stringify(calls.send.at(-1).files.map(file => file.name)) === JSON.stringify(['ok.txt']),
+        'Only the files within the limit go with the message');
+      friend.maxFileBytes = savedLimit;
+      document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-close')?.click();
+      await settle();
+      return checks;
+    },
+    async testIncrementalFeed() {
+      let checks = 0;
+      const expect = (condition, message) => { check(condition, message); checks++; };
+      const rows = () => new Map([...document.querySelectorAll('[data-dm-feed] .chat-message-row')]
+        .map(row => [row.dataset.messageId, row]));
+      const selection = () => window.getSelection().toString();
+      const before = rows();
+      selectText('.chat-message-row[data-message-id="peer-rich"] strong', 0, 4);
+      const download = message('download', peer, 'vídeo das férias', { createdAt: now - 5_000, attachments: [{
+        fileId: 'video-file', name: 'ferias.mp4', size: 10_000_000, mime: 'video/mp4', state: 'downloading', receivedBytes: 500_000 }] });
+      storeEvent({ type: 'messages', peer, messages: [download], peerReadAt: 0 });
+      await settle();
+      const after = rows();
+      expect(after.has('download') && [...before].every(([id, row]) => after.get(id) === row),
+        'A new message goes in without redrawing the rows already on screen');
+      expect(selection() === 'negr', `Text selected in another message stays selected: ${JSON.stringify(selection())}`);
+      const downloadRow = after.get('download');
+      for (let step = 1; step <= 100; step++) {
+        storeEvent({ type: 'attachment-progress', peer, messageId: 'download', fileId: 'video-file', receivedBytes: 500_000 + step * 90_000 });
+      }
+      await settle();
+      const bar = downloadRow.querySelector('.dm-attachment-progress');
+      expect(rows().get('download') === downloadRow && bar?.getAttribute('aria-valuenow') === '95'
+        && downloadRow.querySelector('.af-size')?.textContent.includes('95%'),
+      `100 progress events move the bar inside the same row: ${bar?.getAttribute('aria-valuenow')}`);
+      expect([...before].every(([id, row]) => rows().get(id) === row) && selection() === 'negr',
+        'Progress leaves every other row and the selection alone');
+
+      const own = messages.find(entry => entry.id === 'mine');
+      const ownRow = rows().get('mine');
+      storeEvent({ type: 'messages', peer, messages: [{ ...own, reactions: [{ emoji: '👍', users: [peer] }] }], peerReadAt: 0 });
+      await settle();
+      const reacted = rows().get('mine');
+      expect(reacted !== ownRow && reacted.querySelector('.chat-reaction')?.textContent.includes('👍'),
+        'A reaction redraws only the row it belongs to');
+      expect(rows().get('peer-rich') === before.get('peer-rich') && selection() === 'negr',
+        'The selection in another message survives the reaction');
+
+      window.getSelection().removeAllRanges();
+      const editedRow = focusRow('mine-edited');
+      const edited = messages.find(entry => entry.id === 'mine-edited');
+      storeEvent({ type: 'messages', peer, messages: [{ ...edited, content: 'Texto *editado* de novo', editedAt: now }], peerReadAt: 0 });
+      await settle();
+      const redrawn = rows().get('mine-edited');
+      expect(redrawn !== editedRow && redrawn.textContent.includes('editado de novo') && document.activeElement === redrawn,
+        'Keyboard focus follows a message whose row had to be redrawn');
+      return checks;
+    },
+    async testReplyJump(reduced) {
+      let checks = 0;
+      const expect = (condition, message) => { check(condition, message); checks++; };
+      check(matchMedia('(prefers-reduced-motion: reduce)').matches === reduced, 'The test controls the motion preference');
+      if (!document.querySelector('.chat-message-row[data-message-id="answer"]')) {
+        storeEvent({ type: 'messages', peer, peerReadAt: 0,
+          messages: [message('answer', peer, 'Concordo com isso', { createdAt: now - 1_000, replyTo: 'peer-rich' })] });
+        await settle();
+      }
+      const feed = find('[data-dm-feed]');
+      feed.scrollTop = feed.scrollHeight;
+      await settle();
+      const scrolls = [];
+      const scrollIntoView = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = function (options) {
+        scrolls.push({ id: this.dataset?.messageId, options });
+        return scrollIntoView.call(this, options);
+      };
+      try {
+        find('.chat-message-row[data-message-id="answer"] [data-reply-target="peer-rich"]').click();
+        await settle();
+      } finally {
+        Element.prototype.scrollIntoView = scrollIntoView;
+      }
+      const target = find('.chat-message-row[data-message-id="peer-rich"]');
+      expect(scrolls.length === 1 && scrolls[0].id === 'peer-rich' && scrolls[0].options?.block === 'center'
+        && scrolls[0].options?.behavior === (reduced ? 'instant' : 'smooth'),
+      `The jump brings the quoted message to the center, following the motion preference: ${JSON.stringify(scrolls)}`);
+      expect(document.activeElement === target, 'Focus moves to the quoted message');
+      const marker = target.querySelector(':scope > .chat-message-jump-highlight');
+      expect(reduced ? !marker : !!marker, reduced ? 'With reduced motion nothing flashes' : 'The quoted message is marked');
+      return checks;
+    },
+    async testDraft() {
+      let checks = 0;
+      const expect = (condition, message) => { check(condition, message); checks++; };
+      const tray = () => [...document.querySelectorAll('#chat-attachment-tray .tray-item')].map(item => item.title);
+      const reopen = async key => {
+        view.destroy();
+        view = new DmConversationView(key);
+        view.mount(dmRoot);
+        await settle();
+        await new Promise(resolve => setTimeout(resolve, 300));
+      };
+      await resetComposer('rascunho que não pode sumir');
+      paste(content(), fileData('anexo.txt'));
+      find('.chat-message-row[data-message-id="peer-rich"] [data-message-action="reply"]').click();
+      await settle();
+      check(tray().includes('anexo.txt') && visible(find('#chat-reply-composer')), 'The composer holds text, a file and a reply');
+
+      await reopen(otherPeer);
+      expect(input().value === '' && tray().length === 0 && !visible(find('#chat-reply-composer')),
+        'Another conversation does not get the draft');
+      await reopen(peer);
+      await until(() => document.querySelector('.chat-message-row[data-message-id="peer-rich"]'), 'The conversation did not come back');
+      await settle();
+      expect(input().value === 'rascunho que não pode sumir', `The typed text comes back: ${JSON.stringify(input().value)}`);
+      expect(JSON.stringify(tray()) === JSON.stringify(['anexo.txt']) && visible(find('#chat-attachment-tray')), 'The chosen file comes back');
+      expect(visible(find('#chat-reply-composer')) && find('#chat-reply-composer .chat-quote-heading strong')?.textContent === 'Amigo',
+        'The message being answered comes back');
+
+      const sends = calls.send.length;
+      keydown(content(), 'Enter');
+      await until(() => calls.send.length === sends + 1 && input().value === '', 'The restored draft was not sent');
+      const sent = calls.send.at(-1);
+      expect(sent.content === 'rascunho que não pode sumir' && sent.replyTo === 'peer-rich'
+        && sent.files.length === 1 && sent.files[0].name === 'anexo.txt', 'Sending it sends all of it');
+      await reopen(peer);
+      expect(input().value === '' && tray().length === 0 && !visible(find('#chat-reply-composer')), 'Once sent, it is no longer a draft');
       return checks;
     },
     async testLifecycle() {

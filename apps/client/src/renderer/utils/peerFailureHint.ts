@@ -28,7 +28,8 @@ export function peerFailureTooltip(baseKey: 'main.peerConnectionFailed' | 'stage
     hint = t('peerFailure.askHost');
   }
 
-  // Native tooltips break lines on this entity, which keeps the suggestion from
-  // running into a single unreadable line.
-  return `${t(baseKey)}&#10;&#10;${hint}`;
+  // A blank line keeps the suggestion from running into a single unreadable
+  // line. It is plain text, so a template that escapes the title and one that
+  // does not show the same two paragraphs.
+  return `${t(baseKey)}\n\n${hint}`;
 }

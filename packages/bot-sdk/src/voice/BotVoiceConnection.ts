@@ -5,9 +5,11 @@ import {
   voiceRestrictionsUpdatedSchema,
   botVoiceParticipantSchema, botVoiceProducerSchema, botVoiceProducersSchema, botVoiceConsumerSchema, isReceivingBotVoice,
   type BotVoiceAuth, type BotVoiceJoinOptions, type VoiceStateUpdatePayload, type BotVoiceParticipant, type BotVoiceProducer,
+  clientMessage, sfuDtlsParametersSchema, type ClientMessage, type ClientMessageArgs,
 } from '@monky/shared';
 import type { OpusPeer } from './OpusPeer';
 import type { SfuOpusReceiver } from './SfuOpusReceiver';
+import { prepareSfuTransport } from './mediasoupSdp';
 import type { RtpPacket } from 'werift';
 import { VoiceAudioReceiver, type BotVoiceAudioReceiver } from './VoiceAudioReceiver';
 
@@ -22,7 +24,7 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 export interface VoiceCallbacks {
-  send(message: VoiceMessage): void;
+  send(message: ClientMessage): void;
   participants(count: number): void;
   disconnected(reason: string): void;
   error(error: Error): void;
@@ -74,9 +76,9 @@ export class BotVoiceConnection {
     try {
       this.Peer = (await import('./OpusPeer')).OpusPeer;
       if (this.closed) throw new Error('Voice join cancelled.');
-      const response = await this.request(MessageType.VOICE_JOIN, {
+      const response = await this.request([MessageType.VOICE_JOIN, {
         ...options, channelId: this.channelId, isMuted: false, isDeafened: false,
-      }, MessageType.VOICE_USER_JOINED);
+      }], MessageType.VOICE_USER_JOINED);
       if (this.closed) throw new Error('Voice join cancelled.');
       const joined = botVoiceJoinedSchema.parse(response);
       if (joined.channelId !== this.channelId || joined.sessionId !== this.auth.currentUser.sessionId || !joined.participants) {
@@ -149,7 +151,7 @@ export class BotVoiceConnection {
     if (this.closed || !this.admitted) throw new Error('Voice connection is not active.');
     if (update.isMuted === true) { this.muted = true; this.stopSpeaking(); }
     try {
-      const response = await this.request(MessageType.VOICE_STATE_UPDATE, update, MessageType.VOICE_STATE_CHANGED);
+      const response = await this.request([MessageType.VOICE_STATE_UPDATE, update], MessageType.VOICE_STATE_CHANGED);
       const state = botVoiceParticipantSchema.shape.voiceState.parse(record(response)?.voiceState);
       if (state.sessionId !== this.auth.currentUser.sessionId || state.channelId !== this.channelId) {
         throw new Error('Invalid voice state acknowledgement.');
@@ -221,25 +223,27 @@ export class BotVoiceConnection {
   private async startSfuReception(epoch: number): Promise<void> {
     const current = () => !this.closed && this.receiving && epoch === this.receiveEpoch;
     try {
-      const response = await this.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
-        { channelId: this.channelId, direction: 'recv' }, MessageType.SFU_WEBRTC_TRANSPORT_CREATED);
+      const response = await this.request([MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
+        { channelId: this.channelId, direction: 'recv' }], MessageType.SFU_WEBRTC_TRANSPORT_CREATED);
       if (!current()) return;
       const { transportOptions } = botVoiceTransportSchema.parse(response);
+      const transport = await prepareSfuTransport(transportOptions);
+      if (!current()) return;
       const { SfuOpusReceiver, voiceRtpCapabilities } = await import('./SfuOpusReceiver');
       if (!current()) return;
-      const peer = new SfuOpusReceiver(transportOptions, (sessionId, packet) => {
+      const peer = new SfuOpusReceiver(transport, (sessionId, packet) => {
         if (current() && this.sfuReceive?.peer === peer) this.receivePacket(sessionId, packet);
       }, (error) => { if (current() && this.sfuReceive?.peer === peer) this.fail(error); });
-      const receiving = { transportId: transportOptions.id, peer, epoch, consumed: new Set<string>() };
+      const receiving = { transportId: transport.id, peer, epoch, consumed: new Set<string>() };
       this.sfuReceive = receiving;
       const dtlsParameters = await peer.prepare();
       if (!current()) return;
-      await this.request(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
-        channelId: this.channelId, transportId: transportOptions.id, dtlsParameters,
-      }, MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED);
+      await this.request([MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
+        channelId: this.channelId, transportId: transport.id, dtlsParameters: sfuDtlsParametersSchema.parse(dtlsParameters),
+      }], MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED);
       if (!current()) return;
       await peer.ready;
-      const list = await this.request(MessageType.SFU_GET_PRODUCERS, { channelId: this.channelId }, MessageType.SFU_PRODUCERS_LIST);
+      const list = await this.request([MessageType.SFU_GET_PRODUCERS, { channelId: this.channelId }], MessageType.SFU_PRODUCERS_LIST);
       if (!current()) return;
       const snapshot = botVoiceProducersSchema.parse(list);
       if (snapshot.channelId !== this.channelId) throw new Error('Invalid voice producer snapshot.');
@@ -280,9 +284,9 @@ export class BotVoiceConnection {
     }
     const rtpCapabilities = capabilities ?? (await import('./SfuOpusReceiver')).voiceRtpCapabilities;
     if (!current()) return;
-    const response = await this.request(MessageType.SFU_CONSUME, {
+    const response = await this.request([MessageType.SFU_CONSUME, {
       channelId: this.channelId, transportId: receiving.transportId, producerId: producer.producerId, rtpCapabilities,
-    }, MessageType.SFU_CONSUMED);
+    }], MessageType.SFU_CONSUMED);
     if (!current()) return;
     const consumer = botVoiceConsumerSchema.parse(response);
     if (consumer.channelId !== this.channelId || consumer.producerId !== producer.producerId ||
@@ -298,24 +302,26 @@ export class BotVoiceConnection {
   }
 
   private async joinSfu(): Promise<void> {
-    const response = await this.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
-      { channelId: this.channelId, direction: 'send' }, MessageType.SFU_WEBRTC_TRANSPORT_CREATED);
+    const response = await this.request([MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
+      { channelId: this.channelId, direction: 'send' }], MessageType.SFU_WEBRTC_TRANSPORT_CREATED);
     if (this.closed) throw new Error('Voice join cancelled.');
     const { transportOptions } = botVoiceTransportSchema.parse(response);
+    const transport = await prepareSfuTransport(transportOptions);
+    if (this.closed) throw new Error('Voice join cancelled.');
     const Peer = this.Peer;
     if (!Peer) throw new Error('Voice transport has not been loaded.');
     const peer = new Peer(this.auth.iceServers, (error) => this.fail(error));
     this.sfu = peer;
-    const { dtlsParameters, rtpParameters, answer } = await peer.prepareSfu(transportOptions);
-    await this.request(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
-      channelId: this.channelId, transportId: transportOptions.id, dtlsParameters,
-    }, MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED);
+    const { dtlsParameters, rtpParameters, answer } = await peer.prepareSfu(transport);
+    await this.request([MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
+      channelId: this.channelId, transportId: transport.id, dtlsParameters: sfuDtlsParametersSchema.parse(dtlsParameters),
+    }], MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED);
     await peer.pc.setRemoteDescription({ type: 'answer', sdp: answer });
     await peer.ready;
-    await this.request(MessageType.SFU_PRODUCE, {
-      channelId: this.channelId, transportId: transportOptions.id,
+    await this.request([MessageType.SFU_PRODUCE, {
+      channelId: this.channelId, transportId: transport.id,
       kind: 'audio', rtpParameters, appData: { mediaType: 'mic' },
-    }, MessageType.SFU_PRODUCED);
+    }], MessageType.SFU_PRODUCED);
   }
 
   private ensurePeer(sessionId: string, initiate = false): OpusPeer | undefined {
@@ -513,7 +519,8 @@ export class BotVoiceConnection {
     this.callbacks.participants(count);
   }
 
-  private request(type: MessageType, payload: unknown, expected: MessageType): Promise<unknown> {
+  private request(message: ClientMessageArgs, expected: MessageType): Promise<unknown> {
+    const [type] = message;
     if (this.closed && type !== MessageType.VOICE_LEAVE) return Promise.reject(new Error('Voice connection closed.'));
     if (this.pending.size >= 16) return Promise.reject(new Error('Too many pending voice requests.'));
     const requestId = randomUUID();
@@ -523,7 +530,7 @@ export class BotVoiceConnection {
         reject(new Error(`Voice request ${type} timed out.`));
       }, 20000);
       this.pending.set(requestId, { expected, resolve, reject, timer });
-      try { this.callbacks.send({ type, requestId, payload }); }
+      try { this.callbacks.send(clientMessage(...message, requestId)); }
       catch (error) {
         clearTimeout(timer);
         this.pending.delete(requestId);
@@ -657,7 +664,7 @@ export class BotVoiceConnection {
     this.pending.clear();
     // Start remote leave before cleanup; callbacks retain this object until it settles.
     const leave = notify
-      ? this.request(MessageType.VOICE_LEAVE, { channelId: this.channelId }, MessageType.VOICE_USER_LEFT)
+      ? this.request([MessageType.VOICE_LEAVE, { channelId: this.channelId }], MessageType.VOICE_USER_LEFT)
       : Promise.resolve();
     const peers = [...this.peers.values(), ...(this.sfu ? [this.sfu] : [])];
     this.peers.clear();

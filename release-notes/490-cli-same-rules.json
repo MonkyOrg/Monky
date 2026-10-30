@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Os menus do CLI funcionam melhor por SSH, e criar cargos, mudar a porta ou o limite de anexos segue as mesmas regras do app. No SDK de bots, os arquivos do perfil são gravados de forma atômica.",
+  "en": "CLI menus work better over SSH, and creating roles or changing the port or attachment limit follows the same rules as the app. In the bot SDK, profile files are written atomically."
+}

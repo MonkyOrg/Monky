@@ -289,10 +289,12 @@ test('native-only renderer phase echoes its exact request without disconnecting 
   assert.deepEqual(replies, [request]);
 });
 
-function shutdownFixture(dispose, { prepare = async () => {}, farewell = false, nativeHandshake = false } = {}) {
+function shutdownFixture(dispose, { prepare = async () => {}, farewell = false, nativeHandshake = false,
+  stopServers = async () => {}, disposeStorage = async () => {} } = {}) {
   const filename = path.resolve(__dirname, '..', 'src', 'main', 'main.ts');
   const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.Latest, true);
-  const names = new Set(['stopLocalExecutionThenQuit', 'quitApplication', 'announceLeave', 'requestRendererShutdown']);
+  const names = new Set(['stopLocalExecutionThenQuit', 'quitApplication', 'announceLeave', 'requestRendererShutdown',
+    'stopHostedServicesThenQuit']);
   const selected = source.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text));
   assert.equal(selected.length, names.size);
   const beforeQuit = source.statements.find(node => ts.isExpressionStatement(node)
@@ -320,6 +322,9 @@ function shutdownFixture(dispose, { prepare = async () => {}, farewell = false, 
         requests.push(request); phases.push(request.phase === 'native' ? 'native-handshake' : 'farewell');
       } } },
     crashRecovery: null, clientLogger: null, trayManager: null, overlayManager: null, shutdownServer() {},
+    serverManager: { stopAll: () => { phases.push('hosted-stop'); return stopServers(); } },
+    botDeviceStorage: { dispose: () => { phases.push('storage-flush'); return disposeStorage(); } },
+    HOSTED_SHUTDOWN_TIMEOUT_MS: 8000, hostedServicesStopping: false, hostedServicesStopped: false,
     mt: key => key,
     console: { error: (...args) => errors.push(args), warn: (...args) => warnings.push(args) },
     dialog: { showMessageBox() { const choice = shutdownDeferred(); choices.push(choice); return choice.promise; } },
@@ -356,7 +361,8 @@ test('real before-quit drains native ownership before farewell, local disposal a
   assert.equal(f.exited(), 0);
   local.resolve();
   await shutdownTick();
-  assert.deepEqual(f.phases, ['native-drain', 'native-retired', 'farewell', 'local-dispose', 'window-close']);
+  assert.deepEqual(f.phases, ['native-drain', 'native-retired', 'farewell', 'local-dispose', 'hosted-stop', 'storage-flush',
+    'window-close']);
 });
 
 test('native renderer quiescence precedes global drain and phase-mismatched acknowledgements cannot advance shutdown', async () => {
@@ -428,7 +434,7 @@ test('failed native drain keeps the connection alive for Retry; completed farewe
   f.choices[1].resolve({ response: 0 });
   await shutdownTick();
   assert.equal(nativeAttempts, 2);
-  assert.deepEqual(f.phases, ['farewell', 'local-dispose', 'local-dispose', 'window-close']);
+  assert.deepEqual(f.phases, ['farewell', 'local-dispose', 'local-dispose', 'hosted-stop', 'storage-flush', 'window-close']);
 });
 
 test('missing renderer acknowledgement fails closed and Retry waits for a fresh completed handshake', async () => {
@@ -504,4 +510,43 @@ test('a failed shutdown dialog cannot permanently latch the app-close guard', as
   f.context.stopLocalExecutionThenQuit();
   await shutdownTick();
   assert.equal(f.exited(), 1);
+});
+
+test('the final quit waits for hosted servers and bot storage before any window closes', async () => {
+  const servers = shutdownDeferred(), storage = shutdownDeferred();
+  const f = shutdownFixture(async () => {}, { stopServers: () => servers.promise, disposeStorage: () => storage.promise });
+  f.context.quitApplication();
+  await shutdownTick();
+  assert.deepEqual(f.phases, ['local-dispose', 'hosted-stop', 'storage-flush']);
+  f.context.quitApplication();
+  await shutdownTick();
+  assert.equal(f.phases.filter(phase => phase === 'hosted-stop').length, 1, 'A repeated quit joins the pending stop.');
+  servers.resolve();
+  await shutdownTick();
+  assert.equal(f.exited(), 0, 'Pending bot storage writes still hold the windows.');
+  storage.resolve();
+  await shutdownTick();
+  assert.equal(f.exited(), 1);
+  assert.deepEqual(f.phases, ['local-dispose', 'hosted-stop', 'storage-flush', 'window-close']);
+  assert.deepEqual(f.warnings, []);
+});
+
+test('a failed or hung hosted stop cannot keep the app open past its deadline', async () => {
+  const failed = shutdownFixture(async () => {}, { stopServers: async () => { throw new Error('Synthetic stop failure'); } });
+  failed.context.quitApplication();
+  await shutdownTick();
+  assert.equal(failed.exited(), 1);
+  const timers = [];
+  const hung = shutdownFixture(async () => {}, { stopServers: () => new Promise(() => {}) });
+  hung.context.setTimeout = (callback, delay) => { timers.push({ callback, delay }); return timers.length; };
+  hung.context.clearTimeout = () => {};
+  hung.context.quitApplication();
+  await shutdownTick();
+  assert.equal(hung.exited(), 0);
+  assert.deepEqual(timers.map(timer => timer.delay), [8000]);
+  timers[0].callback();
+  await shutdownTick();
+  assert.equal(hung.exited(), 1);
+  assert.equal(hung.warnings.length, 1);
+  assert.match(String(hung.warnings[0][0]), /did not stop in time/);
 });

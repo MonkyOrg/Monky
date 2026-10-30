@@ -1,72 +1,67 @@
 import { t } from '../i18n';
-import { escapeHtml } from '../utils/html';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { html } from '../utils/html';
+import { errorMessage, reportError } from '../utils/feedback';
+import { openModal, type ModalShell } from '../utils/modalShell';
 
-const openModals = new Map<HTMLElement, AbortController>();
+const openModals = new Map<HTMLElement, ModalShell>();
 
-export function openCommunityModal(title: string) {
-  const previous = document.activeElement;
-  const parent = [...openModals.keys()].reverse().find(modal => modal.isConnected && !modal.inert && !modal.hidden);
-  const parentAbort = parent ? openModals.get(parent) : undefined;
-  const abort = new AbortController();
-  const element = document.createElement('div');
-  element.className = 'modal-backdrop';
-  element.dataset.communityModal = '';
-  element.innerHTML = `<section class="modal-card community-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
-    <header class="modal-header"><h2 class="modal-title">${escapeHtml(title)}</h2>
-      <button class="btn btn-secondary" type="button" data-community-close aria-label="${escapeHtml(t('common.close'))}">×</button>
-    </header><div data-community-content></div><p class="community-error" data-community-error role="alert" hidden></p></section>`;
-  const content = element.querySelector<HTMLElement>('[data-community-content]')!;
-  const error = element.querySelector<HTMLElement>('[data-community-error]')!;
-  const close = (immediate = false): void => {
-    if (abort.signal.aborted) {
-      if (immediate) exitModal(element, true);
-      return;
-    }
-    abort.abort();
-    openModals.delete(element);
-    exitModal(element, immediate);
-    if (previous instanceof HTMLElement && previous.isConnected && !previous.closest('[inert], [hidden], [data-ui-closing]')) previous.focus();
-  };
-  if (parent) {
-    parentAbort?.signal.addEventListener('abort', () => close(true), { once: true, signal: abort.signal });
+interface CommunityModalOptions {
+  /** Closes at once when the visible server changes or its connection drops, as a draft for that server does. */
+  closeWithSession?: boolean;
+}
+
+/**
+ * The dialog of the community views: events, polls, forms, forum, search
+ * filters, forwards and recent sounds. One opened from another closes with it.
+ * Failures go to the shared toast; the content area is the view's to fill.
+ */
+export function openCommunityModal(title: string, options: CommunityModalOptions = {}) {
+  const parent = [...openModals.values()].reverse()
+    .find(modal => modal.element.isConnected && !modal.element.inert && !modal.element.hidden);
+  let registered: HTMLElement | null = null;
+  const shell = openModal({
+    card: html`<section class="modal-card community-modal" aria-label="${title}">
+      <header class="modal-header"><h2 class="modal-title">${title}</h2>
+        <button class="btn btn-secondary" type="button" data-community-close data-modal-close aria-label="${t('common.close')}">×</button>
+      </header><div data-community-content></div></section>`,
+    initialFocus: '[data-community-close]',
+    signal: parent?.signal,
+    closeWithSession: options.closeWithSession,
+    onClose: () => { if (registered) openModals.delete(registered); },
+  });
+  if (!shell.closed) {
+    registered = shell.element;
+    openModals.set(registered, shell);
   }
-  element.querySelector('[data-community-close]')!.addEventListener('click', () => close(), { signal: abort.signal });
-  element.addEventListener('mousedown', (event) => { if (event.target === element) close(); }, { signal: abort.signal });
-  document.addEventListener('keydown', (event) => {
-    if (!handlesModalKey(element, event)) return;
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      close();
-    } else if (event.key === 'Tab') {
-      const controls = [...element.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')]
-        .filter((item) => !item.hidden && item.getClientRects().length);
-      const index = controls.indexOf(document.activeElement as HTMLElement);
-      if (controls.length && (event.shiftKey ? index <= 0 : index < 0 || index === controls.length - 1)) {
-        event.preventDefault();
-        controls[event.shiftKey ? controls.length - 1 : 0].focus();
-      }
-    }
-  }, { capture: true, signal: abort.signal });
-  openModals.set(element, abort);
-  document.body.append(element);
-  enterModal(element);
-  element.querySelector<HTMLElement>('button')!.focus();
+  const content = shell.card.querySelector<HTMLElement>('[data-community-content]')!;
+  let dismissError: (() => void) | null = null;
+  const fail = (message: string): void => {
+    if (!shell.signal.aborted) dismissError = reportError(message);
+  };
+  const clearError = (): void => {
+    dismissError?.();
+    dismissError = null;
+  };
   return {
-    element, content, close, signal: abort.signal,
-    fail(message: string) { if (!abort.signal.aborted) { error.textContent = message; error.hidden = false; } },
-    clearError() { error.textContent = ''; error.hidden = true; },
+    element: shell.element, card: shell.card, content, signal: shell.signal,
+    close: (immediate = false): void => { shell.close('api', immediate); },
+    /** Renames the dialog: its heading and the name assistive technology announces. */
+    setTitle(text: string) {
+      const heading = shell.card.querySelector<HTMLElement>('.modal-title');
+      if (heading && heading.textContent !== text) heading.textContent = text;
+      shell.card.setAttribute('aria-label', text);
+    },
+    fail,
+    clearError,
     async run(operation: () => Promise<void>) {
-      error.hidden = true;
+      clearError();
       try { await operation(); }
       catch (failure) {
         console.warn('[Community] Action failed.', failure);
-        if (!abort.signal.aborted) {
-          error.textContent = failure instanceof Error ? failure.message : t('community.actionFailed');
-          error.hidden = false;
-        }
+        fail(errorMessage(failure, t('community.actionFailed')));
       }
     },
   };
 }
+
+export type CommunityModal = ReturnType<typeof openCommunityModal>;

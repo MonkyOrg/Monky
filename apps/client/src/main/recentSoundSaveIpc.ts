@@ -1,15 +1,18 @@
-import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
+import { app, dialog, type BrowserWindow } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { LIMITS, type IpcInvokeChannels } from '@monky/shared';
+import type { IpcRegistry } from './ipc/registry';
 
 const CHANNEL = 'app:save-recent-sound' satisfies keyof IpcInvokeChannels;
 
-export function setupRecentSoundSaveIpc(
+export function registerRecentSoundSaveIpc(
+  registry: IpcRegistry,
   mainWindow: BrowserWindow,
   sanitizeFileName: (name: string) => string,
-): () => void {
-  ipcMain.handle(CHANNEL, async (_, input: IpcInvokeChannels[typeof CHANNEL]['args'][0]) => {
+): void {
+  // Writes a file to disk, so only the main window may ask (E-MAIN-1).
+  registry.handle(CHANNEL, { from: 'main', refused: { success: false, error: 'Unavailable sender' } }, async (_event, input) => {
     try {
       const extensions: Record<string, string> = {
         'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg',
@@ -38,5 +41,4 @@ export function setupRecentSoundSaveIpc(
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
     }
   });
-  return () => ipcMain.removeHandler(CHANNEL);
 }

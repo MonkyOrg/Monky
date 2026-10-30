@@ -30,6 +30,20 @@ export const screenMetadataSignalSchema = z.object({
   streamId: screenShareIdSchema,
   subscriptionId: screenShareIdSchema,
 }).strict();
+/** An `RTCSessionDescriptionInit` as it travels in RTC_SIGNAL. */
+export const rtcSignalDescriptionSchema = z.object({
+  type: z.enum(['offer', 'answer', 'pranswer', 'rollback']),
+  sdp: z.string().max(1024 * 1024).optional(),
+});
+export type RtcSignalDescription = z.infer<typeof rtcSignalDescriptionSchema>;
+/** An `RTCIceCandidateInit` as it travels in RTC_SIGNAL. */
+export const rtcSignalCandidateSchema = z.object({
+  candidate: z.string().max(8192).optional(),
+  sdpMid: z.string().max(128).nullable().optional(),
+  sdpMLineIndex: z.number().int().min(0).max(65535).nullable().optional(),
+  usernameFragment: z.string().max(256).nullable().optional(),
+});
+export type RtcSignalCandidate = z.infer<typeof rtcSignalCandidateSchema>;
 export const rtcSignalSchema = z.union([
   screenWatchSignalSchema,
   screenMetadataSignalSchema,
@@ -38,16 +52,8 @@ export const rtcSignalSchema = z.union([
     targetSessionId: messageReferenceSchema,
     signalType: z.enum(['offer', 'answer', 'candidate', 'user-left']),
     subscriptionId: screenShareIdSchema.optional(),
-    sdp: z.object({
-      type: z.enum(['offer', 'answer', 'pranswer', 'rollback']),
-      sdp: z.string().max(1024 * 1024).optional(),
-    }).optional(),
-    candidate: z.object({
-      candidate: z.string().max(8192).optional(),
-      sdpMid: z.string().max(128).nullable().optional(),
-      sdpMLineIndex: z.number().int().min(0).max(65535).nullable().optional(),
-      usernameFragment: z.string().max(256).nullable().optional(),
-    }).optional(),
+    sdp: rtcSignalDescriptionSchema.optional(),
+    candidate: rtcSignalCandidateSchema.optional(),
   }).strict().refine(value => (value.signalType !== 'offer' && value.signalType !== 'answer') || !!value.subscriptionId),
 ]);
 export const sfuConsumerClosedSchema = z.object({
@@ -83,6 +89,28 @@ export const sfuMediaAppDataSchema = z.discriminatedUnion('mediaType', [
     nativeScreen: nativeScreenRenditionSchema.optional(),
   }).strict(),
 ]);
+export type SfuMediaAppData = z.infer<typeof sfuMediaAppDataSchema>;
+/** The only header extensions mediasoup serializes; it refuses any other URI. */
+const SFU_RTP_HEADER_EXTENSION_URIS = [
+  'urn:ietf:params:rtp-hdrext:sdes:mid',
+  'urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id',
+  'urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id',
+  'http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time',
+  'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01',
+  'urn:ietf:params:rtp-hdrext:ssrc-audio-level',
+  'https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension',
+  'urn:3gpp:video-orientation',
+  'http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time',
+  'urn:ietf:params:rtp-hdrext:toffset',
+  'http://www.webrtc.org/experiments/rtp-hdrext/playout-delay',
+  'urn:mediasoup:params:rtp-hdrext:packet-id',
+] as const;
+const sfuRtpHeaderExtensionUriSchema = z.enum(SFU_RTP_HEADER_EXTENSION_URIS);
+const sfuRtpParameterValuesSchema = z.record(z.union([z.string().max(1024), z.number().finite()]))
+  .refine(value => Object.keys(value).length <= 64);
+const sfuRtcpFeedbackSchema = z.object({
+  type: z.string().max(64), parameter: z.string().max(128).optional(),
+});
 export const sfuConsumeSchema = z.object({
   channelId: messageReferenceSchema,
   transportId: messageReferenceSchema,
@@ -94,34 +122,76 @@ export const sfuConsumeSchema = z.object({
       preferredPayloadType: z.number().int().min(0).max(127),
       clockRate: z.number().int().positive(),
       channels: z.number().int().min(1).max(64).optional(),
-      parameters: z.record(z.union([z.string().max(1024), z.number().finite()]))
-        .refine(value => Object.keys(value).length <= 64).optional(),
-      rtcpFeedback: z.array(z.object({
-        type: z.string().max(64), parameter: z.string().max(128).optional(),
-      })).max(32).optional(),
+      parameters: sfuRtpParameterValuesSchema.optional(),
+      rtcpFeedback: z.array(sfuRtcpFeedbackSchema).max(32).optional(),
     })).max(128).optional(),
     headerExtensions: z.array(z.object({
       kind: z.enum(['audio', 'video']),
-      uri: z.enum([
-        'urn:ietf:params:rtp-hdrext:sdes:mid',
-        'urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id',
-        'urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id',
-        'http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time',
-        'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01',
-        'urn:ietf:params:rtp-hdrext:ssrc-audio-level',
-        'https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension',
-        'urn:3gpp:video-orientation',
-        'http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time',
-        'urn:ietf:params:rtp-hdrext:toffset',
-        'http://www.webrtc.org/experiments/rtp-hdrext/playout-delay',
-        'urn:mediasoup:params:rtp-hdrext:packet-id',
-      ]),
+      uri: sfuRtpHeaderExtensionUriSchema,
       preferredId: z.number().int().min(1).max(255),
       preferredEncrypt: z.boolean().optional(),
       direction: z.enum(['sendrecv', 'sendonly', 'recvonly', 'inactive']).optional(),
     })).max(64).optional(),
   }),
 }).strict();
+export const sfuDtlsParametersSchema = z.object({
+  role: z.enum(['auto', 'client', 'server']).optional(),
+  fingerprints: z.array(z.object({
+    algorithm: z.enum(['sha-1', 'sha-224', 'sha-256', 'sha-384', 'sha-512']),
+    value: z.string().min(1).max(256),
+  })).min(1).max(8),
+});
+export type SfuDtlsParameters = z.infer<typeof sfuDtlsParametersSchema>;
+export const sfuConnectWebRtcTransportSchema = z.object({
+  channelId: messageReferenceSchema,
+  transportId: messageReferenceSchema,
+  dtlsParameters: sfuDtlsParametersSchema,
+});
+/**
+ * What a producer announces, bounded before it reaches mediasoup, which still
+ * judges its meaning. Bounds follow the native engine's own (sfu_controller.cc).
+ * Unlisted keys pass through: mediasoup may know them, and none is relayed.
+ */
+export const sfuRtpParametersSchema = z.object({
+  mid: z.string().max(256).optional(),
+  codecs: z.array(z.object({
+    mimeType: z.string().min(1).max(128),
+    payloadType: z.number().int().min(0).max(127),
+    clockRate: z.number().int().positive(),
+    channels: z.number().int().min(1).max(64).optional(),
+    parameters: sfuRtpParameterValuesSchema.optional(),
+    rtcpFeedback: z.array(sfuRtcpFeedbackSchema).max(32).optional(),
+  }).passthrough()).max(32),
+  headerExtensions: z.array(z.object({
+    uri: sfuRtpHeaderExtensionUriSchema,
+    id: z.number().int().min(1).max(255),
+    encrypt: z.boolean().optional(),
+    parameters: sfuRtpParameterValuesSchema.optional(),
+  }).passthrough()).max(32).optional(),
+  encodings: z.array(z.object({
+    ssrc: z.number().int().min(0).max(0xffffffff).optional(),
+    rid: z.string().max(64).optional(),
+    codecPayloadType: z.number().int().min(0).max(127).optional(),
+    rtx: z.object({ ssrc: z.number().int().min(0).max(0xffffffff) }).optional(),
+    dtx: z.boolean().optional(),
+    scalabilityMode: z.string().max(32).optional(),
+    maxBitrate: z.number().nonnegative().optional(),
+  }).passthrough()).max(16).optional(),
+  rtcp: z.object({
+    cname: z.string().max(256).optional(),
+    reducedSize: z.boolean().optional(),
+  }).passthrough().optional(),
+  msid: z.string().max(256).optional(),
+}).passthrough();
+export type SfuRtpParameters = z.infer<typeof sfuRtpParametersSchema>;
+export const sfuProduceSchema = z.object({
+  channelId: messageReferenceSchema,
+  transportId: messageReferenceSchema,
+  kind: z.enum(['audio', 'video']),
+  rtpParameters: sfuRtpParametersSchema,
+  // Checked against the transport and the announced screens by the handler.
+  appData: z.unknown().optional(),
+});
 export const adminVoiceRestrictionsGetSchema = z.object({
   targetUserId: messageReferenceSchema,
 });
@@ -152,6 +222,53 @@ export const voiceReconnectSchema = z.object({
 export const voiceAfkSchema = z.object({
   channelId: messageReferenceSchema,
 }).strict();
+/*
+ * Voice payloads of human clients (S-VOICE-2). Not strict: an unknown key is
+ * dropped instead of refusing a newer client, so nothing a client invents
+ * lands in the voice state that is replayed to everyone in the room.
+ */
+export const voiceJoinSchema = z.object({
+  channelId: messageReferenceSchema,
+  isMuted: z.boolean().optional(),
+  isDeafened: z.boolean().optional(),
+});
+export const voiceStateUpdateSchema = z.object({
+  isMuted: z.boolean().optional(),
+  isDeafened: z.boolean().optional(),
+  isSpeaking: z.boolean().optional(),
+  isCameraOn: z.boolean().optional(),
+  isScreenSharing: z.boolean().optional(),
+  isSharingScreenAudio: z.boolean().optional(),
+  // The server keeps only well-formed ids, up to its own share limit.
+  screenShareIds: z.array(z.string().max(64)).max(64).optional(),
+  // Checked by the server against the share ids announced with it.
+  nativeScreenShares: z.unknown().optional(),
+});
+export const adminKickVoiceSchema = z.object({
+  targetSessionId: messageReferenceSchema,
+});
+export const adminMoveUserSchema = z.object({
+  targetSessionId: messageReferenceSchema,
+  channelId: messageReferenceSchema,
+});
+/** One printable line: a diagnostic only ever ends up in the server log (S-VOICE-8). */
+const diagnosticTextSchema = (max: number) => z.string().max(max).regex(/^[\x20-\x7E]*$/);
+export const rtcCandidateInfoSchema = z.object({
+  type: diagnosticTextSchema(16),
+  address: diagnosticTextSchema(64).optional(),
+  port: z.number().int().min(0).max(65535).optional(),
+  protocol: diagnosticTextSchema(8).optional(),
+});
+export const rtcDiagnosticsReportSchema = z.object({
+  targetSessionId: diagnosticTextSchema(128).min(1),
+  reason: diagnosticTextSchema(128),
+  iceGatheringState: diagnosticTextSchema(32),
+  signalingState: diagnosticTextSchema(32),
+  iceRestartAttempts: z.number().int().min(0).max(10_000),
+  hardReconnectAttempts: z.number().int().min(0).max(10_000),
+  localCandidate: rtcCandidateInfoSchema.nullish(),
+  remoteCandidate: rtcCandidateInfoSchema.nullish(),
+});
 export const chatHistoryRequestSchema = z.object({
   channelId: messageReferenceSchema,
   limit: z.number().int().positive().optional(),

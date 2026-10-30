@@ -31,6 +31,13 @@ function ecosystemSource(app: Record<string, unknown>): string {
   return `module.exports = ${JSON.stringify({ apps: [app] }, null, 2)};\n`;
 }
 
+/**
+ * Commands that confirmed PM2 runs. Each `pm2 --version` loads all of PM2, and
+ * one command asks several times. A missing PM2 is never remembered, because
+ * `ensurePm2ForStart` installs it and checks again.
+ */
+const confirmedPm2 = new WeakSet<CliContext>();
+
 function runPm2(context: CliContext, args: readonly string[], options: { stdio?: 'pipe' | 'inherit'; timeout?: number } = {}): CommandResult {
   const executable = pm2Command();
   if (!executable) throw new Error('The pm2 Node entry point is unavailable. Install it with: npm install -g pm2');
@@ -40,6 +47,7 @@ function runPm2(context: CliContext, args: readonly string[], options: { stdio?:
 }
 
 export function isPm2Available(context: CliContext): boolean {
+  if (confirmedPm2.has(context)) return true;
   const executable = pm2Command();
   if (!executable) return false;
   const result = runCommand(executable.command, [...executable.args, '--version'], {
@@ -52,6 +60,7 @@ export function isPm2Available(context: CliContext): boolean {
   if (result.status !== 0) {
     throw new Error(`pm2 --version failed (${result.status ?? result.signal}).\n${result.stderr || result.stdout}`);
   }
+  confirmedPm2.add(context);
   return true;
 }
 

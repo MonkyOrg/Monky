@@ -6,11 +6,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <iterator>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 
@@ -34,6 +37,34 @@ struct DeviceNotifications {
     std::lock_guard lock(mutex);
     if (changed) changed();
   }
+};
+
+// Stands in for the tray under --tray: the same threads and the same stop
+// handshake, without an icon on the test machine's notification area.
+class FixtureInterface final : public monky::light::CoreInterface {
+ public:
+  void observe(const nlohmann::json&) override {}
+
+  void stopped() override {
+    {
+      std::lock_guard lock(mutex_);
+      stopped_ = true;
+    }
+    changed_.notify_all();
+  }
+
+  int run() override {
+    std::unique_lock lock(mutex_);
+    changed_.wait(lock, [this] { return stopped_; });
+    // Where the tray takes its icon out of the notification area.
+    std::cout << R"({"event":"fixture-interface-stopped"})" << '\n' << std::flush;
+    return 0;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable changed_;
+  bool stopped_ = false;
 };
 
 struct Devices {
@@ -98,6 +129,15 @@ int run(std::vector<std::string> arguments) {
     });
   };
   audio.fixtureCommand = [catalog, notifications](const nlohmann::json& command) {
+    if (command.at("command") == "fixture-stall") {
+      // Holds the core loop, as a console that stopped taking output does.
+      const auto milliseconds = command.at("milliseconds").get<int>();
+      if (milliseconds < 1 || milliseconds > 10'000) throw std::invalid_argument("Fixture stall out of range");
+      // Same thread as every other event line, so the scenario knows the hold began.
+      std::cout << R"({"event":"fixture-stalling"})" << '\n' << std::flush;
+      std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+      return;
+    }
     if (command.at("command") != "fixture-audio-devices") throw std::invalid_argument("Unknown fixture command");
     catalog->Set(fixtureDevices(command.at("inputs")), fixtureDevices(command.at("outputs")));
     notifications->notify();
@@ -113,6 +153,7 @@ int run(std::vector<std::string> arguments) {
     result["permissionRequests"] = permissionRequests->load();
     return result;
   };
+  audio.createInterface = [](monky::light::CoreCommands) { return std::make_unique<FixtureInterface>(); };
   if (!defaultProcessing) {
     audio.processing.echo_cancellation = false;
     audio.processing.automatic_gain = false;

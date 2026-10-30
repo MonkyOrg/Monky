@@ -12,6 +12,7 @@ import licenseUrl from '../../assets/camera-effects/LICENSE?url';
 import rvmLicenseUrl from '../../assets/camera-effects/RVM-LICENSE?url';
 import sourcesUrl from '../../assets/camera-effects/SOURCES.json?url&no-inline';
 import { openFileInputPicker } from '../../utils/buttonLoading';
+import { setSurfaceVisible } from '../../utils/surfaceVisibility';
 import './cameraEffects.css';
 
 const modeLabels: Record<CameraEffectMode, TranslationKey> = {
@@ -40,6 +41,19 @@ const ranges = [
   { setting: 'keySoftness', label: 'cameraEffects.keySoftness', help: 'cameraEffects.keySoftnessHelp', min: 1, max: 30, unit: 'cameraEffects.percentage' },
   { setting: 'spillReduction', label: 'cameraEffects.spillReduction', help: 'cameraEffects.spillReductionHelp', min: 0, max: 100, unit: 'cameraEffects.percentage' },
 ] as const;
+
+
+/** Which adjustment panels the chosen effect uses. */
+function visiblePanels(settings: CameraEffectSettings): Record<string, boolean> {
+  return {
+    blur: settings.mode === 'blur',
+    person: needsPersonSegmentation(settings.mode),
+    chroma: settings.mode === 'chroma',
+    color: settings.mode === 'color' || (settings.mode === 'chroma' && settings.backgroundSource === 'color'),
+    image: needsBackgroundImage(settings),
+    performance: settings.mode !== 'off',
+  };
+}
 
 export class CameraEffectsControl {
   private root: HTMLElement | null = null;
@@ -84,6 +98,9 @@ export class CameraEffectsControl {
 
   public renderHtml(): string {
     const settings = cameraEffectsStore.snapshot.settings;
+    // Rendered as they are; only later changes unfold or fold with motion.
+    const visible = visiblePanels(settings);
+    const shown = (panel: string): string => visible[panel] ? '' : 'hidden';
     const helpId = (setting: string) => this.id(`camera-effect-${setting}-help`);
     const help = (setting: string, label: TranslationKey, description: TranslationKey) => `
       <button type="button" class="camera-effects-help" data-camera-help="${setting}"
@@ -135,12 +152,12 @@ export class CameraEffectsControl {
             </button>`).join('')}
         </div>
         <p id="${this.id('camera-effects-description')}" class="camera-effects-hint">${t(modeDescriptions[settings.mode])}</p>
-        <div data-camera-panel="blur" hidden>${range('blurRadius')}</div>
-        <div data-camera-panel="person" hidden>
+        <div data-camera-panel="blur" ${shown('blur')}>${range('blurRadius')}</div>
+        <div data-camera-panel="person" ${shown('person')}>
           <p class="camera-effects-hint">${t('cameraEffects.mattingHint')}</p>
           <p class="camera-effects-hint">${t('cameraEffects.approximation')}</p>
         </div>
-        <div data-camera-panel="chroma" hidden>
+        <div data-camera-panel="chroma" ${shown('chroma')}>
           <div class="camera-effects-color-row">
             <span class="camera-effects-label">
               <label for="${this.id('camera-effect-keyColor')}">${t('cameraEffects.keyColor')}</label>
@@ -162,14 +179,14 @@ export class CameraEffectsControl {
           </div>
           <p class="camera-effects-hint">${t('cameraEffects.chromaCompositeHint')}</p>
         </div>
-        <div data-camera-panel="color" class="camera-effects-color-row" hidden>
+        <div data-camera-panel="color" class="camera-effects-color-row" ${shown('color')}>
           <span class="camera-effects-label">
             <label for="${this.id('camera-effect-backgroundColor')}">${t('cameraEffects.backgroundColor')}</label>
             ${help('backgroundColor', 'cameraEffects.backgroundColor', 'cameraEffects.backgroundColorHelp')}
           </span>
           ${this.colorPickers.backgroundColor.renderHtml(settings.backgroundColor)}
         </div>
-        <div data-camera-panel="image" hidden>
+        <div data-camera-panel="image" ${shown('image')}>
           <div class="camera-effects-field-heading">
             <span class="camera-effects-label">
               <span>${t('cameraEffects.modeImage')}</span>
@@ -187,7 +204,7 @@ export class CameraEffectsControl {
           <input id="${this.id('camera-effects-file')}" type="file" accept="image/png,image/jpeg,image/webp" hidden>
           <p class="camera-effects-hint">${t('cameraEffects.imageHint')}</p>
         </div>
-        <div data-camera-panel="performance" hidden>
+        <div data-camera-panel="performance" ${shown('performance')}>
           <div class="camera-effects-field-heading">
             <span class="camera-effects-label">
               <span id="${this.id('camera-effect-limitQuality-label')}">${t('cameraEffects.limitQuality')}</span>
@@ -486,16 +503,9 @@ export class CameraEffectsControl {
     root.querySelector('[data-camera-quality-limit]')?.setAttribute('aria-checked', String(settings.limitQuality));
     const description = this.element<HTMLElement>('camera-effects-description');
     if (description) description.textContent = t(modeDescriptions[settings.mode]);
-    const visible: Record<string, boolean> = {
-      blur: settings.mode === 'blur',
-      person: needsPersonSegmentation(settings.mode),
-      chroma: settings.mode === 'chroma',
-      color: settings.mode === 'color' || (settings.mode === 'chroma' && settings.backgroundSource === 'color'),
-      image: needsBackgroundImage(settings),
-      performance: settings.mode !== 'off',
-    };
+    const visible = visiblePanels(settings);
     for (const panel of root.querySelectorAll<HTMLElement>('[data-camera-panel]')) {
-      panel.hidden = !visible[panel.dataset.cameraPanel ?? ''];
+      setSurfaceVisible(panel, visible[panel.dataset.cameraPanel ?? ''] === true, 'panel');
     }
     for (const field of ranges) {
       const input = this.element<HTMLInputElement>(`camera-effect-${field.setting}`);

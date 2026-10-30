@@ -1,5 +1,6 @@
 import type { Role } from '@monky/shared';
 import { t } from '../i18n';
+import { isHexColor } from './colors';
 import { escapeHtml } from './html';
 
 /**
@@ -12,8 +13,8 @@ export function renderRoleTags(roles: readonly Role[], limit: number): string {
   const ordered = [...roles].sort((a, b) => b.position - a.position);
   const visible = ordered.slice(0, limit);
   const hidden = ordered.slice(limit);
-  const tag = (role: Role) => `<span class="member-role-tag"${role.color
-    ? ` style="--role-color: ${escapeHtml(role.color)}"` : ''}>${escapeHtml(role.name)}</span>`;
+  const tag = (role: Role) => `<span class="member-role-tag"${isHexColor(role.color)
+    ? ` style="--role-color: ${role.color}"` : ''}>${escapeHtml(role.name)}</span>`;
   const more = hidden.length
     ? `<span class="member-role-more" tabindex="0" role="note" data-tooltip="${escapeHtml(hidden.map((role) => role.name).join('\n'))}"
         aria-label="${escapeHtml(t('roles.moreRolesAria', { count: hidden.length, names: hidden.map((role) => role.name).join(', ') }))}">+${hidden.length}</span>`

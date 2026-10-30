@@ -8,6 +8,7 @@ import {
   localExecutionSubjectSchema,
   localPermissionsFileSchema,
   normalizePublicKeyHex,
+  raceSignal,
   type LocalBotIdentity,
   type LocalCapabilityId,
   type LocalConsentDecision,
@@ -58,21 +59,6 @@ function connectionKey(owner: number, connectionId: string): string {
 
 function copy(permission: LocalPermissionInfo): LocalPermissionInfo {
   return { ...permission, bot: { ...permission.bot } };
-}
-
-function waitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const abort = (): void => {
-      signal.removeEventListener('abort', abort);
-      reject(signal.reason);
-    };
-    signal.addEventListener('abort', abort, { once: true });
-    promise.then(
-      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
-      (error: unknown) => { signal.removeEventListener('abort', abort); reject(error); },
-    );
-    if (signal.aborted) abort();
-  });
 }
 
 export class LocalPermissions {
@@ -165,7 +151,7 @@ export class LocalPermissions {
     const waiter = Symbol();
     prompt.waiters.add(waiter);
     try {
-      return await waitWithSignal(prompt.result, signal);
+      return await raceSignal(prompt.result, signal);
     } finally {
       prompt.waiters.delete(waiter);
       if (!prompt.waiters.size && !prompt.settled) {
@@ -227,7 +213,7 @@ export class LocalPermissions {
       }
     };
     try {
-      if (!await waitWithSignal(confirm({ ...permission.bot }, permission.capability, signal), signal)) return false;
+      if (!await raceSignal(confirm({ ...permission.bot }, permission.capability, signal), signal)) return false;
       guard();
       await this.persist({ ...permission, decision: 'always', updatedAt: Date.now() }, guard);
       guard();
@@ -242,24 +228,35 @@ export class LocalPermissions {
   cancelConnection(owner: number, connectionId: string): void {
     const key = connectionKey(owner, connectionId);
     this.connectionGenerations.set(key, (this.connectionGenerations.get(key) ?? 0) + 1);
+    let changed = false;
     for (const [temporaryKey, entry] of this.temporary) {
-      if (entry.owner === owner && entry.connectionId === connectionId) this.temporary.delete(temporaryKey);
+      if (entry.owner === owner && entry.connectionId === connectionId) {
+        this.temporary.delete(temporaryKey);
+        changed = true;
+      }
     }
     for (const prompt of this.prompts.values()) {
       if (prompt.owner === owner && prompt.subject.connectionId === connectionId) {
         prompt.controller.abort(new LocalExecutionError('executor_unavailable'));
       }
     }
-    this.onChanged();
+    // Only temporary grants are listed; an aborted prompt reports through the request waiting for it.
+    if (changed) this.onChanged();
   }
 
   cancelOwner(owner: number): void {
     this.ownerGenerations.set(owner, (this.ownerGenerations.get(owner) ?? 0) + 1);
-    for (const [key, entry] of this.temporary) if (entry.owner === owner) this.temporary.delete(key);
+    let changed = false;
+    for (const [key, entry] of this.temporary) {
+      if (entry.owner === owner) {
+        this.temporary.delete(key);
+        changed = true;
+      }
+    }
     for (const prompt of this.prompts.values()) {
       if (prompt.owner === owner) prompt.controller.abort(new LocalExecutionError('executor_unavailable'));
     }
-    this.onChanged();
+    if (changed) this.onChanged();
   }
 
   async dispose(): Promise<void> {
@@ -312,7 +309,7 @@ export class LocalPermissions {
     owner: number, subject: LocalExecutionSubject, permission: LocalPermissionInfo,
     signal: AbortSignal, guard: () => void, confirm: Confirmation,
   ): Promise<string> {
-    const decision = await waitWithSignal(confirm({ ...permission.bot }, permission.capability, signal), signal);
+    const decision = await raceSignal(confirm({ ...permission.bot }, permission.capability, signal), signal);
     signal.throwIfAborted();
     guard();
     if (decision !== 'deny' && decision !== 'connection' && decision !== 'always') {

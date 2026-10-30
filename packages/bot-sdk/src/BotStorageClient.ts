@@ -2,7 +2,7 @@ import {
   MessageType, ProtocolErrorCode, botStorageContentTypeSchema, botStorageDeletedSchema, botStorageGetResultSchema,
   botStorageKeySchema, botStorageListResultSchema, botStorageListSchema, botStorageObjectInfoSchema, botStoragePutSchema,
   botStorageUsageSchema,
-  type BotStorageList, type BotStorageListResult, type BotStorageObjectInfo, type BotStorageUsage,
+  type BotStorageList, type BotStorageListResult, type BotStorageObjectInfo, type BotStorageUsage, type ClientMessageArgs,
 } from '@monky/shared';
 import { BotRequestError } from './requestError';
 
@@ -30,7 +30,7 @@ export interface BotStorage {
 
 export interface BotStorageAdapter {
   /** Rejects when the connection cannot use storage, before anything is sent. */
-  request(type: MessageType, payload: unknown, timeoutMs: number): Promise<unknown>;
+  request(message: ClientMessageArgs, timeoutMs: number): Promise<unknown>;
 }
 
 /** Large objects travel in one message; give slow links time to carry them. */
@@ -49,7 +49,7 @@ export function createBotStorage(adapter: BotStorageAdapter): BotStorage {
     async get(key: string): Promise<BotStoredObject | null> {
       const parsedKey = botStorageKeySchema.parse(key);
       const result = botStorageGetResultSchema.parse(
-        await adapter.request(MessageType.BOT_STORAGE_GET, { key: parsedKey }, TRANSFER_TIMEOUT_MS),
+        await adapter.request([MessageType.BOT_STORAGE_GET, { key: parsedKey }], TRANSFER_TIMEOUT_MS),
       );
       if (result.key !== parsedKey) throw new Error('The storage response addresses another key.');
       if (!result.object) return null;
@@ -62,7 +62,7 @@ export function createBotStorage(adapter: BotStorageAdapter): BotStorage {
         ...(options.contentType === undefined ? {} : { contentType: botStorageContentTypeSchema.parse(options.contentType) }),
       });
       try {
-        const saved = botStorageObjectInfoSchema.parse(await adapter.request(MessageType.BOT_STORAGE_PUT, payload, TRANSFER_TIMEOUT_MS));
+        const saved = botStorageObjectInfoSchema.parse(await adapter.request([MessageType.BOT_STORAGE_PUT, payload], TRANSFER_TIMEOUT_MS));
         if (saved.key !== payload.key) throw new Error('The storage response addresses another key.');
         return saved;
       } catch (error) {
@@ -72,13 +72,13 @@ export function createBotStorage(adapter: BotStorageAdapter): BotStorage {
     },
     async delete(key: string): Promise<boolean> {
       const parsedKey = botStorageKeySchema.parse(key);
-      const result = botStorageDeletedSchema.parse(await adapter.request(MessageType.BOT_STORAGE_DELETE, { key: parsedKey }, QUERY_TIMEOUT_MS));
+      const result = botStorageDeletedSchema.parse(await adapter.request([MessageType.BOT_STORAGE_DELETE, { key: parsedKey }], QUERY_TIMEOUT_MS));
       if (result.key !== parsedKey) throw new Error('The storage response addresses another key.');
       return result.deleted;
     },
     async list(options: BotStorageList = {}): Promise<BotStorageListResult> {
       const request = botStorageListSchema.parse(options);
-      const result = botStorageListResultSchema.parse(await adapter.request(MessageType.BOT_STORAGE_LIST, request, QUERY_TIMEOUT_MS));
+      const result = botStorageListResultSchema.parse(await adapter.request([MessageType.BOT_STORAGE_LIST, request], QUERY_TIMEOUT_MS));
       const prefix = request.prefix;
       if (prefix && result.objects.some((object) => !object.key.startsWith(prefix))) {
         throw new Error('The storage listing returned keys outside the prefix.');
@@ -86,7 +86,7 @@ export function createBotStorage(adapter: BotStorageAdapter): BotStorage {
       return result;
     },
     async usage(): Promise<BotStorageUsage> {
-      return botStorageUsageSchema.parse(await adapter.request(MessageType.BOT_STORAGE_USAGE, {}, QUERY_TIMEOUT_MS));
+      return botStorageUsageSchema.parse(await adapter.request([MessageType.BOT_STORAGE_USAGE, {}], QUERY_TIMEOUT_MS));
     },
   });
 }

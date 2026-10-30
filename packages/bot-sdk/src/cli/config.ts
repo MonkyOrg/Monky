@@ -11,8 +11,9 @@ import {
   GENERATED_WRAPPER_FILE,
   UPDATER_ECOSYSTEM_FILE,
 } from './constants';
-import { ensurePrivateDirectory, readJsonFile, writePrivateJson } from './fs';
+import { readJsonFile, readOptionalPrivateJson, writePrivateJsonAtomic } from './fs';
 import { CliError, defaultCliLocale } from './locale';
+import { marketplaceBaseUrl } from '../marketplace';
 import {
   botEntryPath,
   isRecord,
@@ -38,6 +39,8 @@ export interface MarketplaceBotConfig {
   botDir: string;
   servePort: number;
   publicHost: string;
+  /** Origin announced instead of publicHost and servePort, e.g. behind a TLS proxy. */
+  publicUrl?: string;
 }
 
 export type BotConfig = ManualBotConfig | MarketplaceBotConfig;
@@ -178,6 +181,18 @@ export function validatePublicHost(value: unknown): string {
   return host;
 }
 
+/** The origin `serve()` will announce; the same rule, so `start` can expect exactly that URL. */
+export function validatePublicUrl(value: unknown): string {
+  const address = stringValue(value, 'public URL', 2048);
+  try {
+    return marketplaceBaseUrl(address);
+  } catch {
+    throw new CliError(
+      'A URL pública deve ser uma origem http(s), como https://bot.exemplo.com, sem caminho, credenciais, query ou fragmento.',
+      'The public URL must be an http(s) origin, such as https://bot.example.com, without a path, credentials, query or fragment.');
+  }
+}
+
 function parseCommonConfig(raw: Record<string, unknown>): { botName: string; botDir: string } {
   return {
     botName: validateBotName(raw.botName),
@@ -187,7 +202,7 @@ function parseCommonConfig(raw: Record<string, unknown>): { botName: string; bot
 
 export function validateConfig(value: unknown, label = 'Bot config'): BotConfig {
   if (!isRecord(value)) throw new CliError(`${label} deve conter um objeto.`, `${label} must contain an object.`);
-  rejectUnknown(value, ['mode', 'botName', 'botDir', 'serverUrl', 'botToken', 'tokenEnv', 'servePort', 'publicHost'], label);
+  rejectUnknown(value, ['mode', 'botName', 'botDir', 'serverUrl', 'botToken', 'tokenEnv', 'servePort', 'publicHost', 'publicUrl'], label);
   const common = parseCommonConfig(value);
   if (value.mode === 'manual') {
     return {
@@ -205,6 +220,7 @@ export function validateConfig(value: unknown, label = 'Bot config'): BotConfig 
       botDir: common.botDir,
       servePort: validateServePort(value.servePort),
       publicHost: validatePublicHost(value.publicHost),
+      ...(value.publicUrl === undefined ? {} : { publicUrl: validatePublicUrl(value.publicUrl) }),
     };
   }
   throw new CliError(`${label}.mode deve ser "manual" ou "marketplace".`, `${label}.mode must be "manual" or "marketplace".`);
@@ -265,13 +281,18 @@ export function normalizeLegacyConfig(value: unknown, defaults: { botName?: stri
 }
 
 export function readConfig(context: CliContext): BotConfig | null {
-  return fs.existsSync(context.configFile)
-    ? readConfigFile(context.configFile, { botName: defaultBotName(context) }) : null;
+  const stored = readOptionalPrivateJson(context.configFile, 'The bot config file', 256_000);
+  return stored === undefined ? null
+    : validateConfig(normalizeLegacyConfig(stored, { botName: defaultBotName(context) }));
 }
 
+/**
+ * Saves the profile configuration atomically, like the other profile files: a
+ * failed or interrupted write keeps the previous `config.json` instead of
+ * leaving it truncated.
+ */
 export function writeConfig(context: CliContext, config: BotConfig): void {
-  ensurePrivateDirectory(context.homeDir);
-  writePrivateJson(context.configFile, config);
+  writePrivateJsonAtomic(context.configFile, config);
 }
 
 export function ensureModeSupported(context: CliContext, mode: BotMode): void {
@@ -303,7 +324,7 @@ export function manualConfig(
 
 export function marketplaceConfig(
   context: CliContext,
-  input: { botName?: string; botDir?: string; servePort?: number; publicHost?: string } = {}
+  input: { botName?: string; botDir?: string; servePort?: number; publicHost?: string; publicUrl?: string } = {}
 ): MarketplaceBotConfig {
   ensureModeSupported(context, 'marketplace');
   return {
@@ -312,6 +333,7 @@ export function marketplaceConfig(
     botDir: normalizeBotDir(input.botDir ?? defaultBotDir(context)),
     servePort: validateServePort(input.servePort ?? DEFAULT_MARKETPLACE_PORT),
     publicHost: validatePublicHost(input.publicHost ?? 'localhost'),
+    ...(input.publicUrl === undefined ? {} : { publicUrl: validatePublicUrl(input.publicUrl) }),
   };
 }
 
@@ -330,6 +352,7 @@ export function sanitizeConfig(config: BotConfig): Record<string, unknown> {
       botDir: config.botDir,
       servePort: config.servePort,
       publicHost: config.publicHost,
+      ...(config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl }),
     };
 }
 

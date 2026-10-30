@@ -1,30 +1,44 @@
 import {
   PUBLIC_AUDIENCE,
-  resourceAudienceSchema,
+  privateAudienceSelectionSchema,
   type ResourceAudience,
 } from '@monky/shared';
+import { z } from 'zod';
 import type { IDatabaseDriver } from './SqliteWrapper';
 
 export type CommunityResourceType = 'event' | 'live_action' | 'poll' | 'native_form';
+
+/**
+ * What storage may hold. Removing members and roles can empty a private
+ * selection; it then stays private to the creator and managers, and the
+ * resource can still be saved again, as the schedulers do on their own.
+ */
+const storedAudienceSchema = z.union([
+  z.object({ visibility: z.literal('public') }).strict(),
+  privateAudienceSelectionSchema.innerType(),
+]);
 
 export class SqliteResourceAudienceRepository {
   constructor(private readonly db: IDatabaseDriver) {}
 
   replace(resourceType: CommunityResourceType, resourceId: string, input: ResourceAudience): void {
-    const audience = resourceAudienceSchema.parse(input);
+    const audience = storedAudienceSchema.parse(input);
     this.remove(resourceType, resourceId);
     if (audience.visibility === 'public') return;
     this.db.prepare(`INSERT INTO community_resource_audiences (resource_type, resource_id)
       VALUES (?, ?)`).run(resourceType, resourceId);
+    // A member or role removed meanwhile is skipped rather than failing the
+    // whole save on its foreign key, as channels do with unknown roles (#384).
     const addUser = this.db.prepare(`INSERT OR IGNORE INTO community_resource_audience_users
-      (resource_type, resource_id, user_id) VALUES (?, ?, ?)`);
+      (resource_type, resource_id, user_id) SELECT ?, ?, id FROM users WHERE id = ?`);
     const addRole = this.db.prepare(`INSERT OR IGNORE INTO community_resource_audience_roles
-      (resource_type, resource_id, role_id) VALUES (?, ?, ?)`);
+      (resource_type, resource_id, role_id) SELECT ?, ?, id FROM roles WHERE id = ?`);
     for (const userId of audience.userIds) addUser.run(resourceType, resourceId, userId);
     for (const roleId of audience.roleIds) addRole.run(resourceType, resourceId, roleId);
   }
 
   remove(resourceType: CommunityResourceType, resourceId: string): void {
+    // The selected users and roles go with it through ON DELETE CASCADE (S-APP-2).
     this.db.prepare(`DELETE FROM community_resource_audiences
       WHERE resource_type = ? AND resource_id = ?`).run(resourceType, resourceId);
   }

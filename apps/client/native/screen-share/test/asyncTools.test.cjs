@@ -1,0 +1,69 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
+const { within, notifyObserver } = require('../runtime/asyncTools.cjs');
+
+test('within settles like its own promise and rejects with its message only after the deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  assert.equal(await within(Promise.resolve('done'), 50, 'Too late.'), 'done');
+  const ownFailure = new Error('Own failure.');
+  await assert.rejects(within(Promise.reject(ownFailure), 50, 'Too late.'), error => error === ownFailure);
+  let settled = false;
+  const pending = within(new Promise(() => {}), 50, 'Retirement did not finish.');
+  void pending.catch(() => {}).finally(() => { settled = true; });
+  t.mock.timers.tick(49);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  await assert.rejects(pending, /^Error: Retirement did not finish\.$/u);
+});
+
+test('within refuses a deadline that is not a duration instead of timing out at once', async () => {
+  // The old boundedCleanup(promise, message, ms) order passed to within(promise, ms, message).
+  for (const milliseconds of ['Retirement did not finish.', undefined, -1, NaN, Infinity]) {
+    await assert.rejects(within(Promise.resolve('done'), milliseconds, 'Retirement did not finish.'), TypeError);
+  }
+  assert.equal(await within(Promise.resolve('done'), 0, 'Too late.'), 'done');
+});
+
+test('within runs on an injected clock and rejects with the error its timeout creates only on expiry', async () => {
+  const pending = new Map();
+  let next = 1;
+  const timers = {
+    setTimeout: (callback, delay) => { pending.set(next, { callback, delay }); return next++; },
+    clearTimeout: id => { pending.delete(id); },
+  };
+  let created = 0;
+  const expire = () => { for (const [id, timer] of [...pending]) { pending.delete(id); timer.callback(); } };
+  const timedOut = within(new Promise(() => {}), 100, () => {
+    created++;
+    return Object.assign(new Error('Native work did not complete.'), { code: 'P2P_TIMEOUT' });
+  }, { timers });
+  assert.equal(created, 0);
+  assert.deepEqual([...pending.values()].map(timer => timer.delay), [100]);
+  expire();
+  await assert.rejects(timedOut, { code: 'P2P_TIMEOUT', message: 'Native work did not complete.' });
+  assert.equal(created, 1);
+  assert.equal(await within(Promise.resolve('done'), 100, () => assert.fail('Settled work never times out.'), { timers }), 'done');
+  assert.equal(pending.size, 0, 'Settling clears the injected timer.');
+});
+
+test('notifyObserver delivers every argument and logs synchronous or asynchronous observer failures', async t => {
+  const logged = [];
+  t.mock.method(console, 'error', (...values) => logged.push(values));
+  const received = [];
+  notifyObserver('Recording observer', (...args) => { received.push(args); }, 'error', { shareId: 'screen-1' });
+  assert.deepEqual(received, [['error', { shareId: 'screen-1' }]]);
+  const thrown = new Error('Synchronous observer failure.');
+  assert.doesNotThrow(() => notifyObserver('Throwing observer', () => { throw thrown; }));
+  const rejected = new Error('Asynchronous observer failure.');
+  notifyObserver('Rejecting observer', async () => { throw rejected; });
+  notifyObserver('Quiet observer', async () => 'handled');
+  await new Promise(resolve => setImmediate(resolve));
+  // Node prints its own process warnings through console.error too (on the CI's Node, the MockTimers
+  // ExperimentalWarning of the first test lands here); everything else must be exactly the observers'.
+  const nodeWarning = /^\(node:\d+\) \w*Warning: /u;
+  const observerLogs = logged.filter(([first]) => !(typeof first === 'string' && nodeWarning.test(first)));
+  assert.deepEqual(observerLogs, [['Throwing observer failed:', thrown], ['Rejecting observer failed:', rejected]]);
+});

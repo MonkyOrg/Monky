@@ -1,9 +1,9 @@
 import { LIMITS } from '@monky/shared';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { escapeHtml } from '../utils/html';
-import { enableBackdropClose } from '../utils/modal';
+import { openModal, type ModalShell } from '../utils/modalShell';
+import { reportError } from '../utils/feedback';
 import { CODE_LANGUAGE_OPTIONS } from '../utils/codeHighlight';
 
 interface CodeBlockModalOptions {
@@ -19,8 +19,7 @@ interface CodeBlockModalOptions {
  */
 export class CodeBlockModal {
   private get limit(): number { return serverStore.serverDetails?.maxMessageLength ?? 2000; }
-  private modalEl: HTMLElement | null = null;
-  private unbind: Array<() => void> = [];
+  private shell: ModalShell | null = null;
   // Kept between openings: people paste one language far more often than they
   // switch, so re-picking it every time would be busywork.
   private lastLanguage = 'plaintext';
@@ -33,16 +32,14 @@ export class CodeBlockModal {
         `<option value="${escapeHtml(lang.id)}" data-search-terms="${escapeHtml(lang.searchTerms ?? '')}" ${lang.id === this.lastLanguage ? 'selected' : ''}>${escapeHtml(lang.id === 'plaintext' ? t('chat.codeBlockPlain') : lang.label)}</option>`
     ).join('');
 
-    this.modalEl = document.createElement('div');
-    this.modalEl.className = 'modal-backdrop';
-    this.modalEl.innerHTML = `
+    let form: HTMLFormElement | null = null;
+    const shell = openModal({
+      card: `
       <div class="modal-card code-modal-card">
         <div class="modal-header">
           <div class="modal-title">${t('chat.codeModalTitle')}</div>
-          <button id="modal-close" class="modal-close-btn">&times;</button>
+          <button type="button" id="modal-close" class="modal-close-btn" data-modal-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
         </div>
-
-        <div id="code-error-banner" class="error-banner"></div>
 
         <form id="form-code-block">
           <div class="form-group">
@@ -60,31 +57,34 @@ export class CodeBlockModal {
           </div>
 
           <div class="modal-footer">
-            <button type="button" id="btn-cancel" class="btn btn-secondary">${t('common.cancel')}</button>
+            <button type="button" id="btn-cancel" class="btn btn-secondary" data-modal-close>${t('common.cancel')}</button>
             <button type="submit" id="btn-send-code" class="btn btn-primary">${t('chat.codeModalSubmit')}</button>
           </div>
         </form>
       </div>
-    `;
-
-    document.body.appendChild(this.modalEl);
-    enterModal(this.modalEl);
-    this.attachEvents(options);
+    `,
+      initialFocus: '#code-body',
+      // Ctrl+Enter sends from anywhere in the dialog.
+      onKeydown: (event) => {
+        if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey)) return;
+        event.preventDefault();
+        form?.requestSubmit();
+      },
+      onClose: () => { if (this.shell === shell) this.shell = null; },
+    });
+    this.shell = shell;
+    form = shell.card.querySelector<HTMLFormElement>('#form-code-block');
+    this.attachEvents(shell, options);
   }
 
-  private attachEvents(options: CodeBlockModalOptions): void {
-    if (!this.modalEl) return;
-
-    const form = this.modalEl.querySelector('#form-code-block') as HTMLFormElement | null;
-    const select = this.modalEl.querySelector('#code-language') as HTMLSelectElement | null;
-    const textarea = this.modalEl.querySelector('#code-body') as HTMLTextAreaElement | null;
-    const counter = this.modalEl.querySelector('#code-char-counter') as HTMLElement | null;
-    const banner = this.modalEl.querySelector('#code-error-banner') as HTMLElement | null;
-    const btnSubmit = this.modalEl.querySelector('#btn-send-code') as HTMLButtonElement | null;
-
-    this.modalEl.querySelector('#modal-close')?.addEventListener('click', () => this.close());
-    this.modalEl.querySelector('#btn-cancel')?.addEventListener('click', () => this.close());
-    enableBackdropClose(this.modalEl, () => this.close());
+  private attachEvents(shell: ModalShell, options: CodeBlockModalOptions): void {
+    const root = shell.card;
+    const listen = { signal: shell.signal };
+    const form = root.querySelector('#form-code-block') as HTMLFormElement | null;
+    const select = root.querySelector('#code-language') as HTMLSelectElement | null;
+    const textarea = root.querySelector('#code-body') as HTMLTextAreaElement | null;
+    const counter = root.querySelector('#code-char-counter') as HTMLElement | null;
+    const btnSubmit = root.querySelector('#btn-send-code') as HTMLButtonElement | null;
 
     // The fence itself counts against the message limit, so the counter shows
     // the size of what will actually be sent instead of just the code.
@@ -100,38 +100,23 @@ export class CodeBlockModal {
       if (btnSubmit) btnSubmit.disabled = tooLong || (textarea?.value.trim().length ?? 0) === 0;
     };
 
-    textarea?.addEventListener('input', refresh);
-    select?.addEventListener('change', refresh);
+    textarea?.addEventListener('input', refresh, listen);
+    select?.addEventListener('change', refresh, listen);
     refresh();
 
     // Tab indenta em vez de pular para o próximo campo (#391). O campo não
     // prende quem navega por teclado: Escape fecha e Ctrl+Enter envia.
-    const onTab = (e: KeyboardEvent): void => {
-      if (e.key !== 'Tab' || !textarea) return;
+    textarea?.addEventListener('keydown', (e: KeyboardEvent): void => {
+      if (e.key !== 'Tab') return;
       e.preventDefault();
-
       indentCodeInput(textarea, e.shiftKey);
-    };
-    textarea?.addEventListener('keydown', onTab);
-
-    const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape' && handlesModalKey(this.modalEl, e)) {
-        this.close();
-        return;
-      }
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        form?.requestSubmit();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    this.unbind.push(() => window.removeEventListener('keydown', onKeyDown, true));
+    }, listen);
 
     form?.addEventListener('submit', (e) => {
       e.preventDefault();
       const code = textarea?.value ?? '';
       if (!code.trim()) {
-        this.showError(banner, t('chat.codeModalEmpty'));
+        reportError(t('chat.codeModalEmpty'), { field: textarea, focus: true });
         return;
       }
       if (this.limit > 0 && totalLength() > this.limit) return;
@@ -139,24 +124,11 @@ export class CodeBlockModal {
       this.lastLanguage = select?.value ?? 'plaintext';
       options.onSubmit(this.lastLanguage, code);
       this.close();
-    });
-
-    textarea?.focus();
-  }
-
-  private showError(banner: HTMLElement | null, message: string): void {
-    if (!banner) return;
-    banner.innerText = message;
-    banner.classList.add('show');
+    }, listen);
   }
 
   public close(): void {
-    this.unbind.forEach((fn) => fn());
-    this.unbind = [];
-    if (this.modalEl) {
-      exitModal(this.modalEl);
-      this.modalEl = null;
-    }
+    this.shell?.close('api');
   }
 }
 

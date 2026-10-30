@@ -6,6 +6,7 @@ import {
   ProtocolErrorCode,
   type BotForm,
   type CommandPromptReceivedPayload,
+  type AuthSuccessPayload,
   type BotSettingsSummary,
   type SlashCommand,
 } from '@monky/shared';
@@ -22,7 +23,8 @@ import {
 import { validateBotAvatar } from '../src/renderer/utils/botProfile';
 import { createChatStore, chatStore, setActiveChatStore } from '../src/renderer/stores/chatStore';
 import { createServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
-import { EventBus, appEvents } from '../src/renderer/core/EventBus';
+import { EventBus, appEvents, type EventArgs, type EventName } from '../src/renderer/core/EventBus';
+import type { AppEvents } from '../src/renderer/core/appEventMap';
 import { silentBus } from '../src/renderer/core/activeProxy';
 import { SessionManager } from '../src/renderer/core/SessionManager';
 import { bindBotChatEvents } from '../src/renderer/core/botChatEvents';
@@ -363,7 +365,8 @@ test('successful forms disappear and discard inputs, while failed submissions re
   assert.match(renderBotInvocation(invocation), /data-loading="1" aria-busy="true"/);
   store.failFormSubmit('invoke-one', 'step-one', 'Try again');
   assert.match(renderBotInvocation(invocation), /Private input/);
-  assert.match(renderBotInvocation(invocation), /Try again/);
+  // Why it failed goes to the alert toast; the card only keeps the form open for another try.
+  assert.doesNotMatch(renderBotInvocation(invocation), /Try again|bot-error|data-loading="1"/);
   store.beginFormSubmit('invoke-one', 'step-one');
   store.acknowledgeForm({ invocationId: 'invoke-one', interactionId: 'step-one', values: { title: 'Private input' } });
   assert.deepEqual(invocation.forms[0].values, {});
@@ -461,11 +464,11 @@ test('server routing stores background prompts silently and restores the foregro
 });
 
 test('canonical command registry responses reach both session stores through actual protocol bindings', () => {
-  const events = new EventBus();
+  const events = new EventBus<AppEvents>();
   const store = createChatStore();
   const server = createServerStore();
-  store.bus = new EventBus();
-  server.bus = new EventBus();
+  store.bus = new EventBus<AppEvents>();
+  server.bus = new EventBus<AppEvents>();
   setActiveChatStore(store);
   setActiveServerStore(server);
   const unbind = bindBotChatEvents(events);
@@ -499,13 +502,18 @@ test('initial registry snapshots populate new and reconnecting sessions without 
   const background = manager.create('127.0.0.1', 9902, 'Caller');
   manager.activate(foreground.key);
   const sent: Array<{ sessionKey: string; type: MessageType; payload: unknown }> = [];
-  foreground.client.send = (type: MessageType, payload: unknown) => { sent.push({ sessionKey: foreground.key, type, payload }); };
-  background.client.send = (type: MessageType, payload: unknown) => { sent.push({ sessionKey: background.key, type, payload }); };
+  foreground.client.send = (type: MessageType, payload: unknown, _requestId?: string) => { sent.push({ sessionKey: foreground.key, type, payload }); };
+  background.client.send = (type: MessageType, payload: unknown, _requestId?: string) => { sent.push({ sessionKey: background.key, type, payload }); };
   let uiUpdates = 0;
   const unbindUi = appEvents.on('chat.commands_updated', () => { uiUpdates++; });
   const unbind = bindBotChatEvents();
+  const signedIn: AuthSuccessPayload = {
+    server: { id: 'server', name: 'Server', createdAt: 1, maxUsers: 10, members: [], voiceStates: {}, channels: [] },
+    currentUser: { id: 'caller', sessionId: 'caller', clientId: 'caller', nickname: 'Caller', status: 'ONLINE', joinedAt: 1 },
+    voiceRestrictions: { serverMuted: false, serverDeafened: false },
+  };
   const connected = (sessionKey: string) => {
-    routeSessionEvent(sessionKey, 'network.connected', () => appEvents.emit('network.connected'));
+    routeSessionEvent(sessionKey, 'network.connected', () => appEvents.emit('network.connected', signedIn));
   };
   const registry = (sessionKey: string, commands: SlashCommand[]) => {
     routeSessionEvent(sessionKey, `message.${MessageType.COMMANDS_LIST_RESPONSE}`, () => {
@@ -561,7 +569,8 @@ test('bot availability snapshots stay scoped, refresh discovery and clear on rev
     schemaRevision: 1, revision: 0, hasServerSettings: false, hasUserSettings: false, canConfigure: false,
     permissions: { requested: ['commands'], granted: [], revision: 1, reviewRequired: true, reviewedBy: null, reviewedAt: null },
   };
-  const emit = (key: string, event: string, value: unknown) => routeSessionEvent(key, event, () => appEvents.emit(event, value));
+  const emit = <K extends EventName<AppEvents>>(key: string, event: K, ...value: EventArgs<AppEvents[K]>) =>
+    routeSessionEvent(key, event, () => appEvents.emit(event, ...value));
   try {
     emit(background.key, `message.${MessageType.BOT_SETTINGS_LIST_RESPONSE}`, { bots: [bot] });
     assert.deepEqual(background.chatStore.getCommandBots(), [bot]);
@@ -642,12 +651,26 @@ test('bot response identity and private rows survive history without duplicates 
   assert.equal(bot.createdAt, 100);
   assert.deepEqual(bot.botComponents, message.botComponents);
   const carousel = renderImageCarousel(
-    bot.botComponents![0].imageUrls, '', 'Images', bot.botComponents![0].presentation,
+    bot.botComponents![0].imageUrls, 'http://bots.example:3000', 'Images', bot.botComponents![0].presentation,
   );
   assert.match(carousel, /image-carousel--format-portrait/);
   assert.match(carousel, /image-carousel--fit-contain/);
   assert.match(carousel, /image-carousel--size-compact/);
+  assert.deepEqual([...carousel.matchAll(/src="([^"]*)"/g)].map((match) => match[1]),
+    ['http://bots.example:3000/avatars/one.png', 'http://bots.example:3000/avatars/two.png'],
+    'slides resolve against the server the message came from');
   assert.equal(store.getMessages('channel-one').length, 2);
+});
+
+test('carousel slides keep only images the server stores or the app already holds (R-COMMUNITY-11)', () => {
+  const base = 'http://bots.example:3000';
+  const slides = (urls: string[], server: string) => [...renderImageCarousel(urls, server, 'Images').matchAll(/src="([^"]*)"/g)]
+    .map((match) => match[1]);
+  assert.deepEqual(slides(['/avatars/one.png', 'data:image/png;base64,iVBORw0KGgo=', 'https://cdn.example/two.png'], base),
+    [`${base}/avatars/one.png`, 'data:image/png;base64,iVBORw0KGgo=', 'https://cdn.example/two.png']);
+  // Glued to the base, "@host" turned the server's address into credentials for another host.
+  assert.deepEqual(slides(['@tracker.example/pixel.png', '/attachments/x.png', 'javascript:alert(1)'], base), ['', '', '']);
+  assert.deepEqual(slides(['/avatars/one.png'], ''), [''], 'without a server there is nothing to resolve against');
 });
 
 test('private command messages survive old reply navigation and return-to-latest without displacing the target', () => {

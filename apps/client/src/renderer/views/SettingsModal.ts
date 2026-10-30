@@ -4,9 +4,9 @@ import { serverStore } from '../stores/serverStore';
 import { applyProfileEverywhere, recordProfileChange } from '../core/profileSync';
 import { connectionStore } from '../stores/connectionStore';
 import { t } from '../i18n';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
-import { enableBackdropClose } from '../utils/modal';
-import { escapeHtml } from '../utils/html';
+import { html, trustedHtml } from '../utils/html';
+import { openModal, type ModalShell } from '../utils/modalShell';
+import { reportError } from '../utils/feedback';
 import { AccountTab } from './settings/tabs/AccountTab';
 import { VoiceVideoTab } from './settings/tabs/VoiceVideoTab';
 import { SoundboardTab } from './settings/tabs/SoundboardTab';
@@ -18,11 +18,28 @@ import { LocalToolsTab } from './settings/tabs/LocalToolsTab';
 import { LogsTab } from './settings/tabs/LogsTab';
 import { AboutTab } from './settings/tabs/AboutTab';
 import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
+import { renderSettingsTabButtons, renderSettingsTabLabel, selectSettingsTab, type SettingsTabEntry } from './settings/settingsLayout';
 import { showLogoutDialog } from './LogoutDialog';
 
+type SettingsTabId = 'account' | 'voice_video' | 'soundboard' | 'stickers' | 'keybinds' | 'notifications'
+  | 'quality' | 'local_tools' | 'logs' | 'about';
+
+/** A tab of the app's settings, declared once: its entry in the sidebar, its panel and its life. */
+interface SettingsTab extends SettingsTabEntry {
+  id: SettingsTabId;
+  render(): string;
+  /** Binds the rendered panel; a promise settles once content that loads on its own is in place. */
+  attach(root: HTMLElement): void | Promise<void>;
+  cleanup?(): void;
+  /** The tab came on screen, or left it. */
+  show?(root: HTMLElement): void;
+  hide?(): void;
+}
+
 export class SettingsModal {
+  private shell: ModalShell | null = null;
   private modalEl: HTMLElement | null = null;
-  private activeTab = 'account';
+  private activeTab: SettingsTabId = 'account';
   private sectionNavigation: SettingsSectionNavigation | null = null;
 
   private accountTab = new AccountTab();
@@ -36,145 +53,149 @@ export class SettingsModal {
   private logsTab = new LogsTab();
   private aboutTab = new AboutTab();
 
+  private readonly tabs: readonly SettingsTab[] = [
+    {
+      id: 'account', icon: 'person', label: 'settings.tabAccount',
+      render: () => this.accountTab.renderHtml(),
+      attach: (root) => this.accountTab.attachEvents(root, {
+        onSaveNickname: async (name: string) => {
+          applyProfileEverywhere({ nickname: name });
+          // The new name also reaches this identity's other devices and friends' DMs.
+          void recordProfileChange({ nickname: true });
+        },
+        onAvatarChanged: async (base64: string) => {
+          applyProfileEverywhere({ avatar: base64 });
+          void recordProfileChange({ avatar: true });
+        },
+        onReloadModal: () => {
+          void this.open();
+        },
+        showError: (msg: string) => { reportError(msg); },
+        onPresenceChanged: (status) => {
+          sessionManager.setPresenceStatus(status);
+        },
+        onGameActivityChanged: () => {
+          void gamePresence.refresh();
+        },
+      }),
+      cleanup: () => this.accountTab.cleanup(),
+    },
+    {
+      id: 'voice_video', icon: 'mic', label: 'settings.tabVoiceVideo',
+      render: () => this.voiceVideoTab.renderHtml(),
+      attach: (root) => this.voiceVideoTab.attachEvents(root),
+      cleanup: () => this.voiceVideoTab.cleanup(),
+      show: (root) => {
+        this.voiceVideoTab.startVadMeter(root);
+        this.voiceVideoTab.activateCameraPreview();
+      },
+      hide: () => this.voiceVideoTab.deactivate(),
+    },
+    {
+      id: 'soundboard', icon: 'music_note', label: 'settings.tabSoundboard',
+      render: () => this.soundboardTab.renderHtml(),
+      attach: (root) => this.soundboardTab.attachEvents(root),
+      cleanup: () => this.soundboardTab.cleanup(),
+    },
+    {
+      id: 'stickers', icon: 'mood', label: 'settings.tabStickers',
+      render: () => this.stickersTab.renderHtml(),
+      attach: (root) => this.stickersTab.attachEvents(root),
+    },
+    {
+      id: 'keybinds', icon: 'keyboard', label: 'settings.tabKeybinds',
+      render: () => this.keybindsTab.renderHtml(),
+      attach: (root) => this.keybindsTab.attachEvents(root),
+    },
+    {
+      id: 'notifications', icon: 'notifications', label: 'settings.tabNotifications',
+      render: () => this.notificationsTab.renderHtml(),
+      attach: (root) => this.notificationsTab.attachEvents(root),
+      cleanup: () => this.notificationsTab.cleanup(),
+    },
+    {
+      id: 'quality', icon: 'speed', label: 'settings.tabQuality',
+      render: () => this.qualityTab.renderHtml(),
+      attach: (root) => this.qualityTab.attachEvents(root),
+      cleanup: () => this.qualityTab.cleanup(),
+      show: () => this.qualityTab.activate(),
+      hide: () => this.qualityTab.deactivate(),
+    },
+    {
+      id: 'local_tools', icon: 'build', label: 'settings.tabLocalTools',
+      render: () => this.localToolsTab.renderHtml(),
+      attach: (root) => this.localToolsTab.attachEvents(root),
+      cleanup: () => this.localToolsTab.cleanup(),
+    },
+    {
+      id: 'logs', icon: 'description', label: 'settings.tabLogs',
+      render: () => this.logsTab.renderHtml(),
+      attach: (root) => this.logsTab.attachEvents(root),
+    },
+    {
+      id: 'about', icon: 'info', label: 'settings.tabAbout', separated: true,
+      render: () => this.aboutTab.renderHtml(),
+      attach: (root) => this.aboutTab.attachEvents(root),
+      cleanup: () => this.aboutTab.cleanup(),
+    },
+  ];
+
   public async open(
     tab?: 'voice_video' | 'local_tools',
     section?: 'camera' | 'noise-suppression' | 'local-tools-storage' | 'local-tools-tools' | 'local-tools-permissions' | 'local-tools-tasks',
   ): Promise<void> {
     this.close();
     if (tab) this.activeTab = tab;
+    const active = this.tab(this.activeTab);
 
-    this.modalEl = document.createElement('div');
-    this.modalEl.className = 'modal-backdrop modal-backdrop--settings';
-    this.modalEl.innerHTML = `
-      <div class="modal-card settings-modal-card">
-        <!-- Sidebar Navigation -->
+    const shell = openModal({
+      backdropClass: 'modal-backdrop--settings',
+      card: html`
+      <div class="modal-card settings-modal-card" aria-labelledby="settings-current-tab-title">
         <div class="settings-sidebar">
-          <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); padding: 4px 10px 8px;">
-            ${t('connection.settingsTitle')}
-          </div>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'account' ? 'active' : ''}" data-tab="account">
-            <span class="material-symbols-outlined md-18">person</span>
-            <span>${t('settings.tabAccount')}</span>
-          </button>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'voice_video' ? 'active' : ''}" data-tab="voice_video">
-            <span class="material-symbols-outlined md-18">mic</span>
-            <span>${t('settings.tabVoiceVideo')}</span>
-          </button>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'soundboard' ? 'active' : ''}" data-tab="soundboard">
-            <span class="material-symbols-outlined md-18">music_note</span>
-            <span>${t('settings.tabSoundboard')}</span>
-          </button>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'stickers' ? 'active' : ''}" data-tab="stickers">
-            <span class="material-symbols-outlined md-18">mood</span>
-            <span>${t('settings.tabStickers')}</span>
-          </button>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'keybinds' ? 'active' : ''}" data-tab="keybinds">
-            <span class="material-symbols-outlined md-18">keyboard</span>
-            <span>${t('settings.tabKeybinds')}</span>
-          </button>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'notifications' ? 'active' : ''}" data-tab="notifications">
-            <span class="material-symbols-outlined md-18">notifications</span>
-            <span>${t('settings.tabNotifications')}</span>
-          </button>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'quality' ? 'active' : ''}" data-tab="quality">
-            <span class="material-symbols-outlined md-18">speed</span>
-            <span>${t('settings.tabQuality')}</span>
-          </button>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'local_tools' ? 'active' : ''}" data-tab="local_tools">
-            <span class="material-symbols-outlined md-18">build</span>
-            <span>${escapeHtml(t('settings.tabLocalTools'))}</span>
-          </button>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'logs' ? 'active' : ''}" data-tab="logs">
-            <span class="material-symbols-outlined md-18">description</span>
-            <span>${t('settings.tabLogs')}</span>
-          </button>
-          <div style="height: 1px; background: var(--border-color); margin: 6px 4px;"></div>
-          <button type="button" class="settings-tab-btn ${this.activeTab === 'about' ? 'active' : ''}" data-tab="about">
-            <span class="material-symbols-outlined md-18">info</span>
-            <span>${t('settings.tabAbout')}</span>
-          </button>
+          ${renderSettingsTabButtons(this.tabs, this.activeTab)}
           <button type="button" id="settings-logout-btn" class="settings-logout-btn">
-            <span class="material-symbols-outlined md-18">logout</span>
-            <span>${escapeHtml(t('settings.logout'))}</span>
+            <span class="material-symbols-outlined md-18" aria-hidden="true">logout</span>
+            <span>${t('settings.logout')}</span>
           </button>
         </div>
 
-        <!-- Main Content Area -->
         <div class="settings-main-container">
-          <!-- Top Header -->
           <div class="settings-content-header">
-            <div id="settings-current-tab-title" style="font-size: 16px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
-              ${this.getTabHeaderTitle(this.activeTab)}
-            </div>
-            <button id="modal-close" class="settings-back-btn" title="${t('common.back')} (ESC)">
-              <span class="material-symbols-outlined md-18">close</span>
-              <span class="esc-hint">ESC</span>
+            <div id="settings-current-tab-title" class="settings-tab-title">${renderSettingsTabLabel(active)}</div>
+            <button type="button" id="modal-close" class="settings-back-btn" data-modal-close title="${t('common.back')} (ESC)" aria-label="${t('common.close')}">
+              <span class="material-symbols-outlined md-18" aria-hidden="true">close</span>
+              <span class="esc-hint" aria-hidden="true">ESC</span>
             </button>
           </div>
 
-          <!-- Body Scroll Container -->
           <div class="settings-content-body">
-            <div id="settings-error-banner" class="error-banner"></div>
-
-            <div class="settings-tab-panel" id="tab-panel-account" style="${this.activeTab === 'account' ? '' : 'display: none;'}">
-              ${this.accountTab.renderHtml()}
-            </div>
-
-            <div class="settings-tab-panel" id="tab-panel-voice_video" style="${this.activeTab === 'voice_video' ? '' : 'display: none;'}">
-              ${this.voiceVideoTab.renderHtml()}
-            </div>
-
-            <div class="settings-tab-panel" id="tab-panel-soundboard" style="${this.activeTab === 'soundboard' ? '' : 'display: none;'}">
-              ${this.soundboardTab.renderHtml()}
-            </div>
-
-            <div class="settings-tab-panel" id="tab-panel-stickers" style="${this.activeTab === 'stickers' ? '' : 'display: none;'}">
-              ${this.stickersTab.renderHtml()}
-            </div>
-
-            <div class="settings-tab-panel" id="tab-panel-keybinds" style="${this.activeTab === 'keybinds' ? '' : 'display: none;'}">
-              ${this.keybindsTab.renderHtml()}
-            </div>
-
-            <div class="settings-tab-panel" id="tab-panel-notifications" style="${this.activeTab === 'notifications' ? '' : 'display: none;'}">
-              ${this.notificationsTab.renderHtml()}
-            </div>
-
-            <div class="settings-tab-panel" id="tab-panel-quality" style="${this.activeTab === 'quality' ? '' : 'display: none;'}">
-              ${this.qualityTab.renderHtml()}
-            </div>
-
-            <div class="settings-tab-panel" id="tab-panel-local_tools" style="${this.activeTab === 'local_tools' ? '' : 'display: none;'}">
-              ${this.localToolsTab.renderHtml()}
-            </div>
-
-            <div class="settings-tab-panel" id="tab-panel-logs" style="${this.activeTab === 'logs' ? '' : 'display: none;'}">
-              ${this.logsTab.renderHtml()}
-            </div>
-
-            <div class="settings-tab-panel" id="tab-panel-about" style="${this.activeTab === 'about' ? '' : 'display: none;'}">
-              ${this.aboutTab.renderHtml()}
-            </div>
+            ${this.tabs.map(entry => html`<div class="settings-tab-panel" id="tab-panel-${entry.id}" ${entry.id === this.activeTab ? null : html`hidden`}>
+              ${trustedHtml(entry.render())}
+            </div>`)}
           </div>
 
-          <!-- Footer -->
           <div class="modal-footer" style="padding: 12px 24px; border-top: 1px solid var(--border-color); margin: 0; background: var(--bg-secondary);">
-            <button id="btn-settings-close" class="btn btn-primary">${t('common.done')}</button>
+            <button type="button" id="btn-settings-close" class="btn btn-primary" data-modal-close>${t('common.done')}</button>
           </div>
         </div>
       </div>
-    `;
+    `,
+      initialFocus: `.settings-tab-btn[data-tab="${this.activeTab}"]`,
+      onClose: () => { if (this.shell === shell) this.teardown(); },
+    });
+    this.shell = shell;
+    this.modalEl = shell.element;
 
-    document.body.appendChild(this.modalEl);
-    enterModal(this.modalEl);
-    const localToolsReady = this.attachEvents();
-    this.sectionNavigation = new SettingsSectionNavigation(this.modalEl);
+    const localToolsReady = this.attachEvents(shell.element);
+    this.sectionNavigation = new SettingsSectionNavigation(shell.element);
     this.sectionNavigation.setTab(this.activeTab);
     if (section && this.activeTab !== 'local_tools') this.sectionNavigation.revealSection(section);
     if (this.activeTab === 'voice_video') {
       this.voiceVideoTab.activateCameraPreview();
     }
-    const modal = this.modalEl;
+    if (this.activeTab === 'quality') this.qualityTab.activate();
+    const modal = shell.element;
     await Promise.all([
       this.voiceVideoTab.refreshDevices(modal).then(() => {
         if (this.modalEl === modal && this.activeTab === 'voice_video') this.voiceVideoTab.startVadMeter(modal);
@@ -186,149 +207,58 @@ export class SettingsModal {
     ]);
   }
 
-  private getTabHeaderTitle(tab: string): string {
-    switch (tab) {
-      case 'voice_video':
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">mic</span><span>${t('settings.tabVoiceVideo')}</span>`;
-      case 'soundboard':
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">music_note</span><span>${t('settings.tabSoundboard')}</span>`;
-      case 'stickers':
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">mood</span><span>${t('settings.tabStickers')}</span>`;
-      case 'keybinds':
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">keyboard</span><span>${t('settings.tabKeybinds')}</span>`;
-      case 'notifications':
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">notifications</span><span>${t('settings.tabNotifications')}</span>`;
-      case 'quality':
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">speed</span><span>${t('settings.tabQuality')}</span>`;
-      case 'local_tools':
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">build</span><span>${escapeHtml(t('settings.tabLocalTools'))}</span>`;
-      case 'logs':
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">description</span><span>${t('settings.tabLogs')}</span>`;
-      case 'about':
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">info</span><span>${t('settings.tabAbout')}</span>`;
-      case 'account':
-      default:
-        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">person</span><span>${t('settings.tabAccount')}</span>`;
-    }
+  private tab(id: SettingsTabId): SettingsTab {
+    return this.tabs.find(entry => entry.id === id) ?? this.tabs[0];
   }
 
-  private attachEvents(): Promise<void> {
-    if (!this.modalEl) return Promise.resolve();
-
-    // Tab switcher
-    this.modalEl.querySelectorAll('.settings-tab-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const tab = btn.getAttribute('data-tab');
-        if (tab) this.switchTab(tab);
-      });
+  /** Binds every tab; resolves when the local tools finished loading. */
+  private attachEvents(root: HTMLElement): Promise<void> {
+    const signal = this.shell?.signal;
+    root.querySelectorAll<HTMLButtonElement>('.settings-tab-btn[data-tab]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const target = this.tabs.find(entry => entry.id === button.dataset.tab);
+        if (target) this.switchTab(target.id);
+      }, { signal });
     });
-
-    // Close handlers
-    const closeModal = () => this.close();
-    this.modalEl.querySelector('#modal-close')?.addEventListener('click', closeModal);
-    this.modalEl.querySelector('#btn-settings-close')?.addEventListener('click', closeModal);
-    this.modalEl.querySelector('#settings-logout-btn')?.addEventListener('click', () => {
+    root.querySelector('#settings-logout-btn')?.addEventListener('click', () => {
       void showLogoutDialog();
-    });
-    enableBackdropClose(this.modalEl, closeModal);
-
-    const onEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && handlesModalKey(this.modalEl, e)) {
-        e.preventDefault();
-        closeModal();
-      }
-    };
-    window.addEventListener('keydown', onEsc);
-    (this.modalEl as any)._escHandler = onEsc;
-
-    // Attach sub-tab event listeners
-    this.accountTab.attachEvents(this.modalEl, {
-      onSaveNickname: async (name: string) => {
-        applyProfileEverywhere({ nickname: name });
-        // The new name also reaches this identity's other devices and friends' DMs.
-        void recordProfileChange({ nickname: true });
-      },
-      onAvatarChanged: async (base64: string) => {
-        applyProfileEverywhere({ avatar: base64 });
-        void recordProfileChange({ avatar: true });
-      },
-      onReloadModal: () => {
-        void this.open();
-      },
-      showError: (msg: string) => this.showError(msg),
-      onPresenceChanged: (status) => {
-        sessionManager.setPresenceStatus(status);
-      },
-      onGameActivityChanged: () => {
-        void gamePresence.refresh();
-      },
-    });
-
-    this.voiceVideoTab.attachEvents(this.modalEl);
-    this.soundboardTab.attachEvents(this.modalEl);
-    this.stickersTab.attachEvents(this.modalEl);
-    this.keybindsTab.attachEvents(this.modalEl);
-    this.notificationsTab.attachEvents(this.modalEl);
-    this.qualityTab.attachEvents(this.modalEl);
-    const localToolsReady = this.localToolsTab.attachEvents(this.modalEl);
-    this.logsTab.attachEvents(this.modalEl);
-    this.aboutTab.attachEvents(this.modalEl);
-    return localToolsReady;
+    }, { signal });
+    let ready: Promise<void> = Promise.resolve();
+    for (const entry of this.tabs) {
+      const attached = entry.attach(root);
+      if (entry.id === 'local_tools' && attached) ready = attached;
+    }
+    return ready;
   }
 
-  private switchTab(tab: string): void {
-    if (!this.modalEl) return;
-    this.activeTab = tab;
-
-    this.modalEl.querySelectorAll('.settings-tab-btn').forEach((b) => {
-      b.classList.toggle('active', b.getAttribute('data-tab') === tab);
+  private switchTab(id: SettingsTabId): void {
+    const root = this.modalEl;
+    if (!root || id === this.activeTab) return;
+    const previous = this.tab(this.activeTab);
+    const next = this.tab(id);
+    this.activeTab = id;
+    selectSettingsTab(root, id);
+    root.querySelectorAll<HTMLElement>('.settings-tab-panel').forEach((panel) => {
+      panel.hidden = panel.id !== `tab-panel-${id}`;
     });
-
-    this.modalEl.querySelectorAll('.settings-tab-panel').forEach((panel) => {
-      (panel as HTMLElement).style.display = panel.id === `tab-panel-${tab}` ? 'block' : 'none';
-    });
-
-    const header = this.modalEl.querySelector('#settings-current-tab-title');
-    if (header) {
-      header.innerHTML = this.getTabHeaderTitle(tab);
-    }
-
-    this.sectionNavigation?.setTab(tab);
-    if (tab === 'voice_video') {
-      this.voiceVideoTab.startVadMeter(this.modalEl);
-      this.voiceVideoTab.activateCameraPreview();
-    } else {
-      this.voiceVideoTab.deactivate();
-    }
-  }
-
-  private showError(msg: string): void {
-    const banner = this.modalEl?.querySelector<HTMLElement>('#settings-error-banner');
-    if (banner) {
-      banner.textContent = msg;
-      banner.style.display = 'block';
-      setTimeout(() => {
-        if (banner) banner.style.display = 'none';
-      }, 5000);
-    }
+    const header = root.querySelector('#settings-current-tab-title');
+    if (header) header.innerHTML = renderSettingsTabLabel(next).toString();
+    this.sectionNavigation?.setTab(id);
+    previous.hide?.();
+    next.show?.(root);
   }
 
   public close(): void {
+    if (this.shell) this.shell.close('api');
+    else this.teardown();
+  }
+
+  private teardown(): void {
     this.sectionNavigation?.destroy();
     this.sectionNavigation = null;
-    this.voiceVideoTab.cleanup();
-    this.soundboardTab.cleanup();
-    this.notificationsTab.cleanup();
-    this.accountTab.cleanup();
-    this.aboutTab.cleanup();
-    this.localToolsTab.cleanup();
-    this.qualityTab.cleanup();
-    if (this.modalEl) {
-      const handler = (this.modalEl as any)._escHandler;
-      if (handler) window.removeEventListener('keydown', handler);
-      exitModal(this.modalEl);
-      this.modalEl = null;
-    }
+    for (const entry of this.tabs) entry.cleanup?.();
+    this.shell = null;
+    this.modalEl = null;
   }
 }
 

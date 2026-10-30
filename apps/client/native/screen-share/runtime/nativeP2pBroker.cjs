@@ -1,6 +1,8 @@
 'use strict';
 
 const { NativeRtcCommands, isNativeRtcCommandsForEngine, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
+const { NativeCommandLedger } = require('./nativeCommandLedger.cjs');
+const { within } = require('./asyncTools.cjs');
 
 const PROTOCOL = 'monky-native-screen-p2p';
 const VERSION = 1;
@@ -64,6 +66,9 @@ const kindOf = value => value.kind ?? 'video';
  * before connect(). A replacement uses a fresh connectionId and larger generation.
  * Pair establishment/leave notification belongs to that controller: retire both
  * ends on authenticated participant departure or a failed-generation notification.
+ * A peer fails, reported with its own scope, on a failed connection, on a native
+ * error of any of its resources, or after staying disconnected for 10 s; the
+ * engine's other peers are untouched.
  * The lexically smaller session grants one offer turn at a time, from either side.
  * A nonleader offerer acknowledges answer application before the leader sends done.
  * Neither "stable" nor an SDP creation result completes a negotiation turn.
@@ -76,11 +81,11 @@ const kindOf = value => value.kind ?? 'video';
  * uses demanded/sourceDemand(), never enabled, to avoid a circular enable gate.
  * Revoked demand is not retirement proof. No source, engine, capture,
  * presentation or browser-call method is used.
- * The injected NativeRtcCommands must belong to this engine; nextId plus
- * getPendingRequest() identify only this broker's cancellable control requests.
+ * The injected NativeRtcCommands must belong to this engine; the requestId of each
+ * request identifies only this broker's cancellable control requests.
  *
  * A/V is explicit: controlVersion:2 plus audio:{prepareReceive,assertReceiveReady,
- * bindReceiver,revokeReceiver,onReceiverVolume,onPublicationState?,rebindSource?}.
+ * bindReceiver,revokeReceiver,onReceiverVolume,onPublicationState?}.
  * Default v1 and a constructor without audio are inert/video-only. Sources use
  * distinct per-screen groups, independent of the peer scope group. Register the
  * parent's existing continuous PCM source with registerAudioSource({sourceId,
@@ -107,17 +112,13 @@ const kindOf = value => value.kind ?? 'video';
  * setAudioMuted(session,shareId,muted) and setAudioVolume(session,shareId,0..2)
  * affect audio only. Volume never authorizes an unwatched receiver or alters call deafen.
  *
- * rebindAudioSource(sourceId,{screenAudioShareId,syncGroup?,signal?}) retires old
- * audio publications and awaits a completed LOCAL-offerer turn covering their
- * StopStandard mutation (or proven peer/engine close). Then audio.rebindSource
- * receives {engine,sourceId,previousShareId,screenAudioShareId,syncGroup,signal,
- * isCurrent,callId,channelId} and must return the REAL {sourceId,syncGroup} ACK.
- * That parent hook also coordinates any SFU users before source.setAudioSyncGroup.
- * The broker never creates PCM sources, changes capture epochs, or mutates an
- * existing sender MSID. Republish explicitly after successful rebind; never pick
- * another screen on Stop/Abort. Pending retirement rejects/retains ownership.
+ * Removing the PCM source or its screen retires its audio publications and awaits
+ * a completed LOCAL-offerer turn covering their StopStandard mutation (or proven
+ * peer/engine close). The broker never creates PCM sources, changes capture
+ * epochs, mutates an existing sender MSID or picks another screen on Stop/Abort.
+ * Pending retirement rejects/retains ownership.
  * Signaling delivery must progress independently while callers await audio
- * remove/rebind; those public waits must not block the carrier's receive queue.
+ * removal; those public waits must not block the carrier's receive queue.
  */
 const NATIVE_P2P_CONTROL_SCHEMA = Object.freeze({
   protocol: PROTOCOL, version: VERSION, envelope: Object.freeze(ENVELOPE),
@@ -161,6 +162,10 @@ const text = (value, maximum) => typeof value === 'string' && value.length > 0
   && value.length <= maximum && Buffer.byteLength(value, 'utf8') <= maximum && !value.includes('\0');
 const reference = value => text(value, 128);
 const share = value => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,64}$/u.test(value);
+const nativeFault = data => fault(text(data?.code, 128) ? data.code : 'P2P_NATIVE_ERROR',
+  text(data?.message, 4096) ? data.message : 'Native screen operation failed.');
+// The browser receivers' policy: native ICE takes tens of seconds to report failed.
+const DISCONNECTED_GRACE_MS = 10000;
 
 function binding(value) {
   check(text(value.trackId, 256) && (value.mid === null || text(value.mid, 256))
@@ -316,9 +321,8 @@ class NativeP2pBroker {
     maximumPeers = 32, maximumQueue = 64, maximumIce = 128, maximumReceivers = 64, maximumHistory = 64,
     controlVersion = VERSION, audio = null,
   }) {
-    check(isNativeRtcCommandsForEngine(commands, engine) && typeof engine?.cancel === 'function' && typeof commands?.request === 'function'
-      && typeof commands?.getPendingRequest === 'function' && positive(commands.nextId),
-    'A ready engine and NativeRtcCommands with monotonic request IDs are required.');
+    check(isNativeRtcCommandsForEngine(commands, engine) && typeof engine?.cancel === 'function',
+      'A ready engine and its own NativeRtcCommands are required.');
     check(['setRoster', 'addPeer', 'removePeer', 'announce', 'setWatching', 'onTrackEvent', 'desiredReceiver', 'confirmReceiver']
       .every(method => typeof routes?.[method] === 'function'), 'NativeScreenRoutes must be injected.');
     check([localSessionId, syncGroup, callId, channelId].every(reference)
@@ -329,8 +333,7 @@ class NativeP2pBroker {
     check(audio === null || (controlVersion === AV_VERSION
       && ['prepareReceive', 'assertReceiveReady', 'expectedOutputEpoch', 'bindReceiver', 'revokeReceiver', 'onReceiverVolume']
         .every(method => typeof audio?.[method] === 'function')
-      && (audio.onPublicationState === undefined || typeof audio.onPublicationState === 'function')
-      && (audio.rebindSource === undefined || typeof audio.rebindSource === 'function')),
+      && (audio.onPublicationState === undefined || typeof audio.onPublicationState === 'function')),
     'Audio requires CONTROL v2 and a separate output/receiver adapter.');
     check(Number.isInteger(operationTimeoutMs) && operationTimeoutMs >= 100 && operationTimeoutMs <= 60000
       && Number.isInteger(turnTimeoutMs) && turnTimeoutMs >= 100 && turnTimeoutMs <= 120000,
@@ -341,6 +344,7 @@ class NativeP2pBroker {
     }
     Object.assign(this, { engine, commands, routes, send, isCurrent, onError, onPublicationState, onPeerState, audio,
       timers, operationTimeoutMs, turnTimeoutMs, maximumPeers, maximumQueue, maximumIce, maximumReceivers, maximumHistory });
+    this.ledger = new NativeCommandLedger(engine, commands);
     for (const [key, value] of Object.entries({ localSessionId, syncGroup, callId, channelId, controlVersion })) {
       Object.defineProperty(this, key, { value, enumerable: true });
     }
@@ -356,9 +360,11 @@ class NativeP2pBroker {
     this.nextWatchRevision = 1;
     this.closed = false;
     this.engineClosing = false;
-    this.engineRetired = false;
     this.nextAudioWatchVersion = 1;
   }
+
+  /** Whether the complete close of the engine was proven: no native command result remains owned. */
+  get engineRetired() { return this.ledger.retired; }
 
   _next(key) {
     check(positive(this[key]), 'Native screen generations are exhausted.');
@@ -429,52 +435,32 @@ class NativeP2pBroker {
     });
   }
 
-  _deadline(peer, promise, message, onTimeout = () => {}) {
-    return new Promise((resolve, reject) => {
-      let settled = false, timer;
-      const settle = (callback, value) => {
-        if (settled) return;
-        settled = true;
-        this.timers.clearTimeout(timer);
-        peer.waiters.delete(retire);
-        callback(value);
-      };
-      const retire = () => settle(reject, fault('P2P_CANCELLED', 'The native engine completed full retirement.'));
-      peer.waiters.add(retire);
-      timer = this.timers.setTimeout(() => {
-        const error = fault('P2P_TIMEOUT', message);
-        onTimeout(error);
-        settle(reject, error);
-      }, this.operationTimeoutMs);
-      Promise.resolve(promise).then(value => settle(resolve, value), error => settle(reject, error));
+  _deadline(promise, message, onTimeout = () => {}) {
+    return within(this.ledger.untilRetired(promise), this.operationTimeoutMs, () => {
+      const error = fault('P2P_TIMEOUT', message);
+      onTimeout(error);
+      return error;
+    }, { timers: this.timers }).then(settled => {
+      if (settled.retired) throw fault('P2P_CANCELLED', 'The native engine completed full retirement.');
+      return settled.value;
     });
   }
 
   _cancel(peer, request) {
     if (this.engineClosing || request.cancelled || request.operation === 'resource.close') return;
     request.cancelled = true;
-    try {
-      const current = this.commands.getPendingRequest(request.id);
-      if (current && current.operation === request.operation && current.target === request.target) {
-        this.engine.cancel(request.id);
-      }
-    } catch (error) {
-      // Native completion can precede delivery of its JS Promise. Retirement
-      // still waits for that original request; failed cancellation is not proof.
-      if (error.code === 'ERR_RTC_REQUEST_ID' && error.status === 4) return;
-      if (!['NOT_FOUND', 'ERR_RTC_NOT_FOUND', 'ERR_RTC_UNKNOWN_REQUEST'].includes(error.code)) this._report(peer, error);
-    }
+    // Native completion can precede delivery of its JS Promise. Retirement
+    // still waits for that original request; failed cancellation is not proof.
+    try { this.ledger.cancel(request); }
+    catch (error) { this._report(peer, error); }
   }
 
   _request(peer, operation, target, data, commit = () => {}, afterSettled = () => {}) {
     if (this.engineClosing) throw fault('P2P_CANCELLED', 'Native commands are blocked during full engine shutdown.');
-    const id = this.commands.nextId;
-    check(positive(id) && peer.pending.size < 128, 'Native command capacity or identifiers exhausted.');
+    check(peer.pending.size < 128, 'Native command capacity exhausted.');
+    const { id, completion: raw } = this.ledger.issue(operation, target, data);
+    check(id !== null, 'Native command ID correlation failed.');
     const request = { id, operation, target, data, cancelled: false, expired: false };
-    const raw = this.commands.request(operation, target, data);
-    const admitted = this.commands.getPendingRequest(id);
-    check(!admitted || (admitted.id === id && admitted.operation === operation && admitted.target === target),
-      'Native command ID correlation failed.');
     peer.pending.set(id, request);
     const completion = Promise.resolve(raw).then(result => {
       if (!this.engineRetired) commit(result);
@@ -489,7 +475,7 @@ class NativeP2pBroker {
     completion.catch(error => {
       if (request.expired && !this.engineRetired) this._report(peer, error);
     });
-    return this._deadline(peer, completion, `Native ${operation} did not complete; ownership is retained.`, () => {
+    return this._deadline(completion, `Native ${operation} did not complete; ownership is retained.`, () => {
       request.expired = true;
       this._cancel(peer, request);
     });
@@ -504,7 +490,7 @@ class NativeP2pBroker {
       });
       const queued = this.send(peer.remoteSessionId, message);
       check(queued && typeof queued.then === 'function', 'Native signaling send must return an enqueue Promise.');
-      await this._deadline(peer, queued, 'Native signaling enqueue timed out.');
+      await this._deadline(queued, 'Native signaling enqueue timed out.');
       this._assertLive(peer);
     } catch (error) {
       if (error.code !== 'P2P_CANCELLED') this._fail(peer, error);
@@ -565,7 +551,7 @@ class NativeP2pBroker {
     const context = this._audioContext(peer, reason, extra);
     const pending = this.audio.prepareReceive(context);
     check(pending && typeof pending.then === 'function', 'Audio preparation must return a real readiness Promise.');
-    const proof = await this._deadline(peer, pending, 'Native audio output preparation timed out.');
+    const proof = await this._deadline(pending, 'Native audio output preparation timed out.');
     this._assertLive(peer);
     this._assertAudioReady(proof, context);
     return { proof, context };
@@ -641,8 +627,7 @@ class NativeP2pBroker {
       check([...this.sources.values()].filter(source => source.active && source.kind === 'video').length < 2,
         'At most two video sources may be active.');
     }
-    this.sources.set(sourceId, { sourceId, localShareId, syncGroup, kind, associatedVideo, active: true,
-      associationRevision: 1, rebinding: false, rebindController: null, waiters: new Set() });
+    this.sources.set(sourceId, { sourceId, localShareId, syncGroup, kind, associatedVideo, active: true });
     this.currentSources.set(key, sourceId);
     if (kind === 'audio') return { sourceId, localShareId, screenAudioShareId, syncGroup, kind };
     return { sourceId, localShareId, syncGroup };
@@ -670,13 +655,13 @@ class NativeP2pBroker {
       && (previous || this.generations.size < this.maximumHistory), 'Native peer/history limit reached.');
     const peer = {
       remoteSessionId, connectionId, generation, peerId: null, status: 'opening', error: null, nativeState: {},
-      chain: Promise.resolve(), queued: 0, queuedBytes: 0, pending: new Map(), resources: new Map(), waiters: new Set(),
+      chain: Promise.resolve(), queued: 0, queuedBytes: 0, pending: new Map(), resources: new Map(),
       publications: new Map(), currentPublications: new Map(), remotePublications: new Map(),
       pendingMetadata: new Map(), receivers: new Map(), watches: new Map(), ice: [],
       receiving: false, receiverSyncScheduled: false, pumpScheduled: false,
       leader: this.localSessionId < remoteSessionId, dirty: false, remoteDirty: false,
       localRequestVersion: 0, remoteRequestVersion: 0, requestOutstanding: false,
-      grantTimer: null,
+      grantTimer: null, disconnectTimer: null,
       sequence: 0, completedTurn: 0, turn: null, lastOfferer: remoteSessionId,
       remoteDescriptionTurn: 0, localDescriptionTurn: 0, cleanupScheduled: false, closePromise: null,
       controller: new AbortController(), mutationVersion: 0, negotiatedMutation: 0, audioRetirements: new Map(),
@@ -707,7 +692,7 @@ class NativeP2pBroker {
 
   publish(sourceId, remoteSessionId, options = {}) {
     const source = this.sources.get(sourceId), peer = this.peers.get(remoteSessionId);
-    check(source?.active && !source.rebinding && this.currentSources.get(mediaKey(source.kind, source.localShareId)) === sourceId
+    check(source?.active && this.currentSources.get(mediaKey(source.kind, source.localShareId)) === sourceId
       && this.roster.get(this.localSessionId)?.has(source.localShareId) && peer && this._live(peer),
     'Cannot publish an unowned source or obsolete native peer.');
     const { signal } = options;
@@ -820,89 +805,6 @@ class NativeP2pBroker {
     return this.publish(sourceId, remoteSessionId, options);
   }
 
-  rebindAudioSource(sourceId, { screenAudioShareId, syncGroup, signal } = {}) {
-    this._requireAudio();
-    const source = this.sources.get(sourceId);
-    const video = this.sources.get(this.currentSources.get(screenAudioShareId));
-    check(!this.closed && source?.active && source.kind === 'audio' && !source.rebinding
-      && share(screenAudioShareId) && this.roster.get(this.localSessionId)?.has(screenAudioShareId)
-      && video?.active && video.kind === 'video', 'Audio rebind requires an explicitly selected active screen.');
-    check((syncGroup === undefined || syncGroup === video.syncGroup)
-      && typeof this.audio.rebindSource === 'function', 'Audio source rebind needs the parent source-owner hook and exact video group.');
-    check(signal === undefined || signal instanceof AbortSignal, 'Invalid audio rebind AbortSignal.');
-    if (signal?.aborted) return Promise.reject(fault('P2P_CANCELLED', 'Audio source rebind was aborted.'));
-    const revision = ++source.associationRevision, controller = new AbortController();
-    check(positive(revision), 'Audio association revisions exhausted.');
-    source.rebinding = true;
-    source.rebindController = controller;
-    source.rebindTarget = video;
-    const abort = () => controller.abort(fault('P2P_CANCELLED', 'Audio source rebind was aborted.'));
-    signal?.addEventListener('abort', abort, { once: true });
-    const current = () => !this.closed && !controller.signal.aborted && source.active
-      && this.sources.get(sourceId) === source && source.associationRevision === revision
-      && video.active && this.sources.get(this.currentSources.get(screenAudioShareId)) === video;
-    const retirements = [];
-    for (const peer of this.peers.values()) {
-      for (const publication of peer.publications.values()) {
-        if (publication.source !== source) continue;
-        this._invalidatePublication(peer, publication);
-        retirements.push({ peer, publication });
-      }
-    }
-    let groupAttempted = false;
-    const workflow = (async () => {
-      const outcomes = await Promise.allSettled(retirements.map(({ peer, publication }) =>
-        this._queue(peer, () => this._retirePublication(peer, publication, this._live(peer)), { closing: true, fatal: false })));
-      const failures = outcomes.filter(outcome => outcome.status === 'rejected').map(outcome => outcome.reason);
-      if (failures.length) throw new AggregateError(failures, 'Audio rebind retains old publication ownership.');
-      await Promise.all(retirements.map(({ peer, publication }) => this._waitAudioRetirement(peer, publication)));
-      if (!current()) throw fault('P2P_CANCELLED', 'Audio rebind selection is no longer current.');
-      groupAttempted = true;
-      const pending = this.audio.rebindSource({
-        engine: this.engine, sourceId, previousShareId: source.localShareId, screenAudioShareId,
-        syncGroup: video.syncGroup, signal: controller.signal, isCurrent: current,
-        callId: this.callId, channelId: this.channelId,
-      });
-      check(pending && typeof pending.then === 'function', 'Audio source rebind must return a native acknowledgement Promise.');
-      const result = await pending;
-      check(result?.sourceId === sourceId && result.syncGroup === video.syncGroup, 'Audio source rebind acknowledgement does not match its owner.');
-      if (!this.engineRetired && this.sources.get(sourceId) === source) source.syncGroup = result.syncGroup;
-      if (!current()) {
-        source.associatedVideo = null;
-        throw fault('P2P_CANCELLED', 'Audio source changed group after its selection was cancelled; explicit reassociation is required.');
-      }
-      const oldKey = mediaKey('audio', source.localShareId);
-      if (this.currentSources.get(oldKey) === sourceId) this.currentSources.delete(oldKey);
-      source.localShareId = screenAudioShareId;
-      source.associatedVideo = video;
-      this.currentSources.set(mediaKey('audio', screenAudioShareId), sourceId);
-      return { sourceId, kind: 'audio', screenAudioShareId, localShareId: screenAudioShareId, syncGroup: source.syncGroup };
-    })().catch(error => {
-      if (groupAttempted && !this.engineRetired && this.sources.get(sourceId) === source) source.associatedVideo = null;
-      throw error;
-    }).finally(() => {
-      signal?.removeEventListener('abort', abort);
-      source.rebinding = false;
-      source.rebindController = null;
-      source.rebindTarget = null;
-      this._collectSources();
-    });
-    const interrupted = new Promise((_resolve, reject) => {
-      const cancel = () => reject(fault('P2P_CANCELLED', 'Audio source rebind was aborted; retirement remains owned.'));
-      controller.signal.addEventListener('abort', cancel, { once: true });
-      void workflow.finally(() => controller.signal.removeEventListener('abort', cancel)).catch(() => {});
-    });
-    return this._deadline(source, Promise.race([workflow, interrupted]), 'Audio source rebind is still pending; ownership is retained.',
-      () => controller.abort(fault('P2P_TIMEOUT', 'Audio source rebind timed out.')));
-  }
-
-  getAudioSource() {
-    const source = [...this.sources.values()].find(value => value.kind === 'audio');
-    return source ? { sourceId: source.sourceId, kind: 'audio', syncGroup: source.syncGroup,
-      screenAudioShareId: source.associatedVideo?.active ? source.localShareId : null,
-      active: source.active, rebinding: source.rebinding, associationRevision: source.associationRevision } : null;
-  }
-
   async _announce(peer, publication) {
     if (!publication.active || !publication.publicationId) return;
     const dto = this._publicationDto(publication);
@@ -911,7 +813,7 @@ class NativeP2pBroker {
   }
 
   _publicationDesired(peer, publication) {
-    const selected = this._live(peer) && publication.active && publication.source.active && !publication.source.rebinding
+    const selected = this._live(peer) && publication.active && publication.source.active
       && peer.currentPublications.get(publication.key) === publication
       && this.roster.get(this.localSessionId)?.has(publication.shareId)
       && publication.watch?.watching === true
@@ -962,15 +864,6 @@ class NativeP2pBroker {
     const source = this.sources.get(sourceId);
     if (!source) return;
     source.active = false;
-    source.associationRevision++;
-    source.rebindController?.abort(fault('P2P_CANCELLED', 'The PCM source was removed.'));
-    if (source.kind === 'video') {
-      for (const audio of this.sources.values()) {
-        if (audio.kind === 'audio' && audio.rebindTarget === source) {
-          audio.rebindController?.abort(fault('P2P_CANCELLED', 'The selected audio rebind screen was removed.'));
-        }
-      }
-    }
     const sourceKey = mediaKey(source.kind, source.localShareId);
     if (this.currentSources.get(sourceKey) === sourceId) this.currentSources.delete(sourceKey);
     const jobs = [];
@@ -1058,7 +951,6 @@ class NativeP2pBroker {
   _collectSources() {
     for (const [id, source] of this.sources) {
       if (source.active) continue;
-      if (source.rebinding && !this.engineRetired) continue;
       const used = [...this.peers.values()].some(peer =>
         [...peer.publications.values()].some(publication => publication.source === source
           || (publication.kind === 'audio' && publication.source.associatedVideo === source))
@@ -1110,9 +1002,10 @@ class NativeP2pBroker {
     for (const publication of [...peer.audioRetirements.values()]) this._proveAudioRetirement(peer, publication, proof);
   }
 
-  _waitAudioRetirement(peer, publication) {
-    if (!publication.retirement) return Promise.resolve();
-    return this._deadline(peer, publication.retirement.promise,
+  async _waitAudioRetirement(peer, publication) {
+    // An already proven retirement (by its SDP turn, peer close or engine close) has nothing left to wait for.
+    if (!publication.retirement || publication.retirement.proven) return;
+    await this._deadline(publication.retirement.promise,
       'Dedicated audio transceiver retirement still needs a completed SDP turn or peer/engine close proof.');
   }
 
@@ -1726,7 +1619,10 @@ class NativeP2pBroker {
         this._beginClose(peer);
         this._scheduleCleanup(peer);
       }
-      return false;
+      if (event.type !== 'error') return false;
+      // A late error belongs to this peer's retirement, never to the other peers of the engine.
+      this._report(peer, nativeFault(event.data));
+      return true;
     }
     try {
       if (['peer.trackAdded', 'peer.trackUpdated', 'peer.trackRemoved'].includes(event.type)) {
@@ -1800,11 +1696,12 @@ class NativeP2pBroker {
         peer.nativeState = { ...peer.nativeState, ...event.data };
         if (Object.values(event.data).includes('failed')) {
           this._fail(peer, fault('P2P_NATIVE_FAILED', 'Native screen peer reported a failed state.'));
-        } else this._state(peer);
+        } else {
+          this._superviseConnection(peer);
+          this._state(peer);
+        }
       } else if (event.type === 'error') {
-        const error = fault(text(event.data?.code, 128) ? event.data.code : 'P2P_NATIVE_ERROR',
-          text(event.data?.message, 4096) ? event.data.message : 'Native screen operation failed.');
-        this._fail(peer, error);
+        this._fail(peer, nativeFault(event.data));
       } else return false;
       return true;
     } catch (error) {
@@ -1823,6 +1720,21 @@ class NativeP2pBroker {
     this._scheduleCleanup(peer);
   }
 
+  // A peer that stays disconnected is failed, so its owner reconnects through a new peer.
+  _superviseConnection(peer) {
+    const state = peer.nativeState.connectionState;
+    if (state === 'connected' && peer.disconnectTimer !== null) {
+      this.timers.clearTimeout(peer.disconnectTimer);
+      peer.disconnectTimer = null;
+    }
+    if (state !== 'disconnected' || peer.disconnectTimer !== null) return;
+    peer.disconnectTimer = this.timers.setTimeout(() => {
+      peer.disconnectTimer = null;
+      if (this._live(peer) && peer.nativeState.connectionState !== 'connected')
+        this._fail(peer, fault('P2P_NATIVE_DISCONNECTED', 'Native screen peer did not reconnect.'));
+    }, DISCONNECTED_GRACE_MS);
+  }
+
   _beginClose(peer, failed = false) {
     if (peer.status === 'closed') return;
     peer.status = failed || peer.error ? 'failed' : 'closing';
@@ -1830,6 +1742,8 @@ class NativeP2pBroker {
     if (peer.turn) this.timers.clearTimeout(peer.turn.timer);
     if (peer.grantTimer !== null) this.timers.clearTimeout(peer.grantTimer);
     peer.grantTimer = null;
+    if (peer.disconnectTimer !== null) this.timers.clearTimeout(peer.disconnectTimer);
+    peer.disconnectTimer = null;
     peer.turn = null;
     peer.ice = [];
     peer.pendingMetadata.clear();
@@ -1947,7 +1861,6 @@ class NativeP2pBroker {
 
   async close() {
     this.closed = true;
-    for (const source of this.sources.values()) source.rebindController?.abort(fault('P2P_CANCELLED', 'Native broker is closing.'));
     const results = await Promise.allSettled([...this.peers.keys()].map(sessionId => this.closePeer(sessionId)));
     for (const source of this.sources.values()) source.active = false;
     this.currentSources.clear();
@@ -1979,14 +1892,10 @@ class NativeP2pBroker {
       throw error;
     }
     if (this.engineRetired) return;
-    this.engineRetired = true;
-    for (const source of this.sources.values()) {
-      source.rebindController?.abort(fault('P2P_CANCELLED', 'Native engine retired during audio rebind.'));
-      for (const retire of [...source.waiters]) retire();
-    }
+    // The proof also ends every wait on this engine's native work.
+    this.ledger.proveRetired();
     for (const peer of this.peers.values()) {
       this._provePeerAudioRetirement(peer, 'engine-close');
-      for (const retire of [...peer.waiters]) retire();
       for (const publication of peer.publications.values()) {
         if (publication.enabled || publication.requestedEnabled || publication.demanded) {
           publication.requestedEnabled = false;

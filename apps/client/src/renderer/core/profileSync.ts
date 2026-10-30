@@ -3,7 +3,7 @@ import { sessionManager } from './SessionManager';
 import { clientLog } from './ClientLogService';
 import { connectionStore } from '../stores/connectionStore';
 import { dmStore } from '../stores/dmStore';
-import { getAvatarUrl } from '../utils/avatar';
+import { getAvatarUrl, resolveImageUrl } from '../utils/avatar';
 
 /**
  * Nickname and avatar travel with the identity (#743 follow-up): every device
@@ -106,11 +106,8 @@ export async function makeProfileThumbnail(source: string): Promise<string | nul
 export function ownAvatarSource(): string | null {
   if (connectionStore.savedAvatarBase64) return connectionStore.savedAvatarBase64;
   for (const session of sessionManager.getAll()) {
-    const url = session.serverStore.currentUser?.avatarUrl;
-    if (!url) continue;
-    if (!url.startsWith('/')) return url;
-    const base = session.client.getHttpBaseUrl();
-    if (base) return `${base}${url}`;
+    const avatar = resolveImageUrl(session.serverStore.currentUser?.avatarUrl, session.client.getHttpBaseUrl());
+    if (avatar) return avatar;
   }
   return null;
 }

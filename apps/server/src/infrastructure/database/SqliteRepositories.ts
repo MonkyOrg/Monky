@@ -1,10 +1,12 @@
 import { IDatabaseDriver } from './SqliteWrapper';
-import { CHANNEL_PERMISSIONS, DEFAULT_PERMISSIONS, channelOverwrites, channelPrivacy, withChannelPrivacy, messageBlocksSchema, resolveChannelPermissions, type ChannelCategory, type ChannelPermissionOverwrite, type MessageBlock } from '@monky/shared';
+import { CHANNEL_PERMISSIONS, channelOverwrites, channelPrivacy, withChannelPrivacy, messageBlocksSchema, resolveChannelPermissions, type ChannelCategory, type ChannelPermissionOverwrite, type MessageBlock } from '@monky/shared';
 import { SqliteCategoryRepository } from './SqliteCategoryRepository';
 import { SqliteChannelPermissions } from './SqliteChannelPermissions';
+import { partialUpdate } from './partialUpdate';
 import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema, botMessageLocalizationsSchema } from '@monky/shared';
-import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NewServerRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
 import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
+import { SERVER_SETTING_DEFAULTS } from '../../domain/serverSettings';
 
 /**
  * Note: all repository methods are declared `async` even though the underlying
@@ -14,6 +16,99 @@ import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepo
  * better-sqlite3 on a worker thread, or PostgreSQL) without changing any caller.
  * The micro-task overhead is negligible for this application's scale.
  */
+
+/** server_meta as stored: flags are 0 or 1, and older rows may lack a value. */
+interface ServerMetaRow {
+  id: string;
+  name: string;
+  everyonePermissions: number | null;
+  passwordHash: string;
+  createdAt: number;
+  maxUsers: number;
+  maxMessageLength: number | null;
+  messageDeleteUndoSeconds: number | null;
+  ownerUserId: string | null;
+  allowSoundboard: number | null;
+  dmRelayEnabled: number | null;
+  recentSoundCacheEnabled: number | null;
+  recentSoundCacheLimit: number | null;
+  allowEveryoneMention: number | null;
+  allowMessageEdit: number | null;
+  showRoleBadgesToEveryone: number | null;
+  voiceMode: string | null;
+  iconPath: string | null;
+  maxAttachmentFileBytes: number | null;
+  maxAttachmentStorageBytes: number | null;
+  turnEnabled: number | null;
+  turnSecret: string | null;
+  maxBots: number | null;
+  afkChannelId: string | null;
+  afkTimeoutSeconds: number | null;
+}
+
+const flag = (stored: number | null, fallback: boolean): boolean => stored === null ? fallback : stored !== 0;
+
+/** Columns updateServer may write, by field. */
+const SERVER_COLUMNS: { readonly [K in keyof ServerRecord]?: string } = {
+  everyonePermissions: 'everyone_permissions',
+  messageDeleteUndoSeconds: 'message_delete_undo_seconds',
+  maxMessageLength: 'max_message_length',
+  name: 'name',
+  passwordHash: 'password_hash',
+  maxUsers: 'max_users',
+  ownerUserId: 'owner_user_id',
+  allowSoundboard: 'allow_soundboard',
+  dmRelayEnabled: 'dm_relay_enabled',
+  recentSoundCacheEnabled: 'recent_sound_cache_enabled',
+  recentSoundCacheLimit: 'recent_sound_cache_limit',
+  allowEveryoneMention: 'allow_everyone_mention',
+  allowMessageEdit: 'allow_message_edit',
+  showRoleBadgesToEveryone: 'show_role_badges_to_everyone',
+  voiceMode: 'voice_mode',
+  iconPath: 'icon_path',
+  maxAttachmentFileBytes: 'max_attachment_file_bytes',
+  maxAttachmentStorageBytes: 'max_attachment_storage_bytes',
+  turnEnabled: 'turn_enabled',
+  turnSecret: 'turn_secret',
+  afkChannelId: 'afk_channel_id',
+  afkTimeoutSeconds: 'afk_timeout_seconds',
+};
+
+const USER_COLUMNS: { readonly [K in keyof UserRecord]?: string } = {
+  nickname: 'nickname',
+  publicKey: 'public_key',
+  avatarPath: 'avatar_path',
+  lastSeenAt: 'last_seen_at',
+};
+
+/** Access rules live in their own tables; SqliteChannelRepository.update writes them separately. */
+const CHANNEL_COLUMNS: { readonly [K in keyof ChannelRecord]?: string } = {
+  categoryId: 'category_id',
+  inheritCategoryPermissions: 'inherit_category_permissions',
+  name: 'name',
+  position: 'position',
+  maxParticipants: 'max_participants',
+  isPrivate: 'is_private',
+  botCommandsEnabled: 'bot_commands_enabled',
+};
+
+const ROLE_COLUMNS: { readonly [K in keyof RoleRecord]?: string } = {
+  name: 'name',
+  color: 'color',
+  position: 'position',
+  permissions: 'permissions',
+  isDefault: 'is_default',
+};
+
+const BOT_COLUMNS: { readonly [K in keyof BotRecord]?: string } = {
+  name: 'name',
+  profilePending: 'profile_pending',
+  tokenHash: 'token_hash',
+  avatarPath: 'avatar_path',
+  boundPublicKey: 'bound_public_key',
+  lastProtocolVersion: 'last_protocol_version',
+  manifestUrl: 'manifest_url',
+};
 
 export class SqliteServerRepository implements IServerRepository {
   constructor(private db: IDatabaseDriver) {}
@@ -35,38 +130,40 @@ export class SqliteServerRepository implements IServerRepository {
   }
 
   async getServer(): Promise<ServerRecord | null> {
-    const row = this.db.prepare('SELECT id, name, everyone_permissions as everyonePermissions, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, dm_relay_enabled as dmRelayEnabled, recent_sound_cache_enabled as recentSoundCacheEnabled, recent_sound_cache_limit as recentSoundCacheLimit, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots, afk_channel_id as afkChannelId, afk_timeout_seconds as afkTimeoutSeconds FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
+    const row = this.db.prepare('SELECT id, name, everyone_permissions as everyonePermissions, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, dm_relay_enabled as dmRelayEnabled, recent_sound_cache_enabled as recentSoundCacheEnabled, recent_sound_cache_limit as recentSoundCacheLimit, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots, afk_channel_id as afkChannelId, afk_timeout_seconds as afkTimeoutSeconds FROM server_meta LIMIT 1').get() as ServerMetaRow | undefined;
     if (!row) return null;
+    const defaults = SERVER_SETTING_DEFAULTS;
     return {
       id: row.id,
-      everyonePermissions: row.everyonePermissions,
+      everyonePermissions: row.everyonePermissions ?? defaults.everyonePermissions,
       name: row.name,
       passwordHash: row.passwordHash,
       createdAt: row.createdAt,
       maxUsers: row.maxUsers,
-      maxMessageLength: row.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
-      messageDeleteUndoSeconds: row.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
+      maxMessageLength: row.maxMessageLength ?? defaults.maxMessageLength,
+      messageDeleteUndoSeconds: row.messageDeleteUndoSeconds ?? defaults.messageDeleteUndoSeconds,
       ownerUserId: row.ownerUserId ?? null,
-      allowSoundboard: row.allowSoundboard !== undefined ? Boolean(row.allowSoundboard) : true,
-      dmRelayEnabled: row.dmRelayEnabled !== undefined ? Boolean(row.dmRelayEnabled) : true,
-      recentSoundCacheEnabled: Boolean(row.recentSoundCacheEnabled),
-      recentSoundCacheLimit: row.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
-      allowEveryoneMention: row.allowEveryoneMention !== undefined ? Boolean(row.allowEveryoneMention) : true,
-      allowMessageEdit: row.allowMessageEdit !== undefined ? Boolean(row.allowMessageEdit) : true,
-      showRoleBadgesToEveryone: row.showRoleBadgesToEveryone !== undefined ? Boolean(row.showRoleBadgesToEveryone) : true,
-      voiceMode: (row.voiceMode as any) || 'p2p',
+      allowSoundboard: flag(row.allowSoundboard, defaults.allowSoundboard),
+      dmRelayEnabled: flag(row.dmRelayEnabled, defaults.dmRelayEnabled),
+      recentSoundCacheEnabled: flag(row.recentSoundCacheEnabled, defaults.recentSoundCacheEnabled),
+      recentSoundCacheLimit: row.recentSoundCacheLimit ?? defaults.recentSoundCacheLimit,
+      allowEveryoneMention: flag(row.allowEveryoneMention, defaults.allowEveryoneMention),
+      allowMessageEdit: flag(row.allowMessageEdit, defaults.allowMessageEdit),
+      showRoleBadgesToEveryone: flag(row.showRoleBadgesToEveryone, defaults.showRoleBadgesToEveryone),
+      voiceMode: row.voiceMode === 'sfu' ? 'sfu' : 'p2p',
       iconPath: row.iconPath || null,
       maxAttachmentFileBytes: row.maxAttachmentFileBytes ?? null,
       maxAttachmentStorageBytes: row.maxAttachmentStorageBytes ?? null,
-      turnEnabled: Boolean(row.turnEnabled),
+      turnEnabled: flag(row.turnEnabled, defaults.turnEnabled),
       turnSecret: row.turnSecret ?? null,
-      maxBots: row.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
+      maxBots: row.maxBots ?? defaults.maxBots,
       afkChannelId: row.afkChannelId ?? null,
-      afkTimeoutSeconds: row.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS,
+      afkTimeoutSeconds: row.afkTimeoutSeconds ?? defaults.afkTimeoutSeconds,
     };
   }
 
-  async createServer(server: ServerRecord): Promise<void> {
+  async createServer(server: NewServerRecord): Promise<void> {
+    const defaults = SERVER_SETTING_DEFAULTS;
     this.db.prepare(
       'INSERT INTO server_meta (id, name, password_hash, created_at, max_users, owner_user_id, allow_soundboard, allow_everyone_mention, show_role_badges_to_everyone, voice_mode, icon_path, max_message_length, message_delete_undo_seconds, everyone_permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
@@ -75,116 +172,24 @@ export class SqliteServerRepository implements IServerRepository {
       server.passwordHash,
       server.createdAt,
       server.maxUsers,
-      server.ownerUserId ?? null,
-      server.allowSoundboard !== false ? 1 : 0,
-      server.allowEveryoneMention !== false ? 1 : 0,
-      server.showRoleBadgesToEveryone !== false ? 1 : 0,
-      server.voiceMode || 'p2p',
-      server.iconPath || null,
-      server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
-      server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
-      server.everyonePermissions ?? DEFAULT_PERMISSIONS
+      server.ownerUserId ?? defaults.ownerUserId,
+      (server.allowSoundboard ?? defaults.allowSoundboard) ? 1 : 0,
+      (server.allowEveryoneMention ?? defaults.allowEveryoneMention) ? 1 : 0,
+      (server.showRoleBadgesToEveryone ?? defaults.showRoleBadgesToEveryone) ? 1 : 0,
+      server.voiceMode || defaults.voiceMode,
+      server.iconPath || defaults.iconPath,
+      server.maxMessageLength ?? defaults.maxMessageLength,
+      server.messageDeleteUndoSeconds ?? defaults.messageDeleteUndoSeconds,
+      server.everyonePermissions ?? defaults.everyonePermissions
     );
   }
 
   async updateServer(server: Partial<ServerRecord>): Promise<void> {
-    const fields: string[] = [];
-    const values: any[] = [];
-    if (server.everyonePermissions !== undefined) {
-      fields.push('everyone_permissions = ?');
-      values.push(server.everyonePermissions);
-    }
-    if (server.messageDeleteUndoSeconds !== undefined) {
-      fields.push('message_delete_undo_seconds = ?');
-      values.push(server.messageDeleteUndoSeconds);
-    }
-    if (server.maxMessageLength !== undefined) {
-      fields.push('max_message_length = ?');
-      values.push(server.maxMessageLength);
-    }
-
-    if (server.name !== undefined) {
-      fields.push('name = ?');
-      values.push(server.name);
-    }
-    if (server.passwordHash !== undefined) {
-      fields.push('password_hash = ?');
-      values.push(server.passwordHash);
-    }
-    if (server.maxUsers !== undefined) {
-      fields.push('max_users = ?');
-      values.push(server.maxUsers);
-    }
-    if (server.ownerUserId !== undefined) {
-      fields.push('owner_user_id = ?');
-      values.push(server.ownerUserId);
-    }
-    if (server.allowSoundboard !== undefined) {
-      fields.push('allow_soundboard = ?');
-      values.push(server.allowSoundboard ? 1 : 0);
-    }
-    if (server.dmRelayEnabled !== undefined) {
-      fields.push('dm_relay_enabled = ?');
-      values.push(server.dmRelayEnabled ? 1 : 0);
-    }
-    if (server.recentSoundCacheEnabled !== undefined) {
-      fields.push('recent_sound_cache_enabled = ?');
-      values.push(server.recentSoundCacheEnabled ? 1 : 0);
-    }
-    if (server.recentSoundCacheLimit !== undefined) {
-      fields.push('recent_sound_cache_limit = ?');
-      values.push(server.recentSoundCacheLimit);
-    }
-    if (server.allowEveryoneMention !== undefined) {
-      fields.push('allow_everyone_mention = ?');
-      values.push(server.allowEveryoneMention ? 1 : 0);
-    }
-    if (server.allowMessageEdit !== undefined) {
-      fields.push('allow_message_edit = ?');
-      values.push(server.allowMessageEdit ? 1 : 0);
-    }
-    if (server.showRoleBadgesToEveryone !== undefined) {
-      fields.push('show_role_badges_to_everyone = ?');
-      values.push(server.showRoleBadgesToEveryone ? 1 : 0);
-    }
-    if (server.voiceMode !== undefined) {
-      fields.push('voice_mode = ?');
-      values.push(server.voiceMode);
-    }
-    if (server.iconPath !== undefined) {
-      fields.push('icon_path = ?');
-      values.push(server.iconPath);
-    }
-    if (server.maxAttachmentFileBytes !== undefined) {
-      fields.push('max_attachment_file_bytes = ?');
-      values.push(server.maxAttachmentFileBytes);
-    }
-    if (server.maxAttachmentStorageBytes !== undefined) {
-      fields.push('max_attachment_storage_bytes = ?');
-      values.push(server.maxAttachmentStorageBytes);
-    }
-    if (server.turnEnabled !== undefined) {
-      fields.push('turn_enabled = ?');
-      values.push(server.turnEnabled ? 1 : 0);
-    }
-    if (server.turnSecret !== undefined) {
-      fields.push('turn_secret = ?');
-      values.push(server.turnSecret);
-    }
-    if (server.afkChannelId !== undefined) {
-      fields.push('afk_channel_id = ?');
-      values.push(server.afkChannelId);
-    }
-    if (server.afkTimeoutSeconds !== undefined) {
-      fields.push('afk_timeout_seconds = ?');
-      values.push(server.afkTimeoutSeconds);
-    }
-
-    if (fields.length === 0) return;
-
+    const update = partialUpdate(server, SERVER_COLUMNS);
+    if (!update) return;
     this.db.prepare(
-      `UPDATE server_meta SET ${fields.join(', ')} WHERE id = (SELECT id FROM server_meta LIMIT 1)`
-    ).run(...values);
+      `UPDATE server_meta SET ${update.set} WHERE id = (SELECT id FROM server_meta LIMIT 1)`
+    ).run(...update.values);
   }
 }
 
@@ -226,37 +231,16 @@ export class SqliteUserRepository implements IUserRepository {
   }
 
   async update(id: string, updates: Partial<UserRecord>): Promise<void> {
-    const fields: string[] = [];
-    const values: any[] = [];
-
-    if (updates.nickname !== undefined) {
-      fields.push('nickname = ?');
-      values.push(updates.nickname);
-    }
-    if (updates.publicKey !== undefined) {
-      fields.push('public_key = ?');
-      values.push(updates.publicKey);
-    }
-    if (updates.avatarPath !== undefined) {
-      fields.push('avatar_path = ?');
-      values.push(updates.avatarPath);
-    }
-    if (updates.lastSeenAt !== undefined) {
-      fields.push('last_seen_at = ?');
-      values.push(updates.lastSeenAt);
-    }
-
-    if (fields.length === 0) return;
-
-    values.push(id);
-    this.db.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    const update = partialUpdate(updates, USER_COLUMNS);
+    if (!update) return;
+    this.db.prepare(`UPDATE users SET ${update.set} WHERE id = ?`).run(...update.values, id);
   }
 
   async delete(id: string): Promise<void> {
-    // Related rows are removed explicitly rather than relying on the cascade, so
-    // the deletion holds even on a database opened without `foreign_keys = ON`.
-    // Chat messages are intentionally preserved (they gracefully render as an
-    // unknown author) to keep channel history intact.
+    // user_roles names the user without an ON DELETE action, so it is cleared
+    // first. The foreign keys take care of the rest: what the member posted
+    // stays and shows an unknown author (D2), the bots they added keep
+    // working, and their votes, answers and individual channel rules go.
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM user_roles WHERE user_id = ?').run(id);
       this.db.prepare('DELETE FROM mentions WHERE user_id = ?').run(id);
@@ -330,7 +314,7 @@ export class SqliteChannelRepository implements IChannelRepository {
     return byChannel;
   }
 
-  private toRecord(row: SqliteChannelRow, allowedRoleIds: string[], categories: Map<string, ChannelCategory>, permissionOverwrites: ChannelPermissionOverwrite[]): ChannelRecord {
+  private toRecord(row: SqliteChannelRow, allowedRoleIds: string[], categories: ReadonlyMap<string, ChannelCategory>, permissionOverwrites: ChannelPermissionOverwrite[]): ChannelRecord {
     const access = resolveChannelPermissions({
       permissionOverwrites,
       categoryId: row.categoryId,
@@ -359,19 +343,16 @@ export class SqliteChannelRepository implements IChannelRepository {
   }
 
   async findById(id: string): Promise<ChannelRecord | null> {
-    const row = this.db.prepare(
-      `SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE id = ?`
-    ).get(id) as SqliteChannelRow | undefined;
+    const row = this.readRow(id);
     if (!row) return null;
-
-    const categories = new Map(this.categories.readByServerId(row.serverId).map((category) => [category.id, category]));
-    const record = this.toRecord(row, this.loadAllowedRoles([row.id]).get(row.id) ?? [], categories, this.permissions.read([row.id]).get(row.id) ?? []);
-    if (!record.forumId) return record;
-    const parentRow: SqliteChannelRow | undefined = this.db.prepare(
-      `SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE id = ?`
-    ).get(record.forumId);
-    const parent = parentRow ? this.toRecord(parentRow, this.loadAllowedRoles([parentRow.id]).get(parentRow.id) ?? [], categories, this.permissions.read([parentRow.id]).get(parentRow.id) ?? []) : null;
-    return this.withForumAccess(record, parent);
+    // A forum topic takes its access from the forum, which has to be read along with it.
+    const parentRow = row.forumId ? this.readRow(row.forumId) : undefined;
+    const rows = parentRow ? [row, parentRow] : [row];
+    // Categories are read only when one of these rows can inherit from one (S-APP-5).
+    const categories = new Map(rows.some((entry) => entry.categoryId)
+      ? this.categories.readByServerId(row.serverId).map((category): [string, ChannelCategory] => [category.id, category]) : []);
+    const [record, parent] = this.hydrate(rows, categories);
+    return record.forumId ? this.withForumAccess(record, parent ?? null) : record;
   }
 
   async listByServerId(serverId: string): Promise<ChannelRecord[]> {
@@ -379,12 +360,22 @@ export class SqliteChannelRepository implements IChannelRepository {
       `SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE server_id = ? ORDER BY position ASC, created_at ASC`
     ).all(serverId) as SqliteChannelRow[];
 
-    const allowedRoles = this.loadAllowedRoles(rows.map((row) => row.id));
     const categories = new Map(this.categories.readByServerId(serverId).map((category) => [category.id, category]));
-    const permissions = this.permissions.read(rows.map(row => row.id));
-    const records = rows.map((row) => this.toRecord(row, allowedRoles.get(row.id) ?? [], categories, permissions.get(row.id) ?? []));
+    const records = this.hydrate(rows, categories);
     const byId = new Map(records.map(record => [record.id, record]));
     return records.map(record => record.forumId ? this.withForumAccess(record, byId.get(record.forumId) ?? null) : record);
+  }
+
+  private readRow(id: string): SqliteChannelRow | undefined {
+    return this.db.prepare(`SELECT ${SqliteChannelRepository.SELECT_COLUMNS} FROM channels WHERE id = ?`).get(id);
+  }
+
+  /** Rows with their effective access, read for all of them at once to avoid N+1 (#384). */
+  private hydrate(rows: SqliteChannelRow[], categories: ReadonlyMap<string, ChannelCategory>): ChannelRecord[] {
+    const ids = rows.map((row) => row.id);
+    const allowedRoles = this.loadAllowedRoles(ids);
+    const permissions = this.permissions.read(ids);
+    return rows.map((row) => this.toRecord(row, allowedRoles.get(row.id) ?? [], categories, permissions.get(row.id) ?? []));
   }
 
   private withForumAccess(record: ChannelRecord, parent: ChannelRecord | null): ChannelRecord {
@@ -433,41 +424,9 @@ export class SqliteChannelRepository implements IChannelRepository {
         this.permissions.replace(id, withChannelPrivacy(this.permissions.read([id]).get(id) ?? [],
           updates.isPrivate ?? stored.isPrivate === 1, updates.allowedRoleIds ?? this.loadAllowedRoles([id]).get(id) ?? []));
       }
-      const assignments: string[] = [];
-      const values: unknown[] = [];
-
-      if (updates.categoryId !== undefined) {
-        assignments.push('category_id = ?');
-        values.push(updates.categoryId);
-      }
-      if (updates.inheritCategoryPermissions !== undefined) {
-        assignments.push('inherit_category_permissions = ?');
-        values.push(updates.inheritCategoryPermissions ? 1 : 0);
-      }
-
-      if (updates.name !== undefined) {
-        assignments.push('name = ?');
-        values.push(updates.name);
-      }
-      if (updates.position !== undefined) {
-        assignments.push('position = ?');
-        values.push(updates.position);
-      }
-      if (updates.maxParticipants !== undefined) {
-        assignments.push('max_participants = ?');
-        values.push(updates.maxParticipants);
-      }
-      if (updates.isPrivate !== undefined) {
-        assignments.push('is_private = ?');
-        values.push(updates.isPrivate ? 1 : 0);
-      }
-      if (updates.botCommandsEnabled !== undefined) {
-        assignments.push('bot_commands_enabled = ?');
-        values.push(updates.botCommandsEnabled ? 1 : 0);
-      }
-
-      if (assignments.length > 0) {
-        this.db.prepare(`UPDATE channels SET ${assignments.join(', ')} WHERE id = ?`).run(...values, id);
+      const update = partialUpdate(updates, CHANNEL_COLUMNS);
+      if (update) {
+        this.db.prepare(`UPDATE channels SET ${update.set} WHERE id = ?`).run(...update.values, id);
       }
       if (updates.allowedRoleIds !== undefined) {
         this.replaceAllowedRoles(id, updates.allowedRoleIds);
@@ -624,24 +583,29 @@ export class SqliteMessageRepository implements IMessageRepository {
       for (const id of attachmentIds) {
         this.db.prepare('UPDATE message_attachments SET message_id = ? WHERE id = ?').run(message.id, id);
       }
-      for (const mention of mentions) {
-        this.db.prepare('INSERT INTO mentions (id, user_id, channel_id, message_id, created_at) VALUES (?, ?, ?, ?, ?)')
-          .run(mention.id, mention.userId, mention.channelId, mention.messageId, mention.createdAt);
-      }
+      for (const mention of mentions) this.insertMention(mention);
       return { message, created: true };
     })();
   }
 
-  async createBotMessage(message: MessageRecord): Promise<MessageRecord | null> {
+  async createBotMessage(message: MessageRecord, mentions: MentionRecord[] = []): Promise<MessageRecord | null> {
     const author = message.botAuthor;
     if (!author) throw new Error('Bot messages require an author snapshot.');
     return this.db.transaction(() => {
       if (!this.db.prepare('SELECT id FROM bots WHERE id = ? AND created_by_user_id = ?').get(author.id, author.ownerUserId)) return null;
+      // A retried post finds its first copy, whose mentions are already recorded.
+      const stored = this.db.prepare('SELECT id FROM messages WHERE id = ?').get(message.id);
       this.insertMessage(message, true);
+      if (!stored) for (const mention of mentions) this.insertMention(mention);
       const row = this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`).get(message.id) as SqliteMessageRow | undefined;
       if (!row) throw new Error('Bot message was not persisted.');
       return toMessageRecord(row);
     })();
+  }
+
+  private insertMention(mention: MentionRecord): void {
+    this.db.prepare('INSERT INTO mentions (id, user_id, channel_id, message_id, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(mention.id, mention.userId, mention.channelId, mention.messageId, mention.createdAt);
   }
 
   private insertMessage(message: MessageRecord, idempotent = false): void {
@@ -664,17 +628,17 @@ export class SqliteMessageRepository implements IMessageRepository {
   }
 
   async listByChannel(channelId: string, limit: number, beforeTimestamp?: number): Promise<MessageRecord[]> {
-    if (beforeTimestamp) {
-      const rows = this.db.prepare(
-        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`
-      ).all(channelId, beforeTimestamp, limit) as SqliteMessageRow[];
-
-      return rows.reverse().map(toMessageRecord);
-    }
-
+    // The oldest timestamp of a page is the client's next `beforeTimestamp`, so
+    // a page takes every message of its oldest millisecond: stopping inside it
+    // would skip the rest (S-APP-11). Ties keep the order they were sent in.
+    const before = beforeTimestamp ? 'AND created_at < ?' : '';
+    const scope = beforeTimestamp ? [channelId, beforeTimestamp] : [channelId];
     const rows = this.db.prepare(
-      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?`
-    ).all(channelId, limit) as SqliteMessageRow[];
+      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel_id = ? ${before} AND created_at >= (
+        SELECT MIN(created_at) FROM (
+          SELECT created_at FROM messages WHERE channel_id = ? ${before} ORDER BY created_at DESC LIMIT ?))
+       ORDER BY created_at DESC, rowid DESC`
+    ).all(...scope, ...scope, limit) as SqliteMessageRow[];
 
     return rows.reverse().map(toMessageRecord);
   }
@@ -886,6 +850,26 @@ export class SqliteAttachmentRepository implements IAttachmentRepository {
       .all() as { filename: string }[];
     return rows.map((r) => r.filename);
   }
+
+  async listByChannelWithTopics(channelId: string): Promise<AttachmentRecord[]> {
+    const rows = this.db
+      .prepare(`${SqliteAttachmentRepository.SELECT}
+        WHERE channel_id = ? OR channel_id IN (SELECT id FROM channels WHERE forum_parent_id = ?)`)
+      .all(channelId, channelId) as SqliteAttachmentRow[];
+    return rows.map((r) => this.map(r));
+  }
+
+  async listUnreachable(now: number): Promise<AttachmentRecord[]> {
+    const rows = this.db
+      .prepare(`${SqliteAttachmentRepository.SELECT}
+        WHERE NOT EXISTS (SELECT 1 FROM channels c WHERE c.id = message_attachments.channel_id
+            AND (c.forum_parent_id IS NULL OR EXISTS (SELECT 1 FROM channels f WHERE f.id = c.forum_parent_id)))
+          OR (message_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = message_attachments.message_id
+            AND (m.deleted_at IS NULL
+              OR EXISTS (SELECT 1 FROM message_deletion_backups b WHERE b.message_id = m.id AND b.expires_at > ?))))`)
+      .all(now) as SqliteAttachmentRow[];
+    return rows.map((r) => this.map(r));
+  }
 }
 
 interface SqliteRoleRow {
@@ -958,31 +942,9 @@ export class SqliteRoleRepository implements IRoleRepository {
   }
 
   async update(roleId: string, updates: Partial<RoleRecord>): Promise<void> {
-    const fields: string[] = [];
-    const values: any[] = [];
-    if (updates.name !== undefined) {
-      fields.push('name = ?');
-      values.push(updates.name);
-    }
-    if (updates.color !== undefined) {
-      fields.push('color = ?');
-      values.push(updates.color);
-    }
-    if (updates.position !== undefined) {
-      fields.push('position = ?');
-      values.push(updates.position);
-    }
-    if (updates.permissions !== undefined) {
-      fields.push('permissions = ?');
-      values.push(updates.permissions);
-    }
-    if (updates.isDefault !== undefined) {
-      fields.push('is_default = ?');
-      values.push(updates.isDefault ? 1 : 0);
-    }
-    if (fields.length === 0) return;
-    values.push(roleId);
-    this.db.prepare(`UPDATE roles SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    const update = partialUpdate(updates, ROLE_COLUMNS);
+    if (!update) return;
+    this.db.prepare(`UPDATE roles SET ${update.set} WHERE id = ?`).run(...update.values, roleId);
   }
 
   async delete(roleId: string): Promise<void> {
@@ -1054,18 +1016,9 @@ export class SqliteBotRepository implements IBotRepository {
   }
 
   async update(id: string, updates: Partial<BotRecord>): Promise<void> {
-    const cols: string[] = [];
-    const vals: Array<string | number | null> = [];
-    if (updates.name !== undefined) { cols.push('name = ?'); vals.push(updates.name); }
-    if (updates.profilePending !== undefined) { cols.push('profile_pending = ?'); vals.push(updates.profilePending ? 1 : 0); }
-    if (updates.tokenHash !== undefined) { cols.push('token_hash = ?'); vals.push(updates.tokenHash); }
-    if (updates.avatarPath !== undefined) { cols.push('avatar_path = ?'); vals.push(updates.avatarPath); }
-    if (updates.boundPublicKey !== undefined) { cols.push('bound_public_key = ?'); vals.push(updates.boundPublicKey); }
-    if (updates.lastProtocolVersion !== undefined) { cols.push('last_protocol_version = ?'); vals.push(updates.lastProtocolVersion); }
-    if (updates.manifestUrl !== undefined) { cols.push('manifest_url = ?'); vals.push(updates.manifestUrl); }
-    if (cols.length === 0) return;
-    vals.push(id);
-    this.db.prepare(`UPDATE bots SET ${cols.join(', ')} WHERE id = ?`).run(...vals);
+    const update = partialUpdate(updates, BOT_COLUMNS);
+    if (!update) return;
+    this.db.prepare(`UPDATE bots SET ${update.set} WHERE id = ?`).run(...update.values, id);
   }
 
   async delete(id: string): Promise<void> {

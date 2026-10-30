@@ -1,19 +1,33 @@
 #pragma once
 
-#include "encoder_diagnostics.h"
+#include "engine_shared.h"
+#include "mf_rtc_adapters.h"
 
 namespace monky::native_rtc::engine {
 
+template <typename T>
+inline Json DiagnosticValue(const std::optional<T>& value) {
+  return value ? Json(*value) : Json(nullptr);
+}
+
+inline Json TimingSnapshot(const screen_video::TimingAggregate& timing) {
+  const auto mean = timing.MeanMs(), maximum = timing.MaximumMs();
+  return {{"count", timing.count}, {"totalMs", timing.totalMs},
+          {"meanMs", mean ? Json(*mean) : Json(nullptr)},
+          {"maxMs", maximum ? Json(*maximum) : Json(nullptr)},
+          {"invalidIntervals", timing.invalidIntervals}};
+}
+
 inline Json DecoderSchedulingSnapshot(const screen_video::DecoderSchedulingStats& value) {
   return {{"clock", "process-steady-clock"},
-          {"enqueueToFirstProcessInput", EncoderTimingSnapshot(value.enqueueToFirstProcessInput)},
-          {"enqueueToAccepted", EncoderTimingSnapshot(value.enqueueToAccepted)},
-          {"processInput", EncoderTimingSnapshot(value.processInput)},
-          {"processOutput", EncoderTimingSnapshot(value.processOutput)},
-          {"acceptedToOutputSample", EncoderTimingSnapshot(value.acceptedToOutputSample)},
-          {"copyOutput", EncoderTimingSnapshot(value.copyOutput)},
-          {"acceptedCallback", EncoderTimingSnapshot(value.acceptedCallback)},
-          {"frameSink", EncoderTimingSnapshot(value.frameSink)},
+          {"enqueueToFirstProcessInput", TimingSnapshot(value.enqueueToFirstProcessInput)},
+          {"enqueueToAccepted", TimingSnapshot(value.enqueueToAccepted)},
+          {"processInput", TimingSnapshot(value.processInput)},
+          {"processOutput", TimingSnapshot(value.processOutput)},
+          {"acceptedToOutputSample", TimingSnapshot(value.acceptedToOutputSample)},
+          {"copyOutput", TimingSnapshot(value.copyOutput)},
+          {"acceptedCallback", TimingSnapshot(value.acceptedCallback)},
+          {"frameSink", TimingSnapshot(value.frameSink)},
           {"outputCapacityChecks", value.outputCapacityChecks},
           {"outputCapacityDeferrals", value.outputCapacityDeferrals},
           {"processInputOtherHresults", value.processInputOtherHresults},
@@ -28,7 +42,7 @@ inline Json DecoderCallsJson(const mf::DecoderCallDiagnostics<Outcome>& value, N
   for (std::size_t i = 0; i < value.outcomes.size(); ++i)
     outcomes[name(static_cast<Outcome>(i))] = value.outcomes[i];
   return {{"calls", value.calls}, {"inProgress", value.in_progress}, {"outcomes", std::move(outcomes)},
-          {"duration", EncoderTimingSnapshot(value.duration)}};
+          {"duration", TimingSnapshot(value.duration)}};
 }
 
 inline Json DecoderLedgerJson(const mf::DecoderDiagnosticSnapshot& value) {
@@ -49,11 +63,11 @@ inline Json DecoderLedgerJson(const mf::DecoderDiagnosticSnapshot& value) {
          {"returned", operation.returned}, {"exceptions", operation.exceptions},
          {"lastStartSteadyUs", DiagnosticValue(operation.last_start_steady_us)},
          {"lastCompletionSteadyUs", DiagnosticValue(operation.last_completion_steady_us)},
-         {"duration", EncoderTimingSnapshot(operation.duration)}};
+         {"duration", TimingSnapshot(operation.duration)}};
   }
   for (std::size_t i = 0; i < value.intervals.size(); ++i)
     intervals[mf::DecoderIntervalName(static_cast<mf::DecoderInterval>(i))] =
-        EncoderTimingSnapshot(value.intervals[i]);
+        TimingSnapshot(value.intervals[i]);
   return {{"counterScope", "decoder-worker-lifetime"}, {"clock", "process-steady-clock"},
           {"observedAtSteadyUs", DiagnosticValue(value.observed_at_steady_us)},
           {"snapshotCopyMs", DiagnosticValue(value.snapshot_copy_ms)},
@@ -61,7 +75,7 @@ inline Json DecoderLedgerJson(const mf::DecoderDiagnosticSnapshot& value) {
           {"submit", DecoderCallsJson(value.submit, mf::DecoderSubmitOutcomeName)},
           {"output", DecoderCallsJson(value.output, mf::DecoderOutputOutcomeName)},
           {"inputStages", std::move(stages)}, {"operations", std::move(operations)},
-          {"intervals", std::move(intervals)}, {"bookkeeping", EncoderTimingSnapshot(value.bookkeeping)},
+          {"intervals", std::move(intervals)}, {"bookkeeping", TimingSnapshot(value.bookkeeping)},
           {"recovery", {{"requests", value.recovery_requests}, {"epochAdvances", value.epoch_advances},
                          {"begun", value.recoveries_begun}, {"finished", value.recoveries_finished},
                          {"sessionSwitches", value.session_switches}}},
@@ -106,7 +120,6 @@ inline Json DecoderRuntimeJson(const mf::DecoderRuntimeSnapshot& decoder) {
         {"pendingPackets", value.pendingPackets}, {"pendingBytes", value.pendingBytes},
         {"pendingGpuCopies", value.pendingGpuCopies}, {"awaitingOutput", value.awaitingOutput},
         {"peakAwaitingOutput", value.peakAwaitingOutput}, {"peakGpuCopies", value.peakGpuCopies},
-        {"diagnosticReadbacks", value.diagnosticReadbacks}, {"diagnosticReadbackBytes", value.diagnosticReadbackBytes},
         {"i420Readbacks", value.i420Readbacks}, {"i420ReadbackBytes", value.i420ReadbackBytes},
         {"totalDecodeLatencyMs", value.totalDecodeLatencyMs}, {"maxDecodeLatencyMs", value.maxDecodeLatencyMs},
         {"totalGpuHoldMs", value.totalGpuHoldMs}, {"maxGpuHoldMs", value.maxGpuHoldMs},

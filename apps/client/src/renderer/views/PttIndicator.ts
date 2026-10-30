@@ -74,7 +74,7 @@ export function bindPttIndicators(container: HTMLElement): () => void {
       }
     });
   };
-  const unbind = ['voice.microphone_updated', 'voice.state_updated', 'voice.channel_changed', 'server.voice_restrictions_updated', 'settings.updated', 'i18n.language_changed']
+  const unbind = (['voice.microphone_updated', 'voice.state_updated', 'voice.channel_changed', 'server.voice_restrictions_updated', 'settings.updated', 'i18n.language_changed'] as const)
     .map((event) => appEvents.on(event, update));
   update();
   return () => unbind.forEach((off) => off());

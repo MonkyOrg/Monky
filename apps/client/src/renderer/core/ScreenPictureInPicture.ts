@@ -5,6 +5,7 @@ import { voiceStore } from '../stores/voiceStore';
 import { settingsStore } from '../stores/settingsStore';
 import { showInfoToast } from '../views/CopyToast';
 import { t } from '../i18n';
+import { stageTileKey } from '../views/stage/stageTiles';
 
 export interface ScreenPictureInPictureSource {
   sessionKey: string;
@@ -131,7 +132,7 @@ class ScreenPictureInPicture {
       if (this.current === entry && !this.isAuthorized(source)) this.close(true);
     };
     for (const event of ['voice.channel_changed', 'voice.screen_watch_changed', 'participants.updated',
-      'session.voice_context_updated', 'server.updated', 'server.roles_updated', 'native_screen.updated']) {
+      'session.voice_context_updated', 'server.updated', 'server.roles_updated', 'native_screen.updated'] as const) {
       entry.dispose.push(appEvents.on(event, invalidate));
     }
     const ended = (): void => { if (this.current === entry) this.close(true); };
@@ -365,7 +366,7 @@ class ScreenPictureInPicture {
 }
 
 function tileKeyOf(entry: Presentation): string {
-  return `${entry.source.publisherSessionId}:screen:${entry.source.shareId}`;
+  return stageTileKey.screen(entry.source.publisherSessionId, entry.source.shareId);
 }
 
 export const screenPictureInPicture = new ScreenPictureInPicture();

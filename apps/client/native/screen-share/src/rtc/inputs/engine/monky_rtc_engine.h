@@ -62,7 +62,7 @@ typedef struct MonkyEngineOptions {
 #define MONKY_ENGINE_EVENT_OPERATION 2u
 #define MONKY_ENGINE_EVENT_REQUEST 3u
 #define MONKY_ENGINE_EVENT_FRAME 4u
-#define MONKY_ENGINE_EVENT_INPUT_RELEASED 5u
+// 5 belonged to the retired raw NV12 input path; never reuse it for another event.
 #define MONKY_ENGINE_EVENT_ERROR 6u
 #define MONKY_ENGINE_EVENT_CLOSED 7u
 #define MONKY_ENGINE_EVENT_SIGNAL 8u
@@ -101,16 +101,6 @@ typedef struct MonkyEngineCallbacks {
   MonkyEngineEventCallback on_event;
   void* user;
 } MonkyEngineCallbacks;
-
-typedef struct MonkyEngineInputFrame {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  uint64_t frame_id;
-  uint64_t texture_nt_handle;
-  int64_t timestamp_us;
-  int64_t duration_us;
-  int64_t ntp_time_ms;
-} MonkyEngineInputFrame;
 
 // Already encoded, complete Annex B H264 access unit. Borrowed bytes are
 // copied before submit_encoded_frame returns; there is no asynchronous JS loan.
@@ -202,16 +192,6 @@ MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_respond(
     MonkyEngineError* error) MONKY_ENGINE_NOEXCEPT;
 MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_cancel(
     MonkyRtcEngine* engine, uint64_t request_id, MonkyEngineError* error) MONKY_ENGINE_NOEXCEPT;
-
-// Accepts only immutable BT.709-limited NV12 NT textures with keyed mutex key 0
-// on the source's explicit adapter. The DLL duplicates the HANDLE. On OK the
-// producer MUST retain its lease until source.frameReleased (including errors),
-// or successful complete engine close. Rejection transfers no new ownership;
-// a duplicate key never retires the previously admitted frame.
-// Input frame_id is unique among retained inputs of that source, not globally.
-MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_submit_frame(
-    MonkyRtcEngine* engine, uint64_t source_id, const MonkyEngineInputFrame* frame,
-    MonkyEngineError* error) MONKY_ENGINE_NOEXCEPT;
 
 // OK means a bounded native copy was admitted, not RTP delivery. The caller
 // may reuse its Buffer immediately. Native copy retirement is independently

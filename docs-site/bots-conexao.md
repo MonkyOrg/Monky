@@ -63,6 +63,8 @@ if (marketplace) {
     description: 'Example bot / Bot de exemplo',
     port: validateBotServePort(requiredEnvironment('MONKY_SERVE_PORT')),
     publicHost: validateBotPublicHost(requiredEnvironment('MONKY_SERVE_PUBLIC_HOST')),
+    // Só existe quando o perfil tem uma URL pública (proxy com TLS).
+    publicUrl: process.env.MONKY_SERVE_PUBLIC_URL || undefined,
   });
 } else {
   bot.connect({
@@ -79,6 +81,12 @@ truthy em JavaScript. Só declare em `modes` os caminhos realmente implementados
 Isso expõe:
 - `GET /manifest` — retorna o manifest do bot (nome, descrição, capacidades solicitadas, URL de registro)
 - `POST /register` — recebe o token de cada servidor que adiciona o bot
+
+Só servidores Monky conversam com essas rotas, nunca páginas web, então elas não
+respondem a CORS. O `POST /register` só aceita `Content-Type: application/json`,
+com corpo de até 16 KiB. Cada endereço de origem pode fazer 10 tentativas de
+registro por minuto, e no máximo 4 registros são concluídos ao mesmo tempo; acima
+disso, o bot responde `429`. Atrás de um proxy, o endereço contado é o do proxy.
 
 Cada servidor que adicionar o bot cria uma **conexão WebSocket independente**. O bot gerencia todas automaticamente, com reconexão.
 
@@ -129,6 +137,37 @@ sudo ufw allow 7780/tcp
 
 Além disso, o `publicHost` deve ser o **IP ou domínio público** da máquina — `localhost` só funciona se bot e servidor estiverem na mesma máquina.
 
+### HTTPS com proxy reverso {#https-com-proxy-reverso}
+
+Sem `publicUrl`, o manifest anuncia `http://<publicHost>:<port>/register`, e o
+servidor Monky envia o token do bot para esse endereço **sem criptografia**. Para
+o token viajar protegido, coloque o bot atrás de um proxy reverso com TLS (Caddy,
+nginx etc.) e informe a origem pública em `publicUrl`:
+
+```ts
+await bot.serve({
+  name: 'Meu Bot',
+  port: 7780,
+  host: '127.0.0.1', // só o proxy, na mesma máquina, acessa a porta
+  publicUrl: 'https://bot.exemplo.com',
+});
+```
+
+O manifest passa a anunciar `https://bot.exemplo.com/register`, e o servidor
+Monky instala o bot pela URL `https://bot.exemplo.com/manifest`. No manifest,
+`publicUrl` tem precedência sobre `publicHost` e `port`. Informe só a origem,
+sem caminho, usuário, senha, query ou fragmento: o proxy encaminha a raiz do
+domínio para o bot, e é nela que o `doctor` e o servidor comprovam o acesso.
+Ao instalar, use a URL final do manifest: o servidor não segue
+redirecionamentos, como o de `http://` para `https://` que o proxy costuma fazer.
+
+Com o CLI do bot, salve a URL no perfil em vez de fixá-la no código:
+`npm run cli -- config set publicUrl https://bot.exemplo.com`, ou
+`--public-url https://bot.exemplo.com` no `setup --non-interactive`. O runner
+entrega o valor em `MONKY_SERVE_PUBLIC_URL`, que a entrada do exemplo acima
+repassa a `serve()`, e `start` e `doctor` passam a conferir o manifest por essa
+URL. `config set publicUrl clear` volta a anunciar o host e a porta.
+
 O acesso também precisa funcionar **do bot para o servidor Monky**. O vínculo
 envia a URL WebSocket usada pelo cliente para entrar no servidor, preservando
 host, porta e caminho; ele não transforma um listener `0.0.0.0` em `localhost`.
@@ -166,11 +205,23 @@ bot.on('error', (err) => console.error(err));
 bot.on('serving', ({ port, manifest }) => console.log(`Manifest em :${port}/manifest`));
 ```
 
-## Segurança: TOFU (Trust On First Use)
+## Segurança: token e identidade {#seguranca-tofu-trust-on-first-use}
 
-Na primeira conexão, o bot apresenta sua **chave pública Ed25519**. O servidor a vincula permanentemente ao bot (TOFU binding). Conexões futuras exigem a mesma chave — se alguém tentar usar o token com uma chave diferente, é rejeitado.
+O **token** é o segredo do bot: quem tiver o token de um vínculo se conecta como
+o bot naquele servidor. Trate-o como uma senha. Guarde o `registrationFile` com
+acesso restrito, não registre o token em logs (o evento `registered` não o
+inclui) e, no modo Marketplace, use HTTPS com `publicUrl`. Para falar com o
+servidor, prefira `wss://`.
 
-No modo marketplace, o TOFU binding acontece automaticamente durante a instalação.
+A **chave pública Ed25519** só identifica o bot. Na primeira conexão, o servidor
+vincula ao bot a chave apresentada (TOFU, *Trust On First Use*) e passa a recusar
+conexões com outra chave. Esse vínculo evita trocar de identidade por engano, mas
+**não** protege um token vazado: a chave é pública (vai no manifest e nos
+comandos), e o servidor não pede prova de posse da chave privada. No modo
+Marketplace, o vínculo acontece durante a instalação.
+
+Se um token vazar, revogue o bot no servidor e adicione-o de novo. O vínculo novo
+recebe outro token, e o bot mantém a mesma identidade.
 
 > 💡 O [Monky Bot](https://github.com/MonkyOrg/MonkyBot) gera o par Ed25519 automaticamente e o reutiliza. Ao criar seu próprio bot com o SDK, gere e persista sua chave com as APIs de criptografia do Node.js e passe a chave pública em `publicKey`; não gere uma identidade nova a cada reinício.
 

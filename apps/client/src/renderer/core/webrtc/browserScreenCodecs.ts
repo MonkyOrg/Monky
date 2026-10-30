@@ -71,11 +71,25 @@ export function assertBrowserScreenCodec(
   }
 }
 
+/**
+ * The `max-recv-level` an H.264 Main receiver advertises for a screen profile,
+ * or null when the level it already offers decodes it (RFC 6184). P2P writes it
+ * into the answer and the SFU into the consumer's capabilities: one rule, so a
+ * high-resolution screen never decodes on one transport and fails on the other.
+ *
+ * Only raised after the WebRTC decoder capability probe; Chromium's own
+ * profile and level are kept rather than pretending another was negotiated.
+ */
+export function h264MaxReceiveLevel(profileLevelId: unknown, video: Readonly<NativeScreenVideoProfile>): string | null {
+  const receiveLevel = getScreenH264ProfileLevelId(video).slice(2);
+  return typeof profileLevelId === 'string' && /^4d[0-9a-f]{4}$/i.test(profileLevelId)
+    && Number.parseInt(profileLevelId.slice(4), 16) < Number.parseInt(receiveLevel.slice(2), 16) ? receiveLevel : null;
+}
+
 export function withBrowserScreenReceiveParameters(
   sdp: string, stereo: boolean, profile: Readonly<NativeScreenVideoProfile>,
   selected: ScreenCodec = 'h264',
 ): string {
-  const receiveLevel = getScreenH264ProfileLevelId(profile).slice(2);
   let media = '';
   const codecs = new Map<string, string>();
   return sdp.split('\r\n').map(line => {
@@ -89,12 +103,10 @@ export function withBrowserScreenReceiveParameters(
       const at = value.indexOf('=');
       return at < 0 ? [value.trim(), ''] : [value.slice(0, at).trim(), value.slice(at + 1).trim()];
     }));
-    const profile = parameters.get('profile-level-id');
-    if (selected === 'h264' && media === 'video' && kind === 'h264' && profile && /^4d[0-9a-f]{4}$/i.test(profile)
-      && Number.parseInt(profile.slice(4), 16) < Number.parseInt(receiveLevel.slice(2), 16)) {
-      // RFC 6184: extend receive capacity only after the WebRTC decoder capability probe.
-      // Keep Chromium's default profile/level rather than pretending it negotiated another one.
-      parameters.set('max-recv-level', receiveLevel);
+    const maxReceiveLevel = selected === 'h264' && media === 'video' && kind === 'h264'
+      ? h264MaxReceiveLevel(parameters.get('profile-level-id'), profile) : null;
+    if (maxReceiveLevel) {
+      parameters.set('max-recv-level', maxReceiveLevel);
     } else if (media === 'audio' && kind === 'opus' && stereo) {
       parameters.set('stereo', '1');
     } else return line;

@@ -1,5 +1,5 @@
 import {
-  commandLocalMetadataSchema, localRuntimeSourceFailureSchema,
+  commandLocalMetadataSchema, localRuntimeSourceFailureSchema, raceSignal,
   type LocalCapabilityId, type LocalExecutionFailure, type LocalExecutionMutationResult,
   type LocalRuntimeSourceFailure, type SlashCommand,
 } from '@monky/shared';
@@ -73,19 +73,5 @@ export function commandLocalIdentity(command: SlashCommand): { botId: string; bo
 
 /** Cancels one observer without cancelling another composer's shared preparation. */
 export function observeWithSignal<T>(result: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const abort = () => {
-      signal.removeEventListener('abort', abort);
-      reject(new DOMException('Local execution cancelled', 'AbortError'));
-    };
-    signal.addEventListener('abort', abort, { once: true });
-    result.then((value) => {
-      signal.removeEventListener('abort', abort);
-      if (!signal.aborted) resolve(value);
-    }, (error: unknown) => {
-      signal.removeEventListener('abort', abort);
-      if (!signal.aborted) reject(error);
-    });
-    if (signal.aborted) abort();
-  });
+  return raceSignal(result, signal, { abortReason: () => new DOMException('Local execution cancelled', 'AbortError') });
 }

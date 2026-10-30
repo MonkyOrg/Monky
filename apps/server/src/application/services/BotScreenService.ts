@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto';
 import { BOT_SCREEN_LIMITS, ProtocolErrorCode, type BotScreen, type BotScreenCreate, type BotScreenPatch, type BotScreenRef } from '@monky/shared';
+import { ServiceError } from '../errors';
 
-export class BotScreenError extends Error {
-  constructor(message: string, readonly code: ProtocolErrorCode) { super(message); }
+export class BotScreenError extends ServiceError {
+  constructor(message: string, code: ProtocolErrorCode) { super(code, message); }
 }
 
 export interface ActiveBotScreen {
@@ -26,7 +27,7 @@ export class BotScreenService {
     if (screens.length >= BOT_SCREEN_LIMITS.activePerServer ||
         screens.filter(({ screen }) => screen.botId === botId).length >= BOT_SCREEN_LIMITS.activePerBot ||
         screens.filter(({ screen }) => screen.channelId === input.channelId).length >= BOT_SCREEN_LIMITS.activePerChannel) {
-      throw new Error('Active screen limit reached. Close a screen before creating another.');
+      throw new BotScreenError('Active screen limit reached. Close a screen before creating another.', ProtocolErrorCode.BOT_INTERACTION_INVALID);
     }
     const entry: ActiveBotScreen = {
       screen: {
@@ -43,7 +44,9 @@ export class BotScreenService {
   update(ref: BotScreenRef, botId: string, patch: BotScreenPatch): ActiveBotScreen {
     const entry = this.requireOwner(ref, botId);
     if (entry.screen.revision !== patch.expectedRevision) throw new BotScreenError('Screen revision is stale. Reload the current snapshot.', ProtocolErrorCode.BOT_SCREEN_CONFLICT);
-    if (entry.screen.revision === Number.MAX_SAFE_INTEGER) throw new Error('Screen revision limit reached.');
+    if (entry.screen.revision === Number.MAX_SAFE_INTEGER) {
+      throw new BotScreenError('Screen revision limit reached.', ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    }
     entry.screen = { ...entry.screen, state: structuredClone(patch.state), revision: entry.screen.revision + 1 };
     return entry;
   }

@@ -1,6 +1,6 @@
-import type { AuthSuccessPayload, VoiceReconnectPayload, VoiceUserJoinedPayload } from '@monky/shared';
+import type { AuthSuccessPayload, VoiceUserJoinedPayload } from '@monky/shared';
 import { MessageType } from '@monky/shared';
-import { networkClient, ProtocolRequestError, RequestTimeoutError, type NetworkClient } from './NetworkClient';
+import { ProtocolRequestError, RequestTimeoutError, type NetworkClient } from './NetworkClient';
 import { sessionManager, sessionKeyFor, type ServerSession } from './SessionManager';
 import { webRtcManager } from './WebRtcManager';
 import { voiceStore } from '../stores/voiceStore';
@@ -9,7 +9,6 @@ import { audioProcessor } from './AudioProcessor';
 import { appEvents } from './EventBus';
 import { t } from '../i18n';
 import { videoService } from './VideoService';
-import { screenAudioService } from './ScreenAudioService';
 import { currentEventOrigin } from './sessionRouting';
 import { stopLocalScreenShares } from './screenShareControls';
 import { afkChannelIdOf } from '../utils/voiceRooms';
@@ -41,12 +40,7 @@ export function isVoiceAdmissionPending(sessionKey: string, channelId: string): 
 }
 
 export function getServerSessionForAddress(host: string, port: number): ServerSession | undefined {
-  const canonicalHost = (value: string) => {
-    return value.trim().replace(/^wss?:\/\//i, '').replace(/^\[(.+)\]$/, '$1').toLowerCase();
-  };
-  const normalizedHost = canonicalHost(host);
-  return sessionManager.get(sessionKeyFor(host, port)) ?? sessionManager.getAll()
-    .find(session => session.port === port && canonicalHost(session.host) === normalizedHost);
+  return sessionManager.get(sessionKeyFor(host, port));
 }
 
 export function assertServerBrowseAvailable(host: string, port: number): void {
@@ -193,19 +187,6 @@ export async function openServerSession(
   }
 }
 
-/**
- * Connection of the server hosting the current call.
- *
- * Leaving a call has to talk to the server the call is on, which is not
- * necessarily the one on screen (#400) — the user may have walked over to
- * another server while still talking.
- */
-export function callClient(): NetworkClient {
-  const key = voiceStore.voiceSessionKey;
-  const session = key ? sessionManager.get(key) : undefined;
-  return session ? session.client : networkClient;
-}
-
 /** An explicit leave is local intent, not something that waits for a server echo. */
 export function leaveCurrentCall(notifyServer = true): void {
   const sessionKey = voiceStore.voiceSessionKey;
@@ -220,7 +201,7 @@ export function leaveCurrentCall(notifyServer = true): void {
   if (sessionId) session.participants.removeVoiceState(sessionId);
   audioProcessor.stopMicrophone();
   videoService.stopCamera();
-  void stopLocalScreenShares(screenAudioService, { teardown: true }).catch((error: unknown) => {
+  void stopLocalScreenShares({ teardown: true }).catch((error: unknown) => {
     clientLog.error('SCREEN_SHARE', 'Failed to stop screen sharing after leaving voice', {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -309,7 +290,7 @@ export async function joinCallOnSession(
   audioProcessor.setMuted(true);
   audioProcessor.stopMicrophone();
   webRtcManager.suspendForVoiceReconnect(true);
-  const stoppedScreens = changingChannel ? stopLocalScreenShares(screenAudioService, { teardown: true }) : null;
+  const stoppedScreens = changingChannel ? stopLocalScreenShares({ teardown: true }) : null;
   // The camera belongs to the room it was turned on in. Stopping it while the
   // old call is still current lets the publication binding announce it off to
   // that room before the departure, and drops the cached track so admission
@@ -335,10 +316,9 @@ export async function joinCallOnSession(
       assertCurrent();
       const payload = { channelId, isMuted: voiceStore.isMuted || leavingAfk, isDeafened: voiceStore.isDeafened };
       try {
-        const joined = await session.client.sendRequest<VoiceUserJoinedPayload>(
-          reconnect ? MessageType.VOICE_RECONNECT : MessageType.VOICE_JOIN,
-          reconnect ? { ...payload, transitionId: reconnect.transitionId } satisfies VoiceReconnectPayload : payload
-        );
+        const joined = await (reconnect
+          ? session.client.sendRequest<VoiceUserJoinedPayload>(MessageType.VOICE_RECONNECT, { ...payload, transitionId: reconnect.transitionId })
+          : session.client.sendRequest<VoiceUserJoinedPayload>(MessageType.VOICE_JOIN, payload));
         assertCurrent();
         if (joined.sessionId !== mySessionId || joined.userId !== myUserId || joined.channelId !== channelId
           || joined.voiceState?.sessionId !== mySessionId || joined.voiceState.userId !== myUserId
@@ -375,9 +355,11 @@ export async function joinCallOnSession(
     session.participants.updateVoiceState({
       ...joined.voiceState, isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
     });
-    voiceStore.setServerMuted(joined.voiceState.serverMuted);
-    voiceStore.setServerDeafened(joined.voiceState.serverDeafened);
-    voiceStore.setPermissionMuted(!!joined.voiceState.permissionMuted);
+    voiceStore.applyModeration({
+      serverMuted: joined.voiceState.serverMuted,
+      serverDeafened: joined.voiceState.serverDeafened,
+      permissionMuted: !!joined.voiceState.permissionMuted,
+    });
     if (joined.voiceState.isMuted !== voiceStore.isMuted || joined.voiceState.isDeafened !== voiceStore.isDeafened) {
       session.client.send(MessageType.VOICE_STATE_UPDATE, {
         isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
@@ -442,7 +424,7 @@ export async function joinCallOnSession(
     session.client.send(MessageType.VOICE_LEAVE, { channelId });
     session.participants.removeVoiceState(mySessionId);
     audioProcessor.stopMicrophone();
-    const stoppedScreens = stopLocalScreenShares(screenAudioService, { teardown: true });
+    const stoppedScreens = stopLocalScreenShares({ teardown: true });
     videoService.stopCamera();
     webRtcManager.closeAllPeers();
     voiceStore.reset();

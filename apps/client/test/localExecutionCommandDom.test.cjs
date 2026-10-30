@@ -221,7 +221,7 @@ async function runSelectionPreflight(language) {
       check(status?.getAttribute('role') === 'status' && status.textContent.trim() === t('localExecution.preparing')
         && status.getBoundingClientRect().height > 0 && !!status.querySelector('.bot-loading-spinner'),
       'Mouse and keyboard selection immediately explain the tool check with a visible localized spinner');
-      view.botChat.renderComposer();
+      view.commands.botChat.renderComposer();
       check(root.querySelector('.bot-command-preparation')?.textContent.trim() === t('localExecution.preparing'),
         'The loading message remains visible while an already-authorized tool check is unresolved');
       check(operations().length === beforeOperations, 'Selection must not send a search, preview or invocation');
@@ -287,7 +287,7 @@ async function runSelectionPreflight(language) {
     check(document.querySelector('.chat-copy-toast--danger[role="alert"]')?.textContent.includes(t('localExecution.failure.permission_denied'))
       && !root.querySelector('[data-command-form] .bot-error'),
     'A failed check is reported in the shared alert toast instead of loose text inside the composer');
-    view.botChat.renderComposer();
+    view.commands.botChat.renderComposer();
     await flush();
     check(native.length === beforeDenial + 1 && !root.querySelector('[data-bot-input]').disabled,
       'Rendering a denied command neither traps its controls nor reopens consent');

@@ -30,10 +30,12 @@ recognized on servers. See the precautions in
 [Getting started](/en/primeiros-passos#keep-an-identity-backup).
 
 **Servers and settings** exports a `.monkybackup` protected by your chosen
-password. Select what to include/restore; this data can also accompany an
+password, which follows the same rule as the identity export. Select what to
+include/restore; this data can also accompany an
 identity export. Saved servers can include passwords and are not written
 in plain text in this backup. Without the chosen password, the file cannot
-be recovered.
+be recovered. Files from earlier versions still open; new ones only open in an
+updated Monky, and an earlier version reports them as an invalid backup file.
 
 When exporting the identity, check **Friends** to bring your friend list and,
 optionally, **Conversation history** to bring your direct messages. Under
@@ -161,10 +163,9 @@ frozen picture until you restore the window, and the broadcast resumes on its
 own. While the shared window is minimized or hidden, a yellow warning over your
 preview on the stage explains why. Only you see this warning.
 
-On the native path, the last viewer to stop also closes that profile's capture,
-encoder and sending pipeline, including the upload to the SFU.
-The source announcement remains available to watch again. The Chromium path
-preserves capture/preview and may continue uploading to the SFU.
+The last viewer to stop also closes that profile's capture, encoder and sending
+pipeline, including the upload to the SFU. The source announcement remains
+available to watch again.
 Signaling, connection control, voice and camera can still use the network.
 
 ### Native sharing and viewer quality
@@ -466,7 +467,11 @@ The soundboard automatically creates a default folder in your local Monky
 profile. You can change it under **Settings → Soundboard**; an existing folder
 selection is never replaced. For stickers, choose a folder in the corresponding
 tab. These are local libraries, not server folders. Configuring a folder does
-not upload all its files. See
+not upload all its files. Monky only reads sounds and stickers from folders
+chosen on this computer. A folder that arrived another way, such as by
+restoring a backup, is confirmed once: Monky asks when you open the soundboard
+or the stickers. If you decline, **Try again** (soundboard) or the reload-folder
+button (stickers) asks again; you can also choose another folder. See
 [Everyday Soundboard and sticker use](/en/usando-o-app#soundboard) for formats,
 sending and permissions.
 
@@ -910,6 +915,15 @@ connect in the background when **Automatically connect to servers in the list**
 is enabled. When migrating older settings with multiple destinations, only the
 most recent choice is kept. A short animation accompanies the transition from
 Home to the server, unless reduced motion is enabled.
+
+A background connection that fails is not repeated endlessly. If the server
+turns the sign-in down (wrong saved password, incompatible version or identity
+not accepted), Monky stops trying until you change the password in
+**Edit connection** (right-click the server in the rail), enter the server
+yourself or reopen the app. Other failures, such as an unstable network, a
+server that is still starting or one with no room right now (full, or with
+your identity's device limit reached), are retried at growing intervals of up
+to 10 minutes.
 
 ### Section navigation
 

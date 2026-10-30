@@ -2,15 +2,9 @@
 
 const assert = require('node:assert/strict');
 const { isDeepStrictEqual } = require('node:util');
-const { within } = require('./nativeDeadline.cjs');
+const { within, notifyObserver } = require('./asyncTools.cjs');
 
 const cancelled = () => new DOMException('The native PCM subscription was detached.', 'AbortError');
-const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  void promise.catch(() => {});
-  return { promise, resolve, reject };
-};
 
 class NativePcmCaptureHub {
   #module;
@@ -45,8 +39,7 @@ class NativePcmCaptureHub {
   }
 
   #report(error) {
-    try { this.#onError(error); }
-    catch (observerError) { console.error('Native PCM capture owner error observer failed:', observerError); }
+    notifyObserver('Native PCM capture owner error observer', this.#onError, error);
   }
 
   #event(owner, event) {
@@ -70,7 +63,8 @@ class NativePcmCaptureHub {
       if (admitted && typeof admitted.then === 'function') {
         // Detachment cancels only this subscriber's delivery credit, never its
         // separate native processing obligations or another subscriber's wait.
-        const delivery = deferred();
+        const delivery = Promise.withResolvers();
+        void delivery.promise.catch(() => {});
         subscription.admissions.add(delivery);
         void Promise.resolve(admitted).then(() => {
           if (subscription.admissions.delete(delivery)) delivery.resolve();
@@ -137,7 +131,7 @@ class NativePcmCaptureHub {
     assert.ok(this.#subscriptions.size < 4, 'A PCM source supports at most four simultaneous video renditions.');
     const subscription = {
       owner: null, onEvent, stopping: false, retirement: null,
-      detached: deferred(), admissions: new Set(),
+      detached: Promise.withResolvers(), admissions: new Set(),
     };
     this.#subscriptions.add(subscription);
     const ready = (async () => {

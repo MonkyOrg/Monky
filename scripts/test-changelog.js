@@ -27,6 +27,10 @@ console.assert(classifyGroup('fix(ui): ajuste (#12)') === 'correcoes', 'fix(scop
 console.assert(classifyGroup('refactor: limpa modulo') === 'outros', 'refactor -> outros');
 console.assert(classifyGroup('chore: bump deps') === 'outros', 'chore -> outros');
 console.assert(classifyGroup('mensagem sem tipo') === 'outros', 'sem tipo -> outros');
+// O marcador de breaking change antes do escopo (#714/#715) segue o tipo, como no versionamento.
+console.assert(classifyGroup('feat!(chat): editor Markdown') === 'novidades', 'feat!(scope) -> novidades');
+console.assert(classifyGroup('* fix!(ui): ajuste') === 'correcoes', 'bullet fix!(scope) -> correcoes');
+console.assert(classifyGroup('refactor!(chat): limpa') === 'outros', 'refactor!(scope) -> outros');
 console.log('✔ classifyGroup agrupou por tipo de commit');
 
 // 2. stripType: remove o prefixo de tipo, preserva o resto (inclui "(#NNN)").
@@ -34,6 +38,8 @@ console.assert(stripType('feat: changelog no client (#547)') === 'changelog no c
 console.assert(stripType('fix(ui): ajuste do modal') === 'ajuste do modal', 'remove fix(scope):');
 console.assert(stripType('* fix: bullet de squash') === 'bullet de squash', 'remove bullet + tipo');
 console.assert(stripType('texto puro') === 'texto puro', 'sem tipo fica igual');
+console.assert(stripType('feat!(chat): editor Markdown (#714)') === 'editor Markdown (#714)', 'remove feat!(scope):');
+console.assert(stripType('wip!(x): rascunho') === 'wip!(x): rascunho', 'tipo desconhecido fica igual');
 console.log('✔ stripType removeu o prefixo de tipo');
 
 // 3. extractEntries: prioriza linhas "#NNN:" curadas do corpo.
@@ -86,6 +92,29 @@ const commitBullets = [
 console.assert(
   JSON.stringify(extractEntries(commitBullets)) === JSON.stringify(['remove codigo morto', 'ajusta script']),
   'fallback para bullets, ignorando bullets de squash tipados'
+);
+
+// O squash do #714 trazia "* feat!(chat): ..." no corpo. O versionamento já o
+// contava como item do squash; o changelog o deixava vazar como texto cru, como
+// bullet comum ou colado na linha curada anterior.
+const squashMarcadorAntesDoEscopo = [
+  'feat!(chat): editor Markdown ao vivo (#714)',
+  '',
+  '* feat!(chat): add live Markdown editing',
+  '- ajusta o layout',
+].join('\n');
+console.assert(
+  JSON.stringify(extractEntries(squashMarcadorAntesDoEscopo)) === JSON.stringify(['ajusta o layout']),
+  'bullet de squash com ! antes do escopo nao vaza como descricao'
+);
+const curadaAntesDoSquash = ['feat: editor (#714)', '', '#711: editor ao vivo', '* feat!(chat): add live Markdown editing'].join('\n');
+console.assert(
+  JSON.stringify(extractEntries(curadaAntesDoSquash)) === JSON.stringify(['#711: editor ao vivo']),
+  'bullet de squash com ! antes do escopo encerra a linha curada'
+);
+console.assert(
+  buildChangelog([squashMarcadorAntesDoEscopo]).startsWith('#### ✨ Novidades'),
+  'assunto com ! antes do escopo entra em Novidades, como o minor/major do versionamento'
 );
 
 // Sem corpo util: cai para o assunto sem o tipo.

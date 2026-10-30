@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Sair da chamada pela bandeja, pela barra lateral ou pela miniatura não troca mais o chat que você está lendo por um palco vazio, e menus de contexto não fecham sozinhos quando outro servidor recebe mensagens.",
+  "en": "Leaving a call from the tray, the sidebar or the thumbnail no longer replaces the chat you are reading with an empty stage, and context menus no longer close when another server receives messages."
+}

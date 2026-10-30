@@ -226,6 +226,8 @@ export interface NativeScreenEndpointSnapshot {
 }
 
 export function loadRuntime(directory?: string): NativeScreenRuntime;
+/** Same checks as loadRuntime; the pinned files are hashed in slices so the caller's event loop keeps running. */
+export function loadRuntimeAsync(directory?: string): Promise<NativeScreenRuntime>;
 export function loadCaptureRuntime(directory?: string): Pick<NativeScreenRuntime, 'host' | 'obs' | 'capture'>;
 export class NativeScreenEndpoint {
   constructor(options: NativeScreenEndpointOptions);

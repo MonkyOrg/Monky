@@ -92,7 +92,7 @@ async function runAutomaticScreenPipSmoke() {
     return pending ? await pending.promise : true;
   } });
   replace(rtc, 'getScreenViewers', async () => []);
-  replace(rtc, 'getAverageP2pPing', async () => 0);
+  replace(rtc, 'getCallPing', () => 0);
   const session = sessionManager.create('automatic-pip-ui.test', 7890, 'PiP fixture');
   replace(session.client, 'send', () => {});
   sessionManager.activate(session.key);

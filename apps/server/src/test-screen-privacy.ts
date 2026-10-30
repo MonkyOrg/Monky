@@ -16,6 +16,40 @@ function screenState(messages: Received[], sessionId: string): Record<string, un
     .map(message => record(message.payload.voiceState)).reverse().find(state => state.sessionId === sessionId);
 }
 
+test('role-gated screens are republished once when their roles change, never on a sign-in or a refresh that changes nothing', async t => {
+  const f = await createApprovedBotFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Republish owner');
+  const publisher = await f.human('Republish publisher');
+  const viewer = await f.human('Republish viewer');
+  const room = text(records(record(owner.auth.payload.server).channels).find(channel => channel.type === 'VOICE')?.id);
+  const pub = text(record(publisher.auth.payload.currentUser).sessionId);
+  for (const user of [owner, publisher, viewer]) await user.peer.request(MessageType.VOICE_JOIN, { channelId: room });
+  const created = await owner.peer.request(MessageType.ROLE_CREATE, { name: 'Republished viewers', permissions: DEFAULT_PERMISSIONS });
+  const roleId = text(records(created.payload.roles).find(role => role.name === 'Republished viewers')?.id);
+  await publisher.peer.request(MessageType.VOICE_STATE_UPDATE, {
+    screenShareIds: ['republished'],
+    nativeScreenShares: [{
+      shareId: 'republished', instanceId: randomUUID(), audio: false,
+      video: { width: 1920, height: 1080, fps: 30, maxBitrateKbps: 8000 }, audience: { userIds: [], roleIds: [roleId] },
+    }],
+  });
+  await viewer.peer.barrier();
+  assertHidden(screenState(viewer.peer.messages, pub)!);
+  const republished = () => viewer.peer.messages.filter(message => message.type === MessageType.VOICE_STATE_CHANGED &&
+    record(message.payload.voiceState).sessionId === pub).length;
+  const before = republished();
+  await f.wsServer['screens'].refreshScreenRoles();
+  await f.human('Republish late member');
+  await f.wsServer['screens'].refreshScreenRoles();
+  await viewer.peer.barrier();
+  assert.equal(republished(), before, 'nothing changed, so nothing is resent to the whole room');
+  await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: viewer.id, roleId });
+  await viewer.peer.barrier();
+  assert.equal(republished(), before + 1, 'the grant republishes the screen once');
+  assert.equal(screenState(viewer.peer.messages, pub)?.isScreenSharing, true);
+});
+
 test('real sockets hide private screens from administrators, auth snapshots, late joins and bots; identity grants span devices', async t => {
   const f = await createApprovedBotFixture();
   t.after(() => f.dispose());
@@ -102,7 +136,7 @@ test('role grants refresh visibility; removal/deletion and withdrawal revoke exa
   assertHidden(screenState(viewer.peer.messages, pub)!);
   const grant = async () => {
     await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: viewer.id, roleId });
-    await f.wsServer['refreshScreenRoles']();
+    await f.wsServer['screens'].refreshScreenRoles();
     await viewer.peer.barrier();
     assert.equal(screenState(viewer.peer.messages, pub)?.isScreenSharing, true);
   };

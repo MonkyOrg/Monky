@@ -999,3 +999,81 @@ test('an active share confirms only after its replacement is live, and a failed 
   assert.equal(f.settingsStore.qualityPreset, 'NORMAL');
   assert.equal(f.document.querySelector('.chat-copy-toast'), null, 'The share already reported its own failure.');
 });
+
+test('encoder checks wait for the quality tab to be shown and stop when it is hidden', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const gate = deferred();
+  let probes = 0;
+  f.controls.encoding = () => { probes++; return gate.promise; };
+  f.mountQuality({ active: false });
+  await flush();
+  f.settingsStore.save();
+  await flush();
+  assert.equal(probes, 0, 'Settings opened on another tab must not start a native encoder.');
+  assert.equal(f.document.querySelector('.chat-copy-toast'), null);
+  f.quality.activate();
+  await flush();
+  assert.equal(probes, 1, 'Showing the quality tab checks the encoder once.');
+  assert.equal(control(f, 'screen-encoding-status').getAttribute('aria-busy'), 'true');
+  f.quality.deactivate();
+  assert.ok(f.traces.some(trace => trace[0] === 'cancel-encoding'), 'Hiding the tab cancels the automatic check in flight.');
+  gate.resolve(automaticAv1());
+  await flush();
+  f.quality.activate();
+  await flush();
+  assert.equal(probes, 2, 'Showing the tab again repeats only the cancelled check.');
+  assert.equal(control(f, 'screen-encoding-status').textContent, f.i18n.t('settings.screenEncodingReady', { codec: 'AV1' }));
+  f.quality.deactivate();
+  f.quality.activate();
+  await flush();
+  assert.equal(probes, 2, 'A finished check is not repeated by switching tabs.');
+});
+
+test('hiding the quality tab keeps verifying a preset the user chose', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.mountQuality();
+  await flush();
+  const gate = deferred();
+  f.controls.encoding = () => gate.promise;
+  choosePreset(f, 'HIGH');
+  await flush();
+  f.quality.deactivate();
+  assert.equal(f.traces.some(trace => trace[0] === 'cancel-encoding'), false, 'An explicit choice keeps verifying in the background.');
+  gate.resolve(automaticAv1());
+  await flush();
+  assert.equal(f.settingsStore.qualityPreset, 'HIGH');
+  assert.deepEqual(f.traces.filter(trace => trace[0] === 'preset'), [['preset', 'HIGH']]);
+});
+
+for (const reason of ['platform', 'runtime', 'ipc']) {
+  for (const language of ['en', 'pt-BR']) {
+    test(`without native capture (${reason}) the tab never probes or warns, and a preset still applies (${language})`, async t => {
+      const f = fixture(language);
+      t.after(() => f.close());
+      let probes = 0;
+      f.controls.encoding = async () => { probes++; return automaticAv1(); };
+      f.controls.capabilities = reason === 'ipc'
+        ? async () => { throw new Error('The native screen IPC boundary is unavailable.'); }
+        : async () => ({ capture: false, captureAudio: false, receive: false, backend: null, reason });
+      f.mountQuality();
+      await flush();
+      assert.equal(probes, 0, 'There is no encoder to start where capture is unavailable.');
+      assert.equal(f.document.querySelector('.chat-copy-toast'), null, 'Opening the tab must not report an error.');
+      assert.equal(control(f, 'screen-encoding-status').textContent, f.i18n.t('settings.screenEncodingCaptureUnavailable'));
+      assert.equal(control(f, 'screen-encoding-status').getAttribute('aria-busy'), 'false');
+      for (const id of ['screen-encoding-automatic', 'screen-encoding-manual', 'screen-encoding-hardware',
+        'screen-encoding-software', 'select-video-codec'])
+        assert.equal(control(f, id).disabled, true, `${id} cannot request a check that cannot run`);
+      choosePreset(f, 'HIGH');
+      await flush();
+      assert.equal(probes, 0);
+      assert.equal(f.settingsStore.qualityPreset, 'HIGH', 'Camera and audio quality still apply without screen capture.');
+      assert.equal(control(f, 'select-preset').value, 'HIGH');
+      assert.deepEqual(f.traces.filter(trace => trace[0] === 'preset'), [['preset', 'HIGH']]);
+      assert.equal(f.document.querySelector('.chat-copy-toast-label').textContent,
+        confirmation(f, 'settings.qualitySaved', 'HIGH'));
+    });
+  }
+}

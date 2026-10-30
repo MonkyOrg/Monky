@@ -41,8 +41,7 @@ function assertOwnedCleanup(trace, packets = 1) {
     'queuedAtFinish', 'pendingAtFinish', 'gateErrors', 'earlyFinish']) {
     assert.equal(trace[point], 0, point);
   }
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0, 'The session returned its capture slot');
 }
 
 function createDoubleWorker() {
@@ -100,7 +99,7 @@ test('unsupported and unavailable remain explicit without native discovery', asy
   let calls = 0;
   const forbidden = new Proxy({}, { get() { calls++; throw new Error('No native access permitted'); } });
   const events = [];
-  const session = createPacketCaptureFactory(forbidden, 'darwin')({}, (event) => events.push(event));
+  const session = createPacketCaptureFactory(forbidden, 'linux')({}, (event) => events.push(event));
   await assert.rejects(session.ready, { code: 'ERR_AUDIO_UNSUPPORTED' });
   assert.equal((await session.stop()).state, 'failed');
   assert.equal(calls, 0);
@@ -210,8 +209,7 @@ test('startup error rejects ready, closes, and releases its packet session', asy
   assert.equal(closed.error.code, 'ERR_AUDIO_STARTUP');
   assert.equal(binding.activeWorkers(), 0);
   assert.deepEqual(events, ['error', 'closed']);
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0);
 });
 
 test('invalid selected window and unsupported actual format never become success-shaped', async () => {
@@ -399,14 +397,13 @@ test('stop cancels a full admission wait without requiring callback promises to 
   binding.releaseGate();
   await filled;
   assert.equal(session.getStats().queuedPackets, 32);
-  assert.equal(binding.legacyStart(), false);
+  assert.equal(binding.captureLeases(), 1);
   const stopped = await session.stop();
   assert.equal(stopped.state, 'closed');
   assert.equal(stopped.queuedPackets, 0);
   assert.equal(stopped.overflowCount, 0);
   assert.equal(binding.activeWorkers(), 0);
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0);
   for (const resolve of pending) resolve();
   await wait(1);
   assert.equal(session.getStats().queuedPackets, 0, 'Late receipts must not release capture credits twice.');
@@ -550,29 +547,22 @@ test('a refilled real TSFN is not a bounded callback burst: PCM waits for downst
   assertOwnedCleanup(binding.trace(), 96);
 });
 
-test('packet sessions coexist while legacy capture stays exclusive on the real production lease', async () => {
+test('independent packet sessions coexist on the real production lease', async () => {
   binding.configure(4);
-  assert.equal(binding.legacyStart(), true);
-  const busy = binding.createPacketCapture({}, () => {});
-  await assert.rejects(busy.ready, { code: 'ERR_AUDIO_BUSY' });
-  await busy.closed;
-  assert.equal(binding.legacyStart(), false);
-  binding.legacyStop();
   const session = binding.createPacketCapture({}, () => {});
   await session.ready;
-  assert.equal(binding.legacyStart(), false);
-  binding.legacyStop(); // An unowned legacy stop must not stop packet acquisition.
+  assert.equal(binding.captureLeases(), 1);
   assert.equal(binding.activeWorkers(), 1);
   // Each shared application owns its own packet session (#253).
   const second = binding.createPacketCapture({}, () => {});
   await second.ready;
   assert.equal(binding.activeWorkers(), 2);
-  assert.equal(binding.legacyStart(), false);
+  assert.equal(binding.captureLeases(), 2);
   await second.stop();
   assert.equal(binding.activeWorkers(), 1, 'Stopping one session leaves the other capturing');
+  assert.equal(binding.captureLeases(), 1);
   await session.stop();
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0);
 });
 
 test('packet sessions are bounded and a released slot is reusable', async () => {
@@ -590,8 +580,66 @@ test('packet sessions are bounded and a released slot is reusable', async () => 
   await reused.ready;
   for (const session of [...sessions, reused]) await session.stop();
   assert.equal(binding.activeWorkers(), 0);
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0);
+});
+
+test('live packet sessions never hold libuv threadpool threads, on the main thread or in a Worker', () => {
+  // Each capture used to park a pool thread until it ended: with the default four threads, live
+  // shares stalled fs, dns, crypto and zlib and a fifth session could not even confirm its stop.
+  const result = spawnSync(process.execPath, ['-e', `
+    const assert = require('node:assert/strict');
+    const { pbkdf2 } = require('node:crypto');
+    const fs = require('node:fs');
+    const { once } = require('node:events');
+    const { Worker } = require('node:worker_threads');
+    const [doublePath, timeoutMs] = [process.argv[1], Number(process.argv[2])];
+    const binding = require(doublePath);
+    async function within(promise, label) {
+      let timer;
+      try {
+        return await Promise.race([promise, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(label + ' waited behind live packet sessions')), timeoutMs);
+        })]);
+      } finally { clearTimeout(timer); }
+    }
+    const poolIsFree = async () => {
+      await within(fs.promises.readFile(doublePath), 'fs.promises.readFile');
+      await within(new Promise((resolve, reject) => pbkdf2('monky', 'salt', 1, 32, 'sha256',
+        (error, key) => error ? reject(error) : resolve(key))), 'crypto.pbkdf2');
+    };
+    (async () => {
+      binding.configure(4);
+      const sessions = Array.from({ length: 8 }, () => binding.createPacketCapture({}, () => {}));
+      await within(Promise.all(sessions.map(session => session.ready)), 'ready');
+      assert.equal(binding.activeWorkers(), 8);
+      await poolIsFree();
+      assert.equal((await within(sessions.pop().stop(), 'stop')).state, 'closed');
+      assert.equal(binding.activeWorkers(), 7, 'Stopping one session leaves the others capturing');
+      for (const session of sessions) await within(session.stop(), 'stop');
+      assert.equal(binding.captureLeases(), 0);
+
+      const worker = new Worker(\`
+        const { parentPort, workerData } = require('node:worker_threads');
+        const binding = require(workerData);
+        const sessions = Array.from({ length: 8 }, () => binding.createPacketCapture({}, () => {}));
+        Promise.all(sessions.map(session => session.ready)).then(() => parentPort.postMessage('ready'));
+      \`, { eval: true, workerData: doublePath });
+      assert.equal((await within(once(worker, 'message'), 'Worker sessions'))[0], 'ready');
+      assert.equal(binding.activeWorkers(), 8);
+      await poolIsFree();
+      await within(worker.terminate(), 'Worker termination');
+      assert.equal(binding.activeWorkers(), 0);
+      assert.equal(binding.captureLeases(), 0);
+      console.log('threadpool-free');
+    })().catch(error => {
+      console.error(error.stack);
+      process.exit(1);
+    });
+  `, doublePath, '2000'], {
+    encoding: 'utf8', timeout: 20000, env: { ...process.env, UV_THREADPOOL_SIZE: '4' },
+  });
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.match(result.stdout, /threadpool-free/u);
 });
 
 test('runtime failure and callback exception close only after the worker and queue drain', async () => {
@@ -646,8 +694,7 @@ test('environment teardown cancels a live double without orphaned work or shared
     assert.equal(binding.activeWorkers(), 1);
     await worker.terminate();
     assert.equal(binding.activeWorkers(), 0);
-    assert.equal(binding.legacyStart(), true);
-    binding.legacyStop();
+    assert.equal(binding.captureLeases(), 0);
   }
 });
 

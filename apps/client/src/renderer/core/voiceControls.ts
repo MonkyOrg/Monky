@@ -3,11 +3,11 @@ import { voiceStore } from '../stores/voiceStore';
 import { settingsStore } from '../stores/settingsStore';
 import { audioProcessor } from './AudioProcessor';
 import { webRtcManager } from './WebRtcManager';
-import { callClient } from './serverConnection';
+import { leaveCurrentCall } from './serverConnection';
+import { callClient, callServer } from './callScope';
 import { soundEffects } from './SoundEffects';
 import { sessionManager } from './SessionManager';
 import { serverStore } from '../stores/serverStore';
-import { participantManager } from './ParticipantManager';
 import { t } from '../i18n';
 import { afkChannelIdOf } from '../utils/voiceRooms';
 
@@ -17,16 +17,14 @@ export function isViewingCallServer(): boolean {
 
 export function updateLocalSpeaking(speaking: boolean): void {
   voiceStore.setSpeaking(speaking);
-  const key = voiceStore.voiceSessionKey;
-  const call = key ? sessionManager.get(key) : undefined;
-  const user = key ? call?.serverStore.currentUser : serverStore.currentUser;
-  const participants = key ? call?.participants : participantManager;
-  if (user && participants) {
+  const call = callServer();
+  const user = call?.serverStore.currentUser;
+  if (call && user) {
     const sessionId = user.sessionId || user.id;
     const inCall = voiceStore.currentVoiceChannelId !== null
-      && participants.get(sessionId)?.voiceState?.channelId === voiceStore.currentVoiceChannelId;
+      && call.participants.get(sessionId)?.voiceState?.channelId === voiceStore.currentVoiceChannelId;
     // Physical capture can already be unmuted while its older server echo is still muted.
-    participants.setSpeaking(sessionId, voiceStore.isSpeaking && inCall, voiceStore);
+    call.participants.setSpeaking(sessionId, voiceStore.isSpeaking && inCall, voiceStore);
   }
 }
 
@@ -52,9 +50,8 @@ export function getVoiceControlModeration(): {
 
 /** Whether the call sits in its server's AFK room, where the server mutes every microphone. */
 export function isCallInAfkChannel(): boolean {
-  const key = voiceStore.voiceSessionKey;
-  const store = key ? sessionManager.get(key)?.serverStore : serverStore;
-  return !!voiceStore.currentVoiceChannelId && voiceStore.currentVoiceChannelId === afkChannelIdOf(store?.serverDetails);
+  return !!voiceStore.currentVoiceChannelId
+    && voiceStore.currentVoiceChannelId === afkChannelIdOf(callServer()?.serverStore.serverDetails);
 }
 
 export function toggleMicrophoneMute(): void {
@@ -97,4 +94,13 @@ export function toggleAudioDeafen(): void {
 export function toggleSoundboardMute(): void {
   settingsStore.soundboardMuted = !settingsStore.soundboardMuted;
   settingsStore.save();
+}
+
+/**
+ * Hangs up from the stage, the sidebar row, the tray or the taskbar thumbnail.
+ * It never goes through a view: a stage that is not on screen would paint
+ * itself over the chat.
+ */
+export function leaveCall(): void {
+  if (voiceStore.currentVoiceChannelId) leaveCurrentCall();
 }

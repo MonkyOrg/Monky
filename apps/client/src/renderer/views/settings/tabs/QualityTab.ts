@@ -205,7 +205,7 @@ export class QualityTab {
             <small id="screen-auto-pip-description" style="display: block; color: var(--text-muted);">${t('settings.screenAutoPipDesc')}</small>
           </div>
           <label class="toggle-switch" aria-label="${escapeHtml(t('settings.screenAutoPipLabel'))}">
-            <input id="checkbox-screen-auto-pip" type="checkbox" aria-describedby="screen-auto-pip-description" ${settingsStore.screenShareAutoPictureInPicture ? 'checked' : ''}>
+            <input id="checkbox-screen-auto-pip" type="checkbox" role="switch" aria-describedby="screen-auto-pip-description" ${settingsStore.screenShareAutoPictureInPicture ? 'checked' : ''}>
             <span class="toggle-slider"></span>
           </label>
         </div>
@@ -218,7 +218,7 @@ export class QualityTab {
             <small id="screen-preview-focus-description" style="display: block; color: var(--text-muted);">${t('settings.screenPreviewPauseDesc')}</small>
           </div>
           <label class="toggle-switch" aria-label="${escapeHtml(t('settings.screenPreviewPauseLabel'))}">
-            <input id="checkbox-screen-preview-focus" type="checkbox" aria-describedby="screen-preview-focus-description" ${settingsStore.screenSharePreviewPauseWhenUnfocused ? 'checked' : ''}>
+            <input id="checkbox-screen-preview-focus" type="checkbox" role="switch" aria-describedby="screen-preview-focus-description" ${settingsStore.screenSharePreviewPauseWhenUnfocused ? 'checked' : ''}>
             <span class="toggle-slider"></span>
           </label>
         </div>
@@ -236,7 +236,7 @@ export class QualityTab {
               <div style="font-size: 11px; color: var(--text-muted);">${t('settings.telemetryDesc')}</div>
             </div>
             <label class="toggle-switch" aria-label="${escapeHtml(t('settings.telemetryLabel'))}">
-              <input id="checkbox-screen-telemetry" type="checkbox" ${settingsStore.screenShareTelemetryEnabled ? 'checked' : ''}>
+              <input id="checkbox-screen-telemetry" type="checkbox" role="switch" ${settingsStore.screenShareTelemetryEnabled ? 'checked' : ''}>
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -645,6 +645,15 @@ export class QualityTab {
     bindInput('screenHeight', 'screenHeight');
     bindResolution('camera');
     bindResolution('screen');
+  }
+
+  /** Encoder checks start a native encoder, so they run only while this tab is shown (#490). */
+  public activate(): void {
+    this.encoding.activate();
+  }
+
+  public deactivate(): void {
+    this.encoding.deactivate();
   }
 
   public cleanup(): void {

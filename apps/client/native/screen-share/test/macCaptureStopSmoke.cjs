@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { within } = require('../runtime/nativeDeadline.cjs');
+const { within } = require('../runtime/asyncTools.cjs');
 const { createMacAudioSource } = require('../../screen-audio/test/macAudioSource.cjs');
 
 async function main() {

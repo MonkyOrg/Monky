@@ -4,7 +4,8 @@ import { settingsStore } from '../../stores/settingsStore';
 import { t, type TranslationKey } from '../../i18n';
 import { NOISE_SUPPRESSION_MODES, isNoiseSuppressionMode, type NoiseSuppressionMode } from '../../utils/audioPreferences';
 import { escapeHtml } from '../../utils/html';
-import { smoothScrollIntoView } from '../../utils/scroll';
+import { createTypeahead, focusItem, nextIndex } from '../../utils/rovingFocus';
+import { reportError } from '../../utils/feedback';
 
 const labels: Record<NoiseSuppressionMode, TranslationKey> = {
   rnnoise: 'audioNoise.rnnoise',
@@ -74,8 +75,7 @@ export class NoiseSuppressionControl {
     const cards = Array.from(root.querySelectorAll<HTMLButtonElement>('button[data-noise-mode]'));
     const abort = new AbortController();
     let busy = false;
-    let search = '';
-    let lastSearch = 0;
+    const typeahead = createTypeahead();
     const refresh = () => {
       const mode = settingsStore.noiseSuppressionMode;
       if (select) {
@@ -105,7 +105,8 @@ export class NoiseSuppressionControl {
       } catch (error) {
         if (!abort.signal.aborted) {
           console.error('[NoiseSuppression] Could not apply the selected engine:', error);
-          status.textContent = t('audioNoise.selectionFailed');
+          status.textContent = '';
+          reportError(t('audioNoise.selectionFailed'));
         }
       } finally {
         busy = false;
@@ -126,22 +127,13 @@ export class NoiseSuppressionControl {
     }
     const keyboard = (event: KeyboardEvent) => {
       const available = cards.filter((card) => !card.disabled);
-      const index = available.findIndex((card) => card === document.activeElement);
-      if (index < 0 || !available.length) return;
-      let next: HTMLButtonElement | undefined;
-      if (event.key === 'ArrowDown') next = available[(index + 1) % available.length];
-      else if (event.key === 'ArrowUp') next = available[(index + available.length - 1) % available.length];
-      else if (event.key === 'Home') next = available[0];
-      else if (event.key === 'End') next = available[available.length - 1];
-      else if (event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) {
-        search = performance.now() - lastSearch < 600 ? search + event.key : event.key;
-        lastSearch = performance.now();
-        next = available.find((card) => card.textContent?.trim().toLocaleLowerCase().startsWith(search.toLocaleLowerCase()));
-      }
+      const current = available.findIndex((card) => card === document.activeElement);
+      if (current < 0) return;
+      const index = nextIndex(event.key, current, available.length);
+      const next = index === null ? typeahead(event, available) : available[index];
       if (next) {
         event.preventDefault();
-        next.focus({ preventScroll: true });
-        smoothScrollIntoView(next, { block: 'nearest' });
+        focusItem(next);
       }
     };
     root.addEventListener('keydown', keyboard);

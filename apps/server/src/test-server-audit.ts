@@ -16,6 +16,7 @@ import {
   channelChanges, channelTreeMoves, movedItems, permissionChanges, serverSettingsChanges,
 } from './application/services/serverAuditChanges';
 import type { ServerRecord } from './domain/entities';
+import { SERVER_SETTING_DEFAULTS } from './domain/serverSettings';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqliteServerAuditRepository } from './infrastructure/database/SqliteServerAuditRepository';
 import { LanBroadcaster } from './infrastructure/discovery/LanBroadcaster';
@@ -89,7 +90,9 @@ test('changes describe what differs and never store secrets', () => {
   assert.deepEqual(permissionChanges(Permission.SPEAK | Permission.MUTE_MEMBERS, 0), [
     { field: 'permissionsRevoked', after: ['SPEAK', 'MUTE_MEMBERS'] },
   ]);
-  const server: ServerRecord = { id: 's', name: 'Old', passwordHash: 'hash-1', createdAt: 1, maxUsers: 10, iconPath: 'a.png' };
+  const server: ServerRecord = {
+    ...SERVER_SETTING_DEFAULTS, id: 's', name: 'Old', passwordHash: 'hash-1', createdAt: 1, maxUsers: 10, iconPath: 'a.png',
+  };
   const changes = serverSettingsChanges(server, { ...server, name: 'New', passwordHash: 'hash-2', iconPath: 'b.png', voiceMode: 'sfu' });
   assert.deepEqual(changes, [
     { field: 'name', before: 'Old', after: 'New' },

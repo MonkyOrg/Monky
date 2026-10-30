@@ -60,6 +60,14 @@ Json settings() {
   return {{"name", "Test"}, {"hasPassword", false}, {"voiceMode", "p2p"},
           {"voiceTransition", {{"id", "transition"}, {"from", "sfu"}, {"to", "p2p"}}}};
 }
+// The admission reply for a room other than the default one.
+Json admissionIn(const std::string& channel) {
+  auto value = admission(false);
+  value["channelId"] = channel;
+  value["voiceState"]["channelId"] = channel;
+  value["participants"][0]["voiceState"]["channelId"] = channel;
+  return value;
+}
 
 struct Fixture {
   ProtocolSession::Time now{};
@@ -311,6 +319,14 @@ void rpcCorrelationAndCancellation() {
   f.receive(message::SFU_ROUTER_RTP_CAPABILITIES,
             {{"channelId", "room"}, {"rtpCapabilities", {{"codecs", Json::array()}}}}, cancelled);
   check(results.size() == 5, "Cancelled RPC completed twice");
+  const auto quiet = f.count(SessionEventKind::failure);
+  f.receive(message::SERVER_ERROR,
+            {{"code", std::string(monky::protocol::error::INTERNAL_ERROR)}, {"message", "Too late"}}, cancelled);
+  check(results.size() == 5 && f.count(SessionEventKind::failure) == quiet,
+        "The refusal of a request already given up on was reported");
+  f.receive(message::SERVER_ERROR,
+            {{"code", std::string(monky::protocol::error::INTERNAL_ERROR)}, {"message", "Unknown"}}, "never-sent");
+  check(f.count(SessionEventKind::failure) == quiet + 1, "An error for no request of ours went unreported");
   f.capabilities(callback);
   f.capabilities(callback);
   f.session.disconnected(f.session.connection(), f.now);
@@ -487,6 +503,28 @@ void adversarialLifecycleEdges() {
   restricted.receive(message::VOICE_USER_LEFT, departure());
   check(restricted.session.phase() == SessionPhase::joining, "Old-room departure cancelled administrative move");
 
+  // A move takes along a call, or the admission on its way to one. Arriving
+  // after a leave it crossed, or with no call at all, it must start none.
+  Fixture admitting;
+  admitting.auth();
+  admitting.session.join("room", admitting.now);
+  admitting.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+  check(admitting.session.phase() == SessionPhase::joining && admitting.session.desiredChannel() == "other" &&
+        admitting.sent.back()["payload"]["channelId"] == "other", "Administrative move during admission not followed");
+  Fixture left;
+  left.auth();
+  left.join();
+  left.session.leave();
+  const auto leaveSent = left.sent.size();
+  left.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+  check(left.sent.size() == leaveSent && left.session.phase() == SessionPhase::ready &&
+        !left.session.desiredChannel(), "Administrative move rejoined a call that was left");
+  Fixture idle;
+  idle.auth();
+  const auto idleSent = idle.sent.size();
+  idle.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+  check(idle.sent.size() == idleSent && !idle.session.desiredChannel(), "Administrative move started a call");
+
   Fixture peer;
   peer.auth();
   peer.join(false);
@@ -648,6 +686,311 @@ void synchronousReentrancy() {
   check(!abandoned.session.admission() && abandoned.count(SessionEventKind::admitted) == 0 &&
         abandoned.count(SessionEventKind::rtcSignal) == 0, "Queued event resurrected a reentrantly departed call");
 }
+
+// A newer server sends values and fields this client has no use for: they pass
+// unread, never a reason to refuse the session or the call (Tolerant Reader).
+void toleratesServerGrowth() {
+  Fixture f;
+  f.open();
+  const auto id = f.lastId();
+  f.receive(message::AUTH_CHALLENGE, {{"nonce", std::string(64, '1')}}, id);
+  auto grown = authenticated();
+  auto forum = room("forum");
+  forum["type"] = "FORUM";
+  Json stage{{"id", "stage"}, {"serverId", "server"}, {"name", "Stage"}, {"type", "STAGE"}};
+  grown["server"]["channels"].push_back(forum);
+  grown["server"]["channels"].push_back(stage);
+  grown["server"].erase("createdAt");
+  grown["server"].erase("maxUsers");
+  // Other members and the server's calls are read by no part of this client.
+  grown["server"]["members"].push_back({{"id", "away"}, {"status", "AWAY"}, {"brb", true}});
+  auto idle = voice("peer", "peer:idle", "afk");
+  idle["connectionHealth"] = "idle";
+  idle.erase("isSpeaking");
+  grown["server"]["voiceStates"] = {{"peer:idle", idle}, {"peer:next", {{"connectionHealth", "warming"}}}};
+  grown["currentUser"]["status"] = "AWAY";
+  grown["currentUser"].erase("clientId");
+  grown["currentUser"]["customStatus"] = {{"color", "#33aa66"}, {"showEmoji", false}, {"showTag", false}};
+  f.receive(message::AUTH_SUCCESS, grown, id);
+  check(f.session.authentication().has_value(), "A forum, an idle call or a new status refused the session");
+  check(f.count(SessionEventKind::failure) == 0, "Unread server growth was reported as malformed");
+
+  // Every channel is listed; only voice rooms take a call.
+  f.session.join("forum", f.now);
+  check(f.sentCount(message::VOICE_JOIN) == 0 && f.session.phase() == SessionPhase::ready &&
+        f.events.back().failure->code == monky::protocol::error::CHANNEL_NOT_FOUND, "A forum was joined as a voice room");
+  const auto refused = f.count(SessionEventKind::failure);
+  auto created = room("posts");
+  created["type"] = "FORUM";
+  created.erase("allowedRoleIds");
+  f.receive(message::CHANNEL_CREATED, {{"channel", created}});
+  check(f.count(SessionEventKind::failure) == refused && f.count(SessionEventKind::channelsChanged) == 1,
+        "A new forum was refused instead of listed");
+
+  // A listen-only call is idle, and a member's voice state lacks fields only
+  // other clients draw.
+  f.session.join("room", f.now);
+  auto roster = admission();
+  roster["participants"][1]["voiceState"]["connectionHealth"] = "idle";
+  roster["participants"][1]["voiceState"].erase("isCameraOn");
+  roster["participants"][1]["user"] = {{"id", "peer"}, {"status", "AWAY"}};
+  roster["participants"][2]["voiceState"]["screenShareIds"] = "not read";
+  f.receive(message::VOICE_USER_JOINED, roster, f.lastId());
+  check(f.session.phase() == SessionPhase::admitted, "An idle participant refused the admission");
+  auto health = voice("peer", "peer:a");
+  health["connectionHealth"] = "a future health";
+  f.receive(message::VOICE_STATE_CHANGED, {{"voiceState", health}});
+  auto arrival = Json{{"channelId", "afk"}, {"userId", "away"}, {"sessionId", "away:a"},
+                      {"voiceState", voice("away", "away:a", "afk")}, {"user", {{"id", "away"}}}};
+  arrival["voiceState"]["connectionHealth"] = "idle";
+  f.receive(message::VOICE_USER_JOINED, arrival);
+  check(f.count(SessionEventKind::failure) == refused, "Call health or a listed room's arrival was refused");
+
+  // Signals for screens, or of kinds yet to come, are none of a voice client's business.
+  const auto routed = f.count(SessionEventKind::rtcSignal);
+  auto watch = offer();
+  watch["signalType"] = "screen-watch";
+  watch.erase("sdp");
+  watch["streamId"] = "screen";
+  f.receive(message::RTC_SIGNAL, watch);
+  auto future = offer();
+  future["signalType"] = "a future signal";
+  f.receive(message::RTC_SIGNAL, future);
+  check(f.count(SessionEventKind::failure) == refused && f.count(SessionEventKind::rtcSignal) == routed,
+        "A signal this client does not use was reported or routed");
+  auto screenAudio = offer();
+  screenAudio["signalType"] = "screen-audio-meta";
+  screenAudio.erase("sdp");
+  screenAudio["streamId"] = "screen";
+  f.receive(message::RTC_SIGNAL, screenAudio);
+  check(f.count(SessionEventKind::rtcSignal) == routed + 1, "Screen audio metadata no longer reaches the engine");
+  screenAudio.erase("streamId");
+  f.receive(message::RTC_SIGNAL, screenAudio);
+  check(f.count(SessionEventKind::failure) == refused + 1, "A signal the engine reads was accepted malformed");
+}
+
+// Speak is granted or denied per room. Denied, the microphone stays closed
+// whatever the user's own choice, and the denial leaves with the call.
+void speakPermissionFollowsTheRoom() {
+  Fixture f;
+  f.auth();
+  f.session.join("room", f.now);
+  auto denied = admission(false);
+  denied["participants"][0]["voiceState"]["permissionMuted"] = true;
+  f.receive(message::VOICE_USER_JOINED, denied, f.lastId());
+  check(f.session.policy().permissionMuted && f.session.policy().suppressMicrophone(),
+        "A room without Speak kept the microphone open");
+  check(!f.session.policy().muted, "A denied permission is not the user's own mute");
+  const auto published = std::find_if(f.events.rbegin(), f.events.rend(), [](const SessionEvent& event) {
+    return event.kind == SessionEventKind::policyChanged;
+  })->payload;
+  check(published.at("permissionMuted") == true && published.at("suppressMicrophone") == true &&
+        published.at("muted") == false, "The policy event hides why the microphone is closed");
+  f.session.setMuted(false);
+  check(f.session.policy().suppressMicrophone(), "Unmuting overrode a denied Speak permission");
+
+  auto granted = voice();
+  granted["permissionMuted"] = false;
+  f.receive(message::VOICE_STATE_CHANGED, {{"voiceState", granted}});
+  check(!f.session.policy().suppressMicrophone(), "Granting Speak kept the microphone closed");
+  auto again = voice();
+  again["permissionMuted"] = true;
+  f.receive(message::VOICE_STATE_CHANGED, {{"voiceState", again}});
+  check(f.session.policy().permissionMuted, "Denying Speak again was ignored");
+
+  const auto before = f.events.size();
+  f.session.leave();
+  check(!f.session.policy().permissionMuted && !f.session.policy().suppressMicrophone(),
+        "The denial outlived the room");
+  check(f.events.size() >= before + 2 && f.events.back().kind == SessionEventKind::policyChanged &&
+        f.events.at(f.events.size() - 2).kind == SessionEventKind::teardown,
+        "The lifted denial must be published after the call is torn down");
+
+  // Servers from before the permission existed never send it: nothing is denied.
+  f.session.join("room", f.now);
+  f.receive(message::VOICE_USER_JOINED, admission(false), f.lastId());
+  check(!f.session.policy().permissionMuted, "An absent permission was read as a denial");
+  auto malformed = voice();
+  malformed["permissionMuted"] = "yes";
+  const auto failures = f.count(SessionEventKind::failure);
+  f.receive(message::VOICE_STATE_CHANGED, {{"voiceState", malformed}});
+  check(f.count(SessionEventKind::failure) == failures + 1 && !f.session.policy().permissionMuted,
+        "A malformed permission was guessed instead of refused");
+}
+
+// The server has already moved the membership: the call follows with a join
+// alone. A leave would name the old room, and one crossing a second move inside
+// the same round trip took the client out of the call it had just been moved to.
+void movesFollowWithoutLeaving() {
+  Fixture f;
+  f.auth();
+  f.receive(message::CHANNEL_CREATED, {{"channel", room("third")}});
+  f.join(false);
+  const auto joins = f.sentCount(message::VOICE_JOIN);
+  f.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+  check(f.sentCount(message::VOICE_LEAVE) == 0, "Following a move named the old room");
+  check(f.session.phase() == SessionPhase::joining && f.session.desiredChannel() == "other" &&
+        f.sentCount(message::VOICE_JOIN) == joins + 1 && f.sent.back()["payload"]["channelId"] == "other",
+        "The move was not followed with a join");
+  const auto first = f.lastId();
+  f.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "third"}});
+  check(f.sentCount(message::VOICE_LEAVE) == 0 && f.sentCount(message::VOICE_JOIN) == joins + 2 &&
+        f.session.desiredChannel() == "third", "A second move was not followed with a join alone");
+  const auto second = f.lastId();
+  f.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "third"}});
+  check(f.sentCount(message::VOICE_JOIN) == joins + 2, "A repeated move asked for the same room twice");
+
+  // The room of the replaced join is no longer the client's to see.
+  const auto failures = f.count(SessionEventKind::failure);
+  f.receive(message::SERVER_ERROR, {{"code", std::string(monky::protocol::error::CHANNEL_NOT_FOUND)},
+                                    {"message", "Canal não encontrado"}}, first);
+  check(f.count(SessionEventKind::failure) == failures && f.session.phase() == SessionPhase::joining,
+        "The refused join that a second move replaced ended or reported the move");
+  f.receive(message::VOICE_USER_LEFT, departure());
+  f.receive(message::VOICE_USER_JOINED, {{"channelId", "third"}, {"userId", "self"}, {"sessionId", "self:device"},
+                                         {"voiceState", voice("self", "self:device", "third")}}, "administrator");
+  check(f.session.phase() == SessionPhase::joining, "The move's own announcements disturbed the admission");
+  f.receive(message::VOICE_USER_JOINED, admissionIn("third"), second);
+  check(f.session.phase() == SessionPhase::admitted && f.session.admission()->channelId == "third",
+        "The followed move did not admit the call");
+  check(f.sentCount(message::VOICE_LEAVE) == 0, "Two moves sent a leave");
+}
+
+// In rooms the client sees, the join a second move replaced is admitted all
+// the same, and takes the membership out of the last room before the second
+// join lands. The client hears of that departure first; the second join's own
+// answer decides, so its refusal leaves and the server is left with no member.
+void crossedMovesWaitForTheirJoin() {
+  const auto crossMoves = [](Fixture& f) {
+    f.auth();
+    f.receive(message::CHANNEL_CREATED, {{"channel", room("third")}});
+    f.join(false);
+    f.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+    const auto replaced = f.lastId();
+    f.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "third"}});
+    const auto following = f.lastId();
+    auto left = departure();
+    left["channelId"] = "third";
+    f.receive(message::VOICE_USER_LEFT, left);
+    f.receive(message::VOICE_USER_JOINED, admissionIn("other"), replaced);
+    return following;
+  };
+  Fixture f;
+  const auto following = crossMoves(f);
+  check(f.session.phase() == SessionPhase::joining && f.session.desiredChannel() == "third",
+        "The departure the replaced join caused ended the move it crossed");
+  auto left = departure();
+  left["channelId"] = "other";
+  f.receive(message::VOICE_USER_LEFT, left);
+  f.receive(message::VOICE_USER_JOINED, admissionIn("third"), following);
+  check(f.session.phase() == SessionPhase::admitted && f.session.admission()->channelId == "third",
+        "Crossed moves left the server with a member the client no longer calls from");
+  check(f.sentCount(message::VOICE_LEAVE) == 0, "Following crossed moves sent a leave");
+
+  Fixture refused;
+  const auto refusedJoin = crossMoves(refused);
+  refused.receive(message::SERVER_ERROR, {{"code", std::string(monky::protocol::error::CHANNEL_NOT_FOUND)},
+                                          {"message", "Canal não encontrado"}}, refusedJoin);
+  check(refused.sentCount(message::VOICE_LEAVE) == 1 && refused.session.phase() == SessionPhase::ready &&
+        !refused.session.desiredChannel(), "A refused join kept the membership the replaced one was given");
+
+  // A room the client saw only from inside is withdrawn once the replaced join
+  // takes it out, and that can come first: the leave still has to go out.
+  Fixture withdrawn;
+  crossMoves(withdrawn);
+  withdrawn.receive(message::CHANNEL_DELETED, {{"channelId", "third"}});
+  check(withdrawn.sentCount(message::VOICE_LEAVE) == 1 && withdrawn.session.phase() == SessionPhase::ready &&
+        !withdrawn.session.desiredChannel(), "A withdrawn room kept the membership the replaced join was given");
+
+  // Once the call is up, its own departure still ends it.
+  f.receive(message::VOICE_USER_LEFT, departure());
+  check(f.session.phase() == SessionPhase::admitted, "A departure from another room ended the call");
+  left["channelId"] = "third";
+  f.receive(message::VOICE_USER_LEFT, left);
+  check(!f.session.admission() && !f.session.desiredChannel(), "The admitted call outlived its own departure");
+}
+
+// The server admits a join without looking for a kick it crossed, so a join the
+// client gave up on can still be given a membership. With nothing newer of its
+// own, the client leaves; a leave ends any room, so a pending join stops it
+// (crossedMovesWaitForTheirJoin answers a replaced join with none sent).
+void admittedRetiredJoinsLeave() {
+  Fixture f;
+  f.auth();
+  f.join(false);
+  f.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+  const auto following = f.lastId();
+  f.receive(message::ADMIN_KICK_VOICE, {{"targetSessionId", "self:device"}});
+  check(f.sentCount(message::VOICE_LEAVE) == 0 && !f.session.desiredChannel(), "The kick itself sent a leave");
+  f.receive(message::VOICE_USER_JOINED, admissionIn("other"), following);
+  check(f.sentCount(message::VOICE_LEAVE) == 1 && f.sent.back()["payload"]["channelId"] == "other" &&
+        f.session.phase() == SessionPhase::ready && !f.session.admission(),
+        "A kick crossing a join left the server holding the membership the join was given");
+  f.receive(message::VOICE_USER_JOINED, admissionIn("other"), following);
+  check(f.sentCount(message::VOICE_LEAVE) == 1, "One admitted join was left twice");
+
+  // A newer intention owns whatever the server holds: it is not left.
+  Fixture rejoined;
+  rejoined.auth();
+  rejoined.join(false);
+  rejoined.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+  const auto crossed = rejoined.lastId();
+  rejoined.receive(message::ADMIN_KICK_VOICE, {{"targetSessionId", "self:device"}});
+  rejoined.session.join("room", rejoined.now);
+  rejoined.receive(message::VOICE_USER_JOINED, admissionIn("other"), crossed);
+  check(rejoined.sentCount(message::VOICE_LEAVE) == 0 && rejoined.session.phase() == SessionPhase::joining,
+        "A crossed join was left while a newer one was on its way");
+}
+
+// Leaving and joining the same room again inside one round trip: the departure
+// of the stay that ended reaches the client while the new join waits for its
+// answer. It must not end that join; the answer decides, and a refusal leaves.
+void rejoinsOutlastTheirOwnDeparture() {
+  Fixture f;
+  f.auth();
+  f.join(false);
+  f.session.leave();
+  f.session.join("room", f.now);
+  const auto rejoin = f.lastId();
+  f.receive(message::VOICE_USER_LEFT, departure());
+  check(f.session.phase() == SessionPhase::joining && f.session.desiredChannel() == "room",
+        "The departure of the stay that ended cancelled the new join");
+  f.receive(message::VOICE_USER_JOINED, admission(false), rejoin);
+  check(f.session.phase() == SessionPhase::admitted && f.session.admission()->channelId == "room" &&
+        f.sentCount(message::VOICE_LEAVE) == 1, "Leaving and joining the same room did not end inside it");
+
+  Fixture refused;
+  refused.auth();
+  refused.join(false);
+  refused.session.leave();
+  refused.session.join("room", refused.now);
+  const auto refusedJoin = refused.lastId();
+  refused.receive(message::VOICE_USER_LEFT, departure());
+  refused.receive(message::SERVER_ERROR, {{"code", std::string(monky::protocol::error::CHANNEL_NOT_FOUND)},
+                                          {"message", "Canal não encontrado"}}, refusedJoin);
+  check(refused.sentCount(message::VOICE_LEAVE) == 2 && refused.session.phase() == SessionPhase::ready &&
+        !refused.session.desiredChannel(), "A refused rejoin did not leave");
+}
+
+// The transport drops what this client never reads before it is queued. Only a
+// top-level type that was read, and is none of this client's, decides that.
+void unreadFramesAreDroppedUnparsed() {
+  using monky::light::reader::discardable;
+  const std::string clip(4 * 1024 * 1024, 'A');
+  check(discardable(R"({"type":"SOUNDBOARD_PLAYED","payload":{"audioBase64":")" + clip + R"("}})"),
+        "A soundboard broadcast would take room in the queue");
+  check(discardable(R"({"payload":{"audioBase64":")" + clip + R"("},"type":"SOUNDBOARD_PLAYED"})"),
+        "A type after a large payload was not found");
+  check(discardable(R"({"payload":{"type":"VOICE_STATE_CHANGED"},"type":"CHAT_MESSAGE_CREATED"})"),
+        "A nested type was taken for the frame's");
+  check(!discardable(R"({"payload":{"type":"CHAT_MESSAGE_CREATED"},"type":"VOICE_STATE_CHANGED"})"),
+        "A relevant frame was dropped for a nested type");
+  check(!discardable(R"({"type":"PONG","payload":{"timestamp":1}})"), "A heartbeat answer was dropped");
+  // Without a readable type a frame goes on, to be reported as malformed.
+  for (const auto* frame : {"{", "[]", "42", "not json", R"({"payload":{}})", R"({"type":7})",
+                            R"({"type":{"name":"SOUNDBOARD_PLAYED"}})", R"({"type":["SOUNDBOARD_PLAYED"]})"})
+    check(!discardable(frame), "A frame without a readable type was dropped instead of reported");
+}
 } // namespace
 
 int main() {
@@ -662,7 +1005,14 @@ int main() {
     adversarialLifecycleEdges();
     channelListAnnouncements();
     synchronousReentrancy();
-    std::cout << "Protocol session: 9 focused native test groups passed\n";
+    toleratesServerGrowth();
+    speakPermissionFollowsTheRoom();
+    movesFollowWithoutLeaving();
+    crossedMovesWaitForTheirJoin();
+    admittedRetiredJoinsLeave();
+    rejoinsOutlastTheirOwnDeparture();
+    unreadFramesAreDroppedUnparsed();
+    std::cout << "Protocol session: 17 focused native test groups passed\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "Protocol session test failure: " << error.what() << '\n';

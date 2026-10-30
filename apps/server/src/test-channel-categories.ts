@@ -9,9 +9,11 @@ import { MessageType, Permission, ProtocolErrorCode, canAccessChannel, channelTr
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqlJsDriver } from './infrastructure/database/SqliteWrapper';
 import { SqliteChannelRepository, SqliteRoleRepository, SqliteServerRepository } from './infrastructure/database/SqliteRepositories';
-import { ensureServerSeedData, MonkyServer } from './server';
+import { ensureServerSeedData } from './server';
 import { AttachmentService } from './application/services/AttachmentService';
 import { AttachmentStorageService } from './infrastructure/security/AttachmentStorageService';
+import { createHttpRequestListener } from './infrastructure/http/HttpRouter';
+import { attachmentRoutes } from './infrastructure/http/attachmentRoutes';
 import { createApprovedBotFixture, record, records, text } from './testFixtures/bots';
 
 test('category permissions fail closed and channel overrides replace inheritance', () => {
@@ -212,13 +214,15 @@ test('HTTP upload tokens cannot outlive inherited access, including an in-flight
   const storage = new AttachmentStorageService(f.dataDir);
   const attachments = new AttachmentService(f.attachmentRepo, f.serverRepo, storage, f.rateLimiter);
   let accepted: (() => void) | undefined;
-  const listener = http.createServer((request, response) => {
-    void MonkyServer['handleAttachmentUpload'](request, response, attachments, storage, async (userId, channelId) => {
+  const listener = http.createServer(createHttpRequestListener(attachmentRoutes({
+    attachments,
+    storage,
+    canUpload: async (userId, channelId) => {
       const allowed = await f.channelService.canUserAccessChannel(userId, channelId);
       if (accepted) { const done = accepted; accepted = undefined; setImmediate(done); }
       return allowed;
-    });
-  });
+    },
+  })));
   listener.listen(0, '127.0.0.1');
   await once(listener, 'listening');
   t.after(async () => { listener.closeAllConnections(); await new Promise<void>((resolve) => listener.close(() => resolve())); });

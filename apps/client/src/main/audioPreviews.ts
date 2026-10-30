@@ -3,15 +3,12 @@ import {
 } from '@monky/shared';
 import { fetchSoundAudio, nativeSoundTransport, SoundDownloadError, type SoundDownloadTransport } from './audioFetch';
 import { isSoundAudio, isSoundFileName, isSoundMime, soundFileNameForMime } from './soundAudioValidation';
+import { isRecord } from './ipc/guards';
 
 interface ActivePreview {
   requestId: string;
   controller: AbortController;
   timer: ReturnType<typeof setTimeout>;
-}
-
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function requestId(value: unknown): value is string {
@@ -27,8 +24,8 @@ export class AudioPreviews {
   ) {}
 
   public async load(owner: number, input: unknown): Promise<AudioPreviewResult> {
-    if (record(input) && ('audioBase64' in input || 'mimeType' in input)) return this.loadBytes(owner, input);
-    if (!record(input) || !requestId(input.requestId) ||
+    if (isRecord(input) && ('audioBase64' in input || 'mimeType' in input)) return this.loadBytes(owner, input);
+    if (!isRecord(input) || !requestId(input.requestId) ||
         Object.keys(input).some((key) => !['requestId', 'url', 'fileName'].includes(key)) ||
         typeof input.url !== 'string' || input.url.length > 2048 ||
         (input.fileName !== undefined && typeof input.fileName !== 'string')) {
@@ -91,7 +88,7 @@ export class AudioPreviews {
   }
 
   public cancel(owner: number, input: unknown): boolean {
-    if (!record(input) || Object.keys(input).length !== 1 || !requestId(input.requestId)) return false;
+    if (!isRecord(input) || Object.keys(input).length !== 1 || !requestId(input.requestId)) return false;
     if (this.active.get(owner)?.requestId !== input.requestId) return false;
     this.cancelOwner(owner);
     return true;

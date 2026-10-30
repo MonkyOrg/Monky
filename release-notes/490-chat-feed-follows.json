@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Chat e DM seguem a mensagem nova mesmo durante a rolagem até a anterior, e na DM enviar volta ao fim. A lista de menções não insere mais @todos no rascunho de outro canal.",
+  "en": "Chat and DMs follow the newest message even while scrolling to the previous one, and sending in a DM returns to the end. The mention list no longer inserts @everyone into another channel's draft."
+}

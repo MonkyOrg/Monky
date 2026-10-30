@@ -17,6 +17,7 @@ import {
   PROTOCOL_VERSION,
   ProtocolErrorCode,
   ProtocolMessage,
+  type ServerMessage,
   UserSummary,
   CommandAutocompletePayload,
   CommandAudioPreviewPayload,
@@ -63,6 +64,7 @@ import {
   SqliteUserRepository,
 } from './infrastructure/database/SqliteRepositories';
 import { AvatarStorageService } from './infrastructure/security/AvatarStorageService';
+import { Logger } from './infrastructure/logger/Logger';
 import { BotInteractionHandler, BotInteractionSession } from './infrastructure/websocket/BotInteractionHandler';
 import { ensureServerSeedData } from './server';
 import { createApprovedBotFixture as createFixture, identity, record, records, text, type Received } from './testFixtures/bots';
@@ -85,6 +87,8 @@ async function restoreDirectly(fixture: Fixture, roleId: string): Promise<void> 
 }
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+/** A different image than PNG, with the same valid signature. */
+const pngVariant = (tail: number) => Buffer.concat([Buffer.from(PNG, 'base64'), Buffer.from([tail])]).toString('base64');
 const AUDIO_PREVIEW = { url: 'https://cdn.example.test/effect.mp3', fileName: 'effect.mp3', durationMs: 1200 };
 
 const SETTINGS_DEFINITION = {
@@ -218,8 +222,9 @@ test('miniapp end rejects admin revocation committed before its role broadcast',
   let reads = 0;
   t.mock.method(f.channelService, 'getAccessContext', async (userId: string) => {
     const context = await getAccess(userId);
-    // Sweep and room admission read first; hold the actual END administrator check.
-    if (userId === moderator.id && ++reads === 3) {
+    // Nothing changed access since the screen was created, so END sweeps nothing (BOTS-3).
+    // Room admission reads first; hold the actual END administrator check.
+    if (userId === moderator.id && ++reads === 2) {
       authorizationRead();
       await authorizationGate;
     }
@@ -260,6 +265,35 @@ test('miniapp end rejects admin revocation committed before its role broadcast',
     resumeRoleWrite();
     await Promise.allSettled(mutation ? [ending, mutation] : [ending]);
   }
+});
+
+test('a miniapp ends when the voice grant that kept its creator in the room lapses', { timeout: 15000 }, async (t) => {
+  const f = await createPrivateVoiceFixture(t);
+  await f.owner.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  const screen = botScreenSchema.parse((await f.bot.peer.request(MessageType.BOT_SCREEN_CREATE, {
+    id: 'presence-game', channelId: f.voiceId, invocationId: f.invocationId,
+    title: 'Presence game', html: '<p>Game</p>', state: {},
+  })).payload);
+  assert.equal(screen.creatorUserId, f.caller.id);
+  await f.owner.peer.wait((message) => message.type === MessageType.BOT_SCREEN_SNAPSHOT && message.payload.id === screen.id);
+  // Without the role the room is private to the creator: only being inside it keeps their access.
+  await f.owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: f.caller.id, roleId: f.role.id });
+  const callerSessionId = text(record(f.caller.auth.payload.currentUser).sessionId);
+  await f.caller.peer.close();
+  await f.owner.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT && message.payload.sessionId === callerSessionId);
+  // A dropped connection keeps the room for 20 s in case they come back, so the game goes on.
+  const kept = await f.bot.peer.request(MessageType.BOT_SCREEN_LIST, { channelId: f.voiceId });
+  assert.deepEqual(records(kept.payload.screens).map((entry) => entry.instanceId), [screen.instanceId]);
+
+  // What the RECONNECT_GRACE_MS timer runs when they do not come back. Nothing
+  // else changes, so only the grant itself can end the game.
+  f.wsServer['voiceSessions'].clearVoiceReturn(callerSessionId);
+  for (const peer of [f.bot.peer, f.owner.peer]) {
+    const removed = await peer.wait((message) =>
+      message.type === MessageType.BOT_SCREEN_REMOVED && message.payload.instanceId === screen.instanceId);
+    assert.equal(botScreenRemovedSchema.parse(removed.payload).reason, 'access_revoked');
+  }
+  assert.deepEqual(records((await f.bot.peer.request(MessageType.BOT_SCREEN_LIST, { channelId: f.voiceId })).payload.screens), []);
 });
 
 test('private invocation voice grants allow only room media, retain rosters and revoke on role loss', { timeout: 30000 }, async (t) => {
@@ -397,7 +431,7 @@ test('pending bot speaking updates cannot revive a departed voice session', { ti
     return channel;
   });
   const since = f.caller.peer.messages.length;
-  const pending = f.wsServer['handleVoiceStateUpdate'](session, { isSpeaking: true });
+  const pending = f.wsServer['voiceSessions']['handleVoiceStateUpdate'](session, { isSpeaking: true });
   await waiting;
   await f.bot.peer.request(MessageType.VOICE_LEAVE, { channelId: f.voiceId });
   await f.caller.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT &&
@@ -545,8 +579,12 @@ test('bot SFU metadata is truthful and media requires admitted, owned voice tran
   await bot.peer.error(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: voiceId, direction: 'send' }, ProtocolErrorCode.BAD_REQUEST);
   await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
   await bot.peer.error(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
-    channelId: voiceId, transportId: 'foreign-transport', dtlsParameters: {},
+    channelId: voiceId, transportId: 'foreign-transport',
+    dtlsParameters: { role: 'client', fingerprints: [{ algorithm: 'sha-256', value: 'AB:CD' }] },
   }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
+    channelId: voiceId, transportId: 'foreign-transport', dtlsParameters: {},
+  }, ProtocolErrorCode.BAD_REQUEST);
   await bot.peer.error(MessageType.SFU_CONSUME, { channelId: voiceId }, ProtocolErrorCode.BAD_REQUEST);
   await bot.peer.error(MessageType.SFU_CONSUME, {
     channelId: voiceId, transportId: 'foreign-transport', producerId: 'foreign-producer', rtpCapabilities: {},
@@ -1710,6 +1748,54 @@ test('public selectors publish durable controls, enforce permissions and finaliz
   await owner.peer.error(MessageType.SELECTOR_RESPOND, { id: another.payload.id, value: 'a' }, ProtocolErrorCode.PERMISSION_DENIED);
 });
 
+test('a refused selector publication tells the bot why, with the code it always had (BOTS-8)', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const owner = await fixture.human('Refused selector owner');
+  const channelId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'TEXT')?.id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const bot = await fixture.bot(text(created.payload.token));
+  const logged: Array<{ level: string; message: string }> = [];
+  t.after(Logger.subscribe((entry) => { logged.push({ level: entry.level, message: entry.message }); }));
+  const refused = async (type: MessageType, payload: unknown, message: string) => {
+    const reply = await bot.peer.request(type, payload);
+    assert.equal(reply.type, MessageType.SERVER_ERROR, `${type} is refused`);
+    assert.deepEqual(reply.payload, { code: ProtocolErrorCode.BOT_INTERACTION_INVALID, message }, `${type} keeps the reason`);
+    assert.ok(logged.some((entry) => entry.level === 'WARN' && entry.message === `Public selector operation ${type} failed: ${message}`));
+  };
+
+  // The bot publishes faster than the server allows: the selector is kept, its message is not.
+  const checkLimit = fixture.rateLimiter.checkLimit.bind(fixture.rateLimiter);
+  const throttled = t.mock.method(fixture.rateLimiter, 'checkLimit', (key: string, maxCount?: number, windowMs?: number) =>
+    key === botId ? false : checkLimit(key, maxCount, windowMs));
+  const id = randomUUID();
+  await refused(MessageType.SELECTOR_CREATE, {
+    id, channelId, title: 'Throttled vote', choices: [{ label: 'A', value: 'a' }, { label: 'B', value: 'b' }],
+    presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 5,
+  }, 'Aguarde antes de publicar novamente.');
+  // Listing retries the pending publication, and its refusal answers the whole list, as it always did.
+  await refused(MessageType.SELECTOR_LIST, {}, 'Aguarde antes de publicar novamente.');
+  throttled.mock.restore();
+  const listed = records((await bot.peer.request(MessageType.SELECTOR_LIST, {})).payload.selectors);
+  assert.equal(listed.find((selector) => selector.id === id)?.messagePublished, true, 'once allowed, the pending selector is published');
+
+  // A result longer than the server accepts, then a bot that is gone by the time the result is published.
+  await fixture.serverRepo.updateServer({ maxMessageLength: 500 });
+  assert.equal((await bot.peer.request(MessageType.SELECTOR_CLOSE, { id })).type, MessageType.SELECTOR_SNAPSHOT);
+  await refused(MessageType.SELECTOR_FINALIZE, { id, content: 'x'.repeat(800) }, 'Mensagem de bot inválida.');
+  const findById = fixture.botService.findById.bind(fixture.botService);
+  const gone = t.mock.method(fixture.botService, 'findById', async (candidate: string) => candidate === botId ? null : findById(candidate));
+  await refused(MessageType.SELECTOR_FINALIZE, { id, content: 'Result: A' }, 'Bot is unavailable.');
+  gone.mock.restore();
+  const finalized = await bot.peer.request(MessageType.SELECTOR_FINALIZE, { id, content: 'Result: A' });
+  assert.equal(finalized.type, MessageType.SELECTOR_SNAPSHOT);
+  assert.equal(typeof finalized.payload.resultMessageId, 'string', 'a refused result leaves the selector ready to finalize');
+
+  // A refusal is the bot's to handle, not a failure of the server.
+  assert.deepEqual(logged.filter((entry) => entry.level === 'ERROR' && entry.message.startsWith('Selector operation failed.')), []);
+});
+
 test('private channel selectors bind invocations and revalidate durable creator capabilities', async (t) => {
   const fixture = await createFixture();
   t.after(() => fixture.dispose());
@@ -1800,13 +1886,17 @@ test('private channel selectors bind invocations and revalidate durable creator 
   const liveId = text(live.payload.id);
   await bot.peer.request(MessageType.COMMAND_FINISH, { invocationId: liveInvocation });
   const access = fixture.channelService.getAccessContext.bind(fixture.channelService);
+  // A failure while checking access still ends the request, but its own words only reach the log (BOTS-8).
+  const logged: string[] = [];
+  t.after(Logger.subscribe((entry) => { if (entry.level === 'ERROR') logged.push(entry.message); }));
   const brokenList = t.mock.method(fixture.channelService, 'getAccessContext', async (userId: string) => {
     if (userId === creator.id) throw new Error('selector-list-database-failure');
     return access(userId);
   });
   const listFailure = await bot.peer.request(MessageType.SELECTOR_LIST, {});
   assert.equal(listFailure.type, MessageType.SERVER_ERROR);
-  assert.equal(listFailure.payload.message, 'selector-list-database-failure');
+  assert.deepEqual(listFailure.payload, { code: ProtocolErrorCode.BOT_INTERACTION_INVALID, message: 'Selector operation failed.' });
+  assert.ok(logged.some((message) => message.includes('selector-list-database-failure')));
   brokenList.mock.restore();
   let voterChecks = 0;
   const brokenPublic = t.mock.method(fixture.channelService, 'getAccessContext', async (userId: string) => {
@@ -1815,7 +1905,8 @@ test('private channel selectors bind invocations and revalidate durable creator 
   });
   const publicFailure = await voter.peer.request(MessageType.SELECTOR_LIST, { channelId });
   assert.equal(publicFailure.type, MessageType.SERVER_ERROR);
-  assert.equal(publicFailure.payload.message, 'selector-public-database-failure');
+  assert.equal(publicFailure.payload.message, 'Selector operation failed.');
+  assert.ok(logged.some((message) => message.includes('selector-public-database-failure')));
   brokenPublic.mock.restore();
   const brokenNotify = t.mock.method(fixture.channelService, 'getAccessContext', async (userId: string) => {
     if (userId === creator.id) throw new Error('selector-notify-database-failure');
@@ -1824,7 +1915,8 @@ test('private channel selectors bind invocations and revalidate durable creator 
   const sinceFailure = voter.peer.messages.length;
   await voter.peer.request(MessageType.SELECTOR_RESPOND, { id: liveId, value: 'a' });
   await voter.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
-    message.payload.message === 'selector-notify-database-failure', sinceFailure);
+    message.payload.message === 'Selector operation failed.', sinceFailure);
+  assert.ok(logged.some((message) => message.includes('selector-notify-database-failure')));
   brokenNotify.mock.restore();
 
   for (const permission of [Permission.READ_MESSAGES, Permission.SEND_MESSAGES, Permission.USE_BOT_COMMANDS]) {
@@ -2270,11 +2362,12 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     if (!tooLarge.success) assert.equal(tooLarge.errorCode, ProtocolErrorCode.AVATAR_TOO_LARGE);
     assert.equal((await fixture.botRepo.findById(botId))?.name, 'Actual Bot');
     assert.equal(await fixture.botRepo.count(), 2);
+    // The same image, here without its data URL prefix, keeps its file and URL (BOTS-4).
     const updated = await bot.peer.request(MessageType.BOT_UPDATE_PROFILE, { name: 'Updated Bot', avatarBase64: PNG });
     assert.equal(updated.type, MessageType.BOT_PROFILE_UPDATED);
     const profile = record(updated.payload.bot);
     assert.equal(profile.name, 'Updated Bot');
-    assert.notEqual(profile.avatarUrl, avatarUrl);
+    assert.equal(profile.avatarUrl, avatarUrl);
     await barrier();
     assert.ok(alice.peer.messages.some((m) => m.type === MessageType.USER_UPDATED && record(m.payload.user).nickname === 'Updated Bot'));
     const commandsResponse = await alice.peer.request(MessageType.COMMANDS_LIST);
@@ -2282,14 +2375,28 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.ok(records(commandsResponse.payload.commands).every((c) => c.botName === 'Updated Bot' && c.botAvatarUrl === profile.avatarUrl));
     const surveyCommand = records(commandsResponse.payload.commands).find((command) => command.name === 'survey');
     assert.deepEqual(record(records(record(records(surveyCommand?.options)[0]).choices)[0]).audio, AUDIO_PREVIEW);
-    const filename = text(profile.avatarUrl).split('/').pop();
+    // A different image takes a new file and URL and the old file goes.
+    const replaced = await bot.peer.request(MessageType.BOT_UPDATE_PROFILE, { avatarBase64: pngVariant(1) });
+    assert.equal(replaced.type, MessageType.BOT_PROFILE_UPDATED);
+    const replacedUrl = text(record(replaced.payload.bot).avatarUrl);
+    assert.notEqual(replacedUrl, avatarUrl);
+    const filename = replacedUrl.split('/').pop();
     assert.ok(filename);
     const saved = fixture.avatars.getAvatarFile(filename);
     assert.ok(saved);
-    assert.deepEqual(fs.readFileSync(saved.filePath), Buffer.from(PNG, 'base64'));
+    assert.deepEqual(fs.readFileSync(saved.filePath), Buffer.from(pngVariant(1), 'base64'));
     const oldFilename = avatarUrl.split('/').pop();
     assert.ok(oldFilename);
     assert.equal(fixture.avatars.getAvatarFile(oldFilename), null);
+    // A reconnecting bot announces its unchanged profile: only the bot is answered.
+    await barrier();
+    const quiet = alice.peer.messages.length;
+    const repeated = await bot.peer.request(MessageType.BOT_UPDATE_PROFILE, { name: 'Updated Bot', avatarBase64: pngVariant(1) });
+    assert.equal(repeated.type, MessageType.BOT_PROFILE_UPDATED);
+    assert.equal(record(repeated.payload.bot).avatarUrl, replacedUrl);
+    assert.ok(fixture.avatars.getAvatarFile(filename));
+    await barrier();
+    assert.deepEqual(alice.peer.messages.slice(quiet).filter((m) => m.type !== MessageType.PONG).map((m) => m.type), []);
   });
 
   await t.test('validates an entire registry replacement before removing valid commands', async () => {
@@ -2586,15 +2693,15 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   });
 
   await t.test('acknowledges invocation and submission before dispatching to the bot', async () => {
-    const sends: ProtocolMessage<unknown>[] = [];
+    const sends: ServerMessage[] = [];
     const original = fixture.wsServer.send.bind(fixture.wsServer);
-    const spy = t.mock.method(fixture.wsServer, 'send', (ws: WebSocket, message: ProtocolMessage<unknown>) => {
+    const spy = t.mock.method(fixture.wsServer, 'send', (ws: WebSocket, message: ServerMessage) => {
       sends.push(message);
       original(ws, message);
     });
     try {
       const { id } = await invoke();
-      const matching = (message: ProtocolMessage<unknown>) => record(message.payload).invocationId === id;
+      const matching = (message: ServerMessage) => record(message.payload).invocationId === id;
       const related = sends.filter(matching);
       assert.equal(related[0].type, MessageType.COMMAND_INVOKED);
       assert.equal(related[1].type, MessageType.COMMAND_INVOKE);
@@ -2847,7 +2954,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.ok(before?.avatarPath);
     const failStorage = t.mock.method(fixture.avatars, 'saveAvatar', async () => { throw new Error('Test storage failure'); });
     try {
-      await bot.peer.error(MessageType.BOT_UPDATE_PROFILE, { name: 'Must not persist', avatarBase64: PNG }, ProtocolErrorCode.INTERNAL_ERROR);
+      await bot.peer.error(MessageType.BOT_UPDATE_PROFILE, { name: 'Must not persist', avatarBase64: pngVariant(2) }, ProtocolErrorCode.INTERNAL_ERROR);
       assert.equal((await fixture.botRepo.findById(botId))?.name, before.name);
       assert.equal((await fixture.botRepo.findById(botId))?.avatarPath, before.avatarPath);
       assert.ok(fixture.avatars.getAvatarFile(before.avatarPath));
@@ -2916,7 +3023,8 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       const rejected = await owner.peer.request(MessageType.BOT_INSTALL, await previewInstall());
       assert.equal(rejected.type, MessageType.SERVER_ERROR);
       assert.equal(rejected.payload.code, ProtocolErrorCode.BAD_REQUEST);
-      assert.match(text(rejected.payload.message), /registro.*502/);
+      assert.match(text(rejected.payload.message), /recusou o registro/);
+      assert.doesNotMatch(text(rejected.payload.message), /502/, 'The HTTP status of the registration URL stays in the log');
       assert.equal(await fixture.botRepo.count(), count, 'a rejected registration must not leave an offline account behind');
       registrationStatus = 200;
       registrationKey = 'invalid-key';
@@ -3685,6 +3793,8 @@ test('bot permission migration preserves existing roles and channels and runs on
   const dbPath = path.join(dataDir, 'server.db');
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const legacy = await SqlJsDriver.create(dbPath);
+  // Versions this old wrote without foreign keys, and the fixture has no server row.
+  legacy.setForeignKeys(false);
   const migrations = path.join(__dirname, 'infrastructure', 'database', 'migrations');
   legacy.exec('CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
   for (const file of fs.readdirSync(migrations).filter((name) => name.endsWith('.sql') && name < '017').sort()) {

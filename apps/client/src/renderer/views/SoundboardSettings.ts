@@ -1,8 +1,26 @@
 import { appEvents } from '../core/EventBus';
+import { soundboardService } from '../core/SoundboardService';
 import { t } from '../i18n';
 import { settingsStore } from '../stores/settingsStore';
 import { escapeHtml } from '../utils/html';
+import { revealWhenUnfolded } from '../utils/surfaceVisibility';
 import { bindSoundboardLimiterControls, renderSoundboardLimiterControls } from './SoundboardLimiterControls';
+
+/**
+ * The soundboard's volume, in the soundboard and in the settings: every step is
+ * heard at once and the value is saved where the slider stops.
+ */
+export function bindSoundboardVolumeSlider(slider: HTMLInputElement | null, label: Element | null): void {
+  slider?.addEventListener('input', () => {
+    const value = parseInt(slider.value, 10);
+    slider.style.setProperty('--slider-progress', `${value}%`);
+    if (label) label.textContent = `${value}%`;
+    settingsStore.soundboardVolume = value;
+    soundboardService.applyVolume();
+    settingsStore.saveSoon();
+  });
+  slider?.addEventListener('change', () => settingsStore.save());
+}
 
 export function renderSoundboardSettings(): string {
   return `
@@ -19,7 +37,13 @@ export function renderSoundboardSettings(): string {
   `;
 }
 
-export function bindSoundboardSettings(root: HTMLElement): () => void {
+export interface SoundboardSettingsBinding {
+  /** Closes the quick settings when they are open; true when that used up the gesture. */
+  collapse(): boolean;
+  unbind(): void;
+}
+
+export function bindSoundboardSettings(root: HTMLElement): SoundboardSettingsBinding {
   const trigger = root.querySelector<HTMLButtonElement>('#sb-btn-settings');
   const section = root.querySelector<HTMLElement>('#sb-settings-section');
   if (!trigger || !section) throw new Error('Soundboard settings controls are missing');
@@ -46,26 +70,36 @@ export function bindSoundboardSettings(root: HTMLElement): () => void {
     section.inert = !expanded;
     section.setAttribute('aria-hidden', String(!expanded));
     section.classList.toggle('is-expanded', expanded);
-    if (expanded) section.querySelector<HTMLInputElement>('[data-limiter-toggle]')?.focus({ preventScroll: true });
+    if (expanded) {
+      section.querySelector<HTMLInputElement>('[data-limiter-toggle]')?.focus({ preventScroll: true });
+      revealWhenUnfolded(section);
+    }
   };
   const toggle = () => setExpanded(!expanded);
-  const keydown = (event: KeyboardEvent) => {
-    if (event.key !== 'Escape' || event.defaultPrevented || !expanded) return;
-    event.preventDefault();
-    event.stopPropagation();
+  const collapse = (): boolean => {
+    if (!expanded) return false;
     setExpanded(false);
     trigger.focus({ preventScroll: true });
+    return true;
+  };
+  const keydown = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape' || event.defaultPrevented || !collapse()) return;
+    event.preventDefault();
+    event.stopPropagation();
   };
   const offSettings = appEvents.on('settings.updated', sync);
   const offConnection = appEvents.on('network.disconnected', () => setExpanded(false));
   trigger.addEventListener('click', toggle);
   root.addEventListener('keydown', keydown);
   sync();
-  return () => {
-    unbindControls?.();
-    offSettings();
-    offConnection();
-    trigger.removeEventListener('click', toggle);
-    root.removeEventListener('keydown', keydown);
+  return {
+    collapse,
+    unbind: () => {
+      unbindControls?.();
+      offSettings();
+      offConnection();
+      trigger.removeEventListener('click', toggle);
+      root.removeEventListener('keydown', keydown);
+    },
   };
 }

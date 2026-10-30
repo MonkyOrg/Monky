@@ -1,11 +1,8 @@
 import { clientLog } from '../core/ClientLogService';
+import { serverAddressKey, type ServerAddress } from '../utils/serverAddress';
 
 export type FavoriteKind = 'sounds' | 'servers';
 type FavoriteStorage = Pick<Storage, 'getItem' | 'setItem'>;
-interface ServerAddress {
-  host: string;
-  port: number;
-}
 
 export const FAVORITES_STORAGE_KEY = 'monky_favorites';
 
@@ -17,8 +14,7 @@ export function soundFavoriteKey(filePath: string): string {
 }
 
 export function savedServerFavoriteKey(server: ServerAddress): string {
-  const host = server.host.trim().replace(/^wss?:\/\//i, '').replace(/^\[(.+)\]$/, '$1').toLowerCase();
-  return JSON.stringify([host, server.port]);
+  return serverAddressKey(server);
 }
 
 function stringKeys(value: unknown): Set<string> {

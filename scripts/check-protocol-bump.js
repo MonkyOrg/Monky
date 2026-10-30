@@ -5,10 +5,11 @@ import { determineBumpType } from './calculate-version.js';
  * Fails a pull request that changes PROTOCOL_VERSION without marking the change
  * as breaking.
  *
- * Bumping PROTOCOL_VERSION makes client and server refuse each other outright
- * (`validators.ts` requires exact equality), so an outdated client cannot talk
- * to an updated server at all. That is a breaking change and has to ship as a
- * major release — it slipped through once as a plain `feat:` and published a
+ * Bumping PROTOCOL_VERSION changes what client and server exchange. They
+ * negotiate a common version and features (`protocolCompatibility.ts`), so a
+ * peer above the floor keeps connecting without the new features, and raising a
+ * floor locks out every peer below it. The project ships every protocol change
+ * as a major release; one slipped through as a plain `feat:` and published a
  * minor (#338).
  *
  * The check runs the very function the release pipeline uses to pick the bump,
@@ -61,8 +62,8 @@ if (bump === 'major') {
 
 console.error(
   `::error file=${PROTOCOL_FILE}::PROTOCOL_VERSION mudou, mas os commits gerariam um bump "${bump}". ` +
-    'Cliente e servidor com versoes de protocolo diferentes se recusam a conectar, entao isso e uma breaking change ' +
-    'e precisa sair como major. Use um titulo de PR como "feat!: ..." ou inclua um paragrafo "BREAKING CHANGE: ..." ' +
+    'Toda mudanca de protocolo sai como major: cliente e servidor negociam versao e recursos, e quem nao atualizar ' +
+    'perde os recursos novos ou, se o piso subir, deixa de conectar. Use um titulo de PR como "feat!: ..." ou inclua um paragrafo "BREAKING CHANGE: ..." ' +
     'na mensagem de um commit da branch.'
 );
 process.exit(1);

@@ -1,6 +1,7 @@
 'use strict';
 
-const { VideoFrameSink, boundedCleanup } = require('./frameSink.cjs');
+const { VideoFrameSink } = require('./frameSink.cjs');
+const { within } = require('./asyncTools.cjs');
 
 const browserPlatform = {
   createTrack: () => new MediaStreamTrackGenerator({ kind: 'video' }),
@@ -185,9 +186,9 @@ class NativeVideoPresentationSink extends VideoFrameSink {
           this.video.playsInline = this.previousVideoState.playsInline;
         }
       }),
-      boundedCleanup(Promise.resolve().then(() => writer?.abort('pipeline-stopped')),
-        'Native presentation writer did not abort.'),
-      boundedCleanup(this.writeInFlight ?? Promise.resolve(), 'Native presentation frame did not finish during stop.'),
+      within(Promise.resolve().then(() => writer?.abort('pipeline-stopped')),
+        5000, 'Native presentation writer did not abort.'),
+      within(this.writeInFlight ?? Promise.resolve(), 5000, 'Native presentation frame did not finish during stop.'),
     ]);
     const released = await Promise.allSettled([Promise.resolve().then(() => {
       // Ending the generator first closes its writable underneath an in-flight

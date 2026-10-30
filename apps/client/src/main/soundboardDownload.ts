@@ -10,13 +10,11 @@ import {
 } from '@monky/shared';
 import { isSoundFileName } from './soundAudioValidation';
 import { fetchSoundAudio, nativeSoundTransport, SoundDownloadError, soundDownloadUrl, type SoundDownloadTransport } from './audioFetch';
-export { nativeSoundTransport, SoundDownloadError, soundDownloadUrl, isPublicSoundAddress, type SoundDownloadTransport } from './audioFetch';
+import { isRecord } from './ipc/guards';
+export { nativeSoundTransport, SoundDownloadError, soundDownloadUrl, type SoundDownloadTransport } from './audioFetch';
 
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 function id(value: unknown): value is string { return typeof value === 'string' && value.length > 0 && value.length <= 128; }
-function errno(error: unknown, code: string): boolean { return record(error) && error.code === code; }
+function errno(error: unknown, code: string): boolean { return isRecord(error) && error.code === code; }
 function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
@@ -57,7 +55,7 @@ export class SoundboardDownloads {
       try {
         const text = await fs.readFile(this.configFile, 'utf8');
         const saved: unknown = text.length <= 16384 ? JSON.parse(text) : null;
-        if (record(saved) && typeof saved.folder === 'string' && path.isAbsolute(saved.folder)) this.confirmedFolder = saved.folder;
+        if (isRecord(saved) && typeof saved.folder === 'string' && path.isAbsolute(saved.folder)) this.confirmedFolder = saved.folder;
         else this.loadFailed = true;
       } catch (error) {
         if (!errno(error, 'ENOENT')) this.loadFailed = true;
@@ -172,7 +170,7 @@ export class SoundboardDownloads {
   }
 
   public async authorize(owner: number, input: unknown): Promise<SoundboardDownloadPermit> {
-    if (!record(input) || !id(input.connectionId) || !id(input.invocationId) ||
+    if (!isRecord(input) || !id(input.connectionId) || !id(input.invocationId) ||
         typeof input.configuredFolder !== 'string' || input.configuredFolder.length > 4096 ||
         typeof input.expiresAt !== 'number' || !Number.isFinite(input.expiresAt) || input.expiresAt <= Date.now() ||
         this.grants.size >= 64) return { status: 'failed', reason: 'invalid_request' };
@@ -204,7 +202,7 @@ export class SoundboardDownloads {
   }
 
   public cancel(owner: number, key: unknown): boolean {
-    if (!record(key) || !id(key.connectionId) || !id(key.invocationId) ||
+    if (!isRecord(key) || !id(key.connectionId) || !id(key.invocationId) ||
         (key.downloadId !== undefined && !id(key.downloadId))) return false;
     let cancelled = false;
     for (const [token, grant] of this.grants) {
@@ -223,7 +221,7 @@ export class SoundboardDownloads {
   }
 
   public async download(owner: number, input: unknown, progress: (event: SoundboardDownloadProgress) => void): Promise<SoundDownloadResult> {
-    if (!record(input) || !id(input.token) || !id(input.connectionId) || !id(input.invocationId) || !id(input.downloadId) ||
+    if (!isRecord(input) || !id(input.token) || !id(input.connectionId) || !id(input.invocationId) || !id(input.downloadId) ||
         typeof input.url !== 'string' || input.url.length > 2048 || typeof input.fileName !== 'string' ||
         typeof input.title !== 'string' || !input.title.trim() || input.title.length > 100 ||
         typeof input.expiresAt !== 'number' || !Number.isFinite(input.expiresAt)) return { status: 'failed', reason: 'invalid_request' };
@@ -290,7 +288,7 @@ export class SoundboardDownloads {
       if (signal.aborted) return signal.reason instanceof SoundDownloadError
         ? { status: 'failed', reason: signal.reason.reason } : { status: 'cancelled' };
       return { status: 'failed', reason: error instanceof SoundDownloadError ? error.reason :
-        record(error) && typeof error.code === 'string' && /^(EACCES|EPERM|ENOSPC|EROFS|EIO|ENOENT|ENOTDIR)$/.test(error.code)
+        isRecord(error) && typeof error.code === 'string' && /^(EACCES|EPERM|ENOSPC|EROFS|EIO|ENOENT|ENOTDIR)$/.test(error.code)
           ? 'write_failed' : 'network_error' };
     } finally {
       clearTimeout(grant.timer);

@@ -83,8 +83,16 @@ Digite um objeto JSON por linha no terminal, usando o ID recebido:
 ```
 
 `enabled:false` desfaz mute/deafen. Restrições impostas pelo servidor continuam
-valendo. `stats` consulta dispositivos e RTP sob demanda; não há coleta periódica
-de telemetria no núcleo. EOF, Ctrl+C e `quit` encerram conexão e mídia.
+valendo, assim como a permissão de falar do canal: sem ela, o microfone fica
+fechado. `voice-policy` traz a política em vigor (`muted`, `deafened`,
+`serverMuted`, `serverDeafened`, `permissionMuted`, `suppressMicrophone` e
+`suppressPlayback`), no mesmo formato do `policy` de `state`. `stats` consulta
+dispositivos e RTP sob demanda; não há coleta periódica de telemetria no núcleo.
+EOF, Ctrl+C e `quit` encerram conexão e mídia. No Windows, fechar a janela do
+console ou perder quem lê os eventos também sai da chamada e faz logout no
+servidor; no segundo caso, o processo termina com código 1. Fechar o console
+termina com código 0, também no Windows 10 e no Windows Server 2022, que desligam
+o console fechado antes de o Light terminar o logout.
 
 ### Dispositivos de áudio
 
@@ -138,7 +146,8 @@ renderizando entre as ativações. Ele traz:
 
 - o estado da sessão e da chamada, com o canal atual;
 - os canais de voz do servidor, com o canal atual marcado, e `Sair do canal`;
-- mute e deafen, marcados e desabilitados quando a restrição é do servidor;
+- mute e deafen, marcados e desabilitados quando a restrição é do servidor ou
+  quando o canal não permite falar;
 - `Dispositivos de áudio`, com entrada, saída e `Padrão do sistema`;
 - `Reconectar agora` e `Sair do Monky Light`.
 
@@ -277,17 +286,47 @@ de bundle, com identificador separado.
 
 `ApplicationLoop` concentra eventos e prazos em uma thread, com fila limitada.
 Quando não há trabalho nem prazo, aguarda uma notificação, sem polling.
+Mensagens que este cliente não lê, como o áudio da soundboard (até ~4 MiB cada),
+são descartadas pelo tipo antes de entrar na fila. Se a entrada da rede passar da
+parte da fila reservada a ela, porque o núcleo atrasou (por exemplo, com o console
+travado), uma mensagem se perde: o núcleo abre uma nova conexão e volta à chamada,
+em vez de encerrar o processo.
 `ConsoleControl` entrega linhas de entrada e sinais de encerramento; sua
-destruição cancela leituras bloqueadas antes de liberar os callbacks.
+destruição cancela leituras bloqueadas antes de liberar os callbacks. No Windows,
+fechar a janela do console segura o processo enquanto o núcleo sai da chamada e
+faz logout; quem encerra o processo é o próprio `main`, com o código de saída
+dele.
 
 `ProtocolSession` confirma a admissão antes de criar mídia, reconcilia a lista
 de participantes e correlaciona respostas por conexão, geração, ID e tipo.
 Reconectar preserva a identidade; expulsões cancelam a intenção de voltar à
-chamada. Alterações P2P/SFU seguem o protocolo do servidor, sem fallback oculto.
+chamada, e um move do servidor só é seguido durante uma chamada ou a entrada
+nela, com um único pedido de entrada na sala nova, sem `VOICE_LEAVE` da antiga,
+como faz o cliente completo. Enquanto um pedido de entrada espera resposta, o
+aviso de que o Light saiu da sala pedida só pode ser de uma estada anterior (uma
+saída processada antes, como ao sair e voltar à mesma sala, ou a sala de onde o
+pedido de um move cruzado o tirou) e não encerra a entrada: vale a resposta do
+pedido. Se a sala pedida sai da lista do Light antes da resposta, ele desiste da
+entrada com `VOICE_LEAVE`, para o servidor não guardar a presença que o pedido
+de um move anterior criou. O mesmo vale para a resposta de admissão de um pedido
+já abandonado, como o que um kick cruzou: sem outra entrada ou chamada em
+andamento, o Light manda `VOICE_LEAVE`. Como o servidor encerra a chamada em
+qualquer sala, esse `VOICE_LEAVE` nunca sai com outra entrada a caminho.
+Alterações P2P/SFU seguem o protocolo do servidor, sem fallback oculto. A
+leitura do protocolo é tolerante (`protocol_reader`): só os campos que o Light
+usa são exigidos, e valores novos das listas que o servidor amplia (tipos de
+canal, status, saúde da chamada, tipos de sinal) não recusam a sessão. Só canais
+`VOICE` recebem chamada.
 
 `VoiceEngine` mantém ADM, processamento de áudio e fábrica WebRTC apenas durante
 a chamada. Mute interrompe a captura real; deafen interrompe captura e reprodução.
-Falhas de SDP/ICE de um participante P2P são isoladas daquele participante.
+Sem a permissão de falar do canal, o microfone fica fechado; em P2P, o áudio de
+quem não pode falar também não é reproduzido.
+Falhas de SDP/ICE de um participante P2P são isoladas daquele participante. No
+SFU vale o mesmo para um microfone que não pode ser recebido: o consumer criado
+no servidor é encerrado e a chamada continua. Se o servidor recusar o microfone,
+a chamada segue só recebendo até a próxima mudança de política. A recuperação dos
+transportes SFU volta ao início sempre que a chamada se restabelece.
 O áudio de tela não é confundido com microfone, e áudio de outra sessão do mesmo
 usuário não é reproduzido.
 
@@ -326,8 +365,16 @@ npm run test:light:voice
 Esse comando compila o núcleo/servidor e exercita PCM decodificado entre clientes
 nativos e entre nativo/Chromium em P2P e SFU. Inclui três participantes, políticas
 de voz, troca de sala, reconexão, expulsão, mudança de topologia, sinalização
-inválida e permissão de microfone pendente/negada. Chromium pertence apenas ao
-cenário de interoperabilidade; usa fontes sintéticas e dispositivos falsos.
+inválida e permissão de microfone pendente/negada. Inclui também dois moves
+cruzados, em salas que o Light vê e em salas que não vê (e de uma vista para uma
+oculta, em que o move se perde sem deixar presença no servidor), um kick que
+cruza a entrada de um move, sair e voltar à mesma sala dentro de um RTT,
+servidor com fórum e chamada ociosa no AFK, canal sem permissão de falar, falhas
+de consumo e de produção no SFU, quedas seguidas de transporte, núcleo atrasado,
+eventos sem leitor e, no Windows, o console fechado, com e sem interface, também
+como o Windows 10 e o Windows Server 2022 o fecham. Esse último usa um
+pseudoconsole, que nunca abre janela. Chromium pertence apenas ao cenário de
+interoperabilidade; usa fontes sintéticas e dispositivos falsos.
 
 Para exercitar **explicitamente o microfone físico** no Windows ou no Mac:
 

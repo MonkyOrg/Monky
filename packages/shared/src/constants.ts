@@ -82,6 +82,12 @@ export const LIMITS = {
    * são 100 MiB, que qualquer cliente não autenticado podia mandar (#372).
    */
   WS_MAX_PAYLOAD_BYTES: 8 * 1024 * 1024,
+  /**
+   * Teto do `requestId` de qualquer mensagem. O servidor copia o id do autor
+   * para eventos que vão a todos, então um id sem limite multiplicava um frame
+   * de 8 MiB pelo número de conectados. Os clientes usam UUIDs (36 a ~80).
+   */
+  MAX_REQUEST_ID_LENGTH: 128,
   DM_RELAY_MAX_ITEMS: 50,
   DM_RELAY_DATA_MAX_LENGTH: 65_536,
   DM_RELAY_FILE_DATA_MAX_LENGTH: 196_608,
@@ -92,7 +98,11 @@ export const LIMITS = {
   DM_RELAY_RATE_BYTES_BURST: 6 * 1024 * 1024,
   DM_RELAY_FILE_BACKPRESSURE_BYTES: 8 * 1024 * 1024,
   HEARTBEAT_INTERVAL_MS: 5000,
-  HEARTBEAT_TIMEOUT_MS: 35000,
+  // Silence after which the server closes a connection, which also takes the
+  // person out of the call (#458). Above the 12 s after which the desktop
+  // client reconnects by itself, so a network hiccup is the client's to
+  // handle, and four missed pings before the server gives up.
+  HEARTBEAT_TIMEOUT_MS: 20000,
   RECONNECT_GRACE_MS: 20000,
   // How long a shutdown waits for peers to answer the close frame before their
   // sockets are forcibly destroyed. Without a bound, a single unresponsive peer
@@ -177,24 +187,9 @@ export function isAfkTimeoutSeconds(value: unknown): value is AfkTimeoutSeconds 
  * Both languages are always accepted, not just the sender's: a message written
  * in one language has to reach the person reading the app in the other.
  * `EVERYONE_MENTION_TOKENS[0]` is the canonical form suggested by the composer.
+ * Whether a message uses them is decided by `MentionMatcher` (mentions.ts).
  */
 export const EVERYONE_MENTION_TOKENS = ['todos', 'everyone'] as const;
-
-/** True when the text contains an `@todos` / `@everyone` token. */
-export function hasEveryoneMention(content: string): boolean {
-  const lower = content.toLowerCase();
-  return EVERYONE_MENTION_TOKENS.some((token) => {
-    let index = lower.indexOf(`@${token}`);
-    while (index !== -1) {
-      // The token must not be a prefix of a longer word, otherwise "@todosaqui"
-      // (or a nickname starting with "todos") would ping the whole channel.
-      const after = lower[index + token.length + 1];
-      if (after === undefined || !/[\p{L}\p{N}_-]/u.test(after)) return true;
-      index = lower.indexOf(`@${token}`, index + 1);
-    }
-    return false;
-  });
-}
 
 export type QualityPresetType = 'ECONOMIC' | 'NORMAL' | 'HIGH' | 'GAMING' | 'QHD' | 'UHD' | 'UHD120' | 'CUSTOM';
 

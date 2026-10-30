@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Se o servidor de mídia do modo SFU cair, as chamadas voltam sozinhas em poucos segundos, sem reiniciar o servidor.",
+  "en": "If the SFU media server crashes, calls come back on their own within seconds, without restarting the server."
+}

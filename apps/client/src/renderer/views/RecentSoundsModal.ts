@@ -13,6 +13,8 @@ import { appEvents } from '../core/EventBus';
 import { sessionManager } from '../core/SessionManager';
 import { soundboardService } from '../core/SoundboardService';
 import { escapeHtml } from '../utils/html';
+import { errorMessage } from '../utils/feedback';
+import { renderLoadingError } from '../utils/loadingSkeleton';
 import { openCommunityModal } from './CommunityModal';
 import { setButtonLoading } from '../utils/buttonLoading';
 import { showSuccessToast } from './CopyToast';
@@ -47,9 +49,12 @@ export class RecentSoundsModal {
     const sessionKey = session.key;
     const modal = openCommunityModal(t('recentSounds.title'));
     modal.element.querySelector('.community-modal')?.classList.add('recent-sounds-modal');
-    modal.content.innerHTML = `<div class="recent-sounds-loading" aria-live="polite">
-      <span class="spinner"></span><span>${escapeHtml(t('common.loading'))}</span>
-    </div>`;
+    const showLoading = (): void => {
+      modal.content.innerHTML = `<div class="recent-sounds-loading" aria-live="polite">
+        <span class="spinner"></span><span>${escapeHtml(t('common.loading'))}</span>
+      </div>`;
+    };
+    showLoading();
     let snapshot: RecentSoundsList | null = null;
     const soundCache = new Map<string, Promise<RecentSoundDownload>>();
     const loadSound = (id: string): Promise<RecentSoundDownload> => {
@@ -149,15 +154,24 @@ export class RecentSoundsModal {
       soundboardService.stopRecentPreview();
     }, { once: true });
 
-    try {
-      const result = recentSoundsListSchema.parse(await session.client.sendRequest<unknown>(
-        MessageType.RECENT_SOUNDS_LIST, {},
-      ));
-      if (modal.signal.aborted || sessionManager.getActive()?.key !== sessionKey) return;
-      render(result);
-    } catch (error) {
-      if (!modal.signal.aborted) modal.fail(error instanceof Error ? error.message : t('recentSounds.loadFailed'));
-    }
+    const load = async (): Promise<void> => {
+      try {
+        const result = recentSoundsListSchema.parse(await session.client.sendRequest<unknown>(
+          MessageType.RECENT_SOUNDS_LIST, {},
+        ));
+        if (modal.signal.aborted || sessionManager.getActive()?.key !== sessionKey) return;
+        render(result);
+      } catch (error) {
+        if (modal.signal.aborted) return;
+        // The list never arrived: say so where it would be, with a way to ask again.
+        modal.content.innerHTML = renderLoadingError(errorMessage(error, t('recentSounds.loadFailed')));
+        modal.content.querySelector('[data-loading-retry]')?.addEventListener('click', () => {
+          showLoading();
+          void load();
+        }, { signal: modal.signal });
+      }
+    };
+    await load();
   }
 
   private async preview(

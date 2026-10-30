@@ -77,6 +77,14 @@ UI **has no access to Node**. Anything that needs the operating system — picki
 a screen to share, reading the native audio module, touching the tray — goes
 through the `window.api` bridge exposed by the preload.
 
+Three barriers protect that bridge. The Content-Security-Policy in `index.html`
+only runs the app's own scripts, so HTML injected by mistake does not execute;
+a new kind of resource (another iframe, worker or origin) has to be added to
+that policy. No window leaves its own document or opens other windows, except
+Picture-in-Picture and links handed to the browser. And sensitive channels —
+identity, backups, hosted servers, local files — only answer the main window;
+the overlay gets a bridge of its own, with just what it needs to draw the call.
+
 ### The UI uses no framework
 
 Possibly the project's most unusual decision: **the renderer is plain TypeScript
@@ -99,6 +107,120 @@ not one store mixing every server's data:
 
 </div>
 
+The bus events are typed in `core/appEventMap.ts`: each name declares what it
+carries, and an emitter or subscriber using another shape does not compile.
+Server messages arrive as `message.<TYPE>`, with the payload of the protocol map
+(`ServerToClientPayloads`, in `@monky/shared`). Stores follow three shapes:
+
+- **Per session** (`serverStore`, `chatStore`, `botScreenStore` and
+  `ParticipantManager`): they emit on their own `bus`, which is `appEvents` for
+  the visible session and the silent bus for the others. The rest of the app
+  reaches them through a proxy that points at the active session.
+- **Global** (`settingsStore`, `connectionStore` and `voiceStore`): they emit on
+  `appEvents` directly, and the event says what changed; `settings.updated`, for
+  instance, carries the keys that changed. `voiceStore` also changes during
+  other servers' events, so it notifies through `emitOutsideRouting`.
+- **View models** (`favoritesStore` and `CommunityFeed`): they tell the views
+  using them through their own `subscribe()`. `dmStore` has a bus of its own,
+  typed by `DmEvents`.
+
+Domain modules, bound once at startup, apply the server's messages to the
+stores: `core/serverStateEvents.ts` (members, roles, channels and settings),
+`core/chatEvents.ts` and `core/voiceEvents.ts`. A server's screen
+(`views/MainView.ts`) composes the parts in `views/main/`: header, channel
+tree, members, user card and call notices.
+
+A view that queries a server by request, such as the audit log and the monitor,
+is tied to the server, connection and member of the moment it opened by a
+`SessionBinding` (`core/sessionBinding.ts`): once any of them changes, it stops
+instead of mixing in another server's data. `BoundRequests` retires each request
+once it settles and the pending ones when the view closes, and
+`watchVisibleSession` (`core/visibleSession.ts`) revalidates access when the
+server changes and closes the view once it is no longer the visible one.
+
+### The UI kit
+
+The pieces every view repeats live in one place, and a new view uses them
+instead of writing them again:
+
+- **Modal shell** (`utils/modalShell.ts`): `openModal({ card, ... })` puts the
+  card on the modal stack and handles the rest. A single capture-phase
+  `keydown` on `document` acts only while the modal is on top with no popup of
+  its own open: Escape closes (or first clears a `data-clear-on-escape` field)
+  and Tab cycles inside the card. The card is always a named modal `dialog`;
+  focus starts on the first control below the header and goes back, on close,
+  to whoever opened it. The shell also closes the modal through
+  `data-modal-close` buttons and a press that starts on the backdrop;
+  `canClose(reason)` holds it open during an operation. When the visible
+  server changes (`closeWithSession`) or the owner's `signal` ends, the modal
+  leaves at once, with no exit animation and with its popups: another
+  server's content must not linger over the new one. Every
+  listener of the content uses `shell.signal`. A view that re-renders writes inside
+  `shell.card`, never replacing it: while a child dialog is open, the stack
+  hides the card below, and a new card would escape that. The order between
+  modals comes from the stack (`utils/modalSurface.ts`), never from a
+  `z-index` of each modal. `openCommunityModal` and the shortcut capture
+  dialog (`ShortcutCaptureDialog`) are thin layers over the shell.
+- **Feedback** (`utils/feedback.ts`): an operation error goes to the shared
+  alert toast through `reportError(message, { field, focus, log, error })`,
+  which also marks the field `aria-invalid` until it is edited again. No error
+  message is ever left loose in the layout. A failed load is something else:
+  the content gives way to a notice with "Try again" (`renderLoadingError`, in
+  `utils/loadingSkeleton.ts`). `copyText` and `openExternalUrl` confirm or
+  explain in the toast. `useAppValidation(form, signal)` replaces the
+  browser's native balloon, which follows the system language, with an
+  explanation in the app's language. Two exceptions are deliberate: a
+  terminal media failure that arrives without an action of the person (voice
+  reconnection, microphone, camera, screen capture) stays in a dialog so it is
+  not missed, and an error of the stage in fullscreen stays inside the
+  fullscreen element, since a toast in `body` would not show.
+- **Choice controls** (`utils/formControls.ts`): on/off is always
+  `renderSwitch({ id, checked, label | labelledBy, ... })`, a hidden checkbox
+  with `role="switch"` and a name, and keyboard focus shows on the track
+  anywhere. A choice among a few options becomes cards (`renderChoiceCards`
+  and `selectChoiceCard`): buttons with `aria-pressed`, styled by
+  `.input-mode-card`, never radio buttons. The P2P/SFU voice mode uses them
+  through `renderVoiceModeCards` (`utils/voiceModeInfo.ts`).
+- **Settings tabs** (`views/settings/settingsLayout.ts`): Settings and Server
+  Settings declare their tabs once, in a table (`SettingsTabEntry`: id, icon,
+  label), and build the sidebar and the title with `renderSettingsTabButtons`
+  and `renderSettingsTabLabel`. In Settings, each tab of the table also says how
+  it renders, binds, shows, hides and cleans up.
+- **Community wizards** (`views/community/wizardShell.ts`): the poll, form and
+  event wizards build the same frame with `mountWizard`. The stepper and the
+  footer stay still while the step slides between them, forward or back, and
+  each new step starts from its top with its title focused. Back and Next wait
+  for the slide to end. Since the footer stays in place, the second click of a
+  double click lands on the button the first one just changed; that click,
+  which the system counts as part of the same gesture (`event.detail` 2 or
+  more), is ignored. So a double click moves a single step and never publishes
+  what nobody reviewed, with or without reduced motion; the keyboard and a new
+  click work as usual. Each wizard says when a step may be left: with a
+  disabled button (`ready`) or with an explanation in the toast (`leave`). The
+  draft closes at once when the visible server changes.
+- **Audience picker** (`views/ResourceAudiencePicker.ts`): who can see a
+  community resource or watch a private screen share. A searchable list that
+  also opens from the keyboard (arrows on the closed field), honors the
+  `AUDIENCE_LIMITS` from `@monky/shared`, and takes its own texts and the
+  on/off switch of whoever uses it (`externalSwitch` with `setPrivate`).
+- **Stage tile volume** (`views/StageVolumeControl.ts`): the mute button with
+  the vertical 0–200% slider above it, the same for a shared screen and a
+  miniapp. It opens on hover and from the keyboard (Tab goes from the button to
+  the slider); Escape closes it, and muted audio keeps it closed.
+- **Motion**: entering and leaving through `utils/surfaceMotion.ts`, the modal
+  stack through `utils/modalSurface.ts`, expansions through `setSurfaceVisible`
+  (`utils/surfaceVisibility.ts`; a panel that unfolds through its own CSS
+  transition, like the soundboard's, calls `revealWhenUnfolded` when opened, so
+  it ends in view the same way), steps that swap the whole card through
+  `replaceModalStep` and steps inside the fixed area of a wizard through
+  `slideStepContent` (both in `utils/modalSteps.ts`), with a forward and a back
+  direction. A tab swap is a `view`: opacity only. Visible scrolling goes
+  through `utils/scroll.ts`. All of them honor `prefers-reduced-motion`.
+- **Resizable panels** (`utils/resizableEdge.ts`): the edge a person drags to
+  widen a panel becomes a window splitter, with a role and bounds for screen
+  readers, arrows, Home and End, and the width saved and restored. The channel
+  list and the voice chat use it.
+
 ### The services
 
 Every large client responsibility lives in its own class, under
@@ -110,8 +232,7 @@ Every large client responsibility lives in its own class, under
 | `WebRtcManager` | Shared media orchestration, local publications and P2P connections; delegates SFU transport |
 | `webrtc/SfuClientEngine` | SFU transport: negotiated capabilities, producers, consumers and reconnection |
 | `AudioProcessor` | Microphone, noise suppression, speech detection |
-| `VideoService` | Shared camera capture, local effects and screen capture |
-| `ScreenAudioService` | Bridges the native screen-audio module into WebRTC |
+| `VideoService` | Shared camera capture, local effects and the registry of published screens |
 | `ParticipantManager` | Who is online, in which channel and in what state |
 | `SoundboardService` | Soundboard clips and shortcuts |
 | `KeybindService` | Global shortcuts |
@@ -125,43 +246,36 @@ carry a second implementation of capture, quality preferences or codec rules.
 
 | Responsibility | Owner |
 |---|---|
-| Capture, preview and source shutdown | `VideoService`; audio capture belongs to `ScreenAudioService` |
+| Local registry of published screens and their previews | `VideoService`; capture, encoding and audio belong to the native source |
 | Stop/replace controls, associated audio and updating the correct session | `screenShareControls.ts`, used by the picker, views and call departure/switching |
-| Intended screen publications, cancellation and cleanup on failure | The `localScreenShares` registry and screen-sharing methods in `WebRtcManager` |
+| Starting, cancelling and retiring each source | `WebRtcManager`'s `startNativeScreenShare()` and `removeNativeScreenSource()`, carried out by `webrtc/NativeScreenController.ts` (local sources in `webrtc/nativeScreen/LocalScreenSources.ts`) |
 | Viewing intent, independent of the view and mute preference | `VoiceStore`, owned by the call session and applied to both transports through `WebRtcManager` |
-| Bitrate/FPS limits and adaptation preference | `webrtc/mediaEncodingPolicy.ts`, used by P2P and SFU |
-| Codec-family selection and refusal of alternatives for explicit choices | `webrtc/codecPreferences.ts`, with capabilities supplied by each transport |
-| Serialized RTP parameter changes | `webrtc/rtpSenderParameters.ts`: quality and codec do not overwrite each other's transaction |
+| Screen codec and encoding mode | Quality preferences, probed by `core/screenEncoding.ts` and verified when the native source is admitted |
+| Microphone and camera bitrate/FPS limits and adaptation preference | `webrtc/mediaEncodingPolicy.ts`, used by P2P and SFU |
+| Camera codec preference order | `webrtc/codecPreferences.ts`, with capabilities supplied by each transport |
+| ICE route in use (ping, relay indicator and diagnostics) | `webrtc/rtcStats.ts`, used by P2P and SFU; the call measures once and the stage and the sidebar only display it |
+| Serialized RTP parameter changes | `webrtc/rtpSenderParameters.ts`: overlapping updates do not overwrite each other's transaction |
 | Receiving and associating remote media with the UI | `webrtc/RemoteMediaRouter`, shared by both modes |
 | Native capture/encoding/transport and Main-process ownership | `nativeScreenSharing.ts` and `native/screen-share` |
-| Native-screen subscriptions/presentation or compatible Chromium reception | `webrtc/NativeScreenController.ts` and `webrtc/BrowserScreenSubscription.ts` |
+| Native-screen subscriptions/presentation or compatible Chromium reception | `webrtc/nativeScreen/RemoteScreenPresentations.ts` (automatic reconnection in `RewatchPolicy.ts`) and `webrtc/BrowserScreenSubscription.ts` |
 
-On the Chromium path, what **must** differ is the publishing mechanism. P2P has one sender per
-destination, SDP/ICE negotiation and a dedicated sending m-line per screen;
-the encoder is also selected through `encodings[].codec`. SFU has a producer
-on the sending transport, with its codec selected from capabilities negotiated
-with the server. SDP codec preferences do not replace pinning the P2P encoder,
-and the local capabilities used by P2P do not replace SFU capabilities.
+The renderer does not publish screens: the voice connection carries only the
+microphone and camera. Each screen is captured, encoded and sent by its native
+source over its own connections, in both P2P and SFU. Chromium only takes part
+as an optional receiver of those screens, when selected in settings
+(`BrowserScreenSubscription`, over P2P or SFU).
 
-On this path, capture and publication have separate lifetimes: rebuilding a transport in
-the same call preserves active capture, while leaving the call or stopping the
-share ends the source. A mode change requiring an authorized leave/rejoin
-performs the full call cleanup. SFU uses `stopTracks: false`, and screen audio and video share
-protection against late producers after cancellation or replacement. Changing
-the codec rebuilds publication, not capture.
-
-The picker calls `WebRtcManager.assertScreenShareSupported()` before requesting
-capture; `VideoService` does not depend on codecs or voice mode. Closing the
-picker cancels pending acquisition without ending already published screens.
-Audio startup can also be cancelled before native capture or during publication:
-stopping the screen must not produce a late audio-sharing announcement.
+The picker only uses native capture and explains why when it is unavailable:
+there is no fallback to Chromium capture. Closing the picker cancels pending
+acquisition without ending already published screens. Screen audio belongs to
+the native source that captures it, so stopping the screen must not produce a
+late audio-sharing announcement.
 The controls helper snapshots the call session instead of sending updates to
 whichever server happens to be visible when an asynchronous operation finishes.
 
 Profile values are **per-send ceilings**, not FPS guarantees or a total
 upload budget. P2P may send the same screen to several destinations; SFU
-normally sends it to the server once. `GAMING` prioritizes framerate; the
-other profiles prioritize resolution. These ceilings do not promise sustained
+normally sends it to the server once. These ceilings do not promise sustained
 1080p120.
 
 The native path uses **libobs/WGC → AMF H.264 → native WebRTC** on qualified
@@ -296,9 +410,10 @@ what.
 
 </div>
 
-Beyond the WebSocket, the server exposes a few HTTP routes: `/health`, `/preview`
-and `/invite-info` (public information for the invite screen), `/avatars/*` and
-the `/attachments` upload/download.
+Beyond the WebSocket, the server exposes a few HTTP routes: `/health`, `/preview`,
+`/invite-info` (addresses for the invite screen, answered only on the server's own
+machine; members get the same over the WebSocket), `/avatars/*` and the
+`/attachments` upload/download.
 
 The default port is **3000**.
 
@@ -449,7 +564,7 @@ Excellent for small friend groups and lightweight/free VPS instances with low CP
 ### Topology 2: SFU (Selective Forwarding Unit)
 
 For the browser engine's SFU call, the client opens a pair of **WebRTC Transports** with the host server:
-- **`sendTransport`:** Transmits local audio and video tracks (microphone, camera, screen and system audio).
+- **`sendTransport`:** Transmits local audio and video tracks (microphone and camera).
 - **`recvTransport`:** Receives forwarded tracks from all other participants routed through the `mediasoup` worker.
 
 The server identifies this pair with purpose `call`, also used when `purpose`
@@ -564,17 +679,17 @@ button.
 
 The camera follows the resolution and FPS of the selected quality profile.
 
-Screen sharing is a track **separate** from the camera — you can transmit both at
-once. The source is announced in the call without requiring reception of its
-media. In P2P, negotiation and `screen-video-meta` associate the track with
-the correct screen, separately from the camera.
+Screen sharing is **separate** from the camera — you can transmit both at once.
+The source is announced in the call (`nativeScreenShares`) without requiring
+reception of its media, and each subscription uses its own connections,
+outside the voice connection.
 
 Each person can share **up to 8 screens at once**. The limit is per person,
 not per call: each screen costs the sharer another capture, another encoder and
 more upload, while viewers only receive the screens they chose to watch. That
 is why, from the third screen on, Monky asks for confirmation once per call.
-Each is identified by the id of its own `MediaStream`, and that id is what ties
-together the track, the sender and the tile on screen.
+Each is identified by its source id (`shareId`), which ties together the
+announcement, the subscriptions and the tile on screen.
 
 The `screen-shares-8` feature is negotiated. Servers without it accept 2 screens
 per person, so the client does not offer a third one on that server. Clients
@@ -588,11 +703,11 @@ to the recipient; `Stop watching` revokes it. The choice follows the same
 source through view and transport reconstruction, but a new broadcast does
 not inherit it merely because it has the same owner.
 
-In P2P, a `screen-watch` type `RTC_SIGNAL` sends intent to the publisher. On the Chromium path,
-Screen senders have no attached track/active encoding until subscribed;
-stopping affects only that peer. Publisher/viewer epochs and an increasing
-revision protect against old commands and negotiations. The server authenticates
-the sender and checks the channel and published source.
+`NATIVE_SCREEN_SIGNAL` carries intent to the publisher: `watch` and `stop` come
+from the viewer; `accepted`, `capture-mode` and `closed`, from the publisher.
+Each subscription has its own `subscriptionId` and names the source instance
+(`sourceInstanceId`); stopping affects only that subscription. The server
+authenticates the sender and checks the channel and published source.
 
 In SFU, the catalog remains available without automatically creating screen
 consumers. Screen/audio consumers start paused **on the server** and are
@@ -602,15 +717,12 @@ usage. Late responses must not reactivate a cancelled subscription.
 
 Screen audio is shared per publisher/recipient: it continues while that
 recipient watches at least one screen from that publisher. Microphone, camera,
-other viewers and mute preferences are independent. On the native path, the
-last subscription to a profile closes its capture, encoder and sending
-pipeline, including publisher-to-SFU upload. The Chromium path retains
-capture/preview and may keep uploading to the SFU. RTCP and
-signaling remain allowed; this does not promise zero bytes in the call.
-The contracts require client and server to share the same `PROTOCOL_VERSION`.
-
-Monky also tags the track with a content hint: `motion` favours smoothness (good
-for games and video), `detail` favours sharpness (good for code and text).
+other viewers and mute preferences are independent. The last subscription to a
+profile closes its capture, encoder and sending pipeline, including
+publisher-to-SFU upload. RTCP and signaling remain allowed; this does not promise zero bytes in the call.
+Client and server negotiate these contracts when they connect, as described in
+"Negotiated compatibility" above: the viewer list, for example, only appears
+when both sides advertised `screen-viewers`.
 
 ### Screen audio: the native module
 
@@ -623,12 +735,19 @@ is why Monky has a native C++ module:
 | **macOS** | ScreenCaptureKit (macOS 13+ for audio; native video requires 14+), capturing system audio or the entire selected application after confirmation |
 | **Others** | Not supported — the app keeps working, just without screen audio |
 
-If the module fails to load, nothing breaks: sharing keeps working without sound
-and the app says so.
+On Windows the same module also identifies the picker's windows and monitors,
+reads the keyboard layout for shortcuts and constrains the overlay's resizing.
+That is why it embeds the Visual C++ runtime instead of depending on the
+redistributable installed on the system, and packaging rejects a build that
+needs it again. If the module still fails to load, the main process logs the
+cause in the app log, and the functions that depend on it fail with that cause
+instead of returning empty lists: on Windows, the picker cannot list windows or
+monitors. On macOS, sharing keeps working without sound and the app says so.
 
 Each share with sound opens its own capture session. The module accepts up to 8
-sessions at once, one for each screen a person may share, and keeps the legacy
-capture exclusive. The main process decides which sounds may coexist and repeats
+sessions at once, one for each screen a person may share. Each session runs on
+its own thread, which notifies the Node loop when it ends; none of them occupies
+the libuv thread pool, which serves files, DNS and cryptography. The main process decides which sounds may coexist and repeats
 the picker's checks: a monitor's sound (and, on macOS, any source's, because
 ScreenCaptureKit delivers the system mix) does not coexist with another, and two
 windows of the same process do not capture the same sound. Because process
@@ -643,9 +762,9 @@ sound.
 
 ### Quality and bandwidth
 
-Profiles control resolution, FPS and the bitrate ceiling. Chromium sending
-parameters use `RTCRtpSender.setParameters()`; native profiles configure
-the actual capture/encoder/transport pipeline:
+Profiles control resolution, FPS and the bitrate ceiling. The microphone and
+camera apply these ceilings with `RTCRtpSender.setParameters()`; for screens
+they configure the actual native capture/encoder/transport pipeline:
 
 | Profile | Audio | Camera | Screen |
 |---|---|---|---|
@@ -662,11 +781,10 @@ below 30fps. Ceilings sit above usual streaming values because capture encoders
 emit a keyframe every second. 4K at 120fps needs H.264 level 6.0 or AV1;
 when a profile is chosen, Monky checks the encoder and lowers the FPS if it refuses.
 
-In named profiles from 60fps up (Smooth to Extreme), the degradation preference
-becomes `maintain-framerate`: under tight bandwidth Monky sacrifices resolution
-to hold the frame rate, because in games and video smoothness matters more than
-sharpness. In the other profiles it is the opposite on the Chromium path. The
-native path requests the chosen real profile and does not hide degradation
+In named profiles from 60fps up (Smooth to Extreme), the camera's degradation
+preference becomes `maintain-framerate`: under tight bandwidth Monky sacrifices
+resolution to hold the frame rate; in the other profiles it is the opposite.
+Native screens request the chosen real profile and do not hide degradation
 behind an FPS setting.
 
 The Custom profile accepts up to 3840×2160 and 240 FPS (120 FPS at 4K).
@@ -741,8 +859,10 @@ Things that follow directly from the architecture, and are not bugs:
 - **TURN is off by default.** Very restrictive networks can prevent the media
   connection even when the server is reachable. An optional relay exists, but it
   costs the host bandwidth and only runs on Linux.
-- **The protocol requires an exact match.** Client and server need the same
-  `PROTOCOL_VERSION`; updating only one side breaks the connection.
+- **Compatibility has a floor.** Client and server negotiate version and
+  features when they connect, but only from a floor up (`MIN_CLIENT_PROTOCOL`
+  for clients, `MIN_BOT_PROTOCOL` for bots). Anyone below it cannot join until
+  they update, and a new feature only appears when both sides have it.
 - **Screen audio only on Windows and macOS**, because it depends on each system's
   native API.
 - **Qualification depends on hardware.** The macOS path was exercised on M1

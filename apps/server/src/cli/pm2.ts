@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ANSI, color } from './constants';
 import { t } from './i18n/index';
-import { commandSucceeds, runSync } from './process';
+import { commandInstalled, commandSucceeds, runSync } from './process';
 import { canonicalDataDir, LEGACY_PM2_PROCESS_NAME, serverIdFor } from './registry';
 import { resolveInterpreter } from './health';
 import { LIMITS } from '@monky/shared';
@@ -10,7 +10,6 @@ import { LIMITS } from '@monky/shared';
 export const PM2_PROCESS_PREFIX = 'monky-server';
 export const UPDATER_PROCESS_PREFIX = 'monky-updater';
 export const LEGACY_UPDATER_PROCESS_NAME = 'monky-updater';
-export const AUTO_UPDATE_CRON = '0 4 * * *'; // daily at 4am
 
 export { LEGACY_PM2_PROCESS_NAME };
 
@@ -27,6 +26,20 @@ export function getPm2ProcessName(dataDir: string): string {
 
 export function getUpdaterProcessName(dataDir: string): string {
   return `${UPDATER_PROCESS_PREFIX}-${serverIdFor(dataDir)}`;
+}
+
+/**
+ * Whether PM2 can be used. `missing`: nothing named `pm2` is installed.
+ * `failing`: it was found, but `pm2 --version` did not succeed. Telling the two
+ * apart is what keeps the CLI from installing a second PM2 over one that
+ * another tool manages (Volta, pnpm, Yarn), and from treating the processes
+ * that PM2 may still run as gone.
+ */
+export type Pm2Availability = 'available' | 'missing' | 'failing';
+
+export function pm2Availability(): Pm2Availability {
+  if (commandSucceeds('pm2', ['--version'])) return 'available';
+  return commandInstalled('pm2') ? 'failing' : 'missing';
 }
 
 export function isPm2Available(): boolean {
@@ -51,24 +64,30 @@ export interface Pm2Process {
   };
 }
 
+/**
+ * Every process PM2 knows about, read with a single `pm2 jlist`.
+ *
+ * Each PM2 call loads all of PM2, so a command reads this once and passes the
+ * result to every lookup it makes before acting. Without PM2 the call fails
+ * and the list is empty, which needs no separate `pm2 --version`.
+ */
 export function listPm2Processes(): Pm2Process[] {
-  if (!isPm2Available()) return [];
   try {
     const listResult = runSync('pm2', ['jlist'], { encoding: 'utf8' });
-    if (listResult.status !== 0) return [];
-    const parsed = JSON.parse(listResult.stdout);
+    if (listResult.error || listResult.status !== 0) return [];
+    const parsed: unknown = JSON.parse(listResult.stdout);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-export function findPm2Process(processName: string): Pm2Process | null {
-  return listPm2Processes().find((entry) => entry.name === processName) ?? null;
+export function findPm2Process(processName: string, processes: readonly Pm2Process[] = listPm2Processes()): Pm2Process | null {
+  return processes.find((entry) => entry.name === processName) ?? null;
 }
 
-export function isMonkyServerRunning(processName: string): boolean {
-  return findPm2Process(processName)?.pm2_env?.status === 'online';
+export function isMonkyServerRunning(processName: string, processes: readonly Pm2Process[] = listPm2Processes()): boolean {
+  return findPm2Process(processName, processes)?.pm2_env?.status === 'online';
 }
 
 /**
@@ -92,8 +111,8 @@ export function deletePm2Process(processName: string): void {
  * Reading logs is still useful for a stopped or crashed process, so this is a
  * weaker check than {@link isMonkyServerRunning}.
  */
-export function isMonkyServerRegistered(processName: string): boolean {
-  return findPm2Process(processName) !== null;
+export function isMonkyServerRegistered(processName: string, processes: readonly Pm2Process[] = listPm2Processes()): boolean {
+  return findPm2Process(processName, processes) !== null;
 }
 
 export function readProcessDataDir(entry: Pm2Process): string | null {
@@ -110,9 +129,9 @@ export function readProcessDataDir(entry: Pm2Process): string | null {
  * Data directories of every Monky process PM2 knows about, including the
  * pre-registry process name so older installations are not lost on upgrade.
  */
-export function discoverPm2DataDirs(): string[] {
+export function discoverPm2DataDirs(processes: readonly Pm2Process[] = listPm2Processes()): string[] {
   const found: string[] = [];
-  for (const entry of listPm2Processes()) {
+  for (const entry of processes) {
     const name = entry.name ?? '';
     if (name !== LEGACY_PM2_PROCESS_NAME && !name.startsWith(`${PM2_PROCESS_PREFIX}-`)) continue;
     const dataDir = readProcessDataDir(entry);
@@ -127,31 +146,44 @@ export function discoverPm2DataDirs(): string[] {
  * Upgrading must not leave an orphan `monky-server` running alongside the new
  * per-directory process on the same port.
  */
-export function findLegacyProcessFor(dataDir: string): Pm2Process | null {
-  const legacy = findPm2Process(LEGACY_PM2_PROCESS_NAME);
+export function findLegacyProcessFor(dataDir: string, processes: readonly Pm2Process[] = listPm2Processes()): Pm2Process | null {
+  const legacy = findPm2Process(LEGACY_PM2_PROCESS_NAME, processes);
   if (!legacy) return null;
   const legacyDataDir = readProcessDataDir(legacy);
   return legacyDataDir === canonicalDataDir(dataDir) ? legacy : null;
 }
 
+/**
+ * Installs PM2 when it is missing. A PM2 that is installed but fails is
+ * reported instead: installing over it would leave two copies.
+ */
 export function ensurePm2(): void {
-  if (!isPm2Available()) {
-    console.log(color(t('pm2.notFound'), ANSI.yellow));
-    const result = runSync('npm', ['install', '-g', 'pm2'], { stdio: 'inherit' });
-    if (result.error || result.status !== 0) {
-      throw new Error(t('pm2.installFailed'));
-    }
+  const availability = pm2Availability();
+  if (availability === 'available') return;
+  if (availability === 'failing') {
+    throw new Error(`${t('pm2.failing', { action: t('action.start') })} ${t('pm2.failingHint')}`);
+  }
+  console.log(color(t('pm2.notFound'), ANSI.yellow));
+  const result = runSync('npm', ['install', '-g', 'pm2'], { stdio: 'inherit' });
+  if (result.error || result.status !== 0) {
+    throw new Error(t('pm2.installFailed'));
   }
 }
 
 /**
- * Reports PM2 as missing without installing it.
+ * Reports PM2 as missing, or as failing, without installing it.
  *
  * Only `monky start` needs PM2 badly enough to install it; reading status or
  * stopping a server should never install software as a side effect.
  */
 export function requirePm2(action: string): boolean {
-  if (isPm2Available()) return true;
+  const availability = pm2Availability();
+  if (availability === 'available') return true;
+  if (availability === 'failing') {
+    console.log(color(t('pm2.failing', { action }), ANSI.yellow));
+    console.log(color(t('pm2.failingHint'), ANSI.dim));
+    return false;
+  }
   console.log(color(t('pm2.notInstalled', { action }), ANSI.yellow));
   console.log(color(t('pm2.installHint'), ANSI.dim));
   return false;

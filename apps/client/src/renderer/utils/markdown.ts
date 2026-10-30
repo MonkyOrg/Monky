@@ -1,5 +1,5 @@
 import { escapeHtml } from './html';
-import { EVERYONE_MENTION_TOKENS } from '@monky/shared';
+import { MentionMatcher } from '@monky/shared';
 import { codeLanguageLabel, codeLineNumbers, highlightCode, resolveCodeLanguage } from './codeHighlight';
 import { t } from '../i18n';
 import { parser, Strikethrough } from '@lezer/markdown';
@@ -68,10 +68,14 @@ export function findAutomaticLinks(text: string, tree = inlineParser.parse(text)
  */
 export interface MarkdownOptions {
   interactive?: boolean;
+  /** The reader's nickname: mentions of it, and `@todos` (#464), are marked as aimed at them. */
   currentNickname?: string;
-  knownNicknames?: string[];
-  /** Highlight `@todos` / `@everyone` as a mention aimed at the reader (#464). */
-  everyoneMentionEnabled?: boolean;
+  /**
+   * Who can be mentioned, built once per member list. The highlight follows the
+   * rule the server and the notification cue use (#14). Without it, only
+   * `currentNickname` is recognised.
+   */
+  mentions?: MentionMatcher;
 }
 
 /**
@@ -105,48 +109,80 @@ export function renderCodeBlock(tag: string, code: string, interactive = true): 
 
 export function renderMarkdown(raw: string, options?: MarkdownOptions): string {
   if (!raw) return '';
+  // NUL delimits the placeholders below, so the text never carries one of its own.
+  // The replacement character keeps every position, and the same mentions.
+  const source = raw.replace(/\u0000/g, '\uFFFD');
 
+  // Each placeholder keeps what it stood for, escaped: a link address takes back
+  // the text as typed, so code or a mention never turns into markup inside it.
+  const typed = new Map<string, string>();
+  const hold = (kind: string, list: string[], html: string, text: string): string => {
+    const token = `\u0000${kind}${list.push(html) - 1}\u0000`;
+    typed.set(token, text);
+    return token;
+  };
+  const asTyped = (value: string): string =>
+    value.replace(/\u0000[A-Z]{2}\d+\u0000/g, token => asTyped(typed.get(token) ?? ''));
+
+  // Automatic links and mentions are found on the source, where the server and
+  // the notification cue look for mentions too, and wait as placeholders.
   const automaticLinks: string[] = [];
-  let text = raw;
-  for (const link of findAutomaticLinks(raw).reverse()) {
+  const mentionSpans: string[] = [];
+  const placeholders: { from: number; to: number; text: string }[] = [];
+  const links = findAutomaticLinks(source);
+  for (const link of links) {
     const url = escapeHtml(link.url);
-    const index = automaticLinks.push(`<a href="${url}" class="md-link" data-external-link="${url}">${escapeHtml(raw.slice(link.from, link.to))}</a>`) - 1;
-    text = text.slice(0, link.from) + `\u0000AL${index}\u0000` + text.slice(link.to);
+    const label = escapeHtml(source.slice(link.from, link.to));
+    placeholders.push({ from: link.from, to: link.to,
+      text: hold('AL', automaticLinks, `<a href="${url}" class="md-link" data-external-link="${url}">${label}</a>`, label) });
+  }
+  const reader = options?.currentNickname?.trim() ?? '';
+  const matcher = options?.mentions ?? (reader ? new MentionMatcher([reader]) : null);
+  for (const mention of matcher?.find(source) ?? []) {
+    const to = mention.index + mention.length;
+    if (links.some(link => mention.index < link.to && to > link.from)) continue;
+    const mine = mention.everyone || (!!reader && mention.name.toLowerCase() === reader.toLowerCase());
+    placeholders.push({ from: mention.index, to, text: hold('MN', mentionSpans,
+      `<span class="chat-mention${mine ? ' chat-mention-me' : ''}">@${escapeHtml(mention.name)}</span>`,
+      escapeHtml(source.slice(mention.index, to))) });
+  }
+  let text = source;
+  for (const placeholder of placeholders.sort((left, right) => right.from - left.from)) {
+    text = text.slice(0, placeholder.from) + placeholder.text + text.slice(placeholder.to);
   }
 
   // 1. Fenced code blocks are pulled out before anything else, while the source
   //    is still raw — the highlighter needs the original text, and the
   //    placeholders left behind survive the escaping pass untouched.
   const codeBlocks: string[] = [];
-  const stash = (tag: string, code: string): string => {
-    const idx = codeBlocks.push(renderCodeBlock(tag, code, options?.interactive !== false)) - 1;
-    return `\u0000CB${idx}\u0000`;
-  };
+  const stash = (fence: string, tag: string, code: string): string =>
+    hold('CB', codeBlocks, renderCodeBlock(tag, code, options?.interactive !== false), escapeHtml(fence));
 
   //    A language tag only counts on a fence that opens its own line, so a
   //    single-line ```snippet``` keeps behaving as an untagged block.
-  text = text.replace(/```([A-Za-z0-9+#._-]*)[ \t]*\r?\n([\s\S]*?)```/g, (_m, tag: string, code: string) =>
-    stash(tag, code.replace(/\r?\n$/, ''))
+  text = text.replace(/```([A-Za-z0-9+#._-]*)[ \t]*\r?\n([\s\S]*?)```/g, (fence: string, tag: string, code: string) =>
+    stash(fence, tag, code.replace(/\r?\n$/, ''))
   );
-  text = text.replace(/```([\s\S]*?)```/g, (_m, code: string) => stash('', code.replace(/^\r?\n/, '').replace(/\r?\n$/, '')));
+  text = text.replace(/```([\s\S]*?)```/g, (fence: string, code: string) =>
+    stash(fence, '', code.replace(/^\r?\n/, '').replace(/\r?\n$/, '')));
 
   // 2. Escape everything else - no raw HTML from users can survive this.
   text = escapeHtml(text);
 
   // 3. Inline code (`...`). Same placeholder treatment.
   const inlineCodes: string[] = [];
-  text = text.replace(/`([^`\n]+?)`/g, (_m, code) => {
-    const idx = inlineCodes.push(`<code class="md-inline-code">${code}</code>`) - 1;
-    return `\u0000IC${idx}\u0000`;
-  });
+  text = text.replace(/`([^`\n]+?)`/g, (span: string, code: string) =>
+    hold('IC', inlineCodes, `<code class="md-inline-code">${code}</code>`, span));
 
   // Inline-level formatting applied to the text content of each block.
   const applyInline = (s: string): string => {
     const links: string[] = [];
-    // Links: [label](url) - only http/https.
-    s = s.replace(/\[((?:\\.|[^\]\\])+?)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label: string, url: string) => {
+    // Links: [label](url) - only http/https. The address ends at a line break
+    // (`<br>` here), and takes back whatever a placeholder in it stood for.
+    s = s.replace(/\[((?:\\.|[^\]\\])+?)\]\((https?:\/\/[^\s)<]+)\)/g, (_m, label: string, url: string) => {
       const display = label.replace(/\\([\\[\]])/g, '$1');
-      const idx = links.push(`<a href="${url}" class="md-link" data-external-link="${url}">${display}</a>`) - 1;
+      const href = asTyped(url);
+      const idx = links.push(`<a href="${href}" class="md-link" data-external-link="${href}">${display}</a>`) - 1;
       return `\u0000LK${idx}\u0000`;
     });
     // Use the editor's parser so nested/toggled emphasis has the same meaning after sending.
@@ -161,31 +197,6 @@ export function renderMarkdown(raw: string, options?: MarkdownOptions): string {
     } });
     for (const replacement of replacements.sort((a, b) => b.from - a.from)) {
       s = s.slice(0, replacement.from) + replacement.html + s.slice(replacement.to);
-    }
-
-    // Mentions (@nickname)
-    if (options?.everyoneMentionEnabled) {
-      for (const token of EVERYONE_MENTION_TOKENS) {
-        const regex = new RegExp(`(^|[\\s(])@${token}(?=$|[\\s),.!?:;])`, 'gi');
-        s = s.replace(regex, `$1<span class="chat-mention chat-mention-me">@${token}</span>`);
-      }
-    }
-    if (options?.knownNicknames && options.knownNicknames.length > 0) {
-      const sortedNicks = [...new Set(options.knownNicknames)].sort((a, b) => b.length - a.length);
-      for (const nick of sortedNicks) {
-        if (!nick) continue;
-        const isMe = !!options.currentNickname && nick.toLowerCase() === options.currentNickname.toLowerCase();
-        const cls = isMe ? 'chat-mention chat-mention-me' : 'chat-mention';
-        const escapedNick = nick.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const escapedHtmlNick = escapeHtml(nick);
-        const regex = new RegExp(`(^|[\\s(])@${escapedNick}(?=$|[\\s),.!?:;])`, 'gi');
-        s = s.replace(regex, `$1<span class="${cls}">@${escapedHtmlNick}</span>`);
-      }
-    } else if (options?.currentNickname) {
-      const escapedNick = options.currentNickname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const escapedHtmlNick = escapeHtml(options.currentNickname);
-      const regex = new RegExp(`(^|[\\s(])@${escapedNick}(?=$|[\\s),.!?:;])`, 'gi');
-      s = s.replace(regex, `$1<span class="chat-mention chat-mention-me">@${escapedHtmlNick}</span>`);
     }
 
     // Restore link placeholders
@@ -296,6 +307,7 @@ export function renderMarkdown(raw: string, options?: MarkdownOptions): string {
   // 5. Restore placeholders (inline code, plus any code block left inline).
   html = html.replace(/\u0000IC(\d+)\u0000/g, (_m, idx) => inlineCodes[Number(idx)]);
   html = html.replace(/\u0000CB(\d+)\u0000/g, (_m, idx) => codeBlocks[Number(idx)]);
+  html = html.replace(/\u0000MN(\d+)\u0000/g, (_m, idx) => mentionSpans[Number(idx)] ?? '');
   if (options?.interactive === false) {
     html = html.replace(/<a\b[^>]*>/g, '<span class="md-link">').replace(/<\/a>/g, '</span>');
   }

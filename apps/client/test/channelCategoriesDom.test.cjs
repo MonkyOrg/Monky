@@ -276,6 +276,22 @@ if (!process.versions.electron) {
         points.channel,
         '[data-category-id="destination"] > .category-title',
         0.75,
+        true,
+        async () => {
+          // The list keeps the pointer while the dragged row is redrawn under it (R-SHELL-12).
+          const repaint = await browser.webContents.executeJavaScript(`(() => {
+            const list = document.querySelector('#channel-categories-list');
+            const before = document.querySelector('.channel-item[data-channel-id="voice"]');
+            const held = list.hasPointerCapture(1);
+            window.categoryRenameChannel('voice', 'voice repainted');
+            const after = document.querySelector('.channel-item[data-channel-id="voice"]');
+            return { held, replaced: !!after && after !== before, stillHeld: list.hasPointerCapture(1),
+              marked: !!document.querySelector('.channel-reorder-active .channel-dragging[data-channel-id="voice"]') };
+          })()`);
+          if (!repaint.held || !repaint.replaced || !repaint.stillHeld || !repaint.marked) {
+            throw new Error('Redrawing the dragged channel lost the drag: ' + JSON.stringify(repaint));
+          }
+        },
       );
       if (channelDragGeometry.targetAfter.top <= channelDragGeometry.targetBefore.top) {
         throw new Error('The Uncategorized target did not push existing categories down during channel drag: ' +
@@ -314,7 +330,7 @@ if (!process.versions.electron) {
         throw new Error('The shared audience dropdown did not open and focus its search in channel settings');
       }
       await key('Escape');
-      if (!await browser.webContents.executeJavaScript(`!!document.querySelector('.channel-settings-card:not([hidden])') && !document.querySelector('[data-audience-popup]:popover-open')`)) {
+      if (!await browser.webContents.executeJavaScript(`!!document.querySelector('.channel-settings-card:not([hidden])') && !document.querySelector('[data-audience-popup]:popover-open:not([data-ui-closing])')`)) {
         throw new Error('Escape must close the role dropdown without closing channel settings');
       }
       await click('[data-audience-toggle]');
@@ -457,6 +473,8 @@ if (!process.versions.electron) {
       if (JSON.stringify(adjacentLayout) !== JSON.stringify(['gap:', 'category:voice|text', 'gap:', 'destination:', ':loose|tail', 'end:'])) {
         throw new Error('Adjacent categories did not get a slot between them: ' + JSON.stringify(adjacentLayout));
       }
+      // Slots the tree kept from the drag fold back with their transition: measure them once at rest (R-SHELL-11).
+      await browser.webContents.executeJavaScript('Promise.allSettled(document.getAnimations().map(animation => animation.finished))');
       const restingSlots = await browser.webContents.executeJavaScript(`[...document.querySelectorAll('[data-root-gap]')]
         .map(slot => slot.getBoundingClientRect().height + ':' + getComputedStyle(slot.querySelector('.channel-tree-gap-label')).opacity)`);
       if (JSON.stringify(restingSlots) !== JSON.stringify(['0:0', '16:0', '0:0'])) {
@@ -597,6 +615,16 @@ async function regression(locale) {
   check(field('.create-channel-modal') === reopenedCreate, 'late channel creation never closes a reopened form');
   create.close();
   client.sendRequest = sendRequest;
+  create.open();
+  const createDialog = field('.create-channel-modal');
+  check(createDialog.getAttribute('role') === 'dialog' && createDialog.getAttribute('aria-modal') === 'true'
+    && document.getElementById(createDialog.getAttribute('aria-labelledby'))?.textContent === t('channelModal.title'),
+  'Channel creation is announced as a labelled modal dialog');
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(!field('.create-channel-modal'), 'Escape closes channel creation even when focus is outside the form');
+  create.open();
+  field('#input-channel-name').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(!field('.create-channel-modal'), 'Escape closes channel creation from its fields');
   const edit = new EditChannelModal();
   edit.open('text');
   check(!field('#input-channel-inherit'), 'Editing uses synchronization status instead of another inheritance switch');
@@ -677,6 +705,9 @@ async function regression(locale) {
     'A changed inherited category rejects a stale draft before sending');
   edit.close();
   store.setCategories(details.categories);
+  edit.open('text');
+  field('#input-channel-name').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(!field('.channel-settings-card'), 'Escape closes channel editing');
   const initialCategories = [category, destination];
   const updatedCategory = { ...category, permissionOverwrites: [
     { roleId: null, allow: 0, deny: 524288 | 512 },
@@ -842,7 +873,7 @@ async function regression(locale) {
     store.myPermissions = managing;
   }
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  view.openChannelMenu('voice', 10, 10);
+  view.channels.openChannelMenu('voice', 10, 10);
   check(document.querySelector('[aria-haspopup="menu"]'), 'channel movement is offered through contextual submenu');
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 
@@ -953,28 +984,86 @@ async function regression(locale) {
   await flush();
   check(requests.length === requestsBeforeAfk && [...document.querySelectorAll('.chat-copy-toast')]
     .some(toast => toast.textContent.includes(t('afk.joinBlocked'))), 'clicking the AFK room explains instead of joining');
-  view.openChannelMenu('afk', 10, 10);
+  view.channels.openChannelMenu('afk', 10, 10);
   check(menuItems().some(item => menuLabel(item) === t('afk.deleteDisabled') && item.disabled)
     && !menuItems().some(item => menuLabel(item) === t('main.deleteChannel')), 'the AFK room is not deleted from the channel list');
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  view.openChannelMenu('voice', 10, 10);
+  view.channels.openChannelMenu('voice', 10, 10);
   check(menuItems().some(item => menuLabel(item) === t('main.deleteChannel') && !item.disabled), 'other rooms are still deleted from the list');
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  {
+    // Deleting waits for the server: a refusal is explained and the call in the room goes on.
+    const { voiceStore } = await import('/stores/voiceStore.ts');
+    const deletions = [];
+    let refuse = true;
+    const previousRequest = client.sendRequest;
+    client.sendRequest = async (type, payload) => {
+      if (type !== 'CHANNEL_DELETE') return previousRequest(type, payload);
+      deletions.push(payload.channelId);
+      if (refuse) throw new Error('Controlled delete refusal');
+      return { channelId: payload.channelId };
+    };
+    const deleteVoiceRoom = async () => {
+      view.channels.openChannelMenu('voice', 10, 10);
+      menuItems().find(item => menuLabel(item) === t('main.deleteChannel')).click();
+      await flush();
+      field('[data-action="confirm"]').click();
+      await flush();
+    };
+    voiceStore.setChannel('voice');
+    try {
+      await deleteVoiceRoom();
+      check(deletions.join() === 'voice' && voiceStore.currentVoiceChannelId === 'voice'
+        && [...document.querySelectorAll('.chat-copy-toast')].some(toast => toast.textContent.includes('Controlled delete refusal')),
+      'a refused deletion is explained and the call in that room goes on');
+      refuse = false;
+      await deleteVoiceRoom();
+      check(deletions.join() === 'voice,voice' && voiceStore.currentVoiceChannelId === 'voice',
+        'an accepted deletion leaves the call to the server, which takes everyone out of the room');
+    } finally {
+      client.sendRequest = previousRequest;
+      voiceStore.setChannel(null);
+      document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+    }
+  }
   store.setServerDetails(details, user);
   view.renderChannels();
 
-  const moveToCategory = new DataTransfer();
-  const looseChannel = root.querySelector('[data-channel-id="loose"]');
+  // Reordering is a pointer drag: synthetic pointer events drive its real handlers,
+  // aimed through elementFromPoint like a user would.
+  const pointAt = (element, yRatio = 0.5) => {
+    const box = element.getBoundingClientRect();
+    const point = { clientX: Math.round(box.left + Math.min(80, box.width / 2)), clientY: Math.round(box.top + box.height * yRatio) };
+    const hit = document.elementFromPoint(point.clientX, point.clientY);
+    check(hit === element || element.contains(hit), `pointer target is covered by ${hit?.outerHTML.slice(0, 160)}`);
+    return point;
+  };
+  const mouse = { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+  const pressPointer = handle => {
+    const start = pointAt(handle);
+    handle.dispatchEvent(new PointerEvent('pointerdown', { ...mouse, button: 0, buttons: 1, ...start }));
+    // The drag starts only past its 6 px threshold.
+    window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1,
+      clientX: start.clientX + 7, clientY: start.clientY + 7 }));
+  };
+  const movePointerTo = point => window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1, ...point }));
+  const releasePointer = point => window.dispatchEvent(new PointerEvent('pointerup', { ...mouse, button: 0, ...point }));
+
+  // The creation form opened from the sidebar menu above is still showing; a user
+  // closes it before dragging, otherwise it covers the sidebar.
+  field('.create-channel-modal #modal-close')?.click();
+  const looseChannel = root.querySelector('.channel-item[data-channel-id="loose"]');
   const destinationTitle = root.querySelector('[data-category-id="destination"] > .category-title');
-  looseChannel.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: moveToCategory }));
+  pressPointer(looseChannel);
   check(root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
     'channel dragging reveals category drop surfaces');
-  destinationTitle.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: moveToCategory }));
+  const destinationPoint = pointAt(destinationTitle);
+  movePointerTo(destinationPoint);
   check(destinationTitle.classList.contains('channel-category-drop-target'),
     'destination category uses the highlighted move target');
   check(!destinationTitle.nextElementSibling.classList.contains('channel-category-drop-target'),
     'highlighting a category title does not outline its channel list');
-  destinationTitle.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: moveToCategory }));
+  releasePointer(destinationPoint);
   await flush();
   check(requests.some(({ type, payload }) =>
     type === 'CHANNEL_UPDATE' && payload.channelId === 'loose' && payload.categoryId === destination.id),
@@ -982,7 +1071,8 @@ async function regression(locale) {
   const destinationOrder = requests.findLast(({ type }) => type === 'CHANNEL_REORDER')?.payload.orderedIds ?? [];
   check(destinationOrder.length === 1 && destinationOrder[0] === 'loose',
     'reordering the sidebar excludes forum threads from the payload');
-  looseChannel.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: moveToCategory }));
+  check(!root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
+    'releasing the pointer ends the channel drag');
 
   store.setServerDetails({ ...details, channels: details.channels.filter(item => item.id !== 'loose') }, user);
   view.renderChannels();
@@ -992,12 +1082,11 @@ async function regression(locale) {
     'the uncategorized destination remains mounted when empty');
   check(getComputedStyle(uncategorizedDropzone).display === 'none',
     'the empty uncategorized destination stays out of the normal layout');
-  const moveOutside = new DataTransfer();
   const groupedChannel = root.querySelector('.channel-item[data-channel-id="voice"]');
   check(store.myPermissions === permissions, 'management permission survives the empty destination fixture');
   check(groupedChannel.classList.contains('channel-reorder-handle'),
     'channels retain their pointer reorder handle after the sidebar rerenders');
-  groupedChannel.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: moveOutside }));
+  pressPointer(groupedChannel);
   check(root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
     'dragging from a category activates move-outside surfaces');
   check(getComputedStyle(uncategorizedDropzone).display === 'flex',
@@ -1006,23 +1095,59 @@ async function regression(locale) {
   check(firstCategoryTop >= uncategorizedDropzone.getBoundingClientRect().bottom,
     'the move-outside destination occupies layout space above existing categories');
   const siblingChannel = root.querySelector('.channel-item[data-channel-id="text"]');
-  siblingChannel.dispatchEvent(new DragEvent('dragover', {
-    bubbles: true, cancelable: true, clientY: siblingChannel.getBoundingClientRect().top, dataTransfer: moveOutside,
-  }));
+  movePointerTo(pointAt(siblingChannel, 0.25));
   check(siblingChannel.classList.contains('channel-drop-before') &&
     !siblingChannel.closest('[data-category-channels]').classList.contains('channel-category-drop-target'),
   'hovering a channel shows only the insertion line, without outlining the category body');
-  uncategorizedDropzone.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: moveOutside }));
-  check(uncategorizedDropzone.classList.contains('channel-category-drop-target'),
+  const outsidePoint = pointAt(uncategorizedDropzone);
+  movePointerTo(outsidePoint);
+  check(uncategorizedDropzone.classList.contains('channel-category-drop-target') && !siblingChannel.classList.contains('channel-drop-before'),
     'move-outside destination uses the highlighted move target');
-  uncategorizedDropzone.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: moveOutside }));
+  releasePointer(outsidePoint);
   await flush();
   check(requests.some(({ type, payload }) =>
     type === 'CHANNEL_UPDATE' && payload.channelId === 'voice' && payload.categoryId === null),
   'a channel can move outside every category');
-  groupedChannel.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: moveOutside }));
   check(getComputedStyle(uncategorizedDropzone).display === 'none',
     'move-outside destination hides again after dragging');
+
+  // Escape ends a drag where it is: the marks go and the release that follows moves nothing (R-SHELL-12).
+  const requestsBeforeEscape = requests.length;
+  const escapedChannel = root.querySelector('.channel-item[data-channel-id="text"]');
+  pressPointer(escapedChannel);
+  movePointerTo(pointAt(uncategorizedDropzone));
+  check(uncategorizedDropzone.classList.contains('channel-category-drop-target'), 'the drag aims at a destination before Escape');
+  const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+  document.body.dispatchEvent(escape);
+  check(escape.defaultPrevented && !root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active')
+    && !root.querySelector('.channel-dragging, .channel-category-drop-target, .channel-drop-before, .channel-drop-after'),
+  'Escape cancels the channel drag and clears its marks');
+  movePointerTo(outsidePoint);
+  check(!root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
+    'a cancelled drag does not start again while the button is still held');
+  releasePointer(outsidePoint);
+  await flush();
+  check(requests.length === requestsBeforeEscape, 'releasing after Escape moves nothing');
+
+  // A mouse button held for push-to-talk turns the left press and release into moves (R-SHELL-12).
+  const SIDE = 8;
+  const requestsBeforeChord = requests.length;
+  const chorded = root.querySelector('.channel-item[data-channel-id="text"]');
+  const chordStart = pointAt(chorded);
+  chorded.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: 0, buttons: 1 | SIDE, ...chordStart }));
+  window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1 | SIDE,
+    clientX: chordStart.clientX + 7, clientY: chordStart.clientY + 7 }));
+  check(root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
+    'a left press made while another button is held starts the drag');
+  const chordTarget = pointAt(uncategorizedDropzone);
+  window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1 | SIDE, ...chordTarget }));
+  window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: 0, buttons: SIDE, ...chordTarget }));
+  await flush();
+  check(!root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active')
+    && requests.slice(requestsBeforeChord).some(({ type, payload }) =>
+      type === 'CHANNEL_UPDATE' && payload.channelId === 'text' && payload.categoryId === null),
+  'letting go of the left button drops at once, though the other button is still held');
+  window.dispatchEvent(new PointerEvent('pointerup', { ...mouse, button: 3, buttons: 0, ...chordTarget }));
 
   const off = appEvents.on('server.updated', () => view.renderChannels());
   root.querySelector('[data-collapse-category="category"]').click();
@@ -1044,7 +1169,7 @@ async function regression(locale) {
     edit.open('text');
   };
   window.categoryTestMouseEvents = [];
-  for (const type of ['mousedown', 'mousemove', 'mouseup']) {
+  for (const type of ['pointerdown', 'pointermove', 'pointerup']) {
     document.addEventListener(type, event => {
       window.categoryTestMouseEvents.push({
         type,
@@ -1077,4 +1202,10 @@ async function regression(locale) {
   };
   // Kept for the real key event dispatched from Electron after returning.
   window.categoryTestCleanup = () => { off(); view.destroy(); };
+  // A background event redrawing the row being dragged, as a voice or unread update would (R-SHELL-12).
+  window.categoryRenameChannel = (id, name) => {
+    store.setServerDetails({ ...store.serverDetails, channels: store.serverDetails.channels
+      .map(item => item.id === id ? { ...item, name } : item) }, user);
+    view.renderChannels();
+  };
 }

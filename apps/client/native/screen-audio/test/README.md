@@ -28,6 +28,15 @@ Stop/Worker teardown wake the producer and cancel delivery waits without waiting
 for downstream RTC closure. Original PCM, acquired sample/packet indices, QPC
 and WASAPI flags are never rewritten. Device errors remain terminal.
 
+## Capture threads and the libuv threadpool
+
+Each session's capture thread signals its own `uv_async_t` as its last action;
+the loop then joins the already-returning thread and finishes the session in the
+handle's close callback. No session holds a libuv threadpool thread while it
+captures, so file, DNS, crypto and zlib work in the same process keep running
+with all eight sessions live, on the main thread or in a Worker. The regression
+test runs that case with `UV_THREADPOOL_SIZE=4`.
+
 ## Build and run on Windows x64
 
 Run from the repository root with the existing Visual Studio 2022 Build Tools,
@@ -81,9 +90,8 @@ node apps/client/native/screen-audio/test/macPacketAudioSmoke.cjs --artifacts="$
 
 This creates an owned AppKit/AVAudioEngine application with synthetic stereo
 tones; it never acquires a microphone or another application's audio. It checks
-timestamps, channel separation, a second concurrent packet session,
-legacy/packet exclusivity, cancellation, repeated
-start/stop, selected-window loss and application exit with active capture.
+timestamps, channel separation, a second concurrent packet session, cancellation,
+repeated start/stop, selected-window loss and application exit with active capture.
 The fixture requires Electron/AppKit; bare Node capture fails explicitly.
 Production capture shutdown does not depend on Main-thread UI dispatch.
 The device-free check `node --test apps/client/native/screen-audio/test/macAudioRuntime.test.cjs`

@@ -5,8 +5,8 @@ import {
   findLegacyProcessFor,
   getPm2ProcessName,
   getUpdaterProcessName,
-  isPm2Available,
   LEGACY_PM2_PROCESS_NAME,
+  pm2Availability,
 } from '../pm2';
 import { runSync } from '../process';
 import { unregisterServer } from '../registry';
@@ -21,6 +21,7 @@ export async function destroyCommand(globalArgs: GlobalArgs): Promise<void> {
   // folder someone typed by mistake.
   const target = await resolveTargetServer(globalArgs, t('action.destroy'));
   const dataDir = target.dataDir;
+  const processNames = [getPm2ProcessName(dataDir), getUpdaterProcessName(dataDir)];
 
   console.log(color(t('destroy.warning'), ANSI.red));
   console.log(color(t('destroy.allDataWillBeDeleted', { dataDir }), ANSI.red));
@@ -40,6 +41,17 @@ export async function destroyCommand(globalArgs: GlobalArgs): Promise<void> {
     console.log();
   }
 
+  // Without a PM2 the CLI can use, the processes of this server cannot be
+  // removed, and nothing proves they are gone: PM2 may be installed where the
+  // CLI cannot run it, or run them under another account. Left behind, they
+  // keep restarting a server whose folder no longer exists.
+  const pm2 = pm2Availability();
+  if (pm2 !== 'available') {
+    const warning = pm2 === 'missing' ? 'destroy.pm2Missing' : 'destroy.pm2Failing';
+    console.log(color(t(warning, { processes: processNames.join(', ') }), ANSI.yellow));
+    console.log();
+  }
+
   const confirmText = await ask(t('destroy.typeDestroy'));
   if (confirmText !== 'DESTROY') {
     console.log(color(t('prompt.cancelled'), ANSI.yellow));
@@ -52,8 +64,13 @@ export async function destroyCommand(globalArgs: GlobalArgs): Promise<void> {
     return;
   }
 
-  if (isPm2Available()) {
-    const names = [getPm2ProcessName(dataDir), getUpdaterProcessName(dataDir)];
+  if (pm2 !== 'available' && !(await confirm(t('destroy.deleteWithoutPm2'), false))) {
+    console.log(color(t('prompt.cancelled'), ANSI.yellow));
+    return;
+  }
+
+  if (pm2 === 'available') {
+    const names = [...processNames];
     // The pre-registry process is only removed when it belongs to this data
     // directory — another server could be the one still using the old name.
     if (findLegacyProcessFor(dataDir)) {

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Trocar o avatar, o ícone do servidor ou o de um bot não perde mais a imagem antiga quando a gravação falha, e erros internos não mostram mais caminhos de pastas do servidor.",
+  "en": "Changing an avatar, the server icon or a bot icon no longer loses the previous image when saving fails, and internal errors no longer reveal server folder paths."
+}

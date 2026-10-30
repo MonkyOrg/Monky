@@ -4,6 +4,7 @@
 #include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/logging.h"
 #include "av1_sequence.h"
+#include "codec_policy.h"
 
 namespace monky::native_rtc::engine {
 class BoundedAv1Decoder final : public webrtc::VideoDecoder {
@@ -45,20 +46,12 @@ class ScreenDecoderFactory final : public webrtc::VideoDecoderFactory {
       : h264_(std::move(h264)), h264_enabled_(!encoded || !av1), av1_enabled_(!encoded || av1) {}
   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
     auto formats = h264_enabled_ ? h264_->GetSupportedFormats() : std::vector<webrtc::SdpVideoFormat>{};
-    if (av1_enabled_)
-      formats.emplace_back("AV1", webrtc::CodecParameterMap{{"profile", "0"}, {"level-idx", "23"}, {"tier", "0"}});
+    if (av1_enabled_) formats.push_back(codec_policy::ScreenAv1Format());
     return formats;
   }
   CodecSupport QueryCodecSupport(const webrtc::SdpVideoFormat& format, bool scaling) const override {
     if (format.name != "AV1") return h264_enabled_ ? h264_->QueryCodecSupport(format, scaling) : CodecSupport{false, false};
-    const auto profile = format.parameters.find("profile");
-    const auto tier = format.parameters.find("tier"), level = format.parameters.find("level-idx");
-    const bool valid_level = level == format.parameters.end() ||
-        (!level->second.empty() && level->second.size() <= 2 &&
-          std::all_of(level->second.begin(), level->second.end(), [](char c) { return c >= '0' && c <= '9'; }) &&
-          std::stoi(level->second) <= 23);
-    return {av1_enabled_ && !scaling && valid_level && (tier == format.parameters.end() || tier->second == "0") &&
-        (profile == format.parameters.end() || profile->second == "0"), false};
+    return {av1_enabled_ && !scaling && codec_policy::IsScreenAv1Format(format), false};
   }
   std::unique_ptr<webrtc::VideoDecoder> Create(const webrtc::Environment& env,
                                              const webrtc::SdpVideoFormat& format) override {

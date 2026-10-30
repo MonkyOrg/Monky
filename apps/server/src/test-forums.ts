@@ -176,3 +176,29 @@ test('forum acknowledgement rechecks read permission after publishing the new ch
   assert.equal(f.member.peer.messages.some(message =>
     message.type === MessageType.CHAT_MESSAGE && message.payload.channelId === id), false);
 });
+
+test('editing a topic resends that channel alone; new topics reach the others as a difference', async t => {
+  const f = await setup(t);
+  const post = async (title: string) => text(record((await f.member.peer.request(MessageType.FORUM_CREATE_POST, {
+    id: randomUUID(), channelId: f.forum.id, title, content: title,
+  })).payload.post).channelId);
+  const first = await post('First topic');
+  await post('Second topic');
+  const sent = async (since: number, type: MessageType) => {
+    await f.owner.peer.barrier();
+    return f.owner.peer.messages.slice(since).filter(message => message.type === type)
+      .map(message => record(message.payload.channel));
+  };
+
+  let since = f.owner.peer.messages.length;
+  assert.equal((await f.member.peer.request(MessageType.FORUM_UPDATE_POST, { channelId: first, title: 'Renamed topic' })).type,
+    MessageType.FORUM_POST_SAVED);
+  const updated = await sent(since, MessageType.CHANNEL_UPDATED);
+  assert.deepEqual(updated.map(channel => channel.id), [first], 'every other channel and topic stays as it was');
+  assert.equal(updated[0].name, 'Renamed topic');
+
+  since = f.owner.peer.messages.length;
+  const third = await post('Third topic');
+  assert.deepEqual((await sent(since, MessageType.CHANNEL_CREATED)).map(channel => channel.id), [third]);
+  assert.deepEqual(await sent(since, MessageType.CHANNEL_UPDATED), []);
+});

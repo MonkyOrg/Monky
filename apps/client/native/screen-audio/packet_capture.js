@@ -2,7 +2,7 @@
 
 // Kept separate so unsupported/missing-addon behavior is testable without loading
 // a production addon or performing platform capability discovery.
-function createPacketCaptureFactory(binding, platform) {
+function createPacketCaptureFactory(binding, platform, loadError = null) {
   return function createPacketCapture(options, onEvent) {
     if (!options || typeof options !== 'object' || Array.isArray(options) || typeof onEvent !== 'function') {
       throw new TypeError('Expected (options, onEvent)');
@@ -16,7 +16,8 @@ function createPacketCaptureFactory(binding, platform) {
     }
     const error = Object.assign(new Error(supportedPlatform
       ? 'Timestamped native audio capture module is unavailable'
-      : 'Timestamped native audio capture requires Windows or macOS'), {
+      : 'Timestamped native audio capture requires Windows or macOS',
+    supportedPlatform && loadError ? { cause: loadError } : undefined), {
       code: supportedPlatform ? 'ERR_AUDIO_UNAVAILABLE' : 'ERR_AUDIO_UNSUPPORTED',
     });
     const snapshot = Object.freeze({

@@ -1,24 +1,29 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync, spawnSync } from 'child_process';
-import { fetchReleaseCompatibility, isReleaseVersion, PROTOCOL_VERSION, type ReleaseCompatibilityResult } from '@monky/shared';
+import { execSync, spawnSync, type SpawnSyncReturns } from 'child_process';
+import {
+  compareReleaseVersions, fetchReleaseCompatibility, isReleaseVersion, pickNewestRelease, PROTOCOL_VERSION,
+  releaseRequiresProtocolUpdate, type ReleaseCompatibilityResult,
+} from '@monky/shared';
 import { ANSI, color } from '../constants';
 import { GlobalArgs } from '../context';
-import { resolveInterpreter } from '../health';
-import { t } from '../i18n/index';
-import {
-  AUTO_UPDATE_CRON,
-  ensurePm2,
-  findPm2Process,
-  getCliEntryPath,
-  getUpdaterProcessName,
-  isPm2Available,
-  LEGACY_UPDATER_PROCESS_NAME,
-} from '../pm2';
+import { getCliLanguage, t } from '../i18n/index';
+import { isPm2Available } from '../pm2';
 import { confirm } from '../prompts';
 import { runSync } from '../process';
 import { createCliDownloadProgress, downloadCliArtifact, validateCliArtifact, type CliReleaseArtifact } from '../releaseDownload';
+import {
+  acquireUpdateLock,
+  backupDatabase,
+  findRunningTargets,
+  readInstallRecord,
+  recordInstall,
+  restoreDatabaseIfMigrated,
+  type RunningTarget,
+  updateTiming,
+  waitForServer,
+} from '../updateSafety';
 
 // Release bodies carry the full changelog, so 100 entries already exceed the
 // 4 MiB response limit in fetchLatestVersion; the newest release is always in
@@ -26,6 +31,7 @@ import { createCliDownloadProgress, downloadCliArtifact, validateCliArtifact, ty
 export const GITHUB_RELEASES_URL =
   'https://api.github.com/repos/MonkyOrg/Monky/releases?per_page=30';
 export const GITHUB_LATEST_RELEASE_URL = 'https://api.github.com/repos/MonkyOrg/Monky/releases/latest';
+export const GITHUB_RELEASE_BY_TAG_URL = 'https://api.github.com/repos/MonkyOrg/Monky/releases/tags/';
 
 export function getRepoRoot(): string | null {
   // apps/server/dist/cli/commands/update.js -> 4 levels up is repo root
@@ -107,11 +113,25 @@ export function getLocalVersion(): string {
   return '0.0.0';
 }
 
-export async function fetchLatestVersion(
-  includeBeta = false
-): Promise<{ version: string; url: string; tgzUrl?: string; artifact?: CliReleaseArtifact; isPrerelease: boolean } | null> {
-  const endpoint = includeBeta ? GITHUB_RELEASES_URL : GITHUB_LATEST_RELEASE_URL;
+export interface PublishedRelease {
+  version: string;
+  url: string;
+  tgzUrl?: string;
+  artifact?: CliReleaseArtifact;
+  isPrerelease: boolean;
+}
 
+export async function fetchLatestVersion(includeBeta = false): Promise<PublishedRelease | null> {
+  return fetchRelease(includeBeta ? GITHUB_RELEASES_URL : GITHUB_LATEST_RELEASE_URL);
+}
+
+/** The release of one exact version, used to reinstall it when an update fails. */
+export async function fetchReleaseByVersion(version: string): Promise<PublishedRelease | null> {
+  const release = await fetchRelease(`${GITHUB_RELEASE_BY_TAG_URL}v${encodeURIComponent(version)}`);
+  return release?.version === version ? release : null;
+}
+
+async function fetchRelease(endpoint: string): Promise<PublishedRelease | null> {
   try {
     const https = await import('https');
     return new Promise((resolve) => {
@@ -180,42 +200,6 @@ export async function fetchLatestVersion(
   }
 }
 
-export function parseSemver(v: string): {
-  major: number;
-  minor: number;
-  patch: number;
-  isBeta: boolean;
-  betaNumber: number;
-} {
-  const clean = String(v || '').replace(/^v/, '').trim();
-  const [main, prerelease] = clean.split('-');
-  const [major = 0, minor = 0, patch = 0] = main.split('.').map((n) => Number.parseInt(n, 10) || 0);
-  let betaNumber = 0;
-  if (prerelease) {
-    const match = /beta\.?(\d+)/i.exec(prerelease);
-    betaNumber = match ? Number.parseInt(match[1], 10) : 0;
-  }
-  return { major, minor, patch, isBeta: prerelease != null, betaNumber };
-}
-
-export function compareVersions(local: string, remote: string): number {
-  const a = parseSemver(local);
-  const b = parseSemver(remote);
-
-  if (a.major !== b.major) return b.major - a.major;
-  if (a.minor !== b.minor) return b.minor - a.minor;
-  if (a.patch !== b.patch) return b.patch - a.patch;
-
-  // Same base major.minor.patch:
-  // If one is beta and the other is stable, the stable release is strictly newer
-  if (a.isBeta && !b.isBeta) return 1;
-  if (!a.isBeta && b.isBeta) return -1;
-  if (a.isBeta && b.isBeta) {
-    return b.betaNumber - a.betaNumber;
-  }
-  return 0;
-}
-
 export interface GitHubReleaseSummary {
   tag_name?: string;
   html_url?: string;
@@ -250,29 +234,6 @@ function parseGitHubRelease(value: unknown): GitHubReleaseSummary | null {
   };
 }
 
-/**
- * Picks the newest release from the GitHub listing.
- *
- * The `/releases` endpoint does not return the list in chronological order — it
- * orders by tag name, so `v2.4.0-beta.9` came back ahead of `v2.4.0-beta.15`.
- * Reading `parsed[0]` therefore offered an old build as if it were the latest,
- * while the desktop client, which compares every entry, resolved correctly. The
- * two now use the same strategy: compare, never trust the order.
- *
- * Drafts are skipped because they are visible to maintainers only and have no
- * downloadable assets.
- */
-export function pickNewestRelease<T extends GitHubReleaseSummary>(releases: T[]): T | null {
-  let newest: T | null = null;
-  for (const release of releases || []) {
-    if (!release || release.draft || !release.tag_name) continue;
-    if (!newest || compareVersions(newest.tag_name as string, release.tag_name) > 0) {
-      newest = release;
-    }
-  }
-  return newest;
-}
-
 export async function checkForUpdate(
   includeBeta = false
 ): Promise<{
@@ -288,7 +249,7 @@ export async function checkForUpdate(
     throw new Error(t('update.checkFailed'));
   }
 
-  const hasUpdate = compareVersions(local, latest.version) > 0;
+  const hasUpdate = compareReleaseVersions(latest.version, local) > 0;
   if (hasUpdate) {
     const tagDesc = latest.isPrerelease ? ' (Beta)' : '';
     console.log(color(t('update.newVersion', { version: latest.version + tagDesc }), ANSI.green));
@@ -388,14 +349,9 @@ export function resolveInstalledCli(version: string, cwd?: string): string {
   return entry;
 }
 
-export async function performUpdate(
-  options: { targetVersion: string; artifact?: CliReleaseArtifact },
-): Promise<{ cliEntry: string }> {
-  console.log(color(t('update.updating'), ANSI.bold));
-  console.log();
-
-  const { artifact } = options;
-  if (!artifact || artifact.version !== options.targetVersion) throw new Error(t('update.invalidArtifact'));
+/** Downloads, verifies and installs one release, returning its CLI entry point. */
+async function installRelease(version: string, artifact?: CliReleaseArtifact): Promise<string> {
+  if (!artifact || artifact.version !== version) throw new Error(t('update.invalidArtifact'));
   validateCliArtifact(artifact);
   const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'monky-update-'));
   const progress = createCliDownloadProgress();
@@ -409,36 +365,171 @@ export async function performUpdate(
       },
     });
     console.log(color(t('update.installStage'), ANSI.cyan));
-    // A fixed relative filename never interpolates a home/temp path into cmd.exe.
     const installArgs = buildInstallArgs('./package.tgz', detectNpmVersion());
     const installResult = runSync('npm', installArgs, { stdio: 'inherit', cwd: directory });
     if (installResult.error || installResult.status !== 0) throw new Error(t('update.installFailed'));
-    const cliEntry = resolveInstalledCli(options.targetVersion, directory);
-    console.log(color(t('update.success'), ANSI.green));
-    return { cliEntry };
+    return resolveInstalledCli(version, directory);
   } finally {
     progress.finish();
     await fs.promises.rm(directory, { recursive: true, force: true });
   }
 }
 
-export async function updateCommand(globalArgs: GlobalArgs, args: string[]): Promise<void> {
-  const checkOnly = args.includes('--check');
-  const includeBeta = args.includes('--beta') || args.includes('-b');
-  const assumeYes = args.includes('--yes') || args.includes('-y');
+export async function performUpdate(
+  options: { targetVersion: string; artifact?: CliReleaseArtifact },
+): Promise<{ cliEntry: string }> {
+  console.log(color(t('update.updating'), ANSI.bold));
+  console.log();
+  const cliEntry = await installRelease(options.targetVersion, options.artifact);
+  console.log(color(t('update.success'), ANSI.green));
+  return { cliEntry };
+}
 
-  const { hasUpdate, remote, artifact, isPrerelease } = await checkForUpdate(includeBeta);
+/**
+ * Runs the freshly installed CLI once. It loads the whole server, so a
+ * package that cannot run on this host (Node too old, missing module) fails
+ * here, before any server is restarted onto it.
+ */
+export function verifyInstalledCli(cliEntry: string, version: string): boolean {
+  const result = spawnSync(process.execPath, [cliEntry, '--version'], {
+    encoding: 'utf8', timeout: 60_000, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+    // An explicit language keeps an unreadable saved preference from failing the check.
+    env: { ...process.env, MONKY_LANG: getCliLanguage() },
+  });
+  const lines = String(result.stdout ?? '').trim().split(/\r?\n/);
+  return !result.error && result.status === 0 && lines[lines.length - 1]?.trim() === `monky ${version}`;
+}
 
-  if (checkOnly) {
+/**
+ * Reinstalls a release after a failed update. The install record is left
+ * pointing at the failed version on purpose: servers that kept running the
+ * reinstalled code must not later be taken for outdated and restarted.
+ */
+async function reinstallVersion(version: string): Promise<string> {
+  const release = await fetchReleaseByVersion(version);
+  if (!release?.artifact) throw new Error(t('update.previousReleaseUnavailable', { version }));
+  console.log(color(t('update.reinstalling', { version }), ANSI.bold));
+  return installRelease(version, release.artifact);
+}
+
+function describeFailure(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function describeSpawnFailure(result: SpawnSyncReturns<Buffer>): string {
+  return result.error?.message ?? result.signal ?? String(result.status);
+}
+
+async function rollBackInstall(previous: string, next: string): Promise<never> {
+  console.log(color(t('update.smokeTestFailed', { version: next }), ANSI.red));
+  try {
+    await reinstallVersion(previous);
+  } catch (error) {
+    throw new Error(t('update.rollbackFailed', { reason: describeFailure(error), backup: '-' }));
+  }
+  throw new Error(t('update.installRolledBack', { version: next, previous }));
+}
+
+/**
+ * Brings the previous version back after the first server failed to start on
+ * the new one: reinstalls it, restores the database when the failed version
+ * migrated it, and starts the server again. Always ends the update in error.
+ */
+async function rollBack(
+  target: RunningTarget,
+  backup: string | null,
+  versions: { previous: string; next: string },
+): Promise<never> {
+  console.log(color(t('update.rollingBack', { name: target.name, version: versions.next, previous: versions.previous }), ANSI.yellow));
+  // Stops a crash loop from touching the database while it is restored.
+  runSync('pm2', ['stop', target.processName], { stdio: 'ignore' });
+  let cliEntry: string;
+  let restored: boolean;
+  try {
+    cliEntry = await reinstallVersion(versions.previous);
+    restored = backup !== null && await restoreDatabaseIfMigrated(target.dataDir, backup);
+  } catch (error) {
+    throw new Error(t('update.rollbackFailed', { reason: describeFailure(error), backup: backup ?? '-' }));
+  }
+  if (restored && backup) console.log(color(t('update.databaseRestored', { backup }), ANSI.dim));
+  const start = spawnSync(process.execPath, [cliEntry, '--data', target.dataDir, 'start'], { stdio: 'inherit', shell: false });
+  const outcome = !start.error && start.status === 0 ? await waitForServer(target, updateTiming.startupMs) : 'down';
+  throw new Error(outcome === 'down'
+    ? t('update.rollbackStartFailed', { name: target.name, version: versions.previous, backup: backup ?? '-' })
+    : t('update.rolledBack', { version: versions.next, previous: versions.previous }));
+}
+
+/**
+ * Restarts each server through the installed CLI and confirms it answers.
+ * When no server has come up on the new version yet, a failure rolls the
+ * update back; once one has, the version itself runs here, so a later
+ * failure only stops the remaining restarts.
+ */
+async function restartTargets(
+  targets: RunningTarget[],
+  cliEntry: string,
+  versions: { previous: string | null; next: string },
+  ranElsewhere = false,
+): Promise<void> {
+  let ranHere = ranElsewhere;
+  for (const target of targets) {
+    const backup = backupDatabase(target.dataDir, versions.previous ?? 'unknown');
+    const restart = spawnSync(process.execPath, [cliEntry, '--data', target.dataDir, 'restart', '--after-update'], {
+      stdio: 'inherit', shell: false,
+    });
+    const restarted = !restart.error && restart.status === 0;
+    const outcome = await waitForServer(target, restarted ? updateTiming.startupMs : updateTiming.failedRestartGraceMs);
+    if (outcome === 'up') {
+      ranHere = true;
+      continue;
+    }
+    if (outcome === 'unchanged') {
+      if (!restarted) throw new Error(t('update.restartFailed', { reason: describeSpawnFailure(restart) }));
+      console.log(color(t('update.serverNotRestarted', { name: target.name }), ANSI.dim));
+      continue;
+    }
+    if (!ranHere && versions.previous) await rollBack(target, backup, { previous: versions.previous, next: versions.next });
+    throw new Error(t('update.serverDidNotStart', { name: target.name, backup: backup ?? '-' }));
+  }
+}
+
+/**
+ * Servers still running code older than the last install: a declined
+ * restart, or a run that waited for another update and found it done. They
+ * get the same backup and rollback as a restart right after the install,
+ * unless another server of this machine already runs the installed version:
+ * rolling the shared package back would then leave that one on newer code
+ * than its next start, over a database it already migrated.
+ */
+async function restartOutdatedServers(globalArgs: GlobalArgs, version: string, assumeYes: boolean): Promise<void> {
+  const record = readInstallRecord();
+  if (!record || record.version !== version) return;
+  const outdated = findRunningTargets(globalArgs)
+    .filter((target) => target.startedAt !== null && target.startedAt < record.installedAt);
+  if (outdated.length === 0) return;
+  const names = outdated.map((target) => target.name).join(', ');
+  if (!assumeYes) {
+    console.log(color(t('update.outdatedServers', { names }), ANSI.yellow));
     return;
   }
+  const ranElsewhere = findRunningTargets({ ...globalArgs, dataDirSpecified: false })
+    .some((target) => target.startedAt !== null && target.startedAt >= record.installedAt);
+  console.log(color(t('update.restartingOutdated', { names }), ANSI.dim));
+  await restartTargets(outdated, resolveInstalledCli(version), { previous: record.previous, next: version }, ranElsewhere);
+}
 
-  if (!hasUpdate) {
-    if (assumeYes) {
+async function runUpdate(globalArgs: GlobalArgs, includeBeta: boolean, assumeYes: boolean): Promise<void> {
+  const { local, remote, artifact, isPrerelease } = await checkForUpdate(includeBeta);
+  const order = compareReleaseVersions(remote, local);
+  if (order <= 0) {
+    // Only the installed version can be reinstalled: an older release over a
+    // database the newer one already migrated is a downgrade.
+    if (order < 0) console.log(color(t('update.noDowngrade', { local, remote }), ANSI.yellow));
+    const reinstall = order === 0 && !assumeYes && await confirm(t('update.forceReinstall'), false);
+    if (!reinstall) {
+      await restartOutdatedServers(globalArgs, local, assumeYes);
       return;
     }
-    const force = await confirm(t('update.forceReinstall'), false);
-    if (!force) return;
   }
 
   const channelLabel = isPrerelease || includeBeta ? ' (Beta)' : '';
@@ -450,185 +541,40 @@ export async function updateCommand(globalArgs: GlobalArgs, args: string[]): Pro
     }
   }
 
-  const installed = await performUpdate({
-    targetVersion: remote,
-    artifact,
-  });
+  const targets = findRunningTargets(globalArgs);
+  const installed = await performUpdate({ targetVersion: remote, artifact });
+  if (!verifyInstalledCli(installed.cliEntry, remote)) await rollBackInstall(local, remote);
+  recordInstall(remote, local);
 
-  if (!isPm2Available()) return;
-
-  const shouldRestart = assumeYes || await confirm(t('update.confirmRestart'), true);
-  if (shouldRestart) {
-    const args = [installed.cliEntry];
-    if (globalArgs.dataDirSpecified) args.push('--data', globalArgs.dataDir);
-    args.push('restart', '--after-update');
-    const restart = spawnSync(process.execPath, args, { stdio: 'inherit', shell: false });
-    if (restart.error || restart.status !== 0) {
-      throw new Error(t('update.restartFailed', {
-        reason: restart.error?.message ?? restart.signal ?? String(restart.status),
-      }));
-    }
+  if (targets.length === 0) {
+    if (isPm2Available()) console.log(color(t('update.noRunningServers'), ANSI.dim));
+    return;
   }
-}
-
-export function getUpdaterScriptPath(dataDir: string): string {
-  return path.join(dataDir, 'auto-update.cjs');
-}
-
-function getLegacyUpdaterScriptPath(dataDir: string): string {
-  return path.join(dataDir, 'auto-update.sh');
-}
-
-export interface AutoUpdateSchedule {
-  type: 'daily' | 'interval';
-  value: string | number;
-}
-
-/**
- * Auto-updater run by PM2 as a daemon on a schedule.
- *
- * It runs as a long-lived Node.js process managed by PM2, calculating the next check time
- * and calling the CLI entry point with `update --yes`.
- */
-export function generateUpdaterScript(options: {
-  dataDir: string;
-  cliEntry: string;
-  beta: boolean;
-  schedule?: AutoUpdateSchedule;
-}): string {
-  const args = [options.cliEntry, '--data', options.dataDir, 'update', '--yes'];
-  if (options.beta) args.push('--beta');
-  const scheduleType = options.schedule?.type || 'daily';
-  const scheduleValue = options.schedule?.value ?? '04:00';
-
-  return `// Monky auto-updater daemon — generated by "monky config set autoUpdate".
-// Do not edit: this file is rewritten whenever auto-update is reconfigured.
-const { spawnSync } = require('child_process');
-
-const args = ${JSON.stringify(args, null, 2)};
-const scheduleType = ${JSON.stringify(scheduleType)};
-const scheduleValue = ${JSON.stringify(scheduleValue)};
-
-function getMsUntilNextRun() {
-  if (scheduleType === 'interval') {
-    const hours = typeof scheduleValue === 'number' ? scheduleValue : parseInt(scheduleValue, 10) || 2;
-    return Math.max(1, hours) * 60 * 60 * 1000;
-  }
-  const parts = String(scheduleValue || '04:00').split(':').map(Number);
-  const targetH = isNaN(parts[0]) ? 4 : parts[0];
-  const targetM = isNaN(parts[1]) ? 0 : parts[1];
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(targetH, targetM, 0, 0);
-  if (next.getTime() <= now.getTime()) {
-    next.setDate(next.getDate() + 1);
-  }
-  return next.getTime() - now.getTime();
-}
-
-function runUpdateCheck() {
-  console.log('[' + new Date().toISOString() + '] [monky-updater] Checking scheduled updates...');
-  try {
-    const result = spawnSync(process.execPath, args, { stdio: 'inherit' });
-    console.log('[monky-updater] Check finished with code:', result.status);
-  } catch (err) {
-    console.error('[monky-updater] Error while running update check:', err);
-  }
-  scheduleNext();
-}
-
-function scheduleNext() {
-  const delayMs = getMsUntilNextRun();
-  const nextDate = new Date(Date.now() + delayMs);
-  console.log('[' + new Date().toISOString() + '] [monky-updater] Next check scheduled for:', nextDate.toLocaleString());
-  setTimeout(runUpdateCheck, delayMs);
-}
-
-console.log('[monky-updater] Automatic update daemon started (mode: ' + scheduleType + ', value: ' + scheduleValue + ').');
-scheduleNext();
-`;
-}
-
-/**
- * Whether PM2 has an updater registered for this server.
- */
-export function isAutoUpdateEnabled(dataDir: string): boolean {
-  if (!isPm2Available()) return false;
-  return (
-    findPm2Process(getUpdaterProcessName(dataDir)) !== null ||
-    findPm2Process(LEGACY_UPDATER_PROCESS_NAME) !== null
+  const shouldRestart = assumeYes || await confirm(
+    targets.length === 1 ? t('update.confirmRestart') : t('update.confirmRestartMany', { count: targets.length }),
+    true
   );
+  if (!shouldRestart) {
+    console.log(color(t('update.restartLater'), ANSI.dim));
+    return;
+  }
+  await restartTargets(targets, installed.cliEntry, { previous: local, next: remote });
 }
 
-export async function enableAutoUpdate(dataDir: string, schedule?: AutoUpdateSchedule): Promise<void> {
-  ensurePm2();
+export async function updateCommand(globalArgs: GlobalArgs, args: string[]): Promise<void> {
+  const checkOnly = args.includes('--check');
+  const includeBeta = args.includes('--beta') || args.includes('-b');
+  const assumeYes = args.includes('--yes') || args.includes('-y');
 
-  const scriptPath = getUpdaterScriptPath(dataDir);
-  const beta = parseSemver(getLocalVersion()).isBeta;
-  await fs.promises.writeFile(
-    scriptPath,
-    generateUpdaterScript({ dataDir, cliEntry: getCliEntryPath(), beta, schedule }),
-    'utf8'
-  );
-
-  const legacyScript = getLegacyUpdaterScriptPath(dataDir);
-  if (fs.existsSync(legacyScript)) {
-    try {
-      await fs.promises.unlink(legacyScript);
-    } catch {}
-  }
-
-  const processName = getUpdaterProcessName(dataDir);
-  for (const name of [processName, LEGACY_UPDATER_PROCESS_NAME]) {
-    runSync('pm2', ['delete', name], { stdio: 'ignore' });
-  }
-
-  const interpreter = resolveInterpreter();
-  const result = runSync(
-    'pm2',
-    [
-      'start',
-      scriptPath,
-      '--name',
-      processName,
-      // Same reason as the server's ecosystem file: a bare `node` is resolved
-      // from the PM2 daemon's environment, which keeps the Node it was started
-      // with. After a Node upgrade that path can be gone, and PM2 then fails to
-      // spawn while still reporting the process as online (#522).
-      ...(interpreter ? ['--interpreter', interpreter] : []),
-    ],
-    { stdio: 'inherit' }
-  );
-
-  if (result.status !== 0) {
-    throw new Error(t('update.autoUpdateFailed'));
-  }
-
-  runSync('pm2', ['save'], { stdio: 'ignore' });
-
-  const schedType = schedule?.type || 'daily';
-  const schedVal = schedule?.value ?? '04:00';
-  const scheduleLabel = schedType === 'interval'
-    ? t('update.scheduleEvery', { value: schedVal })
-    : t('update.scheduleDaily', { value: schedVal });
-
-  console.log(color(t('update.autoUpdateEnabled'), ANSI.green));
-  console.log(t('update.schedule', { schedule: scheduleLabel }));
-  console.log(beta ? t('update.channelBeta') : t('update.channelStable'));
-  console.log(t('update.script', { path: scriptPath }));
-  console.log(color(t('update.disableHint'), ANSI.dim));
-}
-
-export async function disableAutoUpdate(dataDir: string): Promise<void> {
-  if (!isPm2Available()) {
-    console.log(color(t('update.pm2NotFound'), ANSI.yellow));
+  if (checkOnly) {
+    await checkForUpdate(includeBeta);
     return;
   }
 
-  for (const name of [getUpdaterProcessName(dataDir), LEGACY_UPDATER_PROCESS_NAME]) {
-    runSync('pm2', ['delete', name], { stdio: 'ignore' });
+  const releaseLock = await acquireUpdateLock();
+  try {
+    await runUpdate(globalArgs, includeBeta, assumeYes);
+  } finally {
+    releaseLock();
   }
-  runSync('pm2', ['save'], { stdio: 'ignore' });
-  console.log(color(t('update.autoUpdateDisabled'), ANSI.green));
 }
-import { releaseRequiresProtocolUpdate } from '@monky/shared';

@@ -15,9 +15,12 @@ const { decoderFailureObservations } = require('../runtime/nativeVideoDiagnostic
 function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = false,
   target = { hwnd: 12345, expectedProcessId: 56789 }, captureEncoder = 'auto', captureModule, preserveAspectRatio,
   video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 }, quality = 'source',
-  captureRuntime = {}, captureDirectory = path.resolve(__dirname, 'modeled-capture') } = {}) {
+  captureRuntime = {}, captureDirectory = path.resolve(__dirname, 'modeled-capture'), timers, send = async () => {} } = {}) {
   let finish, closeCalls = 0, engineOptions;
-  const errors = [], requests = [], states = [], diagnostics = [];
+  const contract = require('../runtime/nativeRtc/engine/contract.json');
+  const capabilities = { abiVersion: contract.abiVersion, contractRevision: contract.contractRevision,
+    audioExtensionVersion: contract.audioExtensionVersion, audioAvailable: true, ...contract.requiredCompiledCapabilities };
+  const errors = [], contexts = [], requests = [], states = [], diagnostics = [];
   const closing = new Promise(resolve => { finish = resolve; });
   const engine = {
     ready: Promise.resolve(),
@@ -27,17 +30,18 @@ function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = f
       assert.fail(`An unwatched endpoint cannot allocate transport resources: ${operation}`);
     },
     submitEncodedFrame() { assert.fail('A local-only preview cannot submit network media.'); },
-    cancel() {}, submitFrame() {}, releaseFrame() {},
+    cancel() {}, releaseFrame() {},
     respond() { assert.fail('An unwatched endpoint cannot acknowledge transport creation.'); },
     close() { closeCalls++; return closing; },
   };
   for (const method of ['grantAudioCredits', 'audioClockProbe', 'calibrateAudioClock', 'setAudioOutputFeedback'])
     engine[method] = () => assert.fail(`An unwatched preview cannot open audio output: ${method}`);
-  if (incomplete) delete engine.submitFrame;
+  if (incomplete) delete engine.releaseFrame;
   const frame = { isDestroyed: () => false, postMessage() {}, url: 'file:///C:/modeled/index.html' };
   const webContents = Object.assign(new EventEmitter(), { isDestroyed: () => false, mainFrame: frame });
   const endpoint = new NativeScreenEndpoint({
-    runtime: { ...captureRuntime, rtc: { createEngine: options => { engineOptions = options; return engine; } } },
+    runtime: { ...captureRuntime, rtc: { createEngine: options => { engineOptions = options; return engine; },
+      capabilities: () => capabilities } },
     textures: { importSharedTexture() {}, sendSharedTexture() {} },
     role, mode, sessionId: role === 'publish' ? 'publisher' : 'viewer', publisherSessionId: 'publisher', channelId: 'channel',
     pipelineId: randomUUID(), source: { shareId: 'screen', instanceId: randomUUID(), audio,
@@ -50,10 +54,11 @@ function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = f
         createMessageChannel() { assert.fail('An unwatched preview cannot create an audio-output port.'); } },
     } } : {}),
     rpc: async () => assert.fail('An unwatched preview cannot allocate SFU resources.'),
-    send: async () => {}, onError: error => errors.push(error),
+    send, onError: (error, context) => { errors.push(error); contexts.push(context); },
     onState: state => states.push(state), onDiagnostic: error => diagnostics.push(error),
+    ...(timers ? { timers } : {}),
   });
-  return { endpoint, engine, engineOptions, errors, requests, states, diagnostics, finish, closeCalls: () => closeCalls };
+  return { endpoint, engine, engineOptions, errors, contexts, requests, states, diagnostics, finish, closeCalls: () => closeCalls };
 }
 
 test('publisher fixes its H264 ceiling before engine startup and source creation, receiver keeps Main6', async () => {
@@ -682,8 +687,189 @@ test('SFU capture remains connected when ICE completes and stops admission on ge
   }
   await f.endpoint.dispatch({ type: 'sfu.state', target: 8, data: { state: 'completed' } });
   assert.equal(f.endpoint.connected(), false, 'A different transport cannot authorize capture admission.');
-  assert.deepEqual(f.errors, []);
+  assert.deepEqual(f.errors.map(error => error.code), ['ERR_NATIVE_SFU_TRANSPORT_FAILED'],
+    'Only the genuine failure, once, fails the pipeline.');
 });
+
+class Clock {
+  constructor() { this.now = 0; this.next = 1; this.tasks = new Map(); }
+  setTimeout = (callback, delay) => {
+    const id = this.next++;
+    this.tasks.set(id, { callback, due: this.now + delay });
+    return id;
+  };
+  clearTimeout = id => { this.tasks.delete(id); };
+  advance(milliseconds) {
+    this.now += milliseconds;
+    for (const [id, task] of [...this.tasks].sort((left, right) => left[1].due - right[1].due)) {
+      if (task.due > this.now) continue;
+      this.tasks.delete(id);
+      task.callback();
+    }
+  }
+}
+
+for (const role of ['publish', 'receive']) {
+  const direction = role === 'publish' ? 'send' : 'recv';
+  test(`SFU ${role}: a transport that fails, closes or stays disconnected fails its pipeline once`, async t => {
+    for (const sequence of [['failed'], ['closed'], ['disconnected'], ['disconnected', 'connecting']]) {
+      const clock = new Clock(), f = fixture({ role, mode: 'sfu', timers: clock });
+      if (role === 'publish') t.mock.method(f.endpoint, 'startCapture', async () => {});
+      await f.endpoint.ready;
+      f.endpoint.broker.transports.set(direction, { nativeId: 7 });
+      for (const state of ['new', 'connecting', 'connected', ...sequence])
+        await f.endpoint.dispatch({ type: 'sfu.state', target: 7, data: { state } });
+      if (sequence[0] === 'disconnected') {
+        clock.advance(9999);
+        assert.deepEqual(f.errors, [], 'A short disconnection can still recover.');
+        clock.advance(1);
+      }
+      assert.deepEqual(f.errors.map(error => error.code), ['ERR_NATIVE_SFU_TRANSPORT_FAILED'], sequence.join());
+      await f.endpoint.dispatch({ type: 'sfu.state', target: 7, data: { state: 'closed' } });
+      assert.equal(f.errors.length, 1, 'One broken transport fails its pipeline once.');
+      f.endpoint.broker.transports.delete(direction);
+      const closing = f.endpoint.close();
+      f.finish({ closed: true });
+      await closing;
+      assert.equal(clock.tasks.size, 0);
+    }
+  });
+
+  test(`SFU ${role}: a reconnection within the grace period, other transports and retirement fail nothing`, async t => {
+    const clock = new Clock(), f = fixture({ role, mode: 'sfu', timers: clock });
+    if (role === 'publish') t.mock.method(f.endpoint, 'startCapture', async () => {});
+    await f.endpoint.ready;
+    f.endpoint.broker.transports.set(direction, { nativeId: 7 });
+    for (const state of ['connected', 'disconnected', 'connecting', 'completed'])
+      await f.endpoint.dispatch({ type: 'sfu.state', target: 7, data: { state } });
+    clock.advance(60000);
+    for (const state of ['disconnected', 'failed', 'closed'])
+      await f.endpoint.dispatch({ type: 'sfu.state', target: 8, data: { state } });
+    clock.advance(60000);
+    assert.deepEqual(f.errors, []);
+    await f.endpoint.dispatch({ type: 'sfu.state', target: 7, data: { state: 'disconnected' } });
+    assert.equal(clock.tasks.size, 1);
+    const closing = f.endpoint.close();
+    // Retiring the endpoint closes its own transport; that closure is not a failure.
+    await f.endpoint.dispatch({ type: 'sfu.state', target: 7, data: { state: 'closed' } });
+    f.endpoint.broker.transports.delete(direction);
+    f.finish({ closed: true });
+    await closing;
+    clock.advance(60000);
+    assert.equal(clock.tasks.size, 0);
+    assert.deepEqual(f.errors, []);
+  });
+}
+
+test('a native error of one peer resource goes to that peer; engine-wide failures stay the pipeline\'s', async t => {
+  const f = fixture({ role: 'publish', mode: 'p2p' });
+  t.after(async () => { f.finish({ closed: true }); await f.endpoint.close(); });
+  await f.endpoint.ready;
+  const offered = [];
+  t.mock.method(f.endpoint.transport, 'handleEvent', event => {
+    offered.push(event.target);
+    return event.target === 5;
+  });
+  const failure = (target, terminal = true) => ({ type: 'error', target,
+    data: { code: 'ERR_RTC_PEER', message: 'Peer resource failed.', status: 7, hresult: 0, terminal } });
+  await f.endpoint.dispatch(failure(5));
+  await assert.rejects(f.endpoint.dispatch(failure(6)), { code: 'ERR_RTC_PEER' }, 'An unowned resource is not a peer failure.');
+  await assert.rejects(f.endpoint.dispatch(failure(0)), { code: 'ERR_RTC_PEER' }, 'Target 0 is the whole engine.');
+  await f.endpoint.dispatch(failure(5, false));
+  assert.deepEqual(offered, [5, 6]);
+  assert.equal(f.diagnostics.length, 1);
+});
+
+test('P2P CONTROL resolves on enqueue, before its acknowledgement, and a failed delivery retires only that pair', async t => {
+  const deliveries = [];
+  const f = fixture({ role: 'publish', mode: 'p2p', send: (remote, control) => new Promise((resolve, reject) => {
+    deliveries.push({ remote, control, resolve, reject });
+  }) });
+  t.after(async () => { f.finish({ closed: true }); await f.endpoint.close(); });
+  await f.endpoint.ready;
+  const ice = candidate => ({ protocol: 'monky-native-screen-p2p', version: 1, callId: f.endpoint.source.instanceId,
+    channelId: 'channel', connectionId: 'pair-1', generation: 1, type: 'ice', turn: 1, candidate, sdpMid: '0', sdpMLineIndex: 0 });
+  await f.endpoint.broker.send('viewer', ice('candidate:1'));
+  await f.endpoint.broker.send('viewer', ice('candidate:2'));
+  assert.deepEqual(deliveries.map(delivery => [delivery.remote, delivery.control.candidate]),
+    [['viewer', 'candidate:1'], ['viewer', 'candidate:2']], 'Both reached the carrier before any acknowledgement.');
+  assert.throws(() => f.endpoint.broker.send('viewer', { ...ice('candidate:3'), sdpMid: null, sdpMLineIndex: null }),
+    'Malformed CONTROL is still refused synchronously, before reaching the carrier.');
+  assert.equal(deliveries.length, 2);
+  const failure = Object.assign(new Error('The participant cannot receive this screen.'), { code: 'PERMISSION_DENIED' });
+  deliveries[0].reject(failure);
+  deliveries[1].resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.errors, [failure]);
+  assert.deepEqual(f.contexts, [{ callId: f.endpoint.source.instanceId, channelId: 'channel', remoteSessionId: 'viewer',
+    connectionId: 'pair-1', generation: 1 }], 'The publisher retires exactly that viewer, as for a rejected send.');
+  await assert.rejects(f.endpoint.broker.send('viewer', ice('candidate:4')), error => error === failure);
+  assert.equal(deliveries.length, 2);
+});
+
+for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: an output-device change or repeated mute and volume do not renegotiate the audio Watch`, async t => {
+    const f = fixture({ role: 'receive', mode, audio: true });
+    const devices = [], applied = [];
+    t.mock.method(f.endpoint.audioOutput.owner, 'start', async () => {});
+    t.mock.method(f.endpoint.audioOutput.owner, 'setSinkId', async sinkId => { devices.push(sinkId); });
+    t.after(async () => { f.finish({ closed: true }); await f.endpoint.close(); });
+    await f.endpoint.ready;
+    let failNext = false;
+    const record = name => async (_target, ...values) => {
+      if (failNext) { failNext = false; throw new Error('Modeled audio Watch failure.'); }
+      applied.push([name, values.at(-1)]);
+    };
+    if (mode === 'p2p') {
+      t.mock.method(f.endpoint.broker, 'getPeer', () => ({ status: 'open' }));
+      t.mock.method(f.endpoint.broker, 'setAudioVolume', record('volume'));
+      t.mock.method(f.endpoint.broker, 'setAudioMuted', record('muted'));
+    } else {
+      f.endpoint.audioConsumerId = 3;
+      t.mock.method(f.endpoint.broker, 'setConsumerVolume', record('volume'));
+      t.mock.method(f.endpoint.broker, 'setAudioMuted', record('muted'));
+    }
+    // The fixture's Watch started muted at volume 0.
+    await f.endpoint.setAudioPreferences({ muted: true, volume: 0, sinkId: 'headphones' });
+    await f.endpoint.setAudioPreferences({ muted: true, volume: 0 });
+    assert.deepEqual(devices, ['headphones']);
+    assert.deepEqual(applied, []);
+    await f.endpoint.setAudioPreferences({ muted: false, volume: 0.5 });
+    await f.endpoint.setAudioPreferences({ muted: false, volume: 0.5, sinkId: 'speakers' });
+    assert.deepEqual(applied, [['volume', 0.5], ['muted', false]]);
+    failNext = true;
+    await assert.rejects(f.endpoint.setAudioPreferences({ muted: false, volume: 0.7 }), /Modeled audio Watch failure/);
+    await f.endpoint.setAudioPreferences({ muted: false, volume: 0.7 });
+    assert.deepEqual(applied.slice(2), [['volume', 0.7], ['muted', false]], 'A failed application is retried.');
+    assert.deepEqual(devices, ['headphones', 'speakers']);
+  });
+
+  test(`${mode}: mute and volume sent with a rejected output change are still applied by the next request`, async t => {
+    const f = fixture({ role: 'receive', mode, audio: true });
+    const applied = [];
+    t.mock.method(f.endpoint.audioOutput.owner, 'start', async () => {});
+    t.mock.method(f.endpoint.audioOutput.owner, 'setSinkId', async sinkId => {
+      if (sinkId === 'vanished') throw new Error('Requested device not found.');
+    });
+    t.after(async () => { f.finish({ closed: true }); await f.endpoint.close(); });
+    await f.endpoint.ready;
+    const record = name => async (_target, ...values) => { applied.push([name, values.at(-1)]); };
+    if (mode === 'p2p') {
+      t.mock.method(f.endpoint.broker, 'getPeer', () => ({ status: 'open' }));
+      t.mock.method(f.endpoint.broker, 'setAudioVolume', record('volume'));
+    } else {
+      f.endpoint.audioConsumerId = 3;
+      t.mock.method(f.endpoint.broker, 'setConsumerVolume', record('volume'));
+    }
+    t.mock.method(f.endpoint.broker, 'setAudioMuted', record('muted'));
+    await assert.rejects(f.endpoint.setAudioPreferences({ muted: false, volume: 0.5, sinkId: 'vanished' }), /not found/);
+    assert.deepEqual(applied, []);
+    // The renderer restores the previous output with the same preferences, which never reached the receiver.
+    await f.endpoint.setAudioPreferences({ muted: false, volume: 0.5, sinkId: '' });
+    await f.endpoint.setAudioPreferences({ muted: false, volume: 0.5 });
+    assert.deepEqual(applied, [['volume', 0.5], ['muted', false]]);
+  });
+}
 
 test('public snapshots and a borrowed closed engine cannot forge local endpoint retirement', async () => {
   const engine = { request: async () => ({}), close: async () => ({ closed: true }) };

@@ -573,7 +573,9 @@ test('cancelled autocomplete requests release timers and late server errors are 
   client.send = () => {};
   let errors = 0;
   const unbind = appEvents.on(`message.${MessageType.SERVER_ERROR}`, () => { errors++; });
-  const request = client.sendRequest(MessageType.COMMAND_AUTOCOMPLETE, {}, 'cancelled-query');
+  const request = client.sendRequest(MessageType.COMMAND_AUTOCOMPLETE, {
+    botId: 'bot', commandName: 'play', channelId: 'text', optionName: 'song', query: 'a',
+  }, 'cancelled-query');
   const rejection = assert.rejects(request, { name: 'AbortError' });
   assert.equal(client.cancelRequest('cancelled-query'), true);
   assert.equal(client.cancelRequest('cancelled-query'), false);
@@ -599,7 +601,9 @@ test('timed out lazy preview requests retire late replies and errors', async (co
     appEvents.on(`message.${MessageType.COMMAND_AUDIO_PREVIEW_RESULT}`, () => { events++; }),
   ];
   context.after(() => { unbind.forEach((off) => off()); client.dispose(); });
-  const request = client.sendRequest<unknown>(MessageType.COMMAND_AUDIO_PREVIEW, {}, 'expired-preview', 30_000);
+  const request = client.sendRequest<unknown>(MessageType.COMMAND_AUDIO_PREVIEW, {
+    channelId: 'text', botId: 'bot', commandName: 'play', resourceId: 'sound', optionName: 'song', autocompleteRequestId: 'query',
+  }, 'expired-preview', 30_000);
   const rejection = assert.rejects(request);
   context.mock.timers.tick(30_000);
   await rejection;

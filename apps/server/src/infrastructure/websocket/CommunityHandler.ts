@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import {
+import { serverMessage,
   MessageType, Permission, ProtocolErrorCode, eventListSchema, eventSaveSchema, eventControlSchema,
   eventInterestSchema, communitySettingsUpdateSchema, liveActionCreateSchema, liveActionUpdateSchema,
   eventIdRequestSchema, eventInterestedListSchema, communityImageUploadSchema,
   liveActionIdSchema, liveActionSubmitSchema, validateBotFormValues,
   nativeLiveFormCreateSchema, nativeLiveFormIdSchema, nativeLiveFormResultsRequestSchema,
   nativeLiveFormSubmitSchema,
-  type ProtocolMessage, type ServerEvent, type LiveActionSubmission,
-  type EventControl, type ServerAuditAction, type ServerAuditChange, type ServerAuditRef,
+  type ServerMessage, type ServerEvent, type LiveActionSubmission,
+  type EventControl, type ServerAuditAction, type ServerAuditChange, type ServerAuditRef, type ServerMessageArgs,
 } from '@monky/shared';
 import { ZodError } from 'zod';
 import { CommunityService, CommunityError } from '../../application/services/CommunityService';
@@ -17,6 +17,7 @@ import { eventChanges } from '../../application/services/serverAuditChanges';
 import type { BotInteractionSession, SelectorInvocationAuthorization } from './BotInteractionHandler';
 import { RateLimiter } from '../security/RateLimiter';
 import { Logger } from '../logger/Logger';
+import { toProtocolError } from './protocolErrors';
 
 /** A community change; the server resolves the channel and the member a bot acted for. */
 export interface CommunityAuditInput {
@@ -36,7 +37,7 @@ interface CommunityTransport {
   accessVersion(): number | null;
   botSession(botId: string): BotInteractionSession | undefined;
   authorizeInvocation(session: BotInteractionSession, invocationId: string, channelId: string): Promise<SelectorInvocationAuthorization | undefined>;
-  send(session: BotInteractionSession, message: ProtocolMessage): void;
+  send(session: BotInteractionSession, message: ServerMessage): void;
   pollUpdated(poll: import('@monky/shared').NativePoll): Promise<void>;
   audit?(session: BotInteractionSession, action: ServerAuditAction, input: CommunityAuditInput): Promise<void>;
 }
@@ -44,6 +45,8 @@ interface CommunityTransport {
 export class CommunityHandler {
   private readonly timer: ReturnType<typeof setInterval>;
   private pending: Promise<void> = Promise.resolve();
+  /** The refresh waiting its turn in the queue, shared by whoever asks before it starts. */
+  private queuedRefresh?: Promise<void>;
   private closed = false;
   private lastAccessVersion: number | null = -1;
   private submissions = new Map<string, number>();
@@ -83,7 +86,20 @@ export class CommunityHandler {
     this.pendingStarts.clear();
   }
 
-  refresh(): Promise<void> { return this.enqueue(() => this.refreshNow()); }
+  /**
+   * Republishes every snapshot. A refresh already queued and not started yet
+   * serves every caller that comes before it starts, since it reads the state
+   * they changed: a burst of votes or role edits costs one round (S-WS-4).
+   */
+  refresh(): Promise<void> {
+    if (this.queuedRefresh) return this.queuedRefresh;
+    const refresh = this.enqueue(() => {
+      this.queuedRefresh = undefined;
+      return this.refreshNow();
+    });
+    this.queuedRefresh = refresh;
+    return refresh;
+  }
 
   handle(session: BotInteractionSession, type: MessageType, payload: unknown, requestId?: string): Promise<void> {
     return this.enqueue(async () => {
@@ -330,14 +346,9 @@ export class CommunityHandler {
         this.send(session, MessageType.COMMUNITY_ACK, {}, requestId);
         await this.refreshNow();
       } catch (error: unknown) {
-        const code = error instanceof CommunityError ? error.code :
-          error instanceof ZodError ? ProtocolErrorCode.COMMUNITY_INVALID : ProtocolErrorCode.INTERNAL_ERROR;
-        if (code === ProtocolErrorCode.INTERNAL_ERROR) Logger.error('NETWORK', 'Community operation failed.', error);
-        this.send(session, MessageType.SERVER_ERROR, {
-          code,
-          message: error instanceof CommunityError ? error.message :
-            code === ProtocolErrorCode.COMMUNITY_INVALID ? 'Invalid community request.' : 'Community operation failed.',
-        }, requestId);
+        this.send(session, MessageType.SERVER_ERROR, error instanceof ZodError
+          ? { code: ProtocolErrorCode.COMMUNITY_INVALID, message: 'Invalid community request.' }
+          : toProtocolError(error, { message: 'Community operation failed.', category: 'NETWORK' }), requestId);
       }
     });
   }
@@ -384,8 +395,8 @@ export class CommunityHandler {
     }
   }
 
-  private send(session: BotInteractionSession, type: MessageType, payload: unknown, requestId?: string): void {
-    if (this.transport.isCurrent(session)) this.transport.send(session, { type, payload, requestId });
+  private send(session: BotInteractionSession, ...message: [...ServerMessageArgs, requestId?: string]): void {
+    if (this.transport.isCurrent(session)) this.transport.send(session, serverMessage(...message));
   }
 
   private async sendSnapshot(session: BotInteractionSession, requestId?: string, includeEnded = false): Promise<void> {

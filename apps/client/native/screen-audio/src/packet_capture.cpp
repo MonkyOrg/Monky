@@ -5,7 +5,6 @@
 #include <mutex>
 #include <limits>
 #include <thread>
-#include <condition_variable>
 #include <utility>
 #include <uv.h>
 
@@ -58,8 +57,7 @@ napi_value FormatValue(napi_env env, const Format& f) {
 struct DeliveryCredit;
 
 struct State {
-  explicit State(napi_env env) : env(env), lease(CaptureOwner::packet),
-      sessionId(std::to_string(nextSession.fetch_add(1))) {}
+  explicit State(napi_env env) : env(env), sessionId(std::to_string(nextSession.fetch_add(1))) {}
   napi_env env;
   CaptureLease lease;
   const std::string sessionId;
@@ -78,12 +76,10 @@ struct State {
   bool hasFormat = false;
   std::string errorCode, errorMessage, status = "starting";
   std::thread worker;
-  uv_loop_t* loop = nullptr;
-  uv_work_t joinWork{};
-  bool joinQueued = false;
-  std::mutex threadMutex;
-  std::condition_variable threadPublished;
-  bool threadDecided = false;
+  // The capture thread signals this as its last action. The loop then joins it at once instead of
+  // parking a threadpool thread on the join for the whole capture.
+  uv_async_t exited{};
+  bool exitReserved = false;
   // Cleanup can revoke the producer acquisition before Node destroys its TSFN.
   // Never hold this guard during acquisition, conversion, callbacks or joining.
   std::mutex tsfnMutex;
@@ -454,7 +450,7 @@ QueueResult Queue(State& state, std::unique_ptr<Event> event) {
 void Execute(Shared shared) noexcept {
   auto& state = *shared;
   try {
-    if (!state.lease.held()) throw Failure("ERR_AUDIO_BUSY", "Audio capture is busy (legacy capture or packet session limit)");
+    if (!state.lease.held()) throw Failure("ERR_AUDIO_BUSY", "Audio capture is busy (packet session limit)");
     if (!state.stop.load()) {
       Format format;
       Timeline timeline;
@@ -496,10 +492,12 @@ void Execute(Shared shared) noexcept {
     state.Fail("ERR_AUDIO_CAPTURE", "Unexpected native capture failure");
   }
   ReleaseProducer(state);
+  // Last use of the session on this thread: after it, the loop only waits for the thread to return.
+  uv_async_send(&state.exited);
 }
 
-void Complete(uv_work_t* work, int) noexcept {
-  std::unique_ptr<Shared> shared(static_cast<Shared*>(work->data));
+void WorkerRetired(uv_handle_t* handle) noexcept {
+  std::unique_ptr<Shared> shared(static_cast<Shared*>(handle->data));
   auto& state = **shared;
   state.workDone = true;
 #ifdef MONKY_PACKET_CAPTURE_TEST
@@ -510,13 +508,10 @@ void Complete(uv_work_t* work, int) noexcept {
   Finish(state);
   if (scope) napi_close_handle_scope(state.env, scope);
 }
-void Join(uv_work_t* work) noexcept {
-  auto& state = **static_cast<Shared*>(work->data);
-  {
-    std::unique_lock<std::mutex> lock(state.threadMutex);
-    state.threadPublished.wait(lock, [&] { return state.threadDecided; });
-  }
+void WorkerExited(uv_async_t* handle) noexcept {
+  auto& state = **static_cast<Shared*>(handle->data);
   if (state.worker.joinable()) state.worker.join();
+  uv_close(reinterpret_cast<uv_handle_t*>(handle), WorkerRetired);
 }
 void FinalizeDelivery(napi_env env, void* data, void*) noexcept {
   std::unique_ptr<Shared> shared(static_cast<Shared*>(data));
@@ -665,29 +660,24 @@ Napi::Value CreatePacketCapture(const Napi::CallbackInfo& info) {
 #endif
     NapiCheck(napi_add_async_cleanup_hook(env, Cleanup, state.get(), &state->cleanup));
     if (!state->lease.held()) {
-      state->Fail("ERR_AUDIO_BUSY", "Audio capture is busy (legacy capture or packet session limit)");
+      state->Fail("ERR_AUDIO_BUSY", "Audio capture is busy (packet session limit)");
       state->workDone = true;
       ReleaseProducer(*state);
       queued = true;
       return Napi::Value(env, session);
     }
-    NapiCheck(napi_get_uv_event_loop(env, &state->loop));
-    auto work = std::make_unique<Shared>(state);
-    state->joinWork.data = work.get();
-    // Reserve the owned asynchronous join BEFORE starting capture. A scheduler
-    // failure therefore cannot leave an unjoinable/orphaned capture thread.
-    // Unlike napi_async_work, raw libuv work allows Worker environment cleanup
-    // hooks to request stop while this long-lived capture is running.
-    if (uv_queue_work(state->loop, &state->joinWork, Join, Complete) != 0)
+    uv_loop_t* loop = nullptr;
+    NapiCheck(napi_get_uv_event_loop(env, &loop));
+    // Reserve the exit signal BEFORE starting capture, so a failure cannot leave an unjoinable capture
+    // thread. Like the capture itself, the open handle keeps the loop alive, including through the
+    // Worker environment cleanup that waits for Finish(), and it occupies no threadpool thread.
+    auto exited = std::make_unique<Shared>(state);
+    if (uv_async_init(loop, &state->exited, WorkerExited) != 0)
       throw Failure("ERR_AUDIO_RESOURCE", "Cannot reserve asynchronous capture cleanup");
-    state->joinQueued = true;
-    work.release();
+    state->exited.data = exited.release();
+    state->exitReserved = true;
+    // The exit callback runs on this thread only after this call returns, so it always sees the thread.
     state->worker = std::thread(Execute, state);
-    {
-      std::lock_guard<std::mutex> lock(state->threadMutex);
-      state->threadDecided = true;
-    }
-    state->threadPublished.notify_one();
     queued = true;
     return Napi::Value(env, session);
   } catch (const std::exception& error) {
@@ -697,12 +687,9 @@ Napi::Value CreatePacketCapture(const Napi::CallbackInfo& info) {
     if (state && !queued) {
       state->Fail(code, error.what());
       state->envClosing = !canReport;
-      state->workDone = !state->joinQueued;
-      {
-        std::lock_guard<std::mutex> lock(state->threadMutex);
-        state->threadDecided = true;
-      }
-      state->threadPublished.notify_one();
+      // A reserved exit signal retires through the same close callback as a finished capture.
+      if (state->exitReserved) uv_close(reinterpret_cast<uv_handle_t*>(&state->exited), WorkerRetired);
+      else state->workDone = true;
       if (state->tsfn) ReleaseProducer(*state);
       else { state->deliveryFinalized = true; Finish(*state); }
     }

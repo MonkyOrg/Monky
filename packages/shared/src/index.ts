@@ -17,8 +17,9 @@ export {
   isMotionQualityPreset,
   restoreQualityPreset,
   EVERYONE_MENTION_TOKENS,
-  hasEveryoneMention,
 } from './constants.js';
+export { MentionMatcher, hasEveryoneMention } from './mentions.js';
+export type { Mention, MentionMatcherOptions } from './mentions.js';
 export type { QualityPresetType, QualityProfile, AfkTimeoutSeconds } from './constants.js';
 
 export * from './models.js';
@@ -29,6 +30,8 @@ export * from './fileDownloads.js';
 export * from './messageSearch.js';
 export * from './forum.js';
 export * from './voiceHealth.js';
+export * from './abort.js';
+export * from './githubReleases.js';
 export * from './releaseCompatibility.js';
 export * from './serverMonitor.js';
 export * from './serverAudit.js';
@@ -36,6 +39,7 @@ export * from './serverLifecycle.js';
 export * from './serverInvites.js';
 export * from './botVoice.js';
 export * from './protocol.js';
+export * from './protocolPayloads.js';
 export * from './validators.js';
 export * from './identity.js';
 export * from './permissions.js';
@@ -45,6 +49,7 @@ export * from './developmentQa.js';
 export * from './bugReport.js';
 export * from './nativeAudioIpc.js';
 export * from './screenSharing.js';
+export * from './screenShareFailures.js';
 export * from './resourceAudience.js';
 export * from './nativeScreenIpc.js';
 export * from './shortcuts.js';
@@ -74,3 +79,4 @@ export { createMessageContentSchema } from './validators.js';
 export * from './soundboardEditing';
 export * from './recentSounds.js';
 export * from './directMessages.js';
+export * from './secretEnvelope.js';

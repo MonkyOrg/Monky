@@ -77,6 +77,15 @@ interface **não tem acesso ao Node**. Tudo que precisa do sistema operacional �
 escolher uma tela para compartilhar, ler o módulo nativo de áudio, mexer na
 bandeja — passa pela ponte `window.api` exposta pelo preload.
 
+Três barreiras protegem essa ponte. A Content-Security-Policy do `index.html`
+só executa scripts do próprio app, então um HTML injetado por engano não roda;
+um recurso de tipo novo (outro iframe, worker ou origem) precisa entrar nessa
+política. Nenhuma janela sai do próprio documento nem abre outras janelas, com
+exceção do Picture-in-Picture e dos links enviados ao navegador. E os canais
+sensíveis — identidade, backups, servidores hospedados, arquivos locais — só
+respondem à janela principal; o overlay recebe uma ponte própria, apenas com o
+que precisa para desenhar a chamada.
+
 ### A interface não usa framework
 
 Talvez a decisão mais incomum do projeto: **o renderer é TypeScript e DOM puro**.
@@ -99,6 +108,121 @@ lógico, não uma única store compartilhando dados de todos os servidores:
 
 </div>
 
+Os eventos do barramento são tipados em `core/appEventMap.ts`: cada nome
+declara o que carrega, e quem emite ou assina com outro formato não compila. As
+mensagens do servidor chegam como `message.<TIPO>`, com o payload do mapa do
+protocolo (`ServerToClientPayloads`, no `@monky/shared`). As stores seguem três
+formatos:
+
+- **Por sessão** (`serverStore`, `chatStore`, `botScreenStore` e
+  `ParticipantManager`): emitem no próprio `bus`, que é o `appEvents` na sessão
+  visível e o barramento silencioso nas demais. O resto do app as usa por um
+  proxy que aponta para a sessão ativa.
+- **Globais** (`settingsStore`, `connectionStore` e `voiceStore`): emitem direto
+  no `appEvents`, e o evento diz o que mudou; o `settings.updated`, por exemplo,
+  traz as chaves alteradas. A `voiceStore` também muda durante eventos de outros
+  servidores, por isso notifica por `emitOutsideRouting`.
+- **Modelos de tela** (`favoritesStore` e `CommunityFeed`): avisam as telas
+  que os usam por um `subscribe()` próprio. A `dmStore` tem um barramento só
+  dela, tipado por `DmEvents`.
+
+Quem aplica as mensagens do servidor às stores são módulos por domínio, ligados
+uma vez na inicialização: `core/serverStateEvents.ts` (membros, cargos, canais
+e configurações), `core/chatEvents.ts` e `core/voiceEvents.ts`. A tela de um
+servidor (`views/MainView.ts`) compõe as partes de `views/main/`: cabeçalho,
+árvore de canais, membros, cartão do usuário e avisos da chamada.
+
+Uma tela que consulta um servidor por requisição, como a auditoria e o
+monitor, fica presa ao servidor, à conexão e ao membro do momento em que abriu
+por uma `SessionBinding` (`core/sessionBinding.ts`): quando um deles muda, ela
+para em vez de misturar dados de outro servidor. `BoundRequests` aposenta cada
+requisição quando ela termina e as pendentes quando a tela fecha, e
+`watchVisibleSession` (`core/visibleSession.ts`) revalida o acesso quando o
+servidor muda e fecha a tela quando ele deixa de ser o visível.
+
+### O kit de interface
+
+As peças que toda tela repete ficam num lugar só, e uma tela nova as usa em vez
+de reescrevê-las:
+
+- **Casca de modal** (`utils/modalShell.ts`): `openModal({ card, ... })` põe o
+  cartão na pilha de modais e cuida do resto. Um único `keydown` em captura no
+  `document` só age quando o modal está no topo e sem um popup próprio aberto:
+  Escape fecha (ou limpa antes um campo `data-clear-on-escape`) e Tab circula
+  dentro do cartão. O cartão sempre é um `dialog` modal com nome; o foco começa
+  no primeiro controle abaixo do cabeçalho e volta, ao fechar, a quem abriu.
+  A casca também fecha o modal pelos botões `data-modal-close` e por um clique
+  que começa no fundo; `canClose(motivo)` o segura durante uma operação.
+  Quando o servidor visível muda (`closeWithSession`) ou o `signal` do dono
+  termina, o modal sai na hora, sem animação de saída e com os seus popups:
+  o conteúdo de outro servidor não pode ficar por cima do novo. Todo listener do conteúdo usa `shell.signal`. Uma tela que redesenha escreve dentro de `shell.card`, nunca
+  o troca: enquanto um diálogo filho está aberto, a pilha esconde o cartão de
+  baixo, e um cartão novo escaparia disso. A ordem entre modais é da pilha
+  (`utils/modalSurface.ts`), nunca de um `z-index` de cada modal.
+  `openCommunityModal` e o diálogo de captura de atalho
+  (`ShortcutCaptureDialog`) são camadas finas sobre a casca.
+- **Feedback** (`utils/feedback.ts`): erro de operação vai para o toast de
+  alerta compartilhado com `reportError(mensagem, { field, focus, log, error })`,
+  que também marca o campo com `aria-invalid` até a próxima edição. Nunca fica
+  uma mensagem de erro solta no layout. Uma carga que falhou é outra coisa: o
+  conteúdo dá lugar a um aviso com "Tentar novamente" (`renderLoadingError`, em
+  `utils/loadingSkeleton.ts`). `copyText` e `openExternalUrl` confirmam ou
+  explicam no toast. `useAppValidation(form, signal)` troca o balão nativo do
+  navegador, que segue o idioma do sistema, por uma explicação no idioma do
+  app. Duas exceções são de propósito: uma falha terminal de mídia que chega
+  sem uma ação da pessoa (reconexão de voz, microfone, câmera, captura de
+  tela) continua num diálogo, para não passar despercebida, e um erro do palco
+  em tela cheia fica dentro do elemento em tela cheia, porque um toast no
+  `body` não apareceria.
+- **Controles de escolha** (`utils/formControls.ts`): liga/desliga é sempre
+  `renderSwitch({ id, checked, label | labelledBy, ... })`, um checkbox
+  escondido com `role="switch"` e nome, e o foco de teclado aparece no trilho
+  em qualquer lugar. Uma escolha entre poucas opções vira cards
+  (`renderChoiceCards` e `selectChoiceCard`): botões com `aria-pressed`, no
+  estilo `.input-mode-card`, nunca radio buttons. O modo de voz P2P/SFU usa
+  esses cards por `renderVoiceModeCards` (`utils/voiceModeInfo.ts`).
+- **Abas de configurações** (`views/settings/settingsLayout.ts`): as
+  Configurações e as Configurações do servidor declaram as abas uma vez, numa
+  tabela (`SettingsTabEntry`: id, ícone, rótulo), e montam a barra lateral e o
+  título com `renderSettingsTabButtons` e `renderSettingsTabLabel`. Nas
+  Configurações, cada aba da tabela também diz como se monta, se liga, se
+  mostra, se esconde e se limpa.
+- **Wizards da comunidade** (`views/community/wizardShell.ts`): enquete,
+  formulário e evento montam o mesmo quadro com `mountWizard`. O indicador de
+  etapas e o rodapé ficam parados enquanto a etapa desliza entre eles, para a
+  frente ou para trás, e cada etapa nova começa do topo com o título em foco.
+  Voltar e Avançar esperam o deslize terminar. Como o rodapé não sai do lugar,
+  o segundo clique de um clique duplo cai no botão que o primeiro acabou de
+  trocar; esse clique, que o sistema conta como parte do mesmo gesto
+  (`event.detail` 2 ou mais), é ignorado. Assim um clique duplo anda uma etapa
+  só e nunca publica o que ninguém revisou, com ou sem movimento reduzido; o
+  teclado e um clique novo funcionam normalmente. Cada wizard diz quando uma
+  etapa pode ser deixada: com o botão desabilitado (`ready`) ou com uma
+  explicação no toast (`leave`). O rascunho fecha na hora quando o servidor
+  visível muda.
+- **Seletor de público** (`views/ResourceAudiencePicker.ts`): quem pode ver um
+  recurso da comunidade ou assistir a uma transmissão privada. É uma lista com
+  busca que também abre pelo teclado (setas no campo fechado), respeita os
+  limites de `AUDIENCE_LIMITS`, do `@monky/shared`, e aceita textos próprios e
+  a chave liga/desliga de quem o usa (`externalSwitch` com `setPrivate`).
+- **Volume de um tile do palco** (`views/StageVolumeControl.ts`): o botão de
+  mudo com o controle deslizante vertical de 0 a 200% acima dele, o mesmo na
+  tela compartilhada e no miniapp. Abre ao passar o mouse e pelo teclado (o Tab
+  vai do botão ao controle); Escape fecha, e o áudio mudo o mantém fechado.
+- **Movimento**: entrada e saída por `utils/surfaceMotion.ts`, a pilha de
+  modais por `utils/modalSurface.ts`, expansões por `setSurfaceVisible`
+  (`utils/surfaceVisibility.ts`; um painel que desdobra pela própria transição
+  CSS, como os do soundboard, chama `revealWhenUnfolded` ao abrir, para
+  terminar à vista do mesmo jeito), etapas que trocam o cartão inteiro por
+  `replaceModalStep` e etapas dentro da área fixa de um wizard por
+  `slideStepContent` (ambos em `utils/modalSteps.ts`), com direção de avançar e
+  voltar. Troca de aba é uma `view`: só opacidade. Rolagem visível passa por
+  `utils/scroll.ts`. Todos respeitam `prefers-reduced-motion`.
+- **Painéis redimensionáveis** (`utils/resizableEdge.ts`): a borda que a
+  pessoa arrasta para alargar um painel vira um separador de janela, com papel
+  e limites para leitores de tela, setas, Home e End, e a largura salva e
+  restaurada. A lista de canais e o chat de voz a usam.
+
 ### Os serviços
 
 Cada responsabilidade grande do cliente vive em uma classe própria, em
@@ -110,8 +234,7 @@ Cada responsabilidade grande do cliente vive em uma classe própria, em
 | `WebRtcManager` | Orquestração de mídia comum, publicações locais e conexões P2P; delega o transporte SFU |
 | `webrtc/SfuClientEngine` | Transporte SFU: capacidades negociadas, producers, consumers e reconexão |
 | `AudioProcessor` | Microfone, supressão de ruído, detecção de fala |
-| `VideoService` | Captura compartilhada de câmera, efeitos locais e captura de tela |
-| `ScreenAudioService` | Ponte do módulo nativo de áudio de tela para o WebRTC |
+| `VideoService` | Captura compartilhada de câmera, efeitos locais e registro das telas publicadas |
 | `ParticipantManager` | Quem está online, em qual canal e com qual estado |
 | `SoundboardService` | Sons e atalhos do soundboard |
 | `KeybindService` | Atalhos globais |
@@ -126,45 +249,37 @@ qualidade ou das regras de codec.
 
 | Responsabilidade | Onde fica |
 |---|---|
-| Captura, prévia e encerramento da fonte | `VideoService`; áudio capturado por `ScreenAudioService` |
+| Registro local das telas publicadas e de suas prévias | `VideoService`; captura, encoder e áudio pertencem à fonte nativa |
 | Parada/substituição nos controles, áudio associado e atualização da sessão correta | `screenShareControls.ts`, usado pelo seletor, views e saída/troca de chamada |
-| Intenção de publicar cada tela, cancelamento e limpeza em caso de falha | Registro `localScreenShares` e métodos de compartilhamento do `WebRtcManager` |
+| Início, cancelamento e retirada de cada fonte | `startNativeScreenShare()` e `removeNativeScreenSource()` do `WebRtcManager`, executados por `webrtc/NativeScreenController.ts` (fontes locais em `webrtc/nativeScreen/LocalScreenSources.ts`) |
 | Intenção de assistir, independente da view e da preferência de mute | `VoiceStore`, ligada à sessão da chamada e aplicada pelo `WebRtcManager` aos dois transportes |
-| Limites de bitrate/FPS e preferência de adaptação | `webrtc/mediaEncodingPolicy.ts`, usado por P2P e SFU |
-| Escolha da família de codec e recusa de alternativas quando a escolha é explícita | `webrtc/codecPreferences.ts`, com capacidades fornecidas por cada transporte |
-| Alterações serializadas de parâmetros RTP | `webrtc/rtpSenderParameters.ts`: qualidade e codec não sobrescrevem a transação um do outro |
+| Codec e modo de codificação da tela | Preferências de qualidade, sondadas por `core/screenEncoding.ts` e verificadas na admissão da fonte nativa |
+| Limites de bitrate/FPS e preferência de adaptação de microfone e câmera | `webrtc/mediaEncodingPolicy.ts`, usado por P2P e SFU |
+| Ordem de preferência dos codecs da câmera | `webrtc/codecPreferences.ts`, com capacidades fornecidas por cada transporte |
+| Rota ICE em uso (ping, indicador de relay e diagnóstico) | `webrtc/rtcStats.ts`, usado por P2P e SFU; a chamada mede uma vez e o palco e a barra lateral só exibem |
+| Alterações serializadas de parâmetros RTP | `webrtc/rtpSenderParameters.ts`: atualizações simultâneas não sobrescrevem a transação uma da outra |
 | Recepção e associação da mídia remota à interface | `webrtc/RemoteMediaRouter`, comum aos dois modos |
 | Captura/encoder/transporte nativos e ownership no Main | `nativeScreenSharing.ts` e `native/screen-share` |
-| Assinaturas e apresentação de tela nativa ou recepção Chromium compatível | `webrtc/NativeScreenController.ts` e `webrtc/BrowserScreenSubscription.ts` |
+| Assinaturas e apresentação de tela nativa ou recepção Chromium compatível | `webrtc/nativeScreen/RemoteScreenPresentations.ts` (reconexão automática em `RewatchPolicy.ts`) e `webrtc/BrowserScreenSubscription.ts` |
 
-No caminho Chromium, o que **precisa** diferir é o mecanismo de publicação. Em P2P há um sender por
-destinatário, negociação SDP/ICE e uma m-line de envio dedicada a cada tela;
-o encoder é selecionado também em `encodings[].codec`. Em SFU há um producer
-no transporte de envio, e o codec é escolhido entre as capacidades negociadas
-com o servidor. Preferir codecs no SDP não substitui fixar o encoder P2P, e
-as capacidades locais usadas pelo P2P não substituem as capacidades do SFU.
+O renderer não publica telas: a conexão de voz leva só microfone e câmera.
+Cada tela é capturada, codificada e enviada pela fonte nativa, em conexões
+próprias, tanto em P2P quanto em SFU. O Chromium participa só como receptor
+opcional dessas telas, quando escolhido nas configurações
+(`BrowserScreenSubscription`, por P2P ou SFU).
 
-Nesse caminho, a captura e a publicação têm ciclos de vida distintos: reconstruir um
-transporte na mesma chamada preserva a captura ativa, mas sair da chamada ou
-encerrar o compartilhamento encerra a fonte. Uma troca de modo que exige
-saída/reentrada autorizada segue a limpeza completa da chamada. O SFU usa
-`stopTracks: false`, e áudio e vídeo
-de tela compartilham a proteção contra producers tardios após cancelamento
-ou substituição. Trocar o codec refaz a publicação, não a captura.
-
-O seletor consulta `WebRtcManager.assertScreenShareSupported()` antes de pedir
-captura; `VideoService` não depende de codecs nem do modo de voz. Fechar o
-seletor cancela uma aquisição pendente sem encerrar telas já publicadas.
-O início do áudio também é cancelável antes da captura nativa ou durante a
-publicação: encerrar a tela não pode produzir um anúncio tardio de áudio ativo.
+O seletor só usa a captura nativa e explica o motivo quando ela não está
+disponível: não existe alternativa pela captura do Chromium. Fechar o seletor
+cancela uma aquisição pendente sem encerrar telas já publicadas. O áudio da
+tela pertence à fonte nativa que o captura, então encerrar a tela não pode
+produzir um anúncio tardio de áudio ativo.
 O helper de controles captura a sessão da chamada, em vez de enviar atualizações
 ao servidor que estiver visível quando uma operação assíncrona terminar.
 
 Os valores do perfil são **tetos por envio**, não garantias de FPS nem um
 orçamento agregado de upload. P2P pode transmitir a mesma tela para vários
-destinatários; SFU normalmente a envia uma vez ao servidor. `GAMING` prioriza
-framerate; os demais perfis priorizam resolução. Esses tetos não prometem
-1080p120 sustentados.
+destinatários; SFU normalmente a envia uma vez ao servidor. Esses tetos não
+prometem 1080p120 sustentados.
 
 O caminho nativo usa **libobs/WGC → AMF H.264 → WebRTC nativo** no Windows x64
 qualificado, sem decodificar e recodificar o vídeo no transmissor. A escala
@@ -298,9 +413,10 @@ depende do quê.
 
 </div>
 
-Além do WebSocket, o servidor expõe algumas rotas HTTP: `/health`, `/preview` e
-`/invite-info` (informações públicas para a tela de convite), `/avatars/*` e o
-upload/download de `/attachments`.
+Além do WebSocket, o servidor expõe algumas rotas HTTP: `/health`, `/preview`,
+`/invite-info` (endereços para a tela de convite, respondida só no próprio
+computador do servidor; os membros recebem o mesmo pelo WebSocket), `/avatars/*`
+e o upload/download de `/attachments`.
 
 A porta padrão é a **3000**.
 
@@ -453,7 +569,7 @@ Excelente para grupos pequenos de amigos e servidores em VPSs econômicos (como 
 ### Topologia 2: SFU (Selective Forwarding Unit)
 
 Na chamada SFU do motor de navegador, o cliente abre um par de **WebRTC Transports** com o servidor:
-- **`sendTransport`:** Envia as trilhas locais (microfone, webcam, tela e áudio do sistema).
+- **`sendTransport`:** Envia as trilhas locais (microfone e webcam).
 - **`recvTransport`:** Recebe as trilhas de todos os outros participantes roteadas pelo worker `mediasoup`.
 
 O servidor identifica esse par pelo propósito `call`, também usado quando
@@ -570,17 +686,17 @@ Assim não é preciso renegociar a conexão a cada clique no botão de mudo.
 
 A câmera segue as dimensões e o FPS do perfil de qualidade escolhido.
 
-O compartilhamento de tela é uma track **separada** da câmera — você pode
-transmitir as duas ao mesmo tempo. A fonte é anunciada na chamada sem exigir
-o recebimento de sua mídia. Em P2P, a negociação e o `screen-video-meta`
-associam a track à tela correta, separada da câmera.
+O compartilhamento de tela é **separado** da câmera — você pode transmitir as
+duas ao mesmo tempo. A fonte é anunciada na chamada (`nativeScreenShares`) sem
+exigir o recebimento de sua mídia, e cada assinatura usa conexões próprias,
+fora da conexão de voz.
 
 Cada pessoa pode compartilhar **até 8 telas ao mesmo tempo**. O limite é por
 pessoa, não por chamada: cada tela custa a quem transmite outra captura, outro
 encoder e mais upload, enquanto quem assiste só recebe as telas que escolheu
 assistir. Por isso, a partir da terceira tela o Monky pede confirmação uma vez
-por chamada. Cada uma é identificada pelo id do seu próprio `MediaStream`, e é
-esse id que amarra a track, o sender e o quadradinho na tela.
+por chamada. Cada uma é identificada pelo id da fonte (`shareId`), que amarra o
+anúncio, as assinaturas e o quadradinho na tela.
 
 O recurso `screen-shares-8` é negociado. Servidores sem ele aceitam 2 telas por
 pessoa, então o cliente não oferece uma terceira nesse servidor. Clientes sem ele
@@ -593,11 +709,11 @@ daquela fonte ao destinatário; `Parar de assistir` a revoga. A escolha acompanh
 a mesma fonte em reconstruções de view e transporte, mas não é herdada por uma
 nova transmissão apenas por ter o mesmo dono.
 
-Em P2P, `RTC_SIGNAL` de tipo `screen-watch` leva a intenção ao emissor. No caminho Chromium, os
-senders de tela ficam sem track/encoding ativo até existir uma assinatura;
-parar afeta somente aquele peer. Épocas do publisher e do viewer e uma revisão
-crescente protegem contra comandos e negociações antigos. O servidor autentica
-o remetente e verifica canal e fonte publicada.
+`NATIVE_SCREEN_SIGNAL` leva a intenção ao emissor: `watch` e `stop` partem de
+quem assiste; `accepted`, `capture-mode` e `closed`, do emissor. Cada
+assinatura tem o próprio `subscriptionId` e cita a instância da fonte
+(`sourceInstanceId`); parar afeta somente aquela assinatura. O servidor
+autentica o remetente e verifica canal e fonte publicada.
 
 Em SFU, o catálogo continua disponível sem criar consumers de tela automaticamente.
 Os consumers de tela/áudio começam pausados **no servidor** e só são liberados
@@ -608,15 +724,11 @@ Respostas tardias não podem reativar uma assinatura cancelada.
 O áudio da tela é compartilhado por publisher/destinatário: ele continua
 enquanto esse destinatário assistir pelo menos uma tela daquele publisher.
 Microfone, câmera, outros espectadores e preferências de mute são independentes.
-No caminho nativo, a última assinatura de um perfil encerra sua captura,
-encoder e envio, inclusive publisher→SFU. O caminho Chromium mantém sua
-captura/prévia e pode manter o upload ao SFU. RTCP e sinalização continuam permitidos; não se promete
-zero bytes na chamada. Os contratos exigem cliente e servidor com o mesmo
-`PROTOCOL_VERSION`.
-
-O Monky também marca a track com uma dica de conteúdo: `motion` prioriza
-fluidez (bom para jogos e vídeo), `detail` prioriza nitidez (bom para código e
-texto).
+A última assinatura de um perfil encerra sua captura, encoder e envio, inclusive
+publisher→SFU. RTCP e sinalização continuam permitidos; não se promete
+zero bytes na chamada. Cliente e servidor negociam esses contratos ao conectar,
+como descrito em "Compatibilidade negociada", acima: a lista de espectadores,
+por exemplo, só aparece quando os dois lados anunciaram `screen-viewers`.
 
 ### Áudio da tela: o módulo nativo
 
@@ -629,12 +741,21 @@ Monky tem um módulo nativo em C++:
 | **macOS** | ScreenCaptureKit (macOS 13+ para áudio; caminho de vídeo nativo requer 14+), com áudio do sistema ou do aplicativo inteiro selecionado, mediante confirmação |
 | **Outras** | Não suportado — o app segue funcionando, só sem áudio de tela |
 
-Se o módulo não carregar, nada quebra: o compartilhamento continua funcionando
-sem som e o app avisa.
+No Windows, o mesmo módulo também identifica as janelas e os monitores do
+seletor, lê o layout do teclado para os atalhos e limita o redimensionamento do
+overlay. Por isso ele embute o runtime do Visual C++ em vez de depender do
+redistribuível instalado no sistema, e o empacotamento recusa um build que volte
+a exigi-lo. Se mesmo assim o módulo não carregar, o processo principal registra
+a causa no log do app, e as funções que dependem dele falham com essa causa, em
+vez de devolverem listas vazias: no Windows, o seletor não consegue listar
+janelas nem monitores. No macOS, o compartilhamento continua funcionando sem som
+e o app avisa.
 
 Cada compartilhamento com som abre a própria sessão de captura. O módulo aceita
-até 8 sessões ao mesmo tempo, uma para cada tela permitida por pessoa, e mantém
-a captura legada exclusiva. Quais sons podem coexistir é decidido no processo
+até 8 sessões ao mesmo tempo, uma para cada tela permitida por pessoa. Cada
+sessão roda numa thread própria, que avisa o loop do Node ao terminar; nenhuma
+ocupa o pool de threads do libuv, que atende arquivos, DNS e criptografia. Quais
+sons podem coexistir é decidido no processo
 principal, que repete as checagens do seletor: o som de um monitor (e, no macOS,
 o de qualquer fonte, porque o ScreenCaptureKit entrega a mistura do sistema) não
 convive com outro, e duas janelas do mesmo processo não capturam o mesmo som.
@@ -649,9 +770,9 @@ liberam o som.
 
 ### Qualidade e banda
 
-Os perfis controlam resolução, FPS e teto de bitrate. No caminho Chromium,
-os parâmetros de envio usam `RTCRtpSender.setParameters()`; no nativo,
-configuram o pipeline real de captura/encoder/transporte:
+Os perfis controlam resolução, FPS e teto de bitrate. Microfone e câmera
+aplicam esses tetos com `RTCRtpSender.setParameters()`; na tela, eles
+configuram o pipeline nativo real de captura/encoder/transporte:
 
 | Perfil | Áudio | Câmera | Tela |
 |---|---|---|---|
@@ -669,10 +790,9 @@ emitem um quadro-chave por segundo. 4K a 120fps exige H.264 nível 6.0 ou AV1;
 ao escolher o perfil, o Monky verifica o encoder e reduz o FPS se ele recusar.
 
 Nos perfis nomeados a partir de 60fps (Fluido até Extremo), a preferência de
-degradação vira `maintain-framerate`: sob banda apertada o Monky sacrifica
-resolução para segurar o FPS, porque em jogos e vídeos a fluidez importa mais
-que a nitidez. Nos outros perfis é o contrário no caminho Chromium. O nativo
-solicita o perfil real escolhido e não esconde degradação como se a
+degradação da câmera vira `maintain-framerate`: sob banda apertada o Monky
+sacrifica resolução para segurar o FPS; nos outros perfis é o contrário. A tela
+nativa solicita o perfil real escolhido e não esconde degradação como se a
 configuração garantisse FPS.
 
 O perfil Personalizado aceita até 3840×2160 e 240 FPS (120 FPS em 4K).
@@ -748,8 +868,10 @@ Coisas que são consequência direta da arquitetura, não bugs:
 - **TURN desligado por padrão.** Redes muito restritivas podem impedir a
   conexão de mídia mesmo com o servidor acessível. Há relay opcional, mas ele
   custa banda do host e só roda em Linux.
-- **Protocolo exige igualdade exata.** Cliente e servidor precisam ter a mesma
-  `PROTOCOL_VERSION`; atualizar um lado só quebra a conexão.
+- **Compatibilidade tem piso.** Cliente e servidor negociam versão e recursos
+  ao conectar, mas só a partir de um piso (`MIN_CLIENT_PROTOCOL` para clientes,
+  `MIN_BOT_PROTOCOL` para bots). Quem estiver abaixo dele não entra até
+  atualizar, e um recurso novo só aparece quando os dois lados o têm.
 - **Áudio de tela só em Windows e macOS**, por depender de API nativa de cada
   sistema.
 - **Homologação depende do hardware.** O caminho macOS foi exercitado em M1 com

@@ -4,39 +4,21 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const zlib = require('node:zlib');
-const ts = require('typescript');
-const vm = require('node:vm');
 const shared = require('@monky/shared');
+const { loadMain, fakeIpcMain } = require('./mainModules.cjs');
 const { unzipSync } = require(require.resolve('fflate', { paths: [path.dirname(require.resolve('@monky/shared'))] }));
 
 function load(directory, dialogs) {
-  const handlers = new Map();
-  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'fileBatchDownloadIpc.ts'), 'utf8');
-  const output = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
-  }).outputText;
-  const exports = {};
-  vm.runInNewContext(output, {
-    exports, Buffer, console, Error,
-    require: (name) => {
-      if (name === '@monky/shared') return shared;
-      if (name === './i18n') return { mt: (key) => key };
-      if (['node:fs', 'node:path', 'node:zlib'].includes(name)) return require(name);
-      if (name === 'electron') return {
-        app: { getPath: (kind) => path.join(directory, kind) },
-        dialog: {
-          showOpenDialog: async (_window, options) => { dialogs.push(['open', options]); return dialogs.next(); },
-          showSaveDialog: async (_window, options) => { dialogs.push(['save', options]); return dialogs.next(); },
-        },
-        ipcMain: {
-          handle: (channel, handler) => handlers.set(channel, handler),
-          removeHandler: (channel) => handlers.delete(channel),
-        },
-      };
-      throw new Error(`Unexpected import: ${name}`);
-    },
-  });
-  return { exports, handlers };
+  return loadMain('fileBatchDownloadIpc', {
+    local: { i18n: { mt: (key) => key } },
+    packages: { electron: {
+      app: { getPath: (kind) => path.join(directory, kind) },
+      dialog: {
+        showOpenDialog: async (_window, options) => { dialogs.push(['open', options]); return dialogs.next(); },
+        showSaveDialog: async (_window, options) => { dialogs.push(['save', options]); return dialogs.next(); },
+      },
+    } },
+  }).registerFileBatchDownloadIpc;
 }
 
 test('batch download saves into a folder or one ZIP and never leaves partial archives', async (t) => {
@@ -60,15 +42,23 @@ test('batch download saves into a folder or one ZIP and never leaves partial arc
     if (!contents[file.url]) throw new Error('HTTP 404');
     fs.writeFileSync(destination, contents[file.url]);
   };
-  const { exports, handlers } = load(directory, dialogs);
-  const webContents = {};
+  const register = load(directory, dialogs);
+  const webContents = { mainFrame: {}, isDestroyed: () => false };
   const window = { webContents, isDestroyed: () => false };
-  const dispose = exports.setupFileBatchDownloadIpc(window, (name) => path.basename(name).replace(/[<>:"/\\|?*]/g, '_'), download);
+  const { IpcRegistry } = loadMain('ipc/registry', { globals: { console: { ...console, warn: () => {} } } });
+  const ipc = fakeIpcMain();
+  const handlers = ipc.handlers;
+  const registry = new IpcRegistry(ipc, { main: () => webContents, overlay: () => null });
+  register(registry, window, (name) => path.basename(name).replace(/[<>:"/\\|?*]/g, '_'), download);
   const handler = handlers.get(shared.FILE_BATCH_DOWNLOAD_IPC);
-  const event = { sender: webContents };
+  const event = { sender: webContents, senderFrame: webContents.mainFrame };
   const request = (mode, files) => ({ mode, archiveName: 'Mídias de #geral', files });
 
-  assert.equal((await handler({ sender: {} }, request('folder', [{ url: 'https://server.test/a', fileName: 'a.png' }]))).status, 'failed');
+  // Another window, or a frame inside the main one, never opens a save dialog for files it chose.
+  for (const intruder of [{ sender: {} }, { sender: webContents, senderFrame: {} }]) {
+    const refused = await handler(intruder, request('folder', [{ url: 'https://server.test/a', fileName: 'a.png' }]));
+    assert.deepEqual({ ...refused }, { status: 'failed', saved: 0, error: 'Unavailable sender' });
+  }
   assert.equal((await handler(event, request('folder', [{ url: 'file:///etc/passwd', fileName: 'a.png' }]))).status, 'failed');
   assert.equal((await handler(event, request('folder', [{ url: 'https://server.test/a', dm: { peer: 'p', messageId: 'm', fileId: 'f' }, fileName: 'a.png' }]))).status, 'failed');
   assert.equal((await handler(event, request('folder', []))).status, 'failed');
@@ -115,6 +105,6 @@ test('batch download saves into a folder or one ZIP and never leaves partial arc
   selection = { canceled: true, filePaths: [] };
   assert.equal((await handler(event, request('folder', [{ url: 'https://server.test/a', fileName: 'a.png' }]))).status, 'cancelled');
 
-  dispose();
+  registry.dispose();
   assert.equal(handlers.size, 0);
 });

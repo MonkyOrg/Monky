@@ -13,23 +13,27 @@ const { finished } = require('node:stream/promises');
 const ts = require('typescript');
 const shared = require('@monky/shared');
 const runtime = require('../native/screen-share/index.cjs');
-const sourceFile = path.resolve(__dirname, '..', 'src', 'main', 'nativeScreenSharing.ts');
-const compiled = ts.transpileModule(fs.readFileSync(sourceFile, 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
-}).outputText;
-const load = vm.runInThisContext(`(function(exports, require, module, __filename, __dirname, console, process) { ${compiled}\n})`,
-  { filename: sourceFile });
-const policySource = path.join(path.dirname(sourceFile), 'screenEncodingPolicy.ts');
-const policy = { exports: {} };
-vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(policySource, 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-}).outputText}\n})`, { filename: policySource })(policy.exports, require);
-const occlusionSource = path.join(path.dirname(sourceFile), 'browserOcclusion.ts');
-const occlusion = { exports: {} };
-vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(occlusionSource, 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
-}).outputText}\n})`, { filename: occlusionSource })(occlusion.exports, require);
+const { loadMain } = require('./mainModules.cjs');
+const policy = loadMain('screenEncodingPolicy');
+const encodingCache = loadMain('screenEncodingCache');
+const occlusion = loadMain('browserOcclusion');
 const tick = () => new Promise(resolve => setImmediate(resolve));
+/**
+ * Main checks a shared Windows source every 250 ms, sampling browser occlusion every fourth check. A test that
+ * follows those checks calls this before creating its fixture, since Main modules take their timers when loaded,
+ * and advances the mocked interval with the returned `elapse(ms)`: one check at a time, settling the promise work
+ * each check starts, as real time would, but independent of how busy the machine is.
+ */
+const SOURCE_CHECK_MS = 250;
+const sourceChecks = t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  return async ms => {
+    for (let remaining = ms; remaining > 0; remaining -= SOURCE_CHECK_MS) {
+      t.mock.timers.tick(Math.min(remaining, SOURCE_CHECK_MS));
+      await tick();
+    }
+  };
+};
 const deferred = () => {
   let resolve;
   const promise = new Promise(yes => { resolve = yes; });
@@ -56,7 +60,7 @@ test('encoding policy prefers initialized hardware AV1, then H264, then visible 
   const compiled = ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264', 'monky_aom_av1'];
   for (const accepted of ['obs_nvenc_av1_tex', 'obs_nvenc_h264_tex', 'obs_x264']) {
     const tried = [];
-    const selected = await policy.exports.selectScreenEncoding('automatic', 'software', 'av1', compiled, async value => {
+    const selected = await policy.selectScreenEncoding('automatic', 'software', 'av1', compiled, async value => {
       tried.push(value.encoder);
       if (value.encoder !== accepted) throw Object.assign(new Error('Unsupported selected adapter/profile'),
         { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
@@ -65,6 +69,8 @@ test('encoding policy prefers initialized hardware AV1, then H264, then visible 
     assert.equal(selected.selection.codec, accepted.includes('av1') ? 'av1' : 'h264');
     assert.equal(selected.fallback, accepted === 'obs_x264');
     assert.equal(selected.hardware.available, accepted !== 'obs_x264');
+    // The technical reason stays for the log; the code behind it is what the fallback notice explains (#490).
+    assert.deepEqual(selected.hardware.codes, accepted === 'obs_x264' ? ['ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED'] : undefined);
     assert.deepEqual(tried, compiled.slice(0, compiled.indexOf(accepted) + 1));
   }
 });
@@ -73,16 +79,16 @@ test('macOS keeps Automatic on hardware H264 and exposes AV1 only as explicit na
   const encoders = ['apple_vt_h264', 'apple_vt_h264_software', 'monky_aom_av1'];
   const tried = [];
   const probe = async selection => { tried.push(selection.encoder); };
-  const automatic = await policy.exports.selectScreenEncoding('automatic', 'software', 'av1', encoders, probe);
+  const automatic = await policy.selectScreenEncoding('automatic', 'software', 'av1', encoders, probe);
   assert.equal(automatic.selection.encoder, 'apple_vt_h264');
   assert.deepEqual(tried.splice(0), ['apple_vt_h264']);
-  const software = await policy.exports.selectScreenEncoding('manual', 'software', 'av1', encoders, probe, false);
+  const software = await policy.selectScreenEncoding('manual', 'software', 'av1', encoders, probe, false);
   assert.deepEqual(software.selection, { mode: 'software', codec: 'av1', encoder: 'monky_aom_av1' });
   assert.deepEqual(tried.splice(0), ['monky_aom_av1']);
-  const hardware = await policy.exports.selectScreenEncoding('manual', 'hardware', 'av1', encoders, probe);
+  const hardware = await policy.selectScreenEncoding('manual', 'hardware', 'av1', encoders, probe);
   assert.equal(hardware.selection, null);
   assert.deepEqual(tried, []);
-  const fallback = await policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', encoders, async selection => {
+  const fallback = await policy.selectScreenEncoding('automatic', 'hardware', 'auto', encoders, async selection => {
     if (selection.mode === 'hardware')
       throw Object.assign(new Error('No hardware encoder for this profile.'), { code: 'ERR_MAC_VIDEO_ENCODER_UNSUPPORTED' });
   });
@@ -94,7 +100,7 @@ test('manual software remains software and manual hardware AV1 never switches mo
   const compiled = ['obs_nvenc_av1_tex', 'obs_nvenc_h264_tex', 'obs_x264', 'monky_aom_av1'];
   for (const codec of ['h264', 'av1']) {
     const tried = [];
-    const result = await policy.exports.selectScreenEncoding('manual', 'software', codec, compiled,
+    const result = await policy.selectScreenEncoding('manual', 'software', codec, compiled,
       async selection => { tried.push(selection.encoder); }, false);
     assert.equal(result.selection.mode, 'software');
     assert.equal(result.selection.codec, codec === 'av1' ? 'av1' : 'h264');
@@ -102,7 +108,7 @@ test('manual software remains software and manual hardware AV1 never switches mo
     assert.deepEqual(tried, [codec === 'av1' ? 'monky_aom_av1' : 'obs_x264']);
   }
   const tried = [];
-  const result = await policy.exports.selectScreenEncoding('manual', 'hardware', 'av1', compiled, async selection => {
+  const result = await policy.selectScreenEncoding('manual', 'hardware', 'av1', compiled, async selection => {
     tried.push(selection.encoder);
     if (selection.mode === 'hardware')
       throw Object.assign(new Error('AV1 unsupported'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
@@ -116,10 +122,10 @@ test('manual software remains software and manual hardware AV1 never switches mo
 test('proven AMF MaxLevel insufficiency permits visible software fallback after hardware candidates are exhausted', async () => {
   const message = 'AMF H264 requires level_idc=60 for 3840x2160@120; selected adapter/runtime reports MaxLevel=52.';
   const unsupported = Object.assign(new Error(message), { code: 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' });
-  assert.equal(policy.exports.isUnsupportedScreenEncoder(unsupported), true);
+  assert.equal(policy.isUnsupportedScreenEncoder(unsupported), true);
   for (const strategy of ['automatic', 'manual']) {
     const tried = [];
-    const result = await policy.exports.selectScreenEncoding(strategy, 'hardware', 'h264',
+    const result = await policy.selectScreenEncoding(strategy, 'hardware', 'h264',
       ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'], async selection => {
         tried.push(selection.encoder);
         if (selection.encoder === 'av1_texture_amf')
@@ -129,7 +135,7 @@ test('proven AMF MaxLevel insufficiency permits visible software fallback after 
     assert.deepEqual(tried, strategy === 'automatic'
       ? ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] : ['h264_texture_amf']);
     assert.deepEqual(result.selection, strategy === 'automatic' ? { mode: 'software', codec: 'h264', encoder: 'obs_x264' } : null);
-    assert.deepEqual(result.hardware, { available: false, reason: message });
+    assert.deepEqual(result.hardware, { available: false, reason: message, codes: ['ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED'] });
     assert.equal(result.fallback, strategy === 'automatic');
   }
 });
@@ -143,9 +149,9 @@ test('missing or invalid AMF capability and unconfirmed teardown cannot masquera
       { code: 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' }),
   ];
   for (const error of errors) {
-    assert.equal(policy.exports.isUnsupportedScreenEncoder(error), false);
+    assert.equal(policy.isUnsupportedScreenEncoder(error), false);
     const tried = [];
-    await assert.rejects(policy.exports.selectScreenEncoding('manual', 'hardware', 'h264', ['h264_texture_amf', 'obs_x264'],
+    await assert.rejects(policy.selectScreenEncoding('manual', 'hardware', 'h264', ['h264_texture_amf', 'obs_x264'],
       async selection => { tried.push(selection.encoder); throw error; }), failure => failure === error);
     assert.deepEqual(tried, ['h264_texture_amf']);
   }
@@ -159,7 +165,7 @@ test('driver, runtime, timeout, cancellation and retirement failures never silen
       new Error('Native retirement failed'),
     ])]) {
     const tried = [];
-    await assert.rejects(policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', compiled, async selection => {
+    await assert.rejects(policy.selectScreenEncoding('automatic', 'hardware', 'auto', compiled, async selection => {
       tried.push(selection.encoder); throw error;
     }), failure => failure === error);
     assert.deepEqual(tried, ['obs_nvenc_av1_tex']);
@@ -171,20 +177,22 @@ test('Automatic can verify H264 hardware after a retired AV1 initialization fail
   const failure = Object.assign(new Error('AMF AV1 source-free probe; CreateComponent(AV1) status=1'),
     { code: 'ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE' });
   const tried = [], diagnostics = [];
-  const result = await policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', compiled,
+  const result = await policy.selectScreenEncoding('automatic', 'hardware', 'auto', compiled,
     async selection => {
       tried.push(selection.encoder);
       if (selection.encoder === 'av1_texture_amf') throw failure;
       if (selection.encoder === 'obs_nvenc_av1_tex')
         throw Object.assign(new Error('Unsupported selected adapter'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
       assert.equal(selection.encoder, 'h264_texture_amf');
-    }, true, (selection, error) => diagnostics.push({ selection, error }));
+    }, true, (selection, error, outcome) => diagnostics.push({ selection, error, outcome }));
   assert.deepEqual(tried, ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf']);
   assert.equal(result.selection.encoder, 'h264_texture_amf');
   assert.equal(result.selection.mode, 'hardware');
   assert.equal(result.fallback, false);
   assert.deepEqual(result.hardware, { available: true, reason: null });
-  assert.equal(diagnostics.length, 1);
+  // Every refused candidate is reported once, with why it was left behind.
+  assert.deepEqual(diagnostics.map(value => [value.selection.encoder, value.outcome]),
+    [['av1_texture_amf', 'next-candidate'], ['obs_nvenc_av1_tex', 'unsupported']]);
   assert.equal(diagnostics[0].error, failure);
 });
 
@@ -193,26 +201,31 @@ test('unresolved hardware initialization errors forbid automatic Software and un
     { code: 'ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE' });
   const compiled = ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'];
   const tried = [], diagnostics = [];
-  await assert.rejects(policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', compiled,
+  await assert.rejects(policy.selectScreenEncoding('automatic', 'hardware', 'auto', compiled,
     async selection => {
       tried.push(selection.encoder);
       if (selection.encoder === 'av1_texture_amf') throw failure;
       throw Object.assign(new Error('Unsupported profile'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
-    }, true, (_selection, error) => diagnostics.push(error)), error => error === failure);
+    }, true, (_selection, error, outcome) => diagnostics.push([error, outcome])), error => error === failure);
   assert.deepEqual(tried, ['av1_texture_amf', 'h264_texture_amf']);
-  assert.deepEqual(diagnostics, [failure]);
+  assert.deepEqual(diagnostics.map(([, outcome]) => outcome), ['next-candidate', 'unsupported']);
+  assert.equal(diagnostics[0][0], failure);
   const pending = Object.assign(new AggregateError([failure, new Error('Retirement pending')]),
     { code: failure.code });
   const blocked = [];
-  await assert.rejects(policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', compiled,
+  await assert.rejects(policy.selectScreenEncoding('automatic', 'hardware', 'auto', compiled,
     async selection => { blocked.push(selection.encoder); throw pending; }, true,
     () => assert.fail('An unretired probe cannot be treated as a candidate failure')), error => error === pending);
   assert.deepEqual(blocked, ['av1_texture_amf']);
 });
 
 test('explicit software is usable despite a visibly reported hardware driver error', async () => {
-  const result = await policy.exports.selectScreenEncoding('manual', 'software', 'h264', ['obs_nvenc_h264_tex', 'obs_x264'],
-    async selection => { if (selection.mode === 'hardware') throw new Error('Driver initialization failed'); });
+  const refusals = [];
+  const result = await policy.selectScreenEncoding('manual', 'software', 'h264', ['obs_nvenc_h264_tex', 'obs_x264'],
+    async selection => { if (selection.mode === 'hardware') throw new Error('Driver initialization failed'); }, true,
+    (selection, error, outcome) => refusals.push([selection.encoder, error.message, outcome]));
+  assert.deepEqual(refusals, [['obs_nvenc_h264_tex', 'Driver initialization failed', 'failed']],
+    'The driver error behind explicit Software is reported, so Main logs it.');
   assert.equal(result.selection.encoder, 'obs_x264');
   assert.equal(result.hardware.error, true);
   assert.match(result.hardware.reason, /Driver initialization failed/);
@@ -221,12 +234,12 @@ test('explicit software is usable despite a visibly reported hardware driver err
 
 test('Manual rejects Auto codec and unavailable software AV1 never probes H264 or hardware during admission', async () => {
   const compiled = ['av1_texture_amf', 'monky_aom_av1', 'obs_x264'];
-  await assert.rejects(policy.exports.selectScreenEncoding('manual', 'software', 'auto', compiled, async () => {
+  await assert.rejects(policy.selectScreenEncoding('manual', 'software', 'auto', compiled, async () => {
     assert.fail('Invalid Manual requests must not start discovery');
   }), /exact codec/);
   for (const encoders of [compiled, ['av1_texture_amf', 'obs_x264']]) {
     const tried = [];
-    const result = await policy.exports.selectScreenEncoding('manual', 'software', 'av1', encoders, async selection => {
+    const result = await policy.selectScreenEncoding('manual', 'software', 'av1', encoders, async selection => {
       tried.push(selection.encoder);
       throw Object.assign(new Error('Software AV1 unsupported for this profile'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
     }, false);
@@ -240,7 +253,10 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   encoder = 'h264_texture_amf', probeFailure, probeFailureBeforeSpawn, probeStop,
   probeVerified = true, probeRetires = true, probeStopReportsFailure = false, logger, packetCapture,
   compiledEncoders = [encoder],
-  encodingProbe, arch = 'x64' } = {}) {
+  encodingProbe, arch = 'x64', profileAlias = false } = {}) {
+  // A modeled junction: the profile Electron reports resolves to another physical folder.
+  const profile = path.join(__dirname, profileAlias ? 'modeled-linked-profile' : 'modeled-native-profile');
+  const physicalProfile = path.join(__dirname, 'modeled-native-profile');
   const handlers = new Map(), sent = [], endpoints = [], selections = [], errors = [], captures = [], directories = [];
   const probes = [], removedDirectories = [], logs = [], ports = [], encodingProbes = [];
   const retiredMacProbes = new WeakSet();
@@ -266,7 +282,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   const electron = {
     app: Object.assign(new EventEmitter(), {
       getGPUInfo: async () => assert.fail('Adapter labels cannot establish native hardware availability.'),
-      getPath: () => path.join(__dirname, 'modeled-native-profile'),
+      getPath: () => profile,
     }),
     screen: new EventEmitter(),
     BrowserWindow: { getFocusedWindow: () => focused ? window : null },
@@ -398,45 +414,49 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       assert.fail('IPC/source admission cannot itself capture audio.');
     },
   };
-  const module = { exports: {} };
-  load(module.exports, name => {
-    if (name === 'electron') return electron;
-    if (name === './i18n') return { mt: key => key };
-    if (name === './screenEncodingPolicy') return policy.exports;
-    if (name === './browserOcclusion') return occlusion.exports;
-    if (name === '@monky/screen-share') return { ...runtime, NativeScreenEndpoint: Endpoint, CaptureBridge: Probe,
-      createCaptureBridge: options => new Probe(options),
-      assertMacCaptureBridgeClosed: probe => {
-        assert.ok(retiredMacProbes.has(probe), 'The original macOS capture lease has not proved retirement.');
-      },
-      probeCaptureCapabilities: async (options, signal) => {
-        signal.throwIfAborted();
-        encodingProbes.push(options);
-        if (encodingProbe) await encodingProbe(options, signal);
-        else if (options.encoder !== encoder) throw Object.assign(new Error('Encoder is unsupported by this adapter.'),
-          { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
-        return { encoderId: options.encoder, codec: encoderCodec(options.encoder), mode: encoderMode(options.encoder),
-          adapterIndex: 0, vendorId: options.encoder.startsWith('obs_nvenc_') ? 0x10de : 0x1002, deviceId: 1,
-          encoderInitialized: true, sourceCaptured: false, hardwareQualified: false, hardwareSessionConfirmed: false };
-      },
-      loadRuntime: () => ({ capture: { captureKinds: platform === 'darwin' ? ['window', 'monitor'] : ['window', 'monitor', 'game'],
-        encoders: compiledEncoders, requiresHardwareProbe: true, hardwareQualified: false } }) };
-    if (name === '@monky/screen-audio') return captureModule;
-    if (name === 'node:fs/promises') return {
-      async mkdir(filename) { directories.push(filename); if (directory) await directory.promise; },
-      async lstat() { return { isDirectory: () => true, isSymbolicLink: () => false }; },
-      async realpath(filename) { return filename; }, async readdir() { return []; },
-      async rm(filename) {
-        assert.match(path.basename(filename), /^monky-screen-capture-[a-f0-9]{32}$/);
-        assert.ok(directories.includes(filename)); removedDirectories.push(filename);
-      },
-    };
-    return require(name);
-  }, module, sourceFile, path.dirname(sourceFile), {
+  const modeledFiles = {
+    async mkdir(filename) { directories.push(filename); if (directory) await directory.promise; },
+    async lstat() { return { isDirectory: () => true, isSymbolicLink: () => false }; },
+    async realpath(filename) { return filename.startsWith(profile) ? physicalProfile + filename.slice(profile.length) : filename; },
+    async readdir() { return []; },
+    async rm(filename) {
+      assert.match(path.basename(filename), /^monky-screen-capture-[a-f0-9]{32}$/);
+      assert.ok(directories.includes(filename)); removedDirectories.push(filename);
+    },
+  };
+  const fakeConsole = {
     debug() {},
     error: (...values) => errors.push(values), warn: (...values) => errors.push(values),
-  }, { platform, arch, pid: process.pid });
-  const service = module.exports.setupNativeScreenSharingIpc(window, (id, kind) => {
+  };
+  const screenShare = { ...runtime, NativeScreenEndpoint: Endpoint, CaptureBridge: Probe,
+    createCaptureBridge: options => new Probe(options),
+    assertMacCaptureBridgeClosed: probe => {
+      assert.ok(retiredMacProbes.has(probe), 'The original macOS capture lease has not proved retirement.');
+    },
+    probeCaptureCapabilities: async (options, signal) => {
+      signal.throwIfAborted();
+      encodingProbes.push(options);
+      if (encodingProbe) await encodingProbe(options, signal);
+      else if (options.encoder !== encoder) throw Object.assign(new Error('Encoder is unsupported by this adapter.'),
+        { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+      return { encoderId: options.encoder, codec: encoderCodec(options.encoder), mode: encoderMode(options.encoder),
+        adapterIndex: 0, vendorId: options.encoder.startsWith('obs_nvenc_') ? 0x10de : 0x1002, deviceId: 1,
+        encoderInitialized: true, sourceCaptured: false, hardwareQualified: false, hardwareSessionConfirmed: false };
+    },
+    loadRuntimeAsync: async () => ({ capture: { captureKinds: platform === 'darwin' ? ['window', 'monitor'] : ['window', 'monitor', 'game'],
+      encoders: compiledEncoders, requiresHardwareProbe: true, hardwareQualified: false } }) };
+  const { registerNativeScreenSharingIpc } = loadMain('nativeScreenSharing', {
+    packages: { electron, '@monky/screen-share': screenShare, '@monky/screen-audio': captureModule, 'node:fs/promises': modeledFiles },
+    local: {
+      i18n: { mt: key => key },
+      // The canonical capture root goes through the same modeled filesystem, on the real platform.
+      canonicalDirectory: loadMain('canonicalDirectory', { packages: { 'node:fs/promises': modeledFiles } }),
+    },
+    globals: { console: fakeConsole, process: { platform, arch, pid: process.pid } },
+  });
+  const { IpcRegistry, windowContents } = loadMain('ipc/registry', { globals: { console: fakeConsole } });
+  const registry = new IpcRegistry(electron.ipcMain, { main: () => windowContents(window), overlay: () => null });
+  const service = registerNativeScreenSharingIpc(registry, { window, resolveSource: (id, kind) => {
     selections.push(id);
     if (kind === 'monitor') {
       assert.equal(id, monitorId);
@@ -444,7 +464,8 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     }
     assert.match(id, /^window:/);
     return { ...target, kind };
-  }, { write: entry => { logs.push(structuredClone(entry)); logger?.write(entry); } });
+  },
+    logger: { write: entry => { logs.push(structuredClone(entry)); logger?.write(entry); } } });
   const event = () => ({ sender: contents, senderFrame: contents.mainFrame });
   const invoke = (input, caller = event()) => handlers.get(shared.NATIVE_SCREEN_IPC.invoke)(caller, input);
   const reply = input => handlers.get(shared.NATIVE_SCREEN_IPC.reply)(event(), input);
@@ -542,10 +563,28 @@ function persistentLogger(t, { saveDialog } = {}) {
   return { logger, directory, exportPath, dialogResult };
 }
 
+test('a coded native failure rejects the renderer with its codes after a marker, and Main still logs the cause', async t => {
+  const native = Object.assign(new Error('Unsafe absolute path'), { code: 'ERR_SCREEN_CAPTURE_PATH' });
+  const f = fixture(t, { probeFailure: new AggregateError([native, new Error('cleanup')], 'Selected capture probe failed') });
+  await f.join();
+  const rejection = await f.addSource().then(() => assert.fail('The admission must fail'), error => error);
+  // Electron rejects ipcRenderer.invoke with `Error invoking remote method '<channel>': ${error}` and nothing else.
+  const crossed = new Error(`Error invoking remote method '${shared.NATIVE_SCREEN_IPC.invoke}': ${rejection}`);
+  assert.deepEqual(shared.decodeScreenShareFailure(crossed.message), { codes: ['ERR_SCREEN_CAPTURE_PATH'] });
+  assert.equal(shared.screenShareFailureCategory(shared.decodeScreenShareFailure(crossed.message).codes), 'files');
+  assert.match(crossed.message, /Unsafe absolute path/, 'The console keeps the technical message.');
+  const failure = f.logs.find(entry => entry.message === 'Native screen source-admission failed');
+  assert.deepEqual(failure.data.nativeCodes, ['ERR_SCREEN_CAPTURE_PATH']);
+  // A failure without a code or a notice crosses unchanged.
+  const plain = await f.invoke({ action: 'leave', callId: 'not-a-uuid' }).then(() => assert.fail('Invalid command'), error => error);
+  assert.equal(shared.decodeScreenShareFailure(String(plain)), null);
+});
+
 test('native IPC rejects other WebContents, subframes, unknown payload fields and renderer-supplied HWNDs', async t => {
   const f = fixture(t);
-  await assert.rejects(f.invoke({ action: 'capabilities' }, { ...f.event(), sender: {} }), /owned main frame/);
-  await assert.rejects(f.invoke({ action: 'capabilities' }, { ...f.event(), senderFrame: {} }), /owned main frame/);
+  // Electron turns the registry's refusal into a rejected invoke.
+  await assert.rejects(async () => f.invoke({ action: 'capabilities' }, { ...f.event(), sender: {} }), /only answers the main window/);
+  await assert.rejects(async () => f.invoke({ action: 'capabilities' }, { ...f.event(), senderFrame: {} }), /only answers the main window/);
   await f.join();
   await assert.rejects(f.addSource('bad-window', { target: { hwnd: 1, expectedProcessId: 2 } }));
   await assert.rejects(f.addSource('monitor', { desktopSourceId: 'screen:0:0' }));
@@ -979,8 +1018,12 @@ for (const mode of ['p2p', 'sfu']) {
       const target = { kind: captureKind, hwnd: 12345, expectedProcessId: process.pid,
         expectedProcessCreationTime100ns: '123456789' };
       f.replaceTarget(target);
-      await assert.rejects(f.addSource('own', { captureKind }), {
-        code: 'ERR_AUDIO_TARGET', message: 'screenShare.ownWindowAudioUnavailable',
+      await assert.rejects(f.addSource('own', { captureKind }), error => {
+        // Only the message crosses Electron's invoke: Main's localized notice travels after the marker.
+        assert.deepEqual(shared.decodeScreenShareFailure(String(error)),
+          { codes: ['ERR_AUDIO_TARGET'], notice: 'screenShare.ownWindowAudioUnavailable' });
+        assert.equal(error.cause.code, 'ERR_AUDIO_TARGET');
+        return true;
       });
       assert.equal(f.probes.length, 0);
       assert.equal(f.endpoints.length, 0);
@@ -1039,6 +1082,25 @@ for (const encoder of ['h264_texture_amf', 'obs_nvenc_h264_tex']) {
     assert.equal(f.probes[0].closed, true);
   });
 }
+
+test('a junction above the profile gives probes, sources and cleanup one canonical capture folder', async t => {
+  const f = fixture(t, { profileAlias: true });
+  const physical = path.join(__dirname, 'modeled-native-profile', 'native-screen-capture');
+  await f.join(); await f.participants();
+  const { source } = await f.addSource();
+  await f.command({ action: 'signal', signal: {
+    fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+  } });
+  assert.equal(f.endpoints[0].options.captureDirectory, physical);
+  const runs = [...f.encodingProbes, ...f.probes.map(probe => probe.options)].map(options => options.runDirectory);
+  assert.ok(runs.length >= 2);
+  for (const run of runs) assert.equal(path.dirname(run), physical, 'The helper refuses redirected path components.');
+  assert.equal(f.probes[0].closed, true);
+  assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
+  assert.ok(f.removedDirectories.every(removed => path.dirname(removed) === physical));
+});
 
 for (const captureKind of ['window', 'monitor', 'game']) {
   for (const preserveAspectRatio of [undefined, false, true]) {
@@ -1107,7 +1169,7 @@ test('monitor Stop then rejected window releases its audio reservation and permi
   const failure = Object.assign(new Error('The selected window disappeared during native admission.'),
     { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST' });
   f.setProbeFailure(failure);
-  await assert.rejects(f.addSource('rejected-window'), error => error === failure);
+  await assert.rejects(f.addSource('rejected-window'), error => error.cause === failure);
   assert.equal(f.probes[1].closed, true);
   assert.equal(f.removedDirectories.length, f.encodingProbes.length + 2);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
@@ -1134,7 +1196,7 @@ for (const kind of ['window', 'monitor']) {
     const options = { captureKind: kind, desktopSourceId: kind === 'monitor' ? monitorId : 'window:12345:0' };
     const failure = Object.assign(new Error('The selected source changed.'), { code: 'ERR_MAC_SOURCE_CHANGED' });
     f.setProbeFailure(failure);
-    await assert.rejects(f.addSource('failed-audio', options), error => error === failure);
+    await assert.rejects(f.addSource('failed-audio', options), error => error.cause === failure);
     f.setProbeFailure(null);
     for (let index = 0; index < 12; ++index) {
       const shareId = `retry-${index}`;
@@ -1273,27 +1335,29 @@ test('a resolved nativeClosed snapshot without the original child exit retains s
 });
 
 test('a shared monitor identity is read on admission and display changes, never by the periodic source check', async t => {
+  const elapse = sourceChecks(t);
   const f = fixture(t);
   await f.join();
   await f.addSource('selected', { captureKind: 'monitor', desktopSourceId: monitorId });
   const admitted = f.monitorReads();
   assert.ok(admitted > 0, 'Admission verifies the selected monitor identity.');
   // The source check runs every 250 ms; a device identity read there froze every screen behind slow registry writers.
-  await new Promise(resolve => setTimeout(resolve, 800));
+  await elapse(800);
   assert.equal(f.monitorReads(), admitted, 'An unchanged display configuration is never re-enumerated.');
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
   f.replaceMonitor(structuredClone(monitorTarget));
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.equal(f.monitorReads(), admitted + 1, 'A display change is verified once.');
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 1, 'An unchanged monitor keeps its source.');
 });
 
 test('a selected monitor bounds change or disconnect retires its armed metadata and requires reselection', async t => {
+  const elapse = sourceChecks(t);
   const f = fixture(t);
   await f.join();
   const { source } = await f.addSource('selected', { captureKind: 'monitor', desktopSourceId: monitorId });
   f.replaceMonitor({ ...monitorTarget, bounds: { ...monitorTarget.bounds, width: 1280 } });
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
   assert.ok(f.sent.some(value => value.type === 'error' && value.sourceInstanceId === source.instanceId
     && value.reason === 'source-unavailable' && /explicitly/.test(value.message)));
@@ -1317,11 +1381,12 @@ test('retiring a missing or already retired call is idempotent without accepting
 });
 
 test('closing the selected window retires its announcement with zero viewers and no capture', async t => {
+  const elapse = sourceChecks(t);
   const f = fixture(t);
   await f.join();
   const { source } = await f.addSource();
   f.closeWindow();
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
   assert.ok(f.sent.some(event => event.type === 'state' && event.state === 'closed'
     && event.sourceInstanceId === source.instanceId));
@@ -1329,7 +1394,7 @@ test('closing the selected window retires its announcement with zero viewers and
 });
 
 test('a covered browser window warns only once its content stops updating, once per transition', async t => {
-  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const elapse = sourceChecks(t);
   const occlusionEvents = f => f.sent.filter(event => event.type === 'source-occlusion');
   const f = fixture(t);
   await f.join();
@@ -1338,26 +1403,28 @@ test('a covered browser window warns only once its content stops updating, once 
   f.setFrameProbeMode('painting');
   const { source } = await f.addSource();
   assert.equal(f.logs.find(entry => entry.message === 'Native screen source-admitted').data.occlusionEngine, 'firefox');
-  await wait(1150);
+  await elapse(1150);
   assert.equal(f.startedFrameProbes(), 0, 'Visible windows are never frame-probed.');
   f.setWindowOccluded(true);
-  await wait(3300);
+  await elapse(3300);
   assert.deepEqual(occlusionEvents(f), [], 'A covered browser that keeps painting still streams and stays silent.');
   assert.equal(f.frameProbes.size, 1);
   f.setFrameProbeMode('frozen');
-  await wait(2300);
+  await elapse(1000);
+  assert.deepEqual(occlusionEvents(f), [], 'One sample without new frames is not yet a frozen window.');
+  await elapse(1300);
   assert.deepEqual(occlusionEvents(f).map(({ occluded, engine, shareId, sourceInstanceId, publisherSessionId }) =>
     ({ occluded, engine, shareId, sourceInstanceId, publisherSessionId })),
   [{ occluded: true, engine: 'firefox', shareId: source.shareId, sourceInstanceId: source.instanceId,
     publisherSessionId: f.config.sessionId }]);
   assert.equal(shared.nativeScreenEventSchema.parse(occlusionEvents(f)[0]).type, 'source-occlusion');
-  await wait(1100);
+  await elapse(1100);
   assert.equal(occlusionEvents(f).length, 1, 'Only transitions are reported.');
   f.setFrameProbeMode('painting');
-  await wait(1100);
+  await elapse(1100);
   assert.deepEqual(occlusionEvents(f).map(event => event.occluded), [true, false], 'Resumed painting clears the warning.');
   f.setWindowOccluded(false);
-  await wait(1100);
+  await elapse(1100);
   assert.equal(f.frameProbes.size, 0, 'Uncovering stops the probe.');
   assert.equal(f.startedFrameProbes(), 1);
   assert.deepEqual(f.logs.filter(entry => entry.message === 'Native screen source-occlusion')
@@ -1365,14 +1432,14 @@ test('a covered browser window warns only once its content stops updating, once 
   [['WARN', true, 'firefox', 'number'], ['INFO', false, 'firefox', 'number']]);
   assert.ok(f.logs.some(entry => entry.message === 'Native screen source-frame-probe' && entry.data.frames > 0));
   f.setWindowOccluded(new TypeError('modeled occlusion failure'));
-  await wait(1100);
+  await elapse(1100);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 1, 'Occlusion probing never retires the source.');
   assert.ok(f.logs.some(entry => entry.message === 'Native screen source-occlusion failed' && entry.level === 'ERROR'));
   assert.deepEqual(f.errors, []);
 });
 
 test('without a working content frame probe a covered browser window warns from coverage alone', async t => {
-  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const elapse = sourceChecks(t);
   for (const mode of ['unavailable', 'failed', new TypeError('modeled probe start failure')]) {
     const f = fixture(t);
     await f.join();
@@ -1380,9 +1447,9 @@ test('without a working content frame probe a covered browser window warns from 
     f.setWindowOccluded(true);
     f.setFrameProbeMode(mode);
     await f.addSource();
-    await wait(1150);
+    await elapse(1150);
     assert.deepEqual(f.sent.filter(event => event.type === 'source-occlusion'), [], String(mode));
-    await wait(1100);
+    await elapse(1100);
     assert.deepEqual(f.sent.filter(event => event.type === 'source-occlusion').map(event => [event.occluded, event.engine]),
       [[true, 'chromium']], String(mode));
     assert.equal(f.frameProbes.size, 0, String(mode));
@@ -1393,13 +1460,14 @@ test('without a working content frame probe a covered browser window warns from 
 });
 
 test('retiring a covered browser source stops its content frame probe', async t => {
+  const elapse = sourceChecks(t);
   const f = fixture(t);
   await f.join();
   f.setWindowProcessPath(String.raw`C:\Program Files\Mozilla Firefox\firefox.exe`);
   f.setWindowOccluded(true);
   f.setFrameProbeMode('painting');
   const { source } = await f.addSource();
-  await new Promise(resolve => setTimeout(resolve, 1150));
+  await elapse(1150);
   assert.equal(f.frameProbes.size, 1);
   await f.command({ action: 'source-remove', shareId: source.shareId });
   assert.equal(f.frameProbes.size, 0);
@@ -1407,39 +1475,42 @@ test('retiring a covered browser source stops its content frame probe', async t 
 });
 
 test('non-browser windows and Chromium browsers are classified at admission without polling unrelated windows', async t => {
+  const elapse = sourceChecks(t);
   const f = fixture(t);
   await f.join();
   f.setWindowProcessPath(String.raw`C:\Windows\System32\notepad.exe`);
   f.setWindowOccluded(true);
   await f.addSource('plain-window');
   assert.equal(f.logs.find(entry => entry.message === 'Native screen source-admitted').data.occlusionEngine, undefined);
-  await new Promise(resolve => setTimeout(resolve, 2300));
+  await elapse(2300);
   assert.deepEqual(f.sent.filter(event => event.type === 'source-occlusion'), []);
   assert.equal(f.startedFrameProbes(), 0, 'Windows that keep painting while covered are never frame-probed.');
-  assert.equal(occlusion.exports.browserOcclusionEngine(String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`), 'chromium');
-  assert.equal(occlusion.exports.browserOcclusionEngine(String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\MSEDGE.EXE`), 'chromium');
-  assert.equal(occlusion.exports.browserOcclusionEngine(String.raw`C:\Program Files\LibreWolf\librewolf.exe`), 'firefox');
-  assert.equal(occlusion.exports.browserOcclusionEngine(String.raw`C:\Users\x\AppData\Local\Programs\Microsoft VS Code\Code.exe`), null,
+  assert.equal(occlusion.browserOcclusionEngine(String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`), 'chromium');
+  assert.equal(occlusion.browserOcclusionEngine(String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\MSEDGE.EXE`), 'chromium');
+  assert.equal(occlusion.browserOcclusionEngine(String.raw`C:\Program Files\LibreWolf\librewolf.exe`), 'firefox');
+  assert.equal(occlusion.browserOcclusionEngine(String.raw`C:\Users\x\AppData\Local\Programs\Microsoft VS Code\Code.exe`), null,
     'Plain Electron apps keep painting while covered and must not warn.');
-  assert.equal(occlusion.exports.browserOcclusionEngine(null), null);
+  assert.equal(occlusion.browserOcclusionEngine(null), null);
 });
 
 test('minimized and hidden windows retain their identity but a reused process does not', async t => {
+  const elapse = sourceChecks(t);
   const f = fixture(t);
   await f.join();
   await f.addSource();
   f.pauseWindow(true);
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
   assert.equal(f.errors.length, 0);
   f.pauseWindow(false);
   f.replaceWindowProcess();
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
   assert.equal(f.endpoints.length + f.captures.length, 0);
 });
 
 test('source visibility resets the preview decoder and updates the same active pipeline without another capture packet', async t => {
+  const elapse = sourceChecks(t);
   const f = fixture(t);
   await f.join();
   const { source } = await f.addSource();
@@ -1448,22 +1519,22 @@ test('source visibility resets the preview decoder and updates the same active p
   assert.equal(f.endpoints.length, 1);
   const endpoint = f.endpoints[0];
   const visibility = () => f.sent.filter(event => event.type === 'source-visibility');
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.deepEqual(visibility(), [], 'A visible window never reports a visibility change.');
   f.pauseWindow(true);
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.equal(endpoint.paused, true);
   assert.equal(endpoint.closed, false);
   assert.equal(f.sent.filter(event => event.type === 'preview-state').at(-1).state, 'paused');
-  await new Promise(resolve => setTimeout(resolve, 400));
+  await elapse(400);
   assert.deepEqual(visibility().map(({ hidden, shareId, sourceInstanceId, publisherSessionId }) =>
     ({ hidden, shareId, sourceInstanceId, publisherSessionId })),
   [{ hidden: true, shareId: source.shareId, sourceInstanceId: source.instanceId, publisherSessionId: f.config.sessionId }]);
   assert.equal(shared.nativeScreenEventSchema.parse(visibility()[0]).type, 'source-visibility');
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.equal(visibility().length, 1, 'Only transitions are reported.');
   f.pauseWindow(false);
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.equal(endpoint.paused, false);
   assert.equal(f.sent.filter(event => event.type === 'preview-state').at(-1).state, 'waiting');
   assert.deepEqual(visibility().map(event => event.hidden), [true, false]);
@@ -1472,6 +1543,7 @@ test('source visibility resets the preview decoder and updates the same active p
 });
 
 test('a window hidden right before it closes is reported as closed, never as minimized', async t => {
+  const elapse = sourceChecks(t);
   const f = fixture(t);
   await f.join();
   const { source } = await f.addSource();
@@ -1479,11 +1551,10 @@ test('a window hidden right before it closes is reported as closed, never as min
     presentationId: randomUUID() });
   const pausedPreview = () => f.sent.some(event => event.type === 'preview-state' && event.state === 'paused');
   f.pauseWindow(true);
-  const deadline = Date.now() + 1000;
-  while (!pausedPreview() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 2));
+  await elapse(SOURCE_CHECK_MS);
   assert.ok(pausedPreview(), 'One source check observed the hidden window.');
   f.closeWindow();
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await elapse(350);
   assert.ok(f.sent.some(event => event.type === 'state' && event.state === 'closed'
     && event.sourceInstanceId === source.instanceId));
   assert.deepEqual(f.sent.filter(event => event.type === 'source-visibility'), []);
@@ -2544,10 +2615,20 @@ test('main exposes proven AMF level fallback in discovery and independently admi
   const requested = { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 };
   const discovery = await f.invoke({ action: 'probe-encoding', probeId: randomUUID(),
     video: requested, codec: 'auto', encodingMode: 'hardware' });
-  assert.deepEqual(discovery.availability.hardware, { available: false, reason: message });
+  assert.deepEqual(discovery.availability.hardware,
+    { available: false, reason: message, codes: ['ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED'] });
   assert.equal(discovery.availability.fallback, true);
   assert.equal(discovery.availability.selection.mode, 'software');
   assert.equal(f.probes.length, 0);
+  // The fallback toast only names a category; Main's log keeps why each hardware candidate was refused (#490).
+  const refusals = f.logs.filter(entry => entry.message === 'Native screen encoder-candidate failed');
+  assert.deepEqual(refusals.map(entry => [entry.data.encoder, entry.data.refusal, entry.data.nativeCodes]), [
+    ['av1_texture_amf', 'unsupported', ['ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED']],
+    ['h264_texture_amf', 'unsupported', ['ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED']],
+  ]);
+  assert.deepEqual(refusals[1].data.nativeDiagnostics, [
+    { kind: 'amf-h264-level', requiredLevel: 60, maximumLevel: 52, width: 3840, height: 2160, fps: 120 },
+  ]);
   await f.join();
   const result = await f.addSource('amf-level-fallback', { video: requested, codec: 'auto', encodingMode: 'hardware' });
   assert.equal(result.encoding.hardware.available, false);
@@ -2567,7 +2648,9 @@ for (const [mode, encoder] of [['hardware', 'av1_texture_amf'], ['software', 'mo
     assert.equal(result.availability.fallback, false);
     await f.join();
     await assert.rejects(f.addSource('unavailable-manual', selection));
-    assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), [encoder, encoder]);
+    // Hardware admission reuses the "unsupported" discovery just proved for the same request; software
+    // admission skips the hardware inspection Settings asks for, so it is a different request.
+    assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), mode === 'hardware' ? [encoder] : [encoder, encoder]);
     assert.equal(f.probes.length, 0, 'No selected-source preflight may follow an unavailable exact selection.');
     assert.equal(f.endpoints.length, 0);
     assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
@@ -2669,7 +2752,7 @@ for (const [encoder, mode] of [['av1_texture_amf', 'hardware'], ['monky_aom_av1'
       encodingMode: mode, encodingStrategy: 'manual' });
     await f.join();
     const result = await f.addSource('aligned', { video: requested, encodingMode: mode, codec: 'av1' });
-    assert.equal(f.encodingProbes.length, 2);
+    assert.equal(f.encodingProbes.length, mode === 'hardware' ? 1 : 2, 'Hardware admission reuses the proven discovery.');
     assert.ok(f.encodingProbes.every(probe => probe.video.width === 848));
     assert.equal(f.probes[0].options.video.width, 848);
     assert.deepEqual(result.source.video, { ...requested, width: 848 });
@@ -2729,4 +2812,188 @@ test('closing encoder discovery aborts only its owned request and awaits native 
   await rejected;
   assert.equal(f.removedDirectories.length, 1);
   assert.equal(f.probes.length + f.endpoints.length, 0);
+});
+
+test('remembered discoveries expire, follow display changes, ignore dormant fields and never keep a driver error', () => {
+  const { ScreenEncodingCache, isScreenEncoderFailure } = encodingCache;
+  let now = 0;
+  const cache = new ScreenEncodingCache(1000, () => now);
+  const request = { video, mode: 'software', codec: 'h264', strategy: 'automatic', inspectHardware: false };
+  const proven = { selection: { mode: 'hardware', codec: 'h264', encoder: 'h264_texture_amf' },
+    hardware: { available: true, reason: null }, fallback: false };
+  cache.set(request, 1, proven);
+  const reused = cache.get({ ...request, mode: 'hardware', codec: 'auto', inspectHardware: true }, 1);
+  assert.deepEqual(reused, proven, 'Automatic discovery ignores the dormant manual fields.');
+  assert.equal(cache.isRemembered(reused), true);
+  assert.equal(cache.isRemembered(proven), false);
+  reused.selection.encoder = 'obs_x264';
+  assert.equal(cache.get(request, 1).selection.encoder, 'h264_texture_amf', 'Callers cannot change what is remembered.');
+  assert.equal(cache.get({ ...request, video: { ...video, fps: 60 } }, 1), null);
+  assert.equal(cache.get(request, 2), null, 'A display change forgets it.');
+  assert.equal(cache.get(request, 1), null);
+  cache.set(request, 1, proven);
+  now = 999;
+  assert.ok(cache.get(request, 1));
+  now = 1000;
+  assert.equal(cache.get(request, 1), null, 'It expires.');
+  const manual = { video, mode: 'software', codec: 'h264', strategy: 'manual', inspectHardware: true };
+  cache.set(manual, 1, { selection: { mode: 'software', codec: 'h264', encoder: 'obs_x264' },
+    hardware: { available: false, reason: 'Driver failed.', error: true }, fallback: false });
+  assert.equal(cache.get(manual, 1), null, 'A hardware driver error reported beside software is never kept.');
+  cache.set(manual, 1, { selection: null, hardware: { available: false, reason: 'unsupported' }, fallback: false,
+    reason: 'The selected software encoder is unsupported.' });
+  assert.equal(cache.get(manual, 1).selection, null, 'A positive "unsupported" is kept.');
+  assert.equal(cache.get({ ...manual, inspectHardware: false }, 1), null, 'Skipping the hardware inspection is another request.');
+  const fallback = { selection: { mode: 'hardware', codec: 'h264', encoder: 'obs_nvenc_h264_tex' },
+    hardware: { available: true, reason: null }, fallback: false };
+  const failure = (code, message) => Object.assign(new Error(message), { code });
+  cache.set(request, 1, fallback, [failure('ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE', 'Cannot load system AMF runtime; win32=126'),
+    failure('ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE', 'NVENC nvEncOpenEncodeSessionEx status=4(NV_ENC_ERR_INVALID_DEVICE)')]);
+  assert.equal(cache.get(request, 1).selection.encoder, 'obs_nvenc_h264_tex',
+    'A choice made past encoders their vendor refused is kept.');
+  cache.set(request, 1, fallback, [failure('ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE', 'Cannot load system AMF runtime; win32=126'),
+    failure('ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION', 'AMF AV1 initialization failed.')]);
+  assert.equal(cache.get(request, 1), null,
+    'A choice made past an encoder that failed to initialize is not kept, and it replaces the earlier one.');
+  cache.set(request, 1, proven);
+  cache.forget({ ...request, mode: 'hardware', codec: 'av1', inspectHardware: true });
+  assert.equal(cache.get(request, 1), null, 'Forgetting a request also ignores its dormant fields.');
+  cache.clear();
+  assert.equal(cache.get(manual, 1), null);
+  assert.equal(isScreenEncoderFailure(new AggregateError([new Error('Retirement detail')], 'Capture failed',
+    { cause: Object.assign(new Error('NVENC'), { code: 'ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE' }) })), true);
+  assert.equal(isScreenEncoderFailure(Object.assign(new Error('Gone'), { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST' })), false);
+});
+
+test('Settings discovery, a share and its quality change prove the encoder once, and each still probes the source', async t => {
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] });
+  const discovery = await f.invoke({ action: 'probe-encoding', probeId: randomUUID(), video, codec: 'auto', encodingMode: 'hardware' });
+  assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), ['av1_texture_amf', 'h264_texture_amf']);
+  await f.join();
+  const first = await f.addSource();
+  const changed = await f.addSource(f.source.shareId, { replacesSourceInstanceId: first.source.instanceId });
+  assert.equal(f.encodingProbes.length, 2, 'No candidate encoder process starts again.');
+  assert.deepEqual(f.probes.map(probe => probe.options.encoder), ['h264_texture_amf', 'h264_texture_amf'],
+    'The selected source is still probed with the remembered encoder before each announcement.');
+  assert.deepEqual(first.encoding, discovery.availability);
+  assert.deepEqual(changed.encoding, discovery.availability);
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen encoder-discovery-reused').length, 2);
+});
+
+test('an encoder failing while capturing, a display change and a retired document make admissions discover encoders again', async t => {
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] });
+  const admit = async () => {
+    const { source } = await f.addSource();
+    await f.command({ action: 'source-remove', shareId: source.shareId });
+  };
+  await f.join();
+  await admit();
+  await admit();
+  assert.equal(f.encodingProbes.length, 2, 'The second share reused the first discovery.');
+  const { source } = await f.addSource();
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  f.endpoints[0].options.onError(Object.assign(new Error('AMF stopped encoding.'),
+    { code: 'ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION' }));
+  await tick(); await tick();
+  await f.command({ action: 'source-remove', shareId: source.shareId });
+  await admit();
+  assert.equal(f.encodingProbes.length, 4, 'An encoder that failed while capturing is discovered again.');
+  f.replaceMonitor(structuredClone(monitorTarget));
+  await admit();
+  assert.equal(f.encodingProbes.length, 6, 'A display change can add or remove an adapter.');
+  await admit();
+  assert.equal(f.encodingProbes.length, 6);
+  f.contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+  await tick(); await tick();
+  // The retired document's call is gone; the new document joins its own.
+  f.config.callId = randomUUID();
+  await f.join();
+  await admit();
+  assert.equal(f.encodingProbes.length, 8, 'A retired document forgets remembered discoveries.');
+});
+
+test('a verification the user asks for in Settings probes again and replaces what shares remember', async t => {
+  let av1 = false;
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'obs_x264'], encodingProbe: async () => {
+    if (!av1) throw Object.assign(new Error('AV1 is unsupported by this adapter.'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+  } });
+  const manual = { encodingStrategy: 'manual', encodingMode: 'hardware', codec: 'av1' };
+  const verify = () => f.invoke({ action: 'probe-encoding', probeId: randomUUID(), video, ...manual });
+  assert.equal((await verify()).availability.selection, null);
+  await f.join();
+  await assert.rejects(f.addSource(f.source.shareId, manual), /AV1 is unsupported/);
+  assert.equal(f.encodingProbes.length, 1, 'Sharing reuses the "unsupported" just proved.');
+  // A driver with AV1 is installed, and no display event follows.
+  av1 = true;
+  assert.equal((await verify()).availability.selection.encoder, 'av1_texture_amf');
+  assert.equal(f.encodingProbes.length, 2, 'The verification probed again instead of answering from memory.');
+  const { source } = await f.addSource(f.source.shareId, manual);
+  assert.equal(source.codec, 'av1');
+  assert.equal(f.encodingProbes.length, 2, 'Sharing reuses what the verification proved.');
+  assert.deepEqual(f.probes.map(probe => probe.options.encoder), ['av1_texture_amf'], 'The selected source is still probed.');
+});
+
+test('Automatic remembers no fallback past an encoder that failed to initialize, so the next share tries AV1 again', async t => {
+  let failure = Object.assign(new Error('AMF AV1 initialization failed.'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION' });
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'], encodingProbe: async options => {
+    if (options.encoder === 'av1_texture_amf' && failure) throw failure;
+  } });
+  const admit = async () => {
+    const { source } = await f.addSource();
+    await f.command({ action: 'source-remove', shareId: source.shareId });
+    return source.codec;
+  };
+  await f.join();
+  assert.equal(await admit(), 'h264');
+  failure = null;
+  assert.equal(await admit(), 'av1', 'H264 was not remembered past an AV1 failure that may pass.');
+  assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), ['av1_texture_amf', 'h264_texture_amf', 'av1_texture_amf']);
+  assert.equal(await admit(), 'av1');
+  assert.equal(f.encodingProbes.length, 3, 'The proven AV1 is remembered.');
+});
+
+for (const [machine, refusal, discovered] of [
+  ['an NVIDIA without AV1', encoder => encoder.endsWith('_amf')
+    ? ['ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE', 'Cannot load system AMF runtime; win32=126']
+    : encoder === 'obs_nvenc_av1_tex' ? ['ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED', 'NVENC lacks AV1'] : null,
+  ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf', 'obs_nvenc_h264_tex']],
+  ['a Vega beside a GTX', encoder => encoder === 'av1_texture_amf'
+    ? ['ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE', 'AMF AV1 source-free probe; CreateComponent(AV1) status=1']
+    : encoder.startsWith('obs_nvenc') ? ['ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE',
+      'NVENC nvEncOpenEncodeSessionEx status=4(NV_ENC_ERR_INVALID_DEVICE)'] : null,
+  ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf']],
+]) {
+  test(`Automatic remembers the encoder chosen past encoders their vendor refused, as on ${machine}`, async t => {
+    const f = fixture(t, {
+      compiledEncoders: ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264'],
+      encodingProbe: async options => {
+        const refused = refusal(options.encoder);
+        if (refused) throw Object.assign(new Error(refused[1]), { code: refused[0] });
+      },
+    });
+    await f.join();
+    for (let share = 0; share < 2; share++) {
+      const { source } = await f.addSource();
+      await f.command({ action: 'source-remove', shareId: source.shareId });
+    }
+    assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), discovered, 'The second share reused the discovery.');
+    assert.deepEqual(f.probes.map(probe => probe.options.encoder), [discovered.at(-1), discovered.at(-1)]);
+  });
+}
+
+test('a remembered encoder that fails with the selected source is discovered again once, then forgotten', async t => {
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] });
+  await f.invoke({ action: 'probe-encoding', probeId: randomUUID(), video, codec: 'auto', encodingMode: 'hardware' });
+  await f.join();
+  const failure = Object.assign(new Error('AMF H264 refused the selected source.'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION' });
+  f.setProbeFailure(failure);
+  await assert.rejects(f.addSource(), error => error.cause === failure);
+  assert.equal(f.encodingProbes.length, 4, 'Exactly one fresh discovery follows the remembered choice.');
+  assert.equal(f.probes.length, 2, 'Each choice was probed with the source once, each retired before the next.');
+  assert.ok(f.probes.every(probe => probe.closed));
+  f.setProbeFailure(null);
+  await f.addSource();
+  assert.equal(f.encodingProbes.length, 6, 'A choice that failed with the real source is not remembered.');
+  assert.equal(f.probes.length, 3);
 });

@@ -297,7 +297,7 @@ Hover over a message (or reach its buttons with `Tab`) to reveal a floating tool
 
 After deleting a message, **Undo** restores the same message, including its blocks, attachments and reactions, for **60 seconds** by default. Switching channels or reconnecting does not cancel the server-controlled time window. Only the person who deleted it can undo; restoring someone else's message still requires moderation permission. Authors cannot reverse a moderator's deletion. Reply references show the restored message again without creating another message or repeating mention notifications.
 
-Use **Server settings → Notifications → Deletion undo window (seconds)**, or the CLI key `messageDeleteUndoSeconds`, to set **1 to 86,400 seconds**. Changes apply only to future deletions. Restoration is no longer possible once the deadline expires. Content is kept in a private temporary server backup during the window and removed in the next periodic cleanup after expiry. This feature requires both client and server to support protocol **27**; earlier clients cannot apply restorations.
+Use **Server settings → Notifications → Deletion undo window (seconds)**, or the CLI key `messageDeleteUndoSeconds`, to set **1 to 86,400 seconds**. Changes apply only to future deletions. Restoration is no longer possible once the deadline expires. Content is kept in a private temporary server backup during the window and removed in the next periodic cleanup after expiry, together with the attached files: an attachment's old link stops working. This feature requires both client and server to support protocol **27**; earlier clients cannot apply restorations.
 
 `Ctrl+C` copies selected text with its displayed formatting; `Ctrl+Shift+C` copies the same text without formatting. On macOS, use `Cmd` instead of `Ctrl`. Without a selection, the shortcut acts only on the focused message, never the entire conversation. **Copy message**, both in the toolbar and under **More options**, defaults to formatted copying, just like `Ctrl+C`. Those buttons also respect a selection within the message. In the menu, clicking the label, `Enter` or `Space` performs that copy; hovering, clicking the arrow or pressing `→` opens **Copy with formatting**, **Copy Markdown** and **Copy without formatting**. Use `←` or `Escape` to go back and `Tab` to leave.
 
@@ -343,6 +343,8 @@ server was shut down, is also visible and receives the keyboard: the first
 ## Mentions
 
 Typing `@` lists only members who can read the current channel, including offline members: pick someone to insert `@nickname`. Suggestions follow role and channel privacy changes. The server also checks manually typed mentions; members without access do not receive an unread mention. Whoever is mentioned gets the highlight on the message, the channel badge and the mention sound.
+
+A mention takes the whole nickname: `@Lucas` does not ping someone called "Lu", and an `@` inside an email address, a web address or a code snippet mentions no one.
 
 The first entry on the list is `@everyone` (or `@todos` — both tokens work in any language), which notifies everybody who can see that channel. Private channels stay private: people without access are not notified.
 

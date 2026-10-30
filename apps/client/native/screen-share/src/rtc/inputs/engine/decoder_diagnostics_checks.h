@@ -49,7 +49,7 @@ void RunDecoderJsonChecks(Check&& check) {
   decoder.retained_leases = 6;
   decoder.retired_core_sessions = 1;
   auto& scheduler = decoder.core.scheduling;
-  const auto start = screen_video::EncoderTimingAggregate::Clock::time_point{};
+  const auto start = screen_video::TimingAggregate::Clock::time_point{};
   scheduler.processInput.Observe(start, start);
   scheduler.outputCapacityDeferrals = 12;
   auto detailed = DecoderRuntimeJson(decoder);

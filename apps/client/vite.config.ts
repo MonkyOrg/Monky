@@ -1,11 +1,16 @@
 import { defineConfig } from 'vite';
 import path from 'path';
+import { thirdPartyNotices } from './scripts/thirdPartyNotices.cjs';
+
+const notices = thirdPartyNotices();
 
 export default defineConfig({
   root: path.resolve(__dirname, 'src/renderer'),
   base: './',
+  plugins: [notices.plugin],
   worker: {
     format: 'es',
+    plugins: notices.workerPlugins,
   },
   optimizeDeps: {
     // Prebundle lazy TensorFlow dependencies (including CommonJS kernels)
@@ -18,6 +23,11 @@ export default defineConfig({
     target: 'esnext',
     chunkSizeWarningLimit: 1000,
     rollupOptions: {
+      // The overlay window has its own page and loads none of the app (R-MEDIA-3).
+      input: {
+        index: path.resolve(__dirname, 'src/renderer/index.html'),
+        overlay: path.resolve(__dirname, 'src/renderer/overlay.html'),
+      },
       output: {
         // Extensionless licenses must not acquire a trailing dot on Windows.
         assetFileNames: 'assets/[name]-[hash][extname]',

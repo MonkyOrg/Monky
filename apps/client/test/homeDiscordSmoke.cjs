@@ -93,6 +93,10 @@ if (!process.versions.electron) {
     await window.loadURL(`http://127.0.0.1:${address.port}/__home_discord__`);
     const guideChecks = await evaluate(`(${setupFirstLaunchGuideSmoke.toString()})()`);
     console.log(`First launch guide smoke: ${guideChecks} checks passed`);
+    phase = 'direct messages after Home';
+    await window.loadURL(`http://127.0.0.1:${address.port}/__home_discord__`);
+    const dmChecks = await evaluate(`(${setupDirectMessagesAfterHomeSmoke.toString()})()`);
+    console.log(`Direct messages after Home smoke: ${dmChecks} checks passed`);
     await finish(0);
   }).catch(async error => {
     console.error(`Home Discord smoke failed during ${phase}`, error);
@@ -129,7 +133,7 @@ async function setupHomeDiscordSmoke() {
   const second = saved('second.test', 5102, 1);
 
   window.api = {
-    hasIdentity: async () => true,
+    getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => identity,
     signChallenge: async nonce => { signatures.push(nonce); return `fixture-signature:${nonce}`; },
     getClientLogConfig: async () => ({ enabled: false }),
@@ -267,6 +271,13 @@ async function setupHomeDiscordSmoke() {
   await until(() => !!document.querySelector('#add-server-create-form'), 'create form did not render');
   check(!!document.querySelector('#add-server-open-tutorials'), 'create flow exposes hosting tutorials');
   check(!!document.querySelector('#add-server-name') && !!document.querySelector('#add-server-local-port'), 'create form has server name and port');
+  const voiceModes = document.querySelector('#add-server-voice-mode-cards');
+  const sfuCard = voiceModes.querySelector('[data-mode="sfu"]');
+  sfuCard.click();
+  check(voiceModes.getAttribute('role') === 'group' && voiceModes.classList.contains('input-mode-cards')
+    && sfuCard.getAttribute('aria-pressed') === 'true' && voiceModes.querySelector('[data-mode="p2p"]').getAttribute('aria-pressed') === 'false'
+    && document.querySelector('#add-server-voice-mode').value === 'sfu' && !sfuCard.hasAttribute('style'),
+  'create form picks the voice mode with the shared choice cards, styled by the theme');
   document.querySelector('#add-server-create-back').click();
   await until(() => !!document.querySelector('#add-server-option-join'), 'choice screen did not return');
   document.querySelector('#add-server-option-join').click();
@@ -315,6 +326,10 @@ async function setupHomeDiscordSmoke() {
   settings.selectedMicrophoneId = 'fixture-mic';
   settings.autoEntryServerKeys = ['first.test:5101'];
   settings.save();
+  // Saving settings does not probe the saved servers (R-SHELL-2): the rail's own
+  // round brings the created server in, and it settles before the scenario starts.
+  await serverRailView.refreshServerRailStatuses();
+  await until(() => sessions.getAll().some(session => session.port === 5200), 'the rail round did not connect the created server');
   let stableKeys = '';
   for (let stableTicks = 0; stableTicks < 8;) {
     await tick();
@@ -343,8 +358,10 @@ async function setupHomeDiscordSmoke() {
   document.querySelector('#logout-dialog-export').click();
   await until(() => !!document.querySelector('#identity-export-password'), 'export-first did not open the identity export dialog');
   const exportBackdrop = document.querySelector('#identity-export-password').closest('.modal-backdrop');
-  check(Number(exportBackdrop.style.zIndex) > Number(document.querySelector('.logout-dialog').closest('.modal-backdrop').style.zIndex),
-    'identity export opens above the logout confirmation');
+  const logoutBackdrop = document.querySelector('.logout-dialog').closest('.modal-backdrop');
+  check(!exportBackdrop.style.zIndex && !logoutBackdrop.style.zIndex
+    && !!(logoutBackdrop.compareDocumentPosition(exportBackdrop) & Node.DOCUMENT_POSITION_FOLLOWING) && logoutBackdrop.inert,
+  'identity export opens above the logout confirmation, stacked by order instead of a fixed z-index');
   exportBackdrop.querySelector('[data-action="cancel"]').click();
   await until(() => !document.querySelector('#identity-export-password'), 'identity export dialog did not close');
   document.querySelector('#logout-dialog-cancel').click();
@@ -355,9 +372,12 @@ async function setupHomeDiscordSmoke() {
   logoutButton.click();
   await until(() => !!document.querySelector('.logout-dialog'), 'logout confirmation did not reopen');
   document.querySelector('#logout-dialog-confirm').click();
-  await until(() => document.querySelector('#logout-dialog-error')?.classList.contains('show'), 'logout failure was not shown');
-  check(document.querySelector('#logout-dialog-error').textContent.includes('disk busy')
-    && !document.querySelector('#logout-dialog-confirm').disabled, 'a failed logout shows the error and allows retrying');
+  const logoutToast = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+  await until(() => logoutToast(), 'logout failure was not shown');
+  const logoutFailure = logoutToast();
+  check(logoutFailure.getAttribute('role') === 'alert' && logoutFailure.textContent.includes('disk busy')
+    && !document.querySelector('#logout-dialog-confirm').disabled && !!document.querySelector('.logout-dialog'),
+  'a failed logout explains the error in the alert toast and allows retrying');
   logoutResult = { success: true };
   document.querySelector('#logout-dialog-confirm').click();
   await until(() => logoutCalls.length === 2, 'retrying logout did not call the main process');
@@ -394,7 +414,7 @@ async function setupFirstLaunchGuideSmoke() {
   const sockets = [];
   const unsubscribe = () => () => {};
   window.api = {
-    hasIdentity: async () => true,
+    getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => ({ clientId: 'fixture-client', publicKey: 'fixture-public-key' }),
     signChallenge: async nonce => `fixture-signature:${nonce}`,
     getClientLogConfig: async () => ({ enabled: false }),
@@ -480,5 +500,96 @@ async function setupFirstLaunchGuideSmoke() {
     && !document.querySelector('#add-server-modal').inert, 'Back from hosting tutorials returns to the create-server form');
   check(document.querySelector('#add-server-name') === name && name.value === 'Servidor digitado',
     'the create form keeps what was typed while the tutorials were open');
+  return checks;
+}
+
+/** Home is drawn while the DM store still opens in Main; invitations and auto-entry wait for it (R-SHELL-14). */
+async function setupDirectMessagesAfterHomeSmoke() {
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const tick = () => new Promise(resolve => setTimeout(resolve, 25));
+  const until = async (condition, message) => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (condition()) return;
+      await tick();
+    }
+    throw new Error(message);
+  };
+  const sockets = [];
+  let painted = 0;
+  let answerSnapshot = null;
+  const peer = 'a'.repeat(64);
+  const ok = value => Promise.resolve({ ok: true, value });
+  const dmHandlers = {
+    snapshot: () => new Promise(resolve => { answerSnapshot = resolve; }),
+    pendingPeers: () => ok([]),
+    onEvent: () => () => {},
+  };
+  const unsubscribe = () => () => {};
+  window.api = {
+    getIdentityStatus: async () => ({ state: 'ready' }),
+    getIdentity: async () => ({ clientId: 'fixture-client', publicKey: 'fixture-public-key' }),
+    signChallenge: async nonce => `fixture-signature:${nonce}`,
+    getClientLogConfig: async () => ({ enabled: false }),
+    writeClientLog: async () => {},
+    onAppBeforeQuit: unsubscribe,
+    onTrayToggleMute: unsubscribe,
+    onTrayToggleDeafen: unsubscribe,
+    onTrayLeaveCall: unsubscribe,
+    updateTrayVoiceStatus: async () => {},
+    setWindowInServer: async () => {},
+    stopLanDiscovery: async () => {},
+    startLanDiscovery: async () => {},
+    onLanDiscoveryFound: unsubscribe,
+    onLanDiscoveryLost: unsubscribe,
+    hostServerStatus: async () => ({ servers: [] }),
+    onHostServerStatusChanged: unsubscribe,
+    setLanguage: async () => {},
+    setMinimizeToTray: async () => {},
+    signalRendererReady: () => { painted++; },
+    maximize: async () => {},
+    getAppVersion: async () => '0.0.0-fixture',
+    openExternal: async () => {},
+    dm: new Proxy({}, { get: (_target, name) => dmHandlers[name] ?? (() => ok({})) }),
+  };
+  localStorage.clear();
+  localStorage.setItem('monky_saved_servers', JSON.stringify([{
+    host: 'first.test', port: 5101, name: 'First', serverId: 'server-5101', lastConnected: 1, password: '',
+  }]));
+  localStorage.setItem('monky_nickname', 'Fixture');
+  localStorage.setItem('monky_settings', JSON.stringify({ onboardingCompleted: true, autoConnectServers: true, autoEntryServerKeys: [] }));
+  window.fetch = async () => new Response(JSON.stringify({ name: 'Preview', userCount: 1, voiceUserCount: 0, users: [], voiceUsers: [] }), { status: 200 });
+  window.WebSocket = class {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+    readyState = 0;
+    constructor(url) { if (new URL(url).hostname === 'first.test') sockets.push(url); }
+    send() {}
+    close() { this.readyState = 3; }
+  };
+  navigator.mediaDevices.enumerateDevices = async () => [];
+
+  const { HomeTestApp } = await import('/main.ts');
+  new HomeTestApp();
+  await until(() => !!document.querySelector('#home-view'), 'Home was not drawn while direct messages were opening');
+  check(!!document.querySelector('#home-dm-list .loading-skeleton[role="status"]') && !document.querySelector('#home-dm-list .home-dm-empty'),
+    'the DM list shows placeholders, not "no conversations", while the store opens');
+  await until(() => painted === 1, 'the painted Home was not reported while direct messages were opening');
+  check(typeof answerSnapshot === 'function', 'the DM snapshot is being loaded');
+  await new Promise(resolve => setTimeout(resolve, 150));
+  check(sockets.length === 0, 'auto-entry waits until the DM transport listens');
+
+  answerSnapshot({ ok: true, value: {
+    me: { publicKey: 'f'.repeat(64) },
+    peers: [{ publicKey: peer, nickname: 'Friend', avatar: null, relation: 'friend', blocked: false, friendSince: 1, requestedAt: null, maxFileBytes: 1024 }],
+    conversations: [{ peer, lastMessageAt: 2, lastMessagePreview: 'Oi', lastMessageAuthor: peer, unread: 1, hidden: false, readOnly: false }],
+    settings: { maxFileBytes: 1024 },
+  } });
+  await until(() => !!document.querySelector(`#home-dm-list .home-dm-item[data-dm-id="${peer}"]`)
+    && !document.querySelector('#home-dm-list .loading-skeleton'), 'the conversations did not replace the placeholders');
+  await until(() => sockets.length === 1, 'auto-entry did not start once direct messages were up');
+  check(painted === 1, 'Home is reported painted once');
   return checks;
 }

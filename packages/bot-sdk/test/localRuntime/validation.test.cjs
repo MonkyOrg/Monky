@@ -429,6 +429,26 @@ test('preview refreshes public metadata and returns bounded ten-second Ogg Opus,
   await assert.rejects(source.preview('http://localhost/private', signal()), { code: 'unsupported' });
 });
 
+test('a preview checks its tools by default but trusts a caller that already verified them', async () => {
+  const launched = [];
+  const capture = async (executable, args) => {
+    const check = ['--version', '-version', '-encoders'].some(flag => args.includes(flag));
+    launched.push(check ? `check ${executable}` : 'resolve');
+    if (executable === tools.node) return 'v22.0.0';
+    if (executable === tools.ffmpeg) return args.includes('-version') ? 'ffmpeg version 8.0.1' : ' A....D libopus';
+    if (check) return '2026.08.19';
+    return JSON.stringify({ id: 'abcdefghijk', title: 'Original fixture', duration: 60, availability: 'public', url: track().audioUrl });
+  };
+  const captureBytes = async () => { launched.push('transcode'); return ogg(500); };
+  await new YouTubeSource(tools, { capture, captureBytes }).preview(track().url, signal());
+  assert.deepEqual(launched, [
+    `check ${tools.node}`, `check ${tools.ytDlp}`, `check ${tools.ffmpeg}`, `check ${tools.ffmpeg}`, 'resolve', 'transcode',
+  ]);
+  launched.length = 0;
+  await new YouTubeSource(tools, { capture, captureBytes, toolsVerified: true }).preview(track().url, signal());
+  assert.deepEqual(launched, ['resolve', 'transcode'], 'Already verified tools spare four processes per preview');
+});
+
 test('incremental Ogg parsing returns the same complete 20 ms Opus packets across chunk boundaries', () => {
   const bytes = ogg(6);
   for (const size of [1, 9, 17, bytes.length]) {

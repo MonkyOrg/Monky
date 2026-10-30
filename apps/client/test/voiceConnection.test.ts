@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType, DEFAULT_CUSTOM_PROFILE, ProtocolErrorCode } from '@monky/shared';
+import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType, DEFAULT_CUSTOM_PROFILE, ProtocolErrorCode, type SfuNewProducerPayload } from '@monky/shared';
 import { ParticipantManager } from '../src/renderer/core/ParticipantManager';
 import { NetworkClient, ProtocolRequestError } from '../src/renderer/core/NetworkClient';
 import { SfuClientEngine } from '../src/renderer/core/webrtc/SfuClientEngine';
@@ -467,7 +467,7 @@ function captureTrack(kind: 'video' | 'audio'): MediaStreamTrack {
   const events = new EventTarget();
   let state: MediaStreamTrackState = 'live';
   return {
-    id: 'screen-capture', kind, label: 'screen', enabled: true, muted: false, contentHint: '',
+    id: `${kind}-capture`, kind, label: kind, enabled: true, muted: false, contentHint: '',
     get readyState() { return state; },
     onended: null, onmute: null, onunmute: null,
     getCapabilities: () => ({}), getConstraints: () => ({}), getSettings: () => ({}),
@@ -479,112 +479,60 @@ function captureTrack(kind: 'video' | 'audio'): MediaStreamTrack {
   };
 }
 
-class ScreenProducer {
+class FakeProducer {
   closed = false;
   private onTransportClose = () => {};
-  readonly rtpParameters = { codecs: [{ mimeType: 'video/H264' }] };
   parameters: RTCRtpSendParameters = {
-    transactionId: 'screen', encodings: [{ active: true }], codecs: [], headerExtensions: [], rtcp: {},
+    transactionId: 'producer', encodings: [{ active: true }], codecs: [], headerExtensions: [], rtcp: {},
   };
   readonly rtpSender = {
     getParameters: () => structuredClone(this.parameters),
     setParameters: async (parameters: RTCRtpSendParameters) => { this.parameters = structuredClone(parameters); },
   };
-  constructor(readonly id: string) {}
+  constructor(readonly id: string, readonly track: MediaStreamTrack) {}
   on(event: string, listener: () => void) {
     if (event === 'transportclose') this.onTransportClose = listener;
   }
   close() { this.closed = true; }
-  transportClosed() { this.close(); this.onTransportClose(); }
 }
 
-function screenProducerFixture(t: TestContext) {
+function producerFixture(t: TestContext) {
   const { engine, client } = engineFixture();
-  const preferred = settingsStore.preferredVideoCodec;
-  settingsStore.preferredVideoCodec = 'auto';
-  t.after(() => { engine.leave(); client.dispose(); settingsStore.preferredVideoCodec = preferred; });
+  t.after(() => { engine.leave(); client.dispose(); });
   t.mock.method(engine, 'canProduceKind', () => true);
-  const closed: unknown[] = [];
-  t.mock.method(client, 'send', (type: MessageType, payload: unknown) => {
-    if (type === MessageType.SFU_PRODUCER_CLOSED) closed.push(payload);
-  });
+  t.mock.method(client, 'send', () => {});
   const pending: {
     options: { track: MediaStreamTrack; stopTracks?: boolean; encodings?: RTCRtpEncodingParameters[] };
-    resolve: (producer: ScreenProducer) => void;
-    reject: (error: Error) => void;
+    resolve: (producer: FakeProducer) => void;
   }[] = [];
   Object.defineProperties(engine, {
     channelId: { writable: true, value: 'room' },
     sendTransport: { writable: true, value: {
       close() {},
       produce(options: typeof pending[number]['options']) {
-        return new Promise<ScreenProducer>((resolve, reject) => { pending.push({ options, resolve, reject }); });
+        return new Promise<FakeProducer>(resolve => { pending.push({ options, resolve }); });
       },
     } },
   });
-  return { engine, pending, closed };
+  return { engine, pending };
 }
 
-for (const kind of ['video', 'audio'] as const) {
-  test(`SFU screen ${kind}: stop during publish retires late producers without stopping capture`, async t => {
-    const { engine, pending, closed } = screenProducerFixture(t);
-    const track = captureTrack(kind);
-    const result = (kind === 'video' ? engine.produceScreenVideo(track, 'share')
-      : engine.produceScreenAudio(track, 'share')).then(value => value, (error: unknown) => error);
-    assert.equal(pending.length, 1);
-    assert.equal(pending[0].options.stopTracks, false);
-    engine.closeProducer(`screen_${kind}:share`);
-    const late = new ScreenProducer('late');
-    pending[0].resolve(late);
-    const outcome = await result;
-    if (kind === 'video') assert.ok(outcome instanceof Error && outcome.name === 'AbortError');
-    else assert.equal(outcome, null);
-    assert.equal(late.closed, true);
-    assert.equal(engine['producers'].size, 0);
-    assert.equal(engine['pendingScreenProducers'].size, 0);
-    assert.equal(track.readyState, 'live');
-    assert.deepEqual(closed, [{ channelId: 'room', producerId: 'late' }]);
-  });
-
-  test(`SFU screen ${kind}: superseded failure and old close events never remove the replacement`, async t => {
-    const { engine, pending } = screenProducerFixture(t);
-    const track = captureTrack(kind);
-    const produce = () => kind === 'video' ? engine.produceScreenVideo(track, 'share')
-      : engine.produceScreenAudio(track, 'share');
-    const first = produce().then(value => value, (error: unknown) => error);
-    const second = produce();
-    const replacement = new ScreenProducer('replacement');
-    pending[1].resolve(replacement);
-    assert.equal(await second, replacement);
-    pending[0].reject(new Error('obsolete transport error'));
-    const obsolete = await first;
-    if (kind === 'video') assert.ok(obsolete instanceof Error && obsolete.name === 'AbortError');
-    else assert.equal(obsolete, null);
-    assert.equal(engine['producers'].get(`screen_${kind}:share`), replacement);
-    const third = produce();
-    const latest = new ScreenProducer('latest');
-    pending[2].resolve(latest);
-    await third;
-    replacement.transportClosed();
-    assert.equal(engine['producers'].get(`screen_${kind}:share`), latest);
-    assert.equal(latest.closed, false);
-    assert.equal(track.readyState, 'live');
-  });
-
-  test(`SFU screen ${kind}: common quality caps apply before and after producer creation`, async t => {
-    const { engine, pending } = screenProducerFixture(t);
-    const profile = { ...DEFAULT_CUSTOM_PROFILE, screenFps: 120, screenBitrateKbps: 20000 };
+for (const kind of ['camera', 'mic'] as const) {
+  test(`SFU ${kind}: common quality caps apply before and after producer creation`, async t => {
+    const { engine, pending } = producerFixture(t);
+    const profile = { ...DEFAULT_CUSTOM_PROFILE, cameraFps: 24, cameraBitrateKbps: 1200 };
     await engine.applyQualityParams('CUSTOM', profile);
-    const track = captureTrack(kind);
-    const result = kind === 'video' ? engine.produceScreenVideo(track, 'share') : engine.produceScreenAudio(track, 'share');
-    const encoding = kind === 'video'
-      ? { maxBitrate: 20000000, maxFramerate: 120 } : { maxBitrate: profile.audioBitrateKbps * 1000 };
+    const track = captureTrack(kind === 'camera' ? 'video' : 'audio');
+    const result = kind === 'camera' ? engine.produceCamera(track) : engine.produceMic(track);
+    const encoding = kind === 'camera'
+      ? { maxBitrate: 1200000, maxFramerate: 24 } : { maxBitrate: profile.audioBitrateKbps * 1000 };
     assert.deepEqual(pending[0].options.encodings, [encoding]);
-    const producer = new ScreenProducer('configured');
+    assert.equal(pending[0].options.stopTracks, false, 'capture services keep owning their tracks');
+    const producer = new FakeProducer('configured', track);
     pending[0].resolve(producer);
     await result;
     assert.deepEqual(producer.parameters.encodings, [{ active: true, ...encoding }]);
-    assert.equal(producer.parameters.degradationPreference, kind === 'video' ? 'maintain-resolution' : undefined);
+    assert.equal(producer.parameters.degradationPreference, kind === 'camera' ? 'maintain-resolution' : undefined);
   });
 }
 
@@ -658,7 +606,10 @@ test('SFU ping samples receive-only clients and uses the worse active direction'
   t.after(() => { engine.leave(); client.dispose(); });
   const transport = (state: string, rtt: number) => ({
     connectionState: state, close: () => {},
-    getStats: async () => new Map([['pair', { type: 'candidate-pair', state: 'succeeded', currentRoundTripTime: rtt }]]),
+    getStats: async () => new Map<string, object>([
+      ['transport', { type: 'transport', selectedCandidatePairId: 'pair' }],
+      ['pair', { type: 'candidate-pair', state: 'succeeded', currentRoundTripTime: rtt }],
+    ]),
   });
   Object.defineProperties(engine, {
     sendTransport: { value: transport('new', 0), writable: true },
@@ -667,6 +618,49 @@ test('SFU ping samples receive-only clients and uses the worse active direction'
   assert.equal(await engine.getPing(), 75);
   Object.defineProperty(engine, 'sendTransport', { value: transport('connected', 0.15), writable: true });
   assert.equal(await engine.getPing(), 150);
+});
+
+test('SFU ping is read from the candidate pair carrying media, not the first one that succeeded', async (t) => {
+  const { engine, client } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  // UDP and TCP towards the server both succeed; only the TCP pair carries media.
+  Object.defineProperty(engine, 'recvTransport', { writable: true, value: {
+    connectionState: 'connected', close: () => {},
+    getStats: async () => new Map<string, object>([
+      ['udp-pair', { type: 'candidate-pair', state: 'succeeded', currentRoundTripTime: 0.012 }],
+      ['tcp-pair', { type: 'candidate-pair', state: 'succeeded', currentRoundTripTime: 0.18 }],
+      ['transport', { type: 'transport', selectedCandidatePairId: 'tcp-pair' }],
+    ]),
+  } });
+  assert.equal(await engine.getPing(), 180);
+});
+
+test('an ended microphone track keeps the SFU call listen-only instead of failing the transport', async (t) => {
+  const { engine, client, failures, health } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  t.mock.method(client, 'send', () => {});
+  engine['channelId'] = 'room';
+  engine['sendTransportState'] = 'connected';
+  engine['recvTransportState'] = 'connected';
+  let produced = 0;
+  const ended = captureTrack('audio');
+  Object.defineProperty(engine, 'sendTransport', { writable: true, value: {
+    close() {},
+    async produce() {
+      produced++;
+      ended.stop();
+      throw new DOMException('track ended', 'InvalidStateError');
+    },
+  } });
+  // Ended while the producer was being negotiated.
+  assert.equal(await engine.produceMic(ended), null);
+  // Already ended when publication starts, as on every rung of a rejoin.
+  assert.equal(await engine.produceMic(ended), null);
+  assert.equal(produced, 1, 'a dead track is not offered to the transport again');
+  assert.equal(failures(), 0, 'a dead capture track is not a broken link and starts no rejoin');
+  assert.notEqual(health.at(-1), 'failed');
+  assert.equal(engine.isChannelConnected(), true);
 });
 
 test('rebuilding SFU producers does not stop caller-owned capture tracks', async (t) => {
@@ -690,10 +684,8 @@ test('rebuilding SFU producers does not stop caller-owned capture tracks', async
   } });
   assert.ok(await engine.produceMic(track));
   assert.ok(await engine.produceCamera(cameraTrack));
-  assert.ok(await engine.produceScreenVideo(cameraTrack, 'share'));
-  assert.ok(await engine.produceScreenAudio(track, 'share'));
   engine.leave();
-  assert.equal(closes, 4);
+  assert.equal(closes, 2);
   assert.equal(stops, 0, 'capture ownership remains with AudioProcessor/VideoService across reconnect');
 });
 
@@ -808,7 +800,7 @@ test('a pending receive operation is monitored even when the sending transport i
   t.mock.timers.tick(15_000);
   assert.equal(failures(), 1);
   engine.leave();
-  finish({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: {} });
+  finish({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' } });
   await pending;
   assert.equal(engine['pendingConsumers'].size, 0);
 });
@@ -826,7 +818,9 @@ test('SFU announcements from a background server cannot alter the call even with
     handleRemoteProducerClosed: { value: () => { closes++; } },
   });
   engine['subscribeNetworkEvents']();
-  const producer = { channelId: 'room', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', appData: { mediaType: 'mic' } };
+  const producer: SfuNewProducerPayload = {
+    channelId: 'room', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', appData: { mediaType: 'mic' },
+  };
   setEventOrigin('other-server');
   appEvents.emit(`message.${MessageType.SFU_NEW_PRODUCER}`, producer);
   appEvents.emit(`message.${MessageType.SFU_PRODUCER_CLOSED}`, producer);
@@ -856,13 +850,13 @@ test('duplicate producer announcements and a leave during consume cannot resurre
   });
   const announcement = {
     channelId: 'room', producerId: 'producer', producerSessionId: 'peer',
-    kind: 'audio' as const, appData: { mediaType: 'mic' },
+    kind: 'audio' as const, appData: { mediaType: 'mic' as const },
   };
   const pending = engine['consumeRemoteProducer'](announcement);
   await engine['consumeRemoteProducer'](announcement);
   assert.equal(requests, 1);
   engine.leave();
-  resolveRequest({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: {} });
+  resolveRequest({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' } });
   await pending;
   assert.equal(consumes, 0);
   assert.equal(engine['consumers'].size, 0);

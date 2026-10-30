@@ -217,6 +217,35 @@ export function readBotFieldChange(
   return { ...values, [field.name]: value };
 }
 
+/**
+ * Marks the picked single choice in place. Rebuilding the form instead scrolls
+ * it back to the top and drops keyboard focus on every answer.
+ */
+export function chooseBotFieldValue(
+  choice: HTMLElement,
+  fields: BotInputField[],
+  values: BotFormValues,
+): BotFormValues | null {
+  const value = choice.dataset.botSelectValue;
+  const root = choice.closest<HTMLElement>('[data-field-name]');
+  const field = fields.find((entry) => entry.name === root?.dataset.fieldName);
+  if (!root || value === undefined || field?.type !== 'select' || !field.choices.some((entry) => entry.value === value)) {
+    return null;
+  }
+  for (const option of root.querySelectorAll<HTMLElement>('[data-bot-select-value]')) {
+    const selected = option.dataset.botSelectValue === value;
+    if (option.hasAttribute('aria-pressed')) option.setAttribute('aria-pressed', String(selected));
+    if (option.getAttribute('role') === 'option') {
+      option.classList.toggle('active', selected);
+      option.setAttribute('aria-selected', String(selected));
+      option.tabIndex = selected ? 0 : -1;
+    }
+  }
+  const clear = root.querySelector<HTMLElement>('.bot-field-clear');
+  if (clear) clear.hidden = false;
+  return { ...values, [field.name]: value };
+}
+
 export function applyBotFieldAction(
   button: HTMLButtonElement,
   fields: BotInputField[],

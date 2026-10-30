@@ -4,7 +4,7 @@ import fs from 'fs';
 import net from 'net';
 import os from 'os';
 import path from 'path';
-import { ChildProcess, spawn, spawnSync } from 'child_process';
+import { ChildProcess, execFile, spawn, spawnSync } from 'child_process';
 import { IceServerConfig, LIMITS, TurnAvailability, TurnInstallProgressPayload, TurnInstallStage, TurnUnavailableReason } from '@monky/shared';
 import { Logger } from '../logger/Logger';
 import { getPublicIp } from '../discovery/ServerIpScanner';
@@ -26,9 +26,45 @@ export const TURN_RELAY_MAX_PORT = LIMITS.TURN_RELAY_MAX_PORT;
 /** How long credentials handed to a client stay valid. */
 const CREDENTIAL_TTL_SECONDS = 12 * 60 * 60;
 
+/**
+ * Peers the relay refuses: everything that is not the public internet. This is
+ * the list recommended for coturn by Enable Security (and Synapse's setup
+ * guide). It covers carrier-grade NAT, which is Tailscale's range, and
+ * IPv4-mapped IPv6, which coturn before 4.9.0 does not match against the IPv4
+ * ranges (CVE-2026-27624), so `::ffff:127.0.0.1` would otherwise pass.
+ */
+const DENIED_PEER_RANGES = [
+  '0.0.0.0-0.255.255.255',
+  '10.0.0.0-10.255.255.255',
+  '100.64.0.0-100.127.255.255',
+  '127.0.0.0-127.255.255.255',
+  '169.254.0.0-169.254.255.255',
+  '172.16.0.0-172.31.255.255',
+  '192.0.0.0-192.0.0.255',
+  '192.0.2.0-192.0.2.255',
+  '192.88.99.0-192.88.99.255',
+  '192.168.0.0-192.168.255.255',
+  '198.18.0.0-198.19.255.255',
+  '198.51.100.0-198.51.100.255',
+  '203.0.113.0-203.0.113.255',
+  '240.0.0.0-255.255.255.255',
+  '::1',
+  '64:ff9b::-64:ff9b::ffff:ffff',
+  '::ffff:0.0.0.0-::ffff:255.255.255.255',
+  '100::-100::ffff:ffff:ffff:ffff',
+  '2001::-2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff',
+  '2002::-2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+  'fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+  'fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+] as const;
+
 /** Package installs cross the network and can be slow on a cold VPS. */
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const SERVICE_TIMEOUT_MS = 15 * 1000;
+/** How long a probed availability is reused before someone signing in probes again. */
+const AVAILABILITY_TTL_MS = 60 * 1000;
+/** `sudo -n` never prompts, but a host whose name does not resolve makes it wait. */
+const PROBE_TIMEOUT_MS = 5000;
 
 export type TurnInstallFailure =
   | 'unsupported-platform'
@@ -89,6 +125,8 @@ export class CoturnManager {
    * and would otherwise stare at a modal with no progress at all.
    */
   private static installListeners = new Set<TurnInstallProgressListener>();
+  /** The last availability probe, shared by every caller until it expires. */
+  private static availabilityProbe: { at: number; result: Promise<TurnAvailability> } | null = null;
 
   constructor(private dataDir: string) {
     this.configPath = path.join(this.dataDir, 'turnserver.conf');
@@ -146,6 +184,50 @@ export class CoturnManager {
   }
 
   /**
+   * `describeAvailability` for the running server: probed off the event loop
+   * and shared by everyone signing in (S-VOICE-6). The synchronous `which` and
+   * `sudo -n` it replaces cost tens of milliseconds per login, seconds on a host
+   * whose name does not resolve, and froze heartbeats and voice signalling for
+   * everybody during a reconnection wave. An installation or a relay start
+   * probes again at once; a change made by hand on the host shows within
+   * AVAILABILITY_TTL_MS.
+   */
+  public static availability(): Promise<TurnAvailability> {
+    const cached = CoturnManager.availabilityProbe;
+    if (cached && Date.now() - cached.at < AVAILABILITY_TTL_MS) return cached.result;
+    const result = CoturnManager.probeAvailability();
+    CoturnManager.availabilityProbe = { at: Date.now(), result };
+    return result;
+  }
+
+  /** Makes the next caller probe again, after something that may have changed the answer. */
+  public static invalidateAvailability(): void {
+    CoturnManager.availabilityProbe = null;
+  }
+
+  private static async probeAvailability(): Promise<TurnAvailability> {
+    if (!CoturnManager.isSupportedPlatform()) return { supported: false, reason: 'unsupported-platform' };
+    const binary = await CoturnManager.probe('which', ['turnserver']);
+    if (binary.stdout.trim().split('\n')[0]?.trim()) return { supported: true };
+    const elevated = (typeof process.getuid === 'function' && process.getuid() === 0)
+      || (await CoturnManager.probe('sudo', ['-n', 'true'])).ok;
+    return { supported: false, reason: 'not-installed', autoInstallable: elevated };
+  }
+
+  /** Runs a short command without blocking; a missing command is a failure, never a throw. */
+  private static probe(command: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
+    return new Promise((resolve) => {
+      try {
+        execFile(command, args, { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS }, (error, stdout) => {
+          resolve({ ok: !error, stdout: typeof stdout === 'string' ? stdout : '' });
+        });
+      } catch {
+        resolve({ ok: false, stdout: '' });
+      }
+    });
+  }
+
+  /**
    * How the server can run a privileged command, or null when it cannot.
    *
    * `sudo -n` never prompts: it either works without a password or fails right
@@ -198,6 +280,7 @@ export class CoturnManager {
     const run = CoturnManager.runInstall().finally(() => {
       CoturnManager.installInFlight = null;
       CoturnManager.installListeners.clear();
+      CoturnManager.invalidateAvailability();
     });
     CoturnManager.installInFlight = run;
     return run;
@@ -367,6 +450,9 @@ export class CoturnManager {
   public async start(secret: string): Promise<boolean> {
     if (this.process) return true;
 
+    // Turning the relay on follows a check of the host, which an operator may
+    // have just fixed by hand: what the clients are told is probed again.
+    CoturnManager.invalidateAvailability();
     const binary = CoturnManager.findBinary();
     if (!binary) {
       Logger.warn('NETWORK', `TURN relay not started: ${CoturnManager.getUnavailabilityReason()}`);
@@ -534,6 +620,10 @@ export class CoturnManager {
   }
 
   private buildConfig(secret: string, externalIp: string | null, localIp: string | null): string {
+    // Both come from outside the code (an HTTP service, the interfaces) and are
+    // written into the file as is: anything but an address could add directives.
+    const external = externalIp && net.isIP(externalIp) ? externalIp : null;
+    const local = localIp && net.isIP(localIp) ? localIp : null;
     const lines = [
       '# Generated by Monky Server. Do not edit: it is rewritten on every start.',
       `listening-port=${TURN_LISTENING_PORT}`,
@@ -550,29 +640,28 @@ export class CoturnManager {
     // external-ip tells coturn what address to put in relay candidates. Without
     // it a NAT-based VPS (AWS, Oracle, most cloud providers) would advertise
     // its private NIC address, making relay candidates unreachable from clients.
-    if (externalIp) {
-      if (localIp && localIp !== externalIp) {
+    if (external) {
+      if (local && local !== external && net.isIP(local) === net.isIP(external)) {
         // The mapping form tells coturn "advertise externalIp but bind on localIp".
-        lines.push(`external-ip=${externalIp}/${localIp}`);
+        lines.push(`external-ip=${external}/${local}`);
       } else {
-        lines.push(`external-ip=${externalIp}`);
+        lines.push(`external-ip=${external}`);
       }
     }
 
     lines.push(
-      // Refuse to relay towards private ranges and loopback. Without this an
-      // open relay can be pointed at services on the host's own network, which
-      // is the classic way a misconfigured TURN server becomes an attack proxy.
+      // WebRTC only ever asks for UDP relays. A TCP relay is the classic way
+      // a TURN server becomes a proxy into databases and admin panels that
+      // trust the host's own network.
+      'no-tcp-relay',
+      // Refuse to relay towards anything but the public internet. The host's
+      // own public address is not added on purpose: a call between two
+      // members who both need the relay goes client, TURN, TURN, client
+      // through it. (Behind NAT coturn checks the private address instead,
+      // which the private ranges refuse.) With TCP relays off, only UDP
+      // reaches the host.
       'no-multicast-peers',
-      'denied-peer-ip=0.0.0.0-0.255.255.255',
-      'denied-peer-ip=10.0.0.0-10.255.255.255',
-      'denied-peer-ip=127.0.0.0-127.255.255.255',
-      'denied-peer-ip=169.254.0.0-169.254.255.255',
-      'denied-peer-ip=172.16.0.0-172.31.255.255',
-      'denied-peer-ip=192.168.0.0-192.168.255.255',
-      'denied-peer-ip=::1',
-      'denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
-      'denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+      ...DENIED_PEER_RANGES.map((range) => `denied-peer-ip=${range}`),
       // Media is already encrypted end-to-end by DTLS-SRTP, and a TLS listener
       // would need a certificate the operator does not necessarily have.
       'no-tls',

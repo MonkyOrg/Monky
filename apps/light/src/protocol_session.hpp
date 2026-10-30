@@ -1,5 +1,7 @@
 #pragma once
 
+#include "protocol_reader.hpp"
+
 #include <json.hpp>
 
 #include <array>
@@ -33,15 +35,14 @@ struct VoicePolicy {
   bool deafened = false;
   bool serverMuted = false;
   bool serverDeafened = false;
-  bool suppressMicrophone() const { return muted || deafened || serverMuted || serverDeafened; }
+  // The room denies its Speak permission, as the AFK room does to everyone.
+  bool permissionMuted = false;
+  bool suppressMicrophone() const {
+    return muted || deafened || serverMuted || serverDeafened || permissionMuted;
+  }
   bool suppressPlayback() const { return deafened || serverDeafened; }
-};
-
-struct Participant {
-  std::string userId;
-  std::string sessionId;
-  Json voiceState;
-  std::optional<Json> user;
+  // The one shape policy events and state snapshots report.
+  Json describe() const;
 };
 
 struct Admission {
@@ -177,17 +178,18 @@ private:
   void dispatch(const std::string& type, const Json& payload, const std::string& id, Time now);
   void authenticate(const Json& payload);
   void beginJoin(Time now, bool reconnect);
+  void followMove(std::string room, Time now);
   void acceptAdmission(const Json& payload);
   void updatePolicy(const Json& state, bool acceptManual = false);
   void sendVoiceState();
   void publishPolicy();
   void clearCall(Failure reason);
+  void retire(std::string requestId);
   void failPending(Failure reason);
   void loseConnection(Time now, Failure reason, bool retry);
   void handleSettings(const Json& payload, Time now);
   void handleSignal(const Json& payload);
   void flushEarlySignals();
-  void validateSfu(const std::string& type, const Json& payload, const Pending* pending) const;
 
   Identity identity_;
   Callbacks callbacks_;
@@ -211,6 +213,7 @@ private:
   std::string joinReply_;
   std::string controlId_;
   std::map<std::string, Pending> pending_;
+  std::deque<std::string> retired_;
   std::deque<EarlySignal> earlySignals_;
   std::deque<std::function<void()>> effects_;
   bool flushing_ = false;

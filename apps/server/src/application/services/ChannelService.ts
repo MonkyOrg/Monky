@@ -35,8 +35,9 @@ import {
 } from '@monky/shared';
 import { ChannelRecord } from '../../domain/entities';
 import { ICategoryRepository, IChannelRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
-import { PermissionService } from './PermissionService';
+import { PermissionService, type MemberAccess } from './PermissionService';
 import { BotPermissionService } from './BotPermissionService';
+import type { AttachmentService } from './AttachmentService';
 
 /** Everything needed to decide what a member may see, resolved once per call. */
 export interface ChannelAccessContext {
@@ -44,6 +45,46 @@ export interface ChannelAccessContext {
   permissions: number;
   roleIds: string[];
   isBot?: boolean;
+}
+
+/** A stored channel as members receive it. Every channel summary comes from here (S-APP-10). */
+export function toChannelSummary(record: ChannelRecord): ChannelSummary {
+  return {
+    permissionOverwrites: record.permissionOverwrites,
+    forumId: record.forumId ?? null,
+    forumLocked: record.forumLocked ?? false,
+    forumClosed: record.forumClosed ?? false,
+    categoryId: record.categoryId ?? null,
+    inheritCategoryPermissions: record.inheritCategoryPermissions ?? true,
+    id: record.id,
+    serverId: record.serverId,
+    name: record.name,
+    type: record.type,
+    position: record.position,
+    createdAt: record.createdAt,
+    maxParticipants: record.maxParticipants,
+    isPrivate: record.isPrivate,
+    botCommandsEnabled: record.botCommandsEnabled,
+    allowedRoleIds: record.allowedRoleIds,
+  };
+}
+
+/**
+ * Channel access answers for one operation (S-APP-5). Each member and each
+ * channel is read once, then every question is answered in memory by
+ * ChannelService.allows, the same rule a single check applies. A scope is a
+ * snapshot: an operation that re-checks after an await, to notice access
+ * changed meanwhile, takes a new one.
+ */
+export interface ChannelAccessScope {
+  /** Server-wide permissions as PermissionService resolves them, bots included. */
+  member(userId: string): Promise<MemberAccess>;
+  /** What the channel rules are applied to: a bot carries its approved capabilities instead. */
+  context(userId: string): Promise<ChannelAccessContext>;
+  channel(channelId: string): Promise<ChannelSummary | null>;
+  /** The context with the permissions the member holds inside one channel, none when it does not exist. */
+  channelContext(userId: string, channelId: string): Promise<ChannelAccessContext>;
+  can(userId: string, channelId: string, permission?: Permission): Promise<boolean>;
 }
 
 export class ChannelService {
@@ -58,6 +99,8 @@ export class ChannelService {
     private botPermissions: BotPermissionService,
     private userRepo: IUserRepository,
     private categoryRepo?: ICategoryRepository,
+    /** Files posted in a channel go with it; the database cascades are not relied upon (S-APP-6). */
+    private attachments?: Pick<AttachmentService, 'prepareChannelDeletion'>,
   ) {}
 
   public setVoicePresence(provider: (userId: string, channelId: string) => boolean): void {
@@ -71,27 +114,6 @@ export class ChannelService {
    */
   public rulesFor<T extends ChannelAccessRules & { id: string }>(channel: T, context: ChannelAccessContext): ChannelAccessRules {
     return !context.isBot && this.voicePresence(context.userId, channel.id) ? withVoicePresence(channel, context.userId) : channel;
-  }
-
-  private toSummary(record: ChannelRecord): ChannelSummary {
-    return {
-      permissionOverwrites: record.permissionOverwrites,
-      forumId: record.forumId ?? null,
-      forumLocked: record.forumLocked ?? false,
-      forumClosed: record.forumClosed ?? false,
-      categoryId: record.categoryId ?? null,
-      inheritCategoryPermissions: record.inheritCategoryPermissions ?? true,
-      id: record.id,
-      serverId: record.serverId,
-      name: record.name,
-      type: record.type,
-      position: record.position,
-      createdAt: record.createdAt,
-      maxParticipants: record.maxParticipants,
-      isPrivate: record.isPrivate,
-      botCommandsEnabled: record.botCommandsEnabled,
-      allowedRoleIds: record.allowedRoleIds,
-    };
   }
 
   /**
@@ -157,21 +179,94 @@ export class ChannelService {
   }
 
   public async getAccessContext(userId: string, channelId?: string): Promise<ChannelAccessContext> {
-    const botPermissions = this.botPermissions.getChannelPermissions(userId);
-    if (botPermissions !== undefined) {
-      const channel = channelId ? await this.channelRepo.findById(channelId) : null;
-      return { userId, permissions: channelId
-        ? channel && !channel.isPrivate ? getChannelPermissions(channel, botPermissions, [], true) : 0
-        : botPermissions, roleIds: [], isBot: true };
+    const context: ChannelAccessContext = this.botContext(userId) ?? await this.permissionService.getMemberAccess(userId);
+    return channelId ? this.withinChannel(context, await this.getChannelSummary(channelId)) : context;
+  }
+
+  /** A bot is judged by its approved capabilities, never by server roles. Undefined for people. */
+  private botContext(userId: string): ChannelAccessContext | undefined {
+    const permissions = this.botPermissions.getChannelPermissions(userId);
+    return permissions === undefined ? undefined : { userId, permissions, roleIds: [], isBot: true };
+  }
+
+  /**
+   * The members among `userIds` who hold every given permission in a channel,
+   * for audiences of many people such as an @everyone mention: the channel and
+   * the server are read once and the roles of all of them together (S-APP-5).
+   * Each answer is the one canUserAccessChannel gives.
+   */
+  public async membersWithAccess(
+    channelId: string, userIds: readonly string[], permissions: readonly Permission[] = [Permission.VIEW_CHANNEL],
+  ): Promise<Set<string>> {
+    const allowed = new Set<string>();
+    const channel = userIds.length > 0 ? await this.getChannelSummary(channelId) : null;
+    if (!channel) return allowed;
+    const members = await this.permissionService.getMembersAccess(userIds.filter((userId) => !this.botContext(userId)));
+    for (const userId of userIds) {
+      const context = this.botContext(userId) ?? members.get(userId);
+      if (context && permissions.every((permission) => this.allows(channel, context, permission))) allowed.add(userId);
     }
-    const [permissions, roles] = await Promise.all([
-      this.permissionService.getUserPermissions(userId),
-      this.roleRepo.listRolesForUser(userId),
-    ]);
-    const roleIds = roles.map(role => role.id);
-    const channel = channelId ? await this.channelRepo.findById(channelId) : null;
-    return { userId, permissions: channelId ? channel
-      ? getChannelPermissions(this.rulesFor(channel, { userId, permissions, roleIds }), permissions, roleIds, false, userId) : 0 : permissions, roleIds };
+    return allowed;
+  }
+
+  /**
+   * Whether a member may use a channel, given the context getAccessContext
+   * resolves for them. Every channel check comes down to this rule.
+   */
+  public allows(
+    channel: ChannelAccessRules & { id: string }, context: ChannelAccessContext, permission: Permission = Permission.VIEW_CHANNEL,
+  ): boolean {
+    if (permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS) {
+      return hasPermission(context.permissions, permission);
+    }
+    const rules = this.rulesFor(channel, context);
+    return canAccessChannel(rules, context.permissions, context.roleIds, context.isBot, context.userId) &&
+      hasChannelPermission(rules, context.permissions, context.roleIds, permission, context.isBot, context.userId);
+  }
+
+  /** The permissions a member holds inside one channel; none when it does not exist. Reads nothing. */
+  public withinChannel(context: ChannelAccessContext, channel: (ChannelAccessRules & { id: string }) | null): ChannelAccessContext {
+    if (!channel) return { ...context, permissions: 0 };
+    // Bots never enter a private channel, and their capabilities cap what a channel grants.
+    if (context.isBot) return { ...context, permissions: channel.isPrivate ? 0 : getChannelPermissions(channel, context.permissions, [], true) };
+    return { ...context, permissions: getChannelPermissions(
+      this.rulesFor(channel, context), context.permissions, context.roleIds, false, context.userId) };
+  }
+
+  /**
+   * Answers many access questions with one read per member and per channel
+   * (S-APP-5). The reads are getAccessContext and getChannelSummary, as for a
+   * single check. `channels` may hand over a list already read, such as
+   * listChannels(); channels missing from it are read when asked for.
+   */
+  public accessScope(channels: readonly ChannelSummary[] = []): ChannelAccessScope {
+    const members = new Map<string, Promise<MemberAccess>>();
+    const contexts = new Map<string, Promise<ChannelAccessContext>>();
+    const summaries = new Map(channels.map((channel): [string, Promise<ChannelSummary | null>] => [channel.id, Promise.resolve(channel)]));
+    const once = <T>(memo: Map<string, Promise<T>>, key: string, read: () => Promise<T>): Promise<T> => {
+      let value = memo.get(key);
+      if (!value) {
+        value = read();
+        memo.set(key, value);
+      }
+      return value;
+    };
+    const scope: ChannelAccessScope = {
+      context: (userId) => once(contexts, userId, () => this.getAccessContext(userId)),
+      member: (userId) => once(members, userId, async () => {
+        const context = await scope.context(userId);
+        // A bot's context holds its approved capabilities; on the server it counts as a member without roles.
+        return context.isBot ? this.permissionService.getMemberAccess(userId)
+          : { userId, permissions: context.permissions, roleIds: context.roleIds };
+      }),
+      channel: (channelId) => once(summaries, channelId, () => this.getChannelSummary(channelId)),
+      channelContext: async (userId, channelId) => this.withinChannel(await scope.context(userId), await scope.channel(channelId)),
+      can: async (userId, channelId, permission = Permission.VIEW_CHANNEL) => {
+        const channel = await scope.channel(channelId);
+        return !!channel && this.allows(channel, await scope.context(userId), permission);
+      },
+    };
+    return scope;
   }
 
   public async listChannels(): Promise<ChannelSummary[]> {
@@ -179,20 +274,11 @@ export class ChannelService {
     if (!server) return [];
 
     const channels = await this.channelRepo.listByServerId(server.id);
-    return channels.map((c) => this.toSummary(c));
+    return channels.map(toChannelSummary);
   }
 
   public async canUserAccessChannel(userId: string, channelId: string, permission: Permission = Permission.VIEW_CHANNEL): Promise<boolean> {
-    const channel = await this.channelRepo.findById(channelId);
-    if (!channel) return false;
-
-    const context = await this.getAccessContext(userId);
-    if (permission === Permission.MANAGE_CHANNELS || permission === Permission.MOVE_MEMBERS) {
-      return hasPermission(context.permissions, permission);
-    }
-    const rules = this.rulesFor(channel, context);
-    return canAccessChannel(rules, context.permissions, context.roleIds, context.isBot, userId) &&
-      hasChannelPermission(rules, context.permissions, context.roleIds, permission, context.isBot, userId);
+    return this.accessScope().can(userId, channelId, permission);
   }
 
   public async canUserAccessCategory(userId: string, categoryId: string, permission: Permission): Promise<boolean> {
@@ -209,7 +295,7 @@ export class ChannelService {
   /** Visibility metadata for one channel, used to scope broadcasts (#384). */
   public async getChannelSummary(channelId: string): Promise<ChannelSummary | null> {
     const channel = await this.channelRepo.findById(channelId);
-    return channel ? this.toSummary(channel) : null;
+    return channel ? toChannelSummary(channel) : null;
   }
 
   public async createChannel(
@@ -268,7 +354,7 @@ export class ChannelService {
 
     return {
       success: true,
-      channel: this.toSummary(await this.channelRepo.findById(channelRecord.id) ?? channelRecord),
+      channel: toChannelSummary(await this.channelRepo.findById(channelRecord.id) ?? channelRecord),
     };
   }
 
@@ -358,7 +444,7 @@ export class ChannelService {
 
     return {
       success: true,
-      channel: this.toSummary(await this.channelRepo.findById(channelId) ?? {
+      channel: toChannelSummary(await this.channelRepo.findById(channelId) ?? {
         ...existing,
         name: name ?? existing.name,
         maxParticipants: maxParticipants ?? existing.maxParticipants,
@@ -459,8 +545,15 @@ export class ChannelService {
       };
     }
 
-    await this.channelRepo.delete(channelId);
+    await this.removeChannel(channelId);
     return { success: true };
+  }
+
+  /** Deletes the channel row together with every file posted in it, forum topics included. */
+  private async removeChannel(channelId: string): Promise<void> {
+    const removeAttachments = await this.attachments?.prepareChannelDeletion(channelId);
+    await this.channelRepo.delete(channelId);
+    await removeAttachments?.();
   }
 
   /** The AFK voice channel, when the server has one and it still exists. */
@@ -483,7 +576,7 @@ export class ChannelService {
   public async removeAfkChannel(): Promise<string | null> {
     const id = await this.getAfkChannelId();
     await this.serverRepo.updateServer({ afkChannelId: null });
-    if (id) await this.channelRepo.delete(id);
+    if (id) await this.removeChannel(id);
     return id;
   }
 

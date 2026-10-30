@@ -84,8 +84,11 @@ async function runColorPickerSmoke() {
     typeHex('#broken');
     const beforeInvalid = selections.length;
     outside();
+    // The explanation goes to the shared alert toast (#490); the field itself is marked.
+    const failure = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent ?? '';
     check(first.isOpen && field('hex').getAttribute('aria-invalid') === 'true'
-      && !field('error').hidden && selections.length === beforeInvalid,
+      && failure().includes(language.t('colorPicker.invalidHex')) && !popup().querySelector('[role="alert"]')
+      && selections.length === beforeInvalid,
       'Malformed HEX has an explicit error instead of disappearing or being applied');
     escape();
     check(!first.isOpen && parentEscapes === 0 && trigger().value === saved,
@@ -133,7 +136,7 @@ async function runColorPickerSmoke() {
       sampler = async () => { throw new ScreenColorPickerError(code); };
       field('eyedropper').click();
       await wait();
-      check(field('error').textContent === language.t(key) && saved === '#a1b2c3',
+      check(failure().includes(language.t(key)) && saved === '#a1b2c3',
         `${code} sampling failure is explicit and preserves the selected color`);
     }
     sampler = signal => { samplingSignal = signal; return new Promise(resolve => { resolveSample = resolve; }); };

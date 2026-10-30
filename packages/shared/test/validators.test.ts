@@ -35,11 +35,6 @@ import {
   AFK_TIMEOUT_OPTIONS_SECONDS,
   isAfkTimeoutSeconds,
 } from '../src/index.js';
-import './botInteractions.test.js';
-import './botSettings.test.js';
-import './reactions.test.js';
-import './screenSubscriptions.test.js';
-import './nativeAudioIpc.test.js';
 
 console.log('=== Início dos Testes Unitários de @monky/shared ===');
 
@@ -94,16 +89,16 @@ assert.notEqual(invisible.error?.errors[0]?.message, 'Nickname contém caractere
 console.log('✔ Validações de Nickname passaram');
 
 // Test Message validation
-console.assert(isValidMessageContent('Olá mundo') === true, 'Mensagem normal válida');
-console.assert(isValidMessageContent('') === false, 'Mensagem vazia inválida');
+assert.equal(isValidMessageContent('Olá mundo'), true, 'Mensagem normal válida');
+assert.equal(isValidMessageContent(''), false, 'Mensagem vazia inválida');
 assert.equal(isValidMessageContent('a'.repeat(16001)), false);
 assert.equal(isValidMessageContent('a'.repeat(16000)), true);
 console.log('✔ Validações de Mensagem passaram');
 
 // Test Quality Presets
-console.assert(QUALITY_PRESETS.ECONOMIC.audioBitrateKbps === 24, 'Preset Leve de áudio');
-console.assert(QUALITY_PRESETS.NORMAL.audioBitrateKbps === 32, 'Preset Padrão de áudio');
-console.assert(QUALITY_PRESETS.HIGH.audioBitrateKbps === 48, 'Preset Nítido de áudio');
+assert.equal(QUALITY_PRESETS.ECONOMIC.audioBitrateKbps, 24, 'Preset Leve de áudio');
+assert.equal(QUALITY_PRESETS.NORMAL.audioBitrateKbps, 32, 'Preset Padrão de áudio');
+assert.equal(QUALITY_PRESETS.HIGH.audioBitrateKbps, 48, 'Preset Nítido de áudio');
 assert.deepEqual(Object.values(QUALITY_PRESETS).map(profile => profile.name),
   ['Leve', 'Padrão', 'Nítido', 'Fluido', 'Ultra', 'Cinema', 'Extremo']);
 const presetLadder = Object.values(QUALITY_PRESETS);
@@ -130,9 +125,9 @@ console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
 assert.equal(PROTOCOL_VERSION, 40);
-console.assert(LIMITS.SFU_DEFAULT_MIN_PORT === 40000, 'Porta mínima padrão SFU');
-console.assert(LIMITS.SFU_DEFAULT_MAX_PORT === 49151, 'Porta máxima padrão SFU');
-console.assert(
+assert.equal(LIMITS.SFU_DEFAULT_MIN_PORT, 40000, 'Porta mínima padrão SFU');
+assert.equal(LIMITS.SFU_DEFAULT_MAX_PORT, 49151, 'Porta máxima padrão SFU');
+assert.ok(
   LIMITS.SFU_DEFAULT_MAX_PORT < LIMITS.TURN_RELAY_MIN_PORT,
   'Range UDP do SFU não pode invadir o range de relay do coturn (#515)'
 );
@@ -165,9 +160,9 @@ assert.equal(voiceRestrictionsUpdatedSchema.safeParse({
   userId: 'member', serverMuted: true, serverDeafened: false, permissionMuted: true,
 }).success, true);
 
-console.assert(hasPermission(DEFAULT_PERMISSIONS, Permission.SPEAK) === true, 'Cargo padrão deve poder falar');
-console.assert(hasPermission(DEFAULT_PERMISSIONS, Permission.MANAGE_SERVER) === false, 'Cargo padrão não administra servidor');
-console.assert(hasPermission(ADMIN_PERMISSIONS, Permission.MOVE_MEMBERS) === true, 'Admin deve ter todas permissões');
+assert.equal(hasPermission(DEFAULT_PERMISSIONS, Permission.SPEAK), true, 'Cargo padrão deve poder falar');
+assert.equal(hasPermission(DEFAULT_PERMISSIONS, Permission.MANAGE_SERVER), false, 'Cargo padrão não administra servidor');
+assert.equal(hasPermission(ADMIN_PERMISSIONS, Permission.MOVE_MEMBERS), true, 'Admin deve ter todas permissões');
 assert.equal(channelPermissionOverwritesSchema.safeParse([{ roleId: null, allow: Permission.MANAGE_CHANNELS, deny: 0 }]).success, false);
 assert.equal(channelPermissionOverwritesSchema.safeParse([{ roleId: null, allow: 0, deny: Permission.MOVE_MEMBERS }]).success, false);
 console.log('✔ Permissões verificadas');
@@ -176,55 +171,55 @@ console.log('✔ Permissões verificadas');
 const publicChannel = { isPrivate: false, allowedRoleIds: [] };
 const privateChannel = { isPrivate: true, allowedRoleIds: ['role-a'] };
 
-console.assert(
-  canAccessChannel(publicChannel, DEFAULT_PERMISSIONS, []) === true,
+assert.equal(
+  canAccessChannel(publicChannel, DEFAULT_PERMISSIONS, []), true,
   'Canal público é visível para qualquer membro'
 );
-console.assert(
-  canAccessChannel(privateChannel, DEFAULT_PERMISSIONS, []) === false,
+assert.equal(
+  canAccessChannel(privateChannel, DEFAULT_PERMISSIONS, []), false,
   'Canal privado é invisível para quem não tem o cargo'
 );
-console.assert(
-  canAccessChannel(privateChannel, DEFAULT_PERMISSIONS, ['role-a']) === true,
+assert.equal(
+  canAccessChannel(privateChannel, DEFAULT_PERMISSIONS, ['role-a']), true,
   'Canal privado é visível para quem tem o cargo permitido'
 );
-console.assert(
-  canAccessChannel(privateChannel, DEFAULT_PERMISSIONS, ['role-b']) === false,
+assert.equal(
+  canAccessChannel(privateChannel, DEFAULT_PERMISSIONS, ['role-b']), false,
   'Ter outro cargo não dá acesso ao canal privado'
 );
-console.assert(
-  canAccessChannel(privateChannel, Permission.MANAGE_CHANNELS, []) === false,
+assert.equal(
+  canAccessChannel(privateChannel, Permission.MANAGE_CHANNELS, []), false,
   'Gerenciar canais não ignora a visibilidade do canal'
 );
-console.assert(
-  canAccessChannel(privateChannel, ADMIN_PERMISSIONS, []) === true,
+assert.equal(
+  canAccessChannel(privateChannel, ADMIN_PERMISSIONS, []), true,
   'Administrador acessa qualquer canal'
 );
-console.assert(
-  canAccessChannel({ isPrivate: true, allowedRoleIds: [] }, DEFAULT_PERMISSIONS, ['role-a']) === false,
+assert.equal(
+  canAccessChannel({ isPrivate: true, allowedRoleIds: [] }, DEFAULT_PERMISSIONS, ['role-a']), false,
   'Canal privado sem cargos fica restrito a quem gerencia canais'
 );
-console.assert(
-  canAccessChannel({ isPrivate: true, allowedRoleIds: [] }, Permission.MANAGE_CHANNELS, []) === false,
+assert.equal(
+  canAccessChannel({ isPrivate: true, allowedRoleIds: [] }, Permission.MANAGE_CHANNELS, []), false,
   'Canal privado sem cargos continua fechado sem VIEW_CHANNEL local'
 );
 console.log('✔ Regras de visibilidade de canal privado verificadas (#384)');
 
 // Schemas de canal (#384)
 const createDefaults = channelCreateSchema.safeParse({ name: 'geral', type: 'TEXT' });
-console.assert(hasPermission(DEFAULT_PERMISSIONS, Permission.USE_BOT_COMMANDS), 'Novos membros podem usar comandos de bots por padrão');
-console.assert(!hasPermission(DEFAULT_PERMISSIONS, Permission.MANAGE_BOTS), 'Novos membros não gerenciam bots por padrão');
-console.assert(createDefaults.success && createDefaults.data.botCommandsEnabled === true, 'Novos canais permitem bots por padrão');
-console.assert(channelCreateSchema.parse({ name: 'sem-bots', type: 'TEXT', botCommandsEnabled: false }).botCommandsEnabled === false, 'Criação preserva bloqueio explícito de bots');
-console.assert(channelUpdateSchema.parse({ channelId: 'c1' }).botCommandsEnabled === undefined, 'Edição parcial não redefine configuração de bots');
-console.assert(channelUpdateSchema.parse({ channelId: 'c1', botCommandsEnabled: false }).botCommandsEnabled === false, 'Edição permite bloquear bots');
-console.assert(!channelUpdateSchema.safeParse({ channelId: 'c1', botCommandsEnabled: 'false' }).success, 'Configuração de bots exige booleano');
-console.assert(createDefaults.success === true, 'Criação sem campos de privacidade deve ser válida');
-console.assert(
+assert.ok(hasPermission(DEFAULT_PERMISSIONS, Permission.USE_BOT_COMMANDS), 'Novos membros podem usar comandos de bots por padrão');
+assert.ok(!hasPermission(DEFAULT_PERMISSIONS, Permission.MANAGE_BOTS), 'Novos membros não gerenciam bots por padrão');
+assert.ok(createDefaults.success && createDefaults.data.botCommandsEnabled === true, 'Novos canais permitem bots por padrão');
+assert.equal(channelCreateSchema.parse({ name: 'sem-bots', type: 'TEXT', botCommandsEnabled: false }).botCommandsEnabled, false, 'Criação preserva bloqueio explícito de bots');
+assert.equal(channelUpdateSchema.parse({ channelId: 'c1' }).botCommandsEnabled, undefined, 'Edição parcial não redefine configuração de bots');
+assert.equal(channelUpdateSchema.parse({ channelId: 'c1', botCommandsEnabled: false }).botCommandsEnabled, false, 'Edição permite bloquear bots');
+assert.ok(!channelUpdateSchema.safeParse({ channelId: 'c1', botCommandsEnabled: 'false' }).success, 'Configuração de bots exige booleano');
+assert.equal(createDefaults.success, true, 'Criação sem campos de privacidade deve ser válida');
+assert.ok(
   createDefaults.success && createDefaults.data.isPrivate === false,
   'Canal criado sem isPrivate nasce público'
 );
-console.assert(
+assert.ok(
   createDefaults.success && Array.isArray(createDefaults.data.allowedRoleIds) && createDefaults.data.allowedRoleIds.length === 0,
   'Canal criado sem cargos nasce com lista vazia'
 );
@@ -235,25 +230,25 @@ const createDuplicated = channelCreateSchema.safeParse({
   isPrivate: true,
   allowedRoleIds: ['role-a', 'role-a', 'role-b'],
 });
-console.assert(
+assert.ok(
   createDuplicated.success && createDuplicated.data.allowedRoleIds.length === 2,
   'Cargos repetidos são deduplicados na criação'
 );
 
-console.assert(
-  channelUpdateSchema.safeParse({ channelId: 'c1' }).success === true,
+assert.equal(
+  channelUpdateSchema.safeParse({ channelId: 'c1' }).success, true,
   'Edição só com channelId é válida (nada muda)'
 );
-console.assert(
-  channelUpdateSchema.safeParse({ channelId: 'c1', isPrivate: true }).success === true,
+assert.equal(
+  channelUpdateSchema.safeParse({ channelId: 'c1', isPrivate: true }).success, true,
   'Edição pode alternar privacidade sem reenviar o nome'
 );
-console.assert(
-  channelUpdateSchema.safeParse({ name: 'sem-id' }).success === false,
+assert.equal(
+  channelUpdateSchema.safeParse({ name: 'sem-id' }).success, false,
   'Edição sem channelId deve ser rejeitada'
 );
-console.assert(
-  channelUpdateSchema.safeParse({ channelId: 'c1', name: 'a' }).success === false,
+assert.equal(
+  channelUpdateSchema.safeParse({ channelId: 'c1', name: 'a' }).success, false,
   'Nome curto demais deve ser rejeitado na edição'
 );
 console.log('✔ Schemas de criação e edição de canal verificados (#384)');
@@ -306,57 +301,57 @@ console.log('✔ Limite de pessoas e canal AFK verificados');
 console.log('✔ Status personalizado verificado');
 
 // Presença de jogo e convites de partida (#675)
-console.assert(
+assert.equal(
   userActivitySchema.safeParse({
     source: 'steam', appId: 548430, name: 'Deep Rock Galactic', startedAt: 1_700_000_000_000,
-  }).success === true,
+  }).success, true,
   'Atividade da Steam com appid, nome e início é válida'
 );
-console.assert(
-  userActivitySchema.safeParse({ source: 'steam', appId: 548430, name: 'Deep Rock Galactic' }).success === false,
+assert.equal(
+  userActivitySchema.safeParse({ source: 'steam', appId: 548430, name: 'Deep Rock Galactic' }).success, false,
   'Sem o início não há contador: o campo é obrigatório'
 );
-console.assert(
+assert.equal(
   userActivitySchema.safeParse({
     source: 'steam', appId: 1, name: 'x', startedAt: -1,
-  }).success === false,
+  }).success, false,
   'Início negativo é rejeitado'
 );
-console.assert(
+assert.equal(
   userActivitySchema.safeParse({
     source: 'steam', appId: 1, name: 'x', startedAt: 1, iconBase64: '/9j/4AAQSkZJRg==',
-  }).success === true,
+  }).success, true,
   'Base64 de JPEG é aceito como ícone'
 );
-console.assert(
+assert.equal(
   userActivitySchema.safeParse({
     source: 'steam', appId: 1, name: 'x', startedAt: 1, iconBase64: 'iVBORw0KGgo=',
-  }).success === false,
+  }).success, false,
   'Só JPEG: o prefixo /9j/ é o que autoriza virar data URI'
 );
-console.assert(
+assert.equal(
   userActivitySchema.safeParse({
     source: 'steam', appId: 1, name: 'x', startedAt: 1,
     iconBase64: `/9j/${'A'.repeat(LIMITS.MAX_ACTIVITY_ICON_LENGTH)}`,
-  }).success === false,
+  }).success, false,
   'O ícone tem teto: o campo não é um canal para dados em massa'
 );
-console.assert(
-  userUpdateActivitySchema.safeParse({ activity: null }).success === true,
+assert.equal(
+  userUpdateActivitySchema.safeParse({ activity: null }).success, true,
   'Limpar a atividade é tão válido quanto publicá-la — é o que o toggle desligado envia'
 );
-console.assert(
-  userActivitySchema.safeParse({ source: 'epic', appId: 1, name: 'x' }).success === false,
+assert.equal(
+  userActivitySchema.safeParse({ source: 'epic', appId: 1, name: 'x' }).success, false,
   'Só a Steam é aceita como fonte hoje'
 );
-console.assert(
-  userActivitySchema.safeParse({ source: 'steam', appId: 0, name: 'x' }).success === false,
+assert.equal(
+  userActivitySchema.safeParse({ source: 'steam', appId: 0, name: 'x' }).success, false,
   'AppId precisa ser positivo'
 );
-console.assert(
+assert.equal(
   userActivitySchema.safeParse({
     source: 'steam', appId: 1, name: 'x', executablePath: 'C:/jogo.exe',
-  }).success === false,
+  }).success, false,
   'Campos extras são rejeitados: caminho de executável nunca deve trafegar'
 );
 

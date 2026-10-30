@@ -764,11 +764,11 @@ async function setupFooterSmoke() {
 
 async function setupStageSmoke() {
   const [{ VoiceStageView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
-    { participantManager: participants }, { appEvents }, { screenAudioService },
+    { participantManager: participants }, { appEvents },
     { overlayBridgeService }, { overlayConfigModal }, { soundboardModal }, { sessionManager }, { VideoDiagnosticsSampler }] = await Promise.all([
     import('/views/VoiceStageView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/EventBus.ts'),
-    import('/core/ScreenAudioService.ts'), import('/core/OverlayBridgeService.ts'),
+    import('/core/OverlayBridgeService.ts'),
     import('/views/OverlayConfigModal.ts'), import('/views/SoundboardModal.ts'),
     import('/core/SessionManager.ts'),
     import('/core/webrtc/videoDiagnostics.ts'),
@@ -802,14 +802,11 @@ async function setupStageSmoke() {
       screenShareIds: user === remote ? ['remote-share', 'remote-share-two'] : [],
     });
   }
-  let capturing = false;
   let overlayActive = false;
-  const originalCapturing = screenAudioService.getIsCapturing;
   const originalOverlayActive = overlayBridgeService.isActive;
   const originalOverlayOpen = overlayConfigModal.open;
   const originalSoundboardOpen = soundboardModal.open;
   const actions = { camera: 0, picker: 0, overlay: 0, soundboard: 0, stop: 0, leave: 0, fullscreen: 0 };
-  screenAudioService.getIsCapturing = () => capturing;
   overlayBridgeService.isActive = () => overlayActive;
   overlayConfigModal.open = () => { actions.overlay++; };
   soundboardModal.open = () => { actions.soundboard++; };
@@ -868,7 +865,7 @@ async function setupStageSmoke() {
   check(getComputedStyle(button('.screen-audio-badge')).display === 'none', 'Inactive audio badge is hidden');
   const copyButton = button('.stage-diagnostics-btn');
   check(copyButton && getComputedStyle(copyButton).display === 'none', 'Video diagnostics controls are hidden when telemetry is off');
-  const originalCollect = stage.collectTelemetrySnapshot;
+  const originalCollect = stage.telemetry.collect;
   const originalTiles = stage.getTelemetryTiles;
   const originalClipboard = navigator.clipboard.writeText;
   const originalTelemetryMode = settings.screenShareTelemetryMode;
@@ -882,17 +879,17 @@ async function setupStageSmoke() {
   };
   try {
     stage.getTelemetryTiles = () => [diagnosticTile];
-    stage.collectTelemetrySnapshot = async () => structuredClone(fakeSnapshot);
+    stage.telemetry.collect = async () => structuredClone(fakeSnapshot);
     navigator.clipboard.writeText = async text => { copied = text; copyCount++; };
     settings.screenShareTelemetryEnabled = true;
     settings.screenShareTelemetryMode = 'complete';
-    stage.applyTelemetryOverlayState();
+    stage.telemetry.applyOverlays();
     check(getComputedStyle(copyButton).display !== 'none', 'Enabling telemetry exposes the actual copy button');
     enter(copyButton);
     check(animations(copyButton).length === 1, 'Visible diagnostics controls reuse stage hover feedback');
     leave(copyButton);
-    for (let sample = 0; sample < 25; sample++) await stage.refreshTelemetry();
-    check(stage.telemetryHistory.get(diagnosticTile.key).length === 20, 'Video diagnostics history is bounded');
+    for (let sample = 0; sample < 25; sample++) await stage.telemetry.refresh();
+    check(stage.telemetry.history.get(diagnosticTile.key).length === 20, 'Video diagnostics history is bounded');
     const focusedBeforeCopy = [...stage.focusedTileKeys];
     copyButton.click();
     await delay();
@@ -902,16 +899,16 @@ async function setupStageSmoke() {
     check(JSON.stringify(stage.focusedTileKeys) === JSON.stringify(focusedBeforeCopy), 'Copy does not change video focus');
 
     let release;
-    stage.collectTelemetrySnapshot = () => new Promise(resolve => { release = resolve; });
-    const pending = stage.refreshTelemetry();
+    stage.telemetry.collect = () => new Promise(resolve => { release = resolve; });
+    const pending = stage.telemetry.refresh();
     settings.screenShareTelemetryEnabled = false;
     appEvents.emit('settings.updated');
-    check(stage.telemetryHistory.size === 0 && stage.telemetrySnapshots.size === 0
-      && stage.telemetryEndpoints.size === 0 && stage.telemetryInterval === null,
+    check(stage.telemetry.history.size === 0 && stage.telemetry.snapshots.size === 0
+      && stage.telemetry.endpoints.size === 0 && stage.telemetry.interval === null,
     'Disabling diagnostics clears samples, targets and timers');
     release(structuredClone(fakeSnapshot));
     await pending;
-    check(stage.telemetrySnapshots.size === 0 && stage.telemetryHistory.size === 0,
+    check(stage.telemetry.snapshots.size === 0 && stage.telemetry.history.size === 0,
       'A delayed read cannot repopulate diagnostics after they are disabled');
     check(getComputedStyle(copyButton).display === 'none', 'Disabled diagnostic buttons remain hidden despite their flex styling');
     const retainedVideo = button('video.stage-video-element');
@@ -919,9 +916,9 @@ async function setupStageSmoke() {
     check(button('.stage-diagnostics-btn') === copyButton && button('video.stage-video-element') === retainedVideo,
       'Metadata-only participant updates retain the diagnostic button and video');
     settings.screenShareTelemetryEnabled = true;
-    stage.applyTelemetryOverlayState();
-    stage.collectTelemetrySnapshot = async () => structuredClone(fakeSnapshot);
-    await stage.refreshTelemetry();
+    stage.telemetry.applyOverlays();
+    stage.telemetry.collect = async () => structuredClone(fakeSnapshot);
+    await stage.telemetry.refresh();
     const retainedCopies = copyCount;
     copyButton.click();
     await delay();
@@ -942,12 +939,12 @@ async function setupStageSmoke() {
     diagnosticParticipant.remoteStream = originalCameraStream;
     diagnosticStream.getTracks().forEach(track => track.stop());
     navigator.clipboard.writeText = originalClipboard;
-    stage.collectTelemetrySnapshot = originalCollect;
+    stage.telemetry.collect = originalCollect;
     stage.getTelemetryTiles = originalTiles;
     settings.screenShareTelemetryEnabled = false;
     settings.screenShareTelemetryMode = originalTelemetryMode;
-    stage.stopTelemetryMonitor();
-    stage.applyTelemetryOverlayState();
+    stage.telemetry.stop();
+    stage.telemetry.applyOverlays();
   }
 
   window.stageSmoke = {
@@ -964,8 +961,8 @@ async function setupStageSmoke() {
     },
     async shareAndWatch() {
       voice.isCameraOn = true;
-      capturing = true;
       overlayActive = true;
+      voice.screenAudioShareIds = ['local-share'];
       voice.addScreenShare('local-share');
       await delay();
       await finishAnimations(['#stage-btn-camera', '#stage-btn-screen', '#stage-btn-overlay']
@@ -1074,7 +1071,6 @@ async function setupStageSmoke() {
       const stop = button('#stage-btn-stop-share');
       enter(stop);
       voice.isCameraOn = false;
-      capturing = false;
       voice.setScreenSharing(false);
       await delay();
       check(animations(stop).length === 0 && !stop.querySelector('.control-motion-decoration'),
@@ -1173,7 +1169,6 @@ async function setupStageSmoke() {
       await delay();
       check(animations(control).length === 0, 'Destroy removes motion listeners and state observer');
       offPicker();
-      screenAudioService.getIsCapturing = originalCapturing;
       overlayBridgeService.isActive = originalOverlayActive;
       overlayConfigModal.open = originalOverlayOpen;
       soundboardModal.open = originalSoundboardOpen;

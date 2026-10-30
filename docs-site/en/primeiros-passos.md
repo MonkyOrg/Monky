@@ -28,6 +28,14 @@ The public identity code is different from the backup that lets another
 device use your account. Without a backup, creating a new identity does not
 restore the previous one's access.
 
+The password needs at least 8 characters, and Monky rejects common passwords
+such as `12345678` or `password123`: whoever gets the code can try to guess it
+with no limit on attempts. Codes exported by earlier versions (`MONKY-ID:...`)
+still open. New codes start with `MONKY-ID2:` and only open in an updated
+Monky: an earlier version of the app or of `monky create` reports them as an
+invalid identity code. Update the app and, on the server, run `monky update`
+before `monky create`.
+
 ## 2. Choose how to connect
 
 After creating the identity and profile, Monky opens **Home**. It has the

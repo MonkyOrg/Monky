@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Apagar o canal de voz em que você está só encerra a chamada quando o servidor confirma, e sem permissão aparece um aviso. As larguras da lista de canais e do chat de voz voltam ao que você escolheu quando a janela cresce.",
+  "en": "Deleting the voice channel you are in only ends the call once the server confirms, and without permission you get a notice. The channel list and voice chat widths return to your choice when the window grows."
+}

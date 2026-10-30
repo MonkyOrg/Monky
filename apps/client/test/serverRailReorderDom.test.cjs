@@ -126,7 +126,16 @@ if (!process.versions.electron) {
       const last = await center('.server-rail-item[data-port="5103"]');
       await drag(connected, { x: last.x, y: last.bottom - 4 }, async () => {
         await check(await waitFor(`!!document.querySelector('.server-rail--dragging')`), 'the drag starts before the repaint');
-        await evaluate(`import('/core/EventBus.ts').then(({ appEvents }) => appEvents.emit('community.updated'))`);
+        // The rail, not the item, keeps the pointer: a repaint replaces every item (R-SHELL-12).
+        const repaint = await evaluate(`(() => {
+          const rail = document.querySelector('#server-rail');
+          const before = rail.querySelector('.server-rail-item[data-port="5101"]');
+          const held = rail.hasPointerCapture(1);
+          window.repaintRail('#36c');
+          const replaced = rail.querySelector('.server-rail-item[data-port="5101"]') !== before;
+          return { held, replaced, stillHeld: rail.hasPointerCapture(1) };
+        })()`);
+        await check(repaint.held && repaint.replaced && repaint.stillHeld, `the rail keeps the pointer through a repaint ${JSON.stringify(repaint)}`);
         await frames();
         await check(await evaluate(`!!document.querySelector('.server-rail--dragging .server-rail-item.dragging[data-port="5101"]')`),
           'a repaint during the drag keeps the dragged server marked');
@@ -152,6 +161,39 @@ if (!process.versions.electron) {
       await check(await evaluate('window.connectCalls === 1'), 'a plain click still opens the server');
       await check(JSON.stringify(await order()) === '[5103,5102,5101]', 'a plain click does not reorder');
 
+      // Escape cancels a drag, and releasing afterwards over the server it started on
+      // neither moves nor opens it: that click belongs to the drag (R-SHELL-12).
+      const held = await center('.server-rail-item[data-port="5102"] .server-rail-avatar');
+      browser.webContents.sendInputEvent({ type: 'mouseMove', ...held });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...held });
+      browser.webContents.sendInputEvent({ type: 'mouseMove', modifiers: ['leftButtonDown'], x: held.x, y: held.y + 40 });
+      await check(await waitFor(`!!document.querySelector('.server-rail--dragging')`), 'the held server is dragged');
+      await evaluate(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`);
+      await check(await evaluate(`!document.querySelector('.server-rail--dragging, .dragging, .server-rail-drop-zone.active, .combine-target, .drag-over')
+        && !document.querySelector('#server-rail').hasPointerCapture(1)`), 'Escape cancels the drag and lets the pointer go');
+      browser.webContents.sendInputEvent({ type: 'mouseMove', modifiers: ['leftButtonDown'], ...held });
+      await frames();
+      await check(await evaluate(`!document.querySelector('.server-rail--dragging')`), 'a cancelled press does not drag again');
+      browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...held });
+      await frames();
+      await new Promise(resolve => setTimeout(resolve, 30));
+      await check(await evaluate('window.connectCalls === 1'), 'releasing a cancelled drag over its server does not open it');
+      await check(JSON.stringify(await order()) === '[5103,5102,5101]', 'a cancelled drag moves nothing');
+
+      // Touch scrolls the rail, as it always has: a finger never starts a reorder.
+      await check(await evaluate(`(() => {
+        const item = document.querySelector('.server-rail-item[data-port="5102"]');
+        const box = item.getBoundingClientRect();
+        const at = { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 };
+        const touch = { bubbles: true, cancelable: true, pointerId: 7, pointerType: 'touch', isPrimary: true };
+        item.dispatchEvent(new PointerEvent('pointerdown', { ...touch, button: 0, buttons: 1, ...at }));
+        window.dispatchEvent(new PointerEvent('pointermove', { ...touch, buttons: 1, clientX: at.clientX, clientY: at.clientY + 30 }));
+        const dragged = !!document.querySelector('.server-rail--dragging');
+        window.dispatchEvent(new PointerEvent('pointercancel', { ...touch, clientX: at.clientX, clientY: at.clientY + 30 }));
+        return !dragged;
+      })()`), 'a touch on the rail does not start a reorder');
+
       // Like Discord: holding a server over the middle of another previews a
       // folder and dropping it there groups both, in place of the target.
       const connectedAgain = await center('.server-rail-item[data-port="5101"]');
@@ -159,6 +201,13 @@ if (!process.versions.electron) {
       await drag(connectedAgain, groupTarget, null, async () => {
         await check(await waitFor(`!!document.querySelector('.server-rail-item.combine-target[data-port="5102"]')`),
           'the target previews the folder while hovered');
+        // A probe answer that changes a status while the server is held paints the dot in
+        // place: rebuilding the rail would drop the folder preview the person is aiming at.
+        await evaluate(`window.probeOnline('c.test')`);
+        await check(await evaluate(`document.querySelector('.server-rail-item[data-port="5103"] .server-rail-status-dot')?.dataset.status === 'online'`),
+          'a probe answer during a drag shows the new status');
+        await check(await evaluate(`!!document.querySelector('.server-rail-item.combine-target[data-port="5102"]')`),
+          'a probe answer during a drag keeps the folder preview');
       });
       await check(JSON.stringify(await order()) === '[5103,"folder:5102","folder:5101"]', 'dropping on a server creates a folder with both');
       const animated = await evaluate('window.animatedFolders');
@@ -247,6 +296,33 @@ if (!process.versions.electron) {
       await drag(leavingToo, { x: head.x, y: head.y - 22 });
       await check(JSON.stringify(await order()) === '[5101,5103,5102]', 'a folder left with one server gives way to it');
       await check(await evaluate(`!document.querySelector('.server-rail-folder')`), 'no empty or single-server folder remains');
+      // A mouse button held for push-to-talk turns the left press and release into moves (R-SHELL-12).
+      const chord = await evaluate(`(() => {
+        const SIDE = 8;
+        const mouse = { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+        const center = port => {
+          const box = document.querySelector('.server-rail-item[data-port="' + port + '"]').getBoundingClientRect();
+          return { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 };
+        };
+        const start = center(5102);
+        const head = center(5101);
+        const target = { clientX: head.clientX, clientY: head.clientY - 22 };
+        document.querySelector('.server-rail-item[data-port="5102"]')
+          .dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: 0, buttons: 1 | SIDE, ...start }));
+        window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1 | SIDE, clientX: start.clientX, clientY: start.clientY - 10 }));
+        const dragged = !!document.querySelector('.server-rail--dragging .server-rail-item.dragging[data-port="5102"]');
+        window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1 | SIDE, ...target }));
+        window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: 0, buttons: SIDE, ...target }));
+        const droppedAtOnce = !document.querySelector('.server-rail--dragging');
+        window.dispatchEvent(new PointerEvent('pointerup', { ...mouse, button: 3, buttons: 0, ...target }));
+        return { dragged, droppedAtOnce, order: window.railOrder() };
+      })()`);
+      await check(chord.dragged && chord.droppedAtOnce && JSON.stringify(chord.order) === '[5102,5101,5103]',
+        `with another button held, the left press drags and its release drops at once ${JSON.stringify(chord)}`);
+      // The live icon is a file the server stores or nothing: the rail never points at a local file (R-COMMUNITY-11).
+      await evaluate(`window.setLiveIcon('file:///C:/Windows/win.ini')`);
+      await check(await evaluate(`!document.querySelector('#server-rail img[src^="file:"]')
+        && !!document.querySelector('.server-rail-item[data-port="5101"] .server-rail-avatar')`), 'a live icon in no server format is not drawn');
       console.log('Server rail reorder DOM passed');
       await finish(0);
     } catch (error) {
@@ -262,16 +338,28 @@ async function setupRail() {
   localStorage.setItem('monky_saved_servers', JSON.stringify([
     saved('a.test', 5101, 3), saved('b.test', 5102, 2), saved('c.test', 5103, 1),
   ]));
-  window.fetch = async () => { throw new Error('offline fixture'); };
+  // Servers answer the status probe only once a step makes them reachable.
+  const reachable = new Set();
+  window.fetch = async (url) => {
+    if (!reachable.has(new URL(String(url)).hostname)) throw new Error('offline fixture');
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
   const [{ connectionStore }, { sessionManager }, { serverRailView }] = await Promise.all([
     import('/stores/connectionStore.ts'), import('/core/SessionManager.ts'), import('/views/ServerRailView.ts'),
   ]);
   connectionStore.loadSavedServers();
   connectionStore.loadRailLayout();
   const session = sessionManager.create('a.test', 5101, 'Fixture');
+  const icon = color => `data:image/svg+xml;base64,${btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44"><rect width="44" height="44" fill="${color}"/></svg>`)}`;
   session.serverStore.serverDetails = {
-    id: 'server-a', name: 'A', iconUrl: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2244%22 height=%2244%22%3E%3Crect width=%2244%22 height=%2244%22 fill=%22%23e44%22/%3E%3C/svg%3E',
+    id: 'server-a', name: 'A', iconUrl: icon('#e44'),
     channels: [], categories: [], members: [], knownMembers: [], voiceStates: {}, roles: [], userRoles: [],
+  };
+  // A background event that changes what the rail shows, so it is drawn again.
+  window.repaintRail = (color) => window.setLiveIcon(icon(color));
+  window.setLiveIcon = (iconUrl) => {
+    session.serverStore.serverDetails = { ...session.serverStore.serverDetails, iconUrl };
+    serverRailView.render();
   };
   sessionManager.activate(session.key);
   window.connectCalls = 0;
@@ -283,6 +371,10 @@ async function setupRail() {
     return animate.apply(this, args);
   };
   serverRailView.connectToSavedServer = async () => { window.connectCalls++; };
+  window.probeOnline = async (host) => {
+    reachable.add(host);
+    await serverRailView.refreshServerRailStatuses();
+  };
   window.railOrder = () => connectionStore.railLayout.flatMap(node => node.type === 'server'
     ? [node.port] : node.children.map(child => `folder:${child.port}`));
   window.railState = () => {

@@ -1,6 +1,6 @@
 import {
   BOT_STORAGE_LIMITS, MessageType, botDeviceStorageScopeSchema, botStorageInfoSchema, botStorageLevelEventSchema,
-  type BotDeviceStorageDecision, type BotDeviceStorageEntry, type BotDeviceStorageScope, type BotStorageInfo,
+  type BotDeviceStorageDecision, type BotDeviceStorageEntry, type BotDeviceStorageScope, type BotStorageInfo, type ClientMessageArgs,
 } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import type { NetworkClient } from '../core/NetworkClient';
@@ -32,7 +32,7 @@ export interface BotStorageSettingsContext {
   botName: () => string;
   canManage: () => boolean;
   isCurrent: () => boolean;
-  request: (type: MessageType, payload: unknown) => Promise<unknown>;
+  request: (...message: ClientMessageArgs) => Promise<unknown>;
 }
 
 /** The Storage tab of the bot settings: the bot's space on this server and on this computer. */

@@ -3,7 +3,7 @@ import {
   LOCAL_CAPABILITY_IDS, LOCAL_CAPABILITY_TOOLS, LOCAL_EXECUTION_RUNTIME_LIMITS,
   localConnectionStateSchema, localFrameProgressSchema, localFrameReadInputSchema, localPermissionChangeSchema,
   localPreparationInputSchema, localRequestCancellationSchema, localTaskPauseSchema,
-  localTaskResultSchema, localTaskStartInputSchema, localToolIdSchema,
+  localTaskResultSchema, localTaskStartInputSchema, localToolIdSchema, raceSignal,
   type LocalCapabilityId, type LocalExecutionFailedResult, type LocalExecutionFailure, type LocalExecutionMutationResult,
   type LocalExecutionSnapshot, type LocalExecutionSubject, type LocalFrameReadResult,
   type LocalPreparationInput, type LocalPreparationResult, type LocalRuntimeSourceFailure, type LocalTaskFailureEvent,
@@ -12,14 +12,17 @@ import {
 } from '@monky/shared';
 import type { LocalExecutionDialogs } from './dialogs';
 import { LocalPermissions, localPermissionId } from './LocalPermissions';
+import type { LocalToolPreparationOptions } from './LocalTools';
 import { LocalExecutionError, localFailureDetails } from './errors';
 
 export interface LocalRuntimePaths { node: string; ytDlp: string; ffmpeg: string }
 
 export interface LocalToolHost {
   initialize(): Promise<void>;
+  /** Platform support only: no inventory walk and no digests. */
+  supported(): Promise<boolean>;
   snapshot(): Promise<Pick<LocalExecutionSnapshot, 'supported' | 'tools' | 'toolsBytes' | 'cacheBytes'>>;
-  prepare(signal: AbortSignal, retryCleanup?: boolean): Promise<LocalRuntimePaths>;
+  prepare(signal: AbortSignal, options?: LocalToolPreparationOptions): Promise<LocalRuntimePaths>;
   remove(tool: LocalToolId): Promise<void>;
   clearCache(): Promise<void>;
   dispose(): Promise<void>;
@@ -74,21 +77,6 @@ export interface LocalExecutionServiceOptions {
   changed: () => void;
   failed: (failure: LocalTaskFailureEvent) => void;
   logError: (message: string, error: unknown) => void;
-}
-
-function awaitSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const abort = (): void => {
-      signal.removeEventListener('abort', abort);
-      reject(signal.reason);
-    };
-    signal.addEventListener('abort', abort, { once: true });
-    promise.then(
-      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
-      (error: unknown) => { signal.removeEventListener('abort', abort); reject(error); },
-    );
-    if (signal.aborted) abort();
-  });
 }
 
 function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
@@ -196,7 +184,7 @@ export class LocalExecutionService {
       const delay = job.nextFrameAt - performance.now();
       if (delay > 0) await wait(delay, job.controller.signal);
       this.assertJob(job);
-      const batch = await awaitSignal(job.runtime.readFrames(parsed.data.count), job.controller.signal);
+      const batch = await raceSignal(job.runtime.readFrames(parsed.data.count), job.controller.signal);
       this.assertJob(job);
       if (batch.frames.length > parsed.data.count || typeof batch.done !== 'boolean' ||
           batch.frames.some((frame) => !(frame instanceof Uint8Array) || !frame.byteLength ||
@@ -244,6 +232,9 @@ export class LocalExecutionService {
     }
     const affected = [...this.jobs.values()].filter((job) => job.subject.connectionId === state.connectionId &&
       (!state.connected || job.voiceChannelId !== undefined && job.voiceChannelId !== state.voiceChannelId));
+    // Connections and permits are not published state, and a dropped temporary grant notifies by itself.
+    // Connecting or changing voice channels therefore never makes the inventory read and hash the tools.
+    if (!affected.length) return { status: 'completed' };
     return this.mutate(async () => this.cancelJobs(affected, 'executor_unavailable'));
   }
 
@@ -319,12 +310,12 @@ export class LocalExecutionService {
     if (enabled) {
       try {
         await this.initialize();
-        await awaitSignal(this.maintenance, signal);
+        await raceSignal(this.maintenance, signal);
         const changed = await this.options.permissions.enable(permissionId, signal, async (bot, capability, signal) => {
           await this.assertSupported(signal);
           let prepared = false;
           const enabled = await this.options.dialogs.enable(bot, capability, signal, async (preparationSignal, retryCleanup) => {
-            await this.options.tools.prepare(preparationSignal, retryCleanup);
+            await this.prepareFromDialog(preparationSignal, retryCleanup);
             prepared = true;
           });
           if (enabled && !prepared) throw new LocalExecutionError('tool_install_failed');
@@ -438,7 +429,7 @@ export class LocalExecutionService {
     let prepared = false;
     try {
       await this.initialize();
-      await awaitSignal(this.maintenance, job.controller.signal);
+      await raceSignal(this.maintenance, job.controller.signal);
       await this.assertSupported(job.controller.signal);
       this.assertJob(job);
       const permissionId = await this.options.permissions.authorize(
@@ -452,7 +443,7 @@ export class LocalExecutionService {
               }
             }
             this.options.changed();
-            await this.options.tools.prepare(preparationSignal, retryCleanup);
+            await this.prepareFromDialog(preparationSignal, retryCleanup);
             prepared = true;
           });
           if (decision !== 'deny' && !prepared) throw new LocalExecutionError('tool_install_failed');
@@ -482,7 +473,7 @@ export class LocalExecutionService {
     let outcome: LocalTaskStartResult;
     try {
       await this.initialize();
-      await awaitSignal(this.maintenance, job.controller.signal);
+      await raceSignal(this.maintenance, job.controller.signal);
       this.assertJob(job);
       await this.options.permissions.assertAllowed(this.options.owner, job.subject, job.info.capability);
       const paths = await this.options.tools.prepare(job.controller.signal);
@@ -495,7 +486,7 @@ export class LocalExecutionService {
         () => { void this.runtimeClosed(job); },
         (error: unknown) => { void this.runtimeClosed(job, error); },
       );
-      const raw = await awaitSignal(runtime.result, job.controller.signal);
+      const raw = await raceSignal(runtime.result, job.controller.signal);
       const result = localTaskResultSchema.safeParse(raw);
       if (!result.success || result.data.operation !== input.spec.operation) throw new LocalExecutionError('worker_failed');
       this.assertJob(job);
@@ -545,8 +536,13 @@ export class LocalExecutionService {
 
   private async assertSupported(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
-    if (!(await this.options.tools.snapshot()).supported) throw new LocalExecutionError('unsupported_platform');
+    if (!await this.options.tools.supported()) throw new LocalExecutionError('unsupported_platform');
     signal.throwIfAborted();
+  }
+
+  /** The person watches this preparation, so it verifies every digest instead of trusting fingerprints. */
+  private async prepareFromDialog(signal: AbortSignal, retryCleanup = false): Promise<void> {
+    await this.options.tools.prepare(signal, { retryCleanup, fullVerification: true });
   }
 
   private deadline(job: Job, timeout: number): void {

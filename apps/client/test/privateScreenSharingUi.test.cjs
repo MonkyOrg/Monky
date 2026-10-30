@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { fixture, flush } = require('./fixtures/screenSharingUiModel.cjs');
+const { fixture, deferred, flush } = require('./fixtures/screenSharingUiModel.cjs');
 const control = (f, selector) => {
   const element = f.document.querySelector(selector);
   assert.ok(element, selector);
@@ -150,13 +150,93 @@ test('audience dropdown stays compact with 500 members/20 roles and preserves ri
   assert.equal(f.document.activeElement, trigger);
   assert.ok(f.document.querySelector('#share-picker-title'), 'Escape closes only the dropdown first');
   trigger.click();
-  assert.equal(user.getAttribute('aria-selected'), 'true');
-  user.click();
-  assert.equal(user.getAttribute('aria-selected'), 'false');
+  const reopened = control(f, '[data-audience-id="member-499"]');
+  assert.notEqual(reopened, user, 'Reopening rebuilds the list with the members the server knows now');
+  assert.equal(reopened.getAttribute('aria-selected'), 'true');
+  reopened.click();
+  assert.equal(reopened.getAttribute('aria-selected'), 'false');
   control(f, '#share-picker-title').dispatchEvent(new Event('pointerdown', { bubbles: true }));
   assert.equal(control(f, '#share-audience-popup').hidden, true, 'outside pointer closes the popup, not the modal');
   key(trigger, 'ArrowDown');
   assert.equal(control(f, '#share-audience-popup').hidden, false);
   toggle(f, false);
   assert.equal(control(f, '#share-audience-popup').hidden, true);
+});
+
+test('a private share names at most the server limits, and nothing changes while it starts', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.serverStore.knownMembers = new Map(Array.from({ length: 260 }, (_, index) => [
+    `member-${index}`, { id: `member-${index}`, nickname: `Member ${String(index).padStart(3, '0')}` },
+  ]));
+  // The share being switched already names as many members as the server accepts.
+  const live = f.createStream('window:202:0');
+  f.captures.get(live.id).source.audience = { userIds: Array.from({ length: 256 }, (_, index) => `member-${index}`), roleIds: [] };
+  f.voiceStore.screenShareIds = [live.id];
+  await f.picker.open();
+  control(f, '[data-source-id="window:101:0"]').click();
+  control(f, '#share-audience-toggle').click();
+  const members = f.document.querySelectorAll('[data-audience-kind="user"]');
+  assert.ok(members.slice(0, 256).every(member => member.getAttribute('aria-selected') === 'true'));
+  assert.ok(members.slice(256).every(member => member.disabled), 'The server refuses a 257th member, so it cannot be picked');
+  members[0].click();
+  assert.equal(members[256].disabled, false, 'Removing one member makes room for another');
+  members[256].click();
+  const gate = deferred();
+  f.controls.start = () => gate.promise;
+  const starting = f.picker.startSharing('replace');
+  await flush();
+  assert.equal(control(f, '#chk-private-share').disabled, true);
+  assert.equal(control(f, '#share-audience-toggle').disabled, true);
+  assert.equal(control(f, '#share-audience-popup').hidden, true, 'The list closes while the share starts');
+  assert.ok(f.document.querySelectorAll('[data-audience-id]').every(option => option.disabled));
+  gate.resolve(f.createStream('window:101:0'));
+  await starting;
+  const start = f.traces.find(value => value[0] === 'native-start');
+  assert.equal(start.at(-1).userIds.length, 256);
+  assert.ok(start.at(-1).userIds.includes('member-256') && !start.at(-1).userIds.includes('member-0'));
+});
+
+const chosen = f => f.document.querySelectorAll('[data-audience-id]')
+  .filter(option => option.getAttribute('aria-selected') === 'true').map(option => option.getAttribute('data-audience-id'));
+const lastStart = f => JSON.parse(JSON.stringify(f.traces.filter(value => value[0] === 'native-start').at(-1)));
+
+test('switching Private off and on keeps who was chosen for a new share, and off sends none of them', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  await f.picker.open();
+  control(f, '.source-item').click();
+  toggle(f, true);
+  control(f, '#share-audience-toggle').click();
+  control(f, '[data-audience-id="allowed"]').click();
+  control(f, '[data-audience-id="friends"]').click();
+  toggle(f, false);
+  assert.equal(control(f, '#btn-share').disabled, false, 'Switched off, the share is public and can start');
+  toggle(f, true);
+  assert.deepEqual(chosen(f).sort(), ['allowed', 'friends'], 'Switching back on restores the choice');
+  assert.equal(control(f, '#share-audience-status').textContent, f.i18n.t('screenShare.privateSelected', { count: 2 }));
+  assert.equal(control(f, '#btn-share').disabled, false);
+  toggle(f, false);
+  await f.picker.startSharing('replace');
+  assert.equal(lastStart(f).length, 5, 'A share started public names nobody, not even the choice set aside');
+});
+
+test('switching Private off and on keeps the audience of the share whose source changes', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.serverStore.knownMembers = new Map(Array.from({ length: 40 }, (_, index) => [
+    `member-${index}`, { id: `member-${index}`, nickname: `Member ${String(index).padStart(2, '0')}` },
+  ]));
+  const audience = { userIds: Array.from({ length: 40 }, (_, index) => `member-${index}`), roleIds: ['friends'] };
+  const live = f.createStream('window:202:0');
+  f.captures.get(live.id).source.audience = audience;
+  f.voiceStore.screenShareIds = [live.id];
+  await f.picker.open();
+  control(f, '[data-source-id="window:101:0"]').click();
+  assert.equal(control(f, '#chk-private-share').checked, true);
+  toggle(f, false);
+  toggle(f, true);
+  assert.equal(chosen(f).length, 41, 'The 40 members and the role of the live share come back');
+  await f.picker.startSharing('replace');
+  assert.deepEqual(lastStart(f).at(-1), audience, 'The new source keeps exactly the same audience');
 });

@@ -3,13 +3,9 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { Decoder } = require('./wire.cjs');
+const { notifyObserver } = require('../asyncTools.cjs');
 
 const failure = (code, message, detail = {}) => Object.assign(new Error(message), { code, ...detail });
-const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-};
 const METHODS = new Set(['capabilities', 'permission', 'list', 'resolve', 'thumbnail', 'close',
   'media.probe', 'media.start', 'media.stop', 'media.bitrate', 'media.keyframe', 'media.stats']);
 const errorCode = value => typeof value === 'string' && /^ERR_MAC_[A-Z_]{1,48}$/u.test(value);
@@ -26,12 +22,12 @@ class MacNativeHost {
     assert.ok(!multiplexed || onVideo === undefined);
     this.sessions = multiplexed ? new Map() : null;
     this.mediaSequence = 0;
-    this.mediaEnd = deferred();
+    this.mediaEnd = Promise.withResolvers();
     void this.mediaEnd.promise.catch(() => {});
     this.pending = new Map();
     this.sequence = 0;
-    this.exit = deferred();
-    this.hello = deferred();
+    this.exit = Promise.withResolvers();
+    this.hello = Promise.withResolvers();
     this.ready = this.hello.promise;
     void this.ready.catch(() => {});
     this.child = (dependencies.spawn ?? spawn)(executable, [], {
@@ -86,8 +82,7 @@ class MacNativeHost {
     this.startTimer = setTimeout(() => this.fail(failure('ERR_MAC_HOST_START', 'Native macOS host startup timed out.')), timeoutMs);
   }
   notify(error) {
-    try { this.onError(error); }
-    catch (observerError) { console.error('[MacNativeHost] Failure observer threw:', observerError); }
+    notifyObserver('[MacNativeHost] Failure observer', this.onError, error);
   }
   fail(error) {
     if (this.exited || this.failure) return;
@@ -260,7 +255,7 @@ class MacNativeHost {
     if (this.exited || this.failure) throw this.failure ?? failure('ERR_MAC_HOST_EXIT', 'Native host is closed.');
     if (this.closing && method !== 'close') throw new DOMException('Native macOS host is closing.', 'AbortError');
     assert.ok(method === 'close' || this.pending.size < 16, 'Native macOS request credits are exhausted.');
-    const id = ++this.sequence, result = deferred();
+    const id = ++this.sequence, result = Promise.withResolvers();
     const record = { ...result, signal, method, session };
     // Screenshot APIs have no cancellation receipt. Retire the isolated owner
     // and wait for OS exit rather than leaving callbacks alive in a shared host.

@@ -1,17 +1,19 @@
 import { EVERYONE_ROLE_ID, Permission, MessageType, type Role, type RoleUpdatePayload, type RolesListPayload } from '@monky/shared';
 import { serverStore } from '../../../stores/serverStore';
 import { getAvatarUrl } from '../../../utils/avatar';
-import { escapeHtml } from '../../../utils/html';
-import { enterModal, exitModal, handlesModalKey } from '../../../utils/modalSurface';
-import { removeOwnedSurfaces } from '../../../utils/surfaceMotion';
+import { escapeHtml, html } from '../../../utils/html';
+import { renderSwitch } from '../../../utils/formControls';
+import { openModal } from '../../../utils/modalShell';
+import { removeOwnedSurfaces, showWithMotion } from '../../../utils/surfaceMotion';
 import { t } from '../../../i18n';
 import type { ServerSettingsContext } from '../ServerSettingsContext';
 import { filterServerMembers, ServerMembersTab } from './ServerMembersTab';
 import { ColorPicker } from '../../ColorPicker';
-import { COLOR_PRESETS } from '../../../utils/colors';
+import { COLOR_PRESETS, isHexColor } from '../../../utils/colors';
 import { ContextMenu } from '../../ContextMenu';
 import { showConfirm } from '../../Dialog';
 import { showSuccessToast } from '../../CopyToast';
+import { changeMemberRole, memberRoleChangedMessage } from '../../memberActions';
 import '../../channelSettings.css';
 
 interface RoleDialog {
@@ -49,10 +51,7 @@ export class ServerRolesTab {
               ${t('roles.badgeVisibilityDesc')}
             </div>
           </div>
-          <label class="toggle-switch" aria-label="${t('roles.badgeVisibility')}">
-            <input id="checkbox-show-role-badges" type="checkbox" ${serverStore.serverDetails?.showRoleBadgesToEveryone !== false ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'checkbox-show-role-badges', label: t('roles.badgeVisibility'), checked: serverStore.serverDetails?.showRoleBadgesToEveryone !== false })}
         </div>
         </fieldset>
         <fieldset class="server-settings-fieldset" data-server-permission="${Permission.MANAGE_ROLES}" style="display: flex; flex-direction: column; gap: 16px;">
@@ -95,7 +94,7 @@ export class ServerRolesTab {
             <button type="button" class="role-editor-tab-btn${everyone ? ' active' : ''}" data-role-editor-tab="permissions">${t('roles.permissionsTab')}</button>
             ${everyone ? '' : `<button type="button" class="role-editor-tab-btn" data-role-editor-tab="members">${t('roles.membersTab')}</button>`}
           </div>
-          ${everyone ? '' : `<div id="role-editor-tab-general" class="role-editor-tab-panel" style="display: flex; flex-direction: column; gap: 12px;">
+          ${everyone ? '' : `<div id="role-editor-tab-general" class="role-editor-tab-panel" style="gap: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label for="role-editor-name">${t('roles.roleName')}</label>
               <input id="role-editor-name" type="text" maxlength="32" placeholder="${t('roles.roleNamePlaceholder')}">
@@ -110,10 +109,7 @@ export class ServerRolesTab {
                 <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">${t('roles.autoAssign')}</div>
                 <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('roles.autoAssignEditorHint')}</div>
               </div>
-              <label class="permission-switch" aria-label="${t('roles.autoAssign')}">
-                <input type="checkbox" id="role-editor-is-default">
-                <span class="slider"></span>
-              </label>
+              ${renderSwitch({ id: 'role-editor-is-default', label: t('roles.autoAssign'), checked: false })}
             </div>
             <section class="role-delete-section" hidden>
               <div>
@@ -123,12 +119,12 @@ export class ServerRolesTab {
               <button type="button" id="btn-role-delete" class="btn btn-danger">${t('roles.deleteRole')}</button>
             </section>
           </div>`}
-          <div id="role-editor-tab-permissions" data-settings-section="role-permissions" data-settings-label="${escapeHtml(t('roles.permissionsTab'))}" class="role-editor-tab-panel" style="display: ${everyone ? 'flex' : 'none'}; flex-direction: column; gap: 10px;">
+          <div id="role-editor-tab-permissions" data-settings-section="role-permissions" data-settings-label="${escapeHtml(t('roles.permissionsTab'))}" class="role-editor-tab-panel" style="gap: 10px;" ${everyone ? '' : 'hidden'}>
             ${everyone || (this.context?.store ?? serverStore).roleModel === 'legacy' ? ''
               : `<p class="role-dialog-hint" data-role-permission-hint>${t('roles.permissionSwitchesHint')}</p>`}
             ${this.renderPermissionSwitches()}
           </div>
-          ${everyone ? '' : `<div id="role-editor-tab-members" data-settings-section="role-members" data-settings-label="${escapeHtml(t('roles.membersTab'))}" class="role-editor-tab-panel" style="display: none; flex-direction: column; gap: 10px;">
+          ${everyone ? '' : `<div id="role-editor-tab-members" data-settings-section="role-members" data-settings-label="${escapeHtml(t('roles.membersTab'))}" class="role-editor-tab-panel" style="gap: 10px;" hidden>
             <div id="role-editor-members-panel">${this.renderRoleMembersEditorPanel()}</div>
           </div>`}
     `;
@@ -144,18 +140,18 @@ export class ServerRolesTab {
       <td style="text-align: right;"><button type="button" class="role-actions-trigger" data-role-menu="${EVERYONE_ROLE_ID}"
         aria-label="${escapeHtml(t('roles.roleActions', { name: t('roles.everyone') }))}" aria-haspopup="menu" aria-expanded="false">
         <span class="material-symbols-outlined md-18" aria-hidden="true">more_horiz</span></button></td></tr>`;
-    return everyone + roles.map((role) => `
+    return everyone + roles.map((role) => html`
       <tr class="role-table-row" data-role-id="${role.id}" draggable="true">
         <td><div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
           <span class="material-symbols-outlined md-16" title="${t('roles.dragReorderHint')}" style="color: var(--text-muted); cursor: grab;">drag_indicator</span>
-          <span style="width: 12px; height: 12px; border-radius: 50%; background: ${role.color || 'var(--text-muted)'}; flex-shrink: 0;"></span>
-          <span style="font-size: 13px; font-weight: 600;">${escapeHtml(role.name)}</span>
-          ${role.isDefault ? `<span class="member-badge-you">${t('roles.autoBadge')}</span>` : ''}
+          <span style="width: 12px; height: 12px; border-radius: 50%; background: ${isHexColor(role.color) ? role.color : 'var(--text-muted)'}; flex-shrink: 0;"></span>
+          <span style="font-size: 13px; font-weight: 600;">${role.name}</span>
+          ${role.isDefault ? html`<span class="member-badge-you">${t('roles.autoBadge')}</span>` : ''}
         </div></td>
-        <td style="font-size: 12px;">${escapeHtml(this.describeRolePermissions(role))}</td>
+        <td style="font-size: 12px;">${this.describeRolePermissions(role)}</td>
         <td class="role-member-count" data-role-count="${role.id}">${members.filter((member) => serverStore.getUserRoleIds(member.id).includes(role.id)).length}</td>
         <td style="text-align: right;"><button type="button" class="role-actions-trigger" data-role-menu="${role.id}"
-          title="${t('common.moreOptions')}" aria-label="${escapeHtml(t('roles.roleActions', { name: role.name }))}" aria-haspopup="menu" aria-expanded="false">
+          title="${t('common.moreOptions')}" aria-label="${t('roles.roleActions', { name: role.name })}" aria-haspopup="menu" aria-expanded="false">
           <span class="material-symbols-outlined md-18" aria-hidden="true">more_horiz</span>
         </button></td>
       </tr>`).join('');
@@ -216,10 +212,7 @@ export class ServerRolesTab {
           <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">${item.label}</div>
           <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${item.description}</div>
         </div>
-        <label class="permission-switch" aria-label="${item.label}">
-          <input type="checkbox" class="role-permission-switch" data-permission="${item.key}">
-          <span class="slider"></span>
-        </label>
+        ${renderSwitch({ className: 'role-permission-switch', label: item.label, checked: false, attributes: html`data-permission="${item.key}"` })}
       </div>
     `).join('');
   }
@@ -263,23 +256,23 @@ export class ServerRolesTab {
           <tbody>
             ${members.map((member) => {
               const offline = member.status === 'DISCONNECTED';
-              return `
-                <tr class="role-member-row" data-member-name="${escapeHtml(member.nickname)}">
+              return html`
+                <tr class="role-member-row" data-member-name="${member.nickname}">
                   <td>
                     <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
-                      <img src="${getAvatarUrl(member.avatarUrl)}" alt="${escapeHtml(member.nickname)}" data-fallback="avatar" style="width: 34px; height: 34px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-color); flex-shrink: 0; ${offline ? 'opacity: 0.5;' : ''}">
+                      <img src="${getAvatarUrl(member.avatarUrl)}" alt="${member.nickname}" data-fallback="avatar" style="width: 34px; height: 34px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-color); flex-shrink: 0; ${offline ? 'opacity: 0.5;' : ''}">
                       <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0;">
-                        <span style="font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(member.nickname)}</span>
-                        ${member.id === serverStore.currentUser?.id ? `<span class="member-badge-you">${t('common.you')}</span>` : ''}
-                        ${member.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
-                        ${offline ? `<span class="member-badge-offline">${t('roles.offlineBadge')}</span>` : ''}
+                        <span style="font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis;">${member.nickname}</span>
+                        ${member.id === serverStore.currentUser?.id ? html`<span class="member-badge-you">${t('common.you')}</span>` : ''}
+                        ${member.id === serverStore.ownerId ? html`<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
+                        ${offline ? html`<span class="member-badge-offline">${t('roles.offlineBadge')}</span>` : ''}
                       </div>
                     </div>
                   </td>
                   <td class="role-member-action-cell">
                     <button type="button" class="btn ${adding ? 'btn-secondary' : 'btn-danger'} role-member-action"
                       data-role-member-action="${adding ? 'add' : 'remove'}" data-user-id="${member.id}" data-role-id="${roleId}"
-                      aria-label="${escapeHtml(t(adding ? 'roles.addMemberLabel' : 'roles.removeMemberLabel', { name: member.nickname }))}">
+                      aria-label="${t(adding ? 'roles.addMemberLabel' : 'roles.removeMemberLabel', { name: member.nickname })}">
                       ${t(adding ? 'roles.addMember' : 'roles.removeMember')}
                     </button>
                   </td>
@@ -360,7 +353,7 @@ export class ServerRolesTab {
       void context.operations.run('role-order', t('roles.dragReorderHint'), Permission.MANAGE_ROLES, async () => {
         for (const [index, roleId] of ordered.entries()) {
           await context.request<RolesListPayload>(
-            MessageType.ROLE_UPDATE, { roleId, position: ordered.length - index }, Permission.MANAGE_ROLES,
+            [MessageType.ROLE_UPDATE, { roleId, position: ordered.length - index }], Permission.MANAGE_ROLES,
           );
         }
       });
@@ -389,9 +382,11 @@ export class ServerRolesTab {
       else if (target.dataset.roleEditorTab) {
         const tab = target.dataset.roleEditorTab;
         container.querySelectorAll<HTMLButtonElement>('.role-editor-tab-btn').forEach((button) => button.classList.toggle('active', button === target));
+        // A tab swap fades only, like every other settings tab.
         container.querySelectorAll<HTMLElement>('.role-editor-tab-panel').forEach((panel) => {
           const visible = panel.id === `role-editor-tab-${tab}`;
-          panel.style.display = visible ? 'flex' : 'none';
+          if (visible && panel.hidden) showWithMotion(panel, 'view');
+          else if (!visible) panel.hidden = true;
         });
       } else if (target.id === 'btn-role-add-members') {
         this.openMemberPicker();
@@ -419,7 +414,7 @@ export class ServerRolesTab {
         const roleId = target.dataset.roleId;
         if (target.dataset.memberAction === 'kick') {
           void context.operations.run(`kick:${userId}`, t('userMenu.kickMember'), Permission.KICK_MEMBERS,
-            () => context.request<unknown>(MessageType.MEMBER_KICK, { targetUserId: userId }, Permission.KICK_MEMBERS));
+            () => context.request<unknown>([MessageType.MEMBER_KICK, { targetUserId: userId }], Permission.KICK_MEMBERS));
         } else if (roleId) {
           this.assignRole(userId, roleId, !context.store.getUserRoleIds(userId).includes(roleId));
         }
@@ -508,7 +503,7 @@ export class ServerRolesTab {
       const latest = context.store.getRole(roleId);
       if (!latest) throw new Error(t('serverSettings.roleUnavailable'));
       if (!this.canDeleteRole(latest)) throw new Error(t('protocolError.permissionDenied'));
-      await context.request<RolesListPayload>(MessageType.ROLE_DELETE, { roleId }, Permission.MANAGE_ROLES);
+      await context.request<RolesListPayload>([MessageType.ROLE_DELETE, { roleId }], Permission.MANAGE_ROLES);
     }).then(() => {
       if (this.roleDeletion === deletion) this.roleDeletion = null;
     });
@@ -536,13 +531,13 @@ export class ServerRolesTab {
     this.editor = this.openDialog('role-editor-title', role ? t('roles.editorEditTitle', { name: role.name }) : t('roles.editorNewTitle'),
       this.renderEditorHtml(role?.id === EVERYONE_ROLE_ID),
       `<button type="button" id="btn-role-save" class="btn btn-primary">${t('roles.createRole')}</button>
-       ${role ? `<button type="button" class="btn btn-secondary" data-role-dialog-close>${t('common.done')}</button>` : ''}`,
+       ${role ? `<button type="button" class="btn btn-secondary" data-role-dialog-close data-modal-close>${t('common.done')}</button>` : ''}`,
       () => {
         this.memberPicker?.close(true);
         this.colorPicker.cleanup();
         this.editor = null;
         this.dirtyName = false;
-        return this.root?.querySelector<HTMLElement>(role ? `[data-role-menu="${role.id}"]` : '#btn-role-create-new');
+        return this.root?.querySelector<HTMLElement>(role ? `[data-role-menu="${CSS.escape(role.id)}"]` : '#btn-role-create-new');
       });
     const root = this.editor.element;
     root.dataset.roleEditor = '';
@@ -596,51 +591,31 @@ export class ServerRolesTab {
   }
 
   private openDialog(titleId: string, title: string, content: string, actions: string, onClose: () => HTMLElement | null | undefined | void): RoleDialog {
-    const element = document.createElement('div');
-    const controller = new AbortController();
-    const options = { signal: controller.signal };
-    element.className = 'modal-backdrop';
-    element.innerHTML = `<section class="modal-card role-dialog-card" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
+    const shell = openModal({
+      card: `<section class="modal-card role-dialog-card" aria-labelledby="${titleId}">
       <header class="modal-header"><h2 class="modal-title" id="${titleId}">${escapeHtml(title)}</h2>
-        <button type="button" class="modal-close-btn" data-role-dialog-close aria-label="${t('common.close')}">&times;</button></header>
+        <button type="button" class="modal-close-btn" data-role-dialog-close data-modal-close aria-label="${t('common.close')}">&times;</button></header>
       <fieldset class="role-dialog-body">${content}</fieldset>
-      <div class="error-banner role-dialog-errors" role="alert" aria-live="polite"></div>
       <span class="role-dialog-status" role="status" aria-live="polite"></span>
       <footer class="modal-footer">${actions}</footer>
-    </section>`;
-    const close = (immediate = false) => {
-      if (controller.signal.aborted) return;
-      if (!immediate) {
+    </section>`,
+      initialFocus: false,
+      // A revoked session or permission closes at once; otherwise the edits being applied hold the dialog.
+      canClose: (reason) => {
+        if (reason === 'session') return true;
         this.finishEditing();
-        if (this.context?.operations.pendingCount) return;
-      }
-      controller.abort();
-      const focus = onClose();
-      exitModal(element, immediate);
-      if (!immediate) focus?.focus({ preventScroll: true });
+        return !this.context?.operations.pendingCount;
+      },
+      onClose: (reason) => {
+        const focus = onClose();
+        if (reason !== 'session') focus?.focus({ preventScroll: true });
+      },
+    });
+    return {
+      element: shell.element,
+      signal: shell.signal,
+      close: (immediate = false) => { shell.close(immediate ? 'session' : 'api', immediate); },
     };
-    element.querySelectorAll('[data-role-dialog-close]').forEach(button =>
-      button.addEventListener('click', () => close(), options));
-    element.addEventListener('mousedown', event => { if (event.target === element) close(); }, options);
-    window.addEventListener('keydown', event => {
-      if (!handlesModalKey(element, event)) return;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        close();
-      } else if (event.key === 'Tab') {
-        const controls = [...element.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')]
-          .filter(control => control.getClientRects().length && !control.hidden);
-        const index = controls.indexOf(document.activeElement as HTMLElement);
-        if (controls.length && (event.shiftKey ? index <= 0 : index < 0 || index === controls.length - 1)) {
-          event.preventDefault();
-          controls[event.shiftKey ? controls.length - 1 : 0].focus({ preventScroll: true });
-        }
-      }
-    }, { ...options, capture: true });
-    document.body.append(element);
-    enterModal(element);
-    return { element, close, signal: controller.signal };
   }
 
   private openMemberPicker(): void {
@@ -650,7 +625,7 @@ export class ServerRolesTab {
     this.memberPicker = this.openDialog('role-add-members-title', t('roles.addMembers'),
       `<p class="role-dialog-hint">${t('roles.addMembersHint')}</p>
        <div data-role-candidates>${this.renderMemberList(roleId, true)}</div>`,
-      `<button type="button" class="btn btn-secondary" data-role-dialog-close>${t('common.done')}</button>`, () => {
+      `<button type="button" class="btn btn-secondary" data-role-dialog-close data-modal-close>${t('common.done')}</button>`, () => {
         this.memberPicker = null;
         return this.editor?.element.querySelector<HTMLElement>('#btn-role-add-members');
       });
@@ -674,7 +649,7 @@ export class ServerRolesTab {
       if (payload.name !== undefined && (!payload.name.trim() || payload.name.length > 32)) {
         throw new Error(t('serverSettings.roleNameInvalid'));
       }
-      await context.request<RolesListPayload>(MessageType.ROLE_UPDATE, payload, Permission.MANAGE_ROLES);
+      await context.request<RolesListPayload>([MessageType.ROLE_UPDATE, payload], Permission.MANAGE_ROLES);
     });
   }
 
@@ -692,7 +667,7 @@ export class ServerRolesTab {
     const deny = context.store.roleModel === 'deny' ? { deny: 0 } : {};
     void context.operations.run('role-create', t('roles.createRole'), Permission.MANAGE_ROLES, async () => {
       if (!name || name.length > 32) throw new Error(t('serverSettings.roleNameInvalid'));
-      await context.request<RolesListPayload>(MessageType.ROLE_CREATE, { name, color, isDefault, permissions, ...deny }, Permission.MANAGE_ROLES);
+      await context.request<RolesListPayload>([MessageType.ROLE_CREATE, { name, color, isDefault, permissions, ...deny }], Permission.MANAGE_ROLES);
     }).then(result => {
       if (result.ok && context.isCurrent() && this.editor === editor) editor?.close();
     });
@@ -701,19 +676,12 @@ export class ServerRolesTab {
   private assignRole(userId: string, roleId: string, assign: boolean): void {
     const context = this.context;
     if (!context || context.operations.isPending(`assignment:${userId}:${roleId}`)) return;
-    void context.operations.run(`assignment:${userId}:${roleId}`, t('roles.assignedColumn'), Permission.MANAGE_ROLES, async () => {
-      const member = context.store.getAllMembersInDisplayOrder().find(member => member.id === userId);
-      const role = context.store.getRole(roleId);
-      if (!role) throw new Error(t('serverSettings.roleUnavailable'));
-      if (!member) throw new Error(t('roles.memberUnavailable'));
-      await context.request<RolesListPayload>(
-        assign ? MessageType.ROLE_ASSIGN : MessageType.ROLE_UNASSIGN, { userId, roleId }, Permission.MANAGE_ROLES,
-      );
-      return { name: member.nickname, role: role.name };
-    }).then(result => {
-      if (result.ok && context.isCurrent()) {
-        showSuccessToast(t(assign ? 'roles.memberAdded' : 'roles.memberRemoved', result.value));
-      }
+    void context.operations.run(`assignment:${userId}:${roleId}`, t('roles.assignedColumn'), Permission.MANAGE_ROLES,
+      () => changeMemberRole(
+        (...message) => context.request<RolesListPayload>(message, Permission.MANAGE_ROLES),
+        context.store, userId, roleId, assign,
+      )).then(result => {
+      if (result.ok && context.isCurrent()) showSuccessToast(memberRoleChangedMessage(assign, result.value));
     });
   }
 
@@ -763,14 +731,6 @@ export class ServerRolesTab {
       const status = dialog.element.querySelector('.role-dialog-status');
       if (status) status.textContent = operations.pendingCount
         ? t('serverSettings.applying', { count: operations.pendingCount }) : '';
-      const errors = dialog.element.querySelector('.role-dialog-errors');
-      if (errors) {
-        errors.textContent = operations.failures.filter(failure =>
-          failure.key === 'role-create' || failure.key === `role:${roleId}` ||
-          failure.key.startsWith('assignment:') && failure.key.endsWith(`:${roleId}`))
-          .map(failure => failure.message).join('\n');
-        errors.classList.toggle('show', Boolean(errors.textContent));
-      }
     }
     const memberSignature = `${roleId}:${signature}`;
     if (role && roleId !== EVERYONE_ROLE_ID && this.membersSignature !== memberSignature) {

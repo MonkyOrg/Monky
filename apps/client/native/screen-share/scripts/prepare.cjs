@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { root, execute } = require('./buildTools.cjs');
 const { cache, fetchObs } = require('./fetchObs.cjs');
+const { pipInstallArguments } = require('./native-rtc/gclientRuntime.cjs');
 const { generateNotices } = require('./notices.cjs');
 const windowsToolchain = require('./windowsToolchain.cjs');
 
@@ -44,11 +45,11 @@ async function prepare(config) {
   const venv = path.join(cache, 'python');
   const interpreter = path.join(venv, 'Scripts', 'python.exe');
   if (!fs.existsSync(venv)) {
+    const install = pipInstallArguments();
     execute(toolchain.python, ['-I', '-m', 'venv', '--copies', venv], { env });
-    const requirements = require('./native-rtc/pins.json').bootstrap.gclientRuntime.requirements
-      .map(requirement => `${requirement.distribution}==${requirement.version}`);
-    execute(interpreter, ['-I', '-m', 'pip', '--isolated', '--disable-pip-version-check',
-      'install', '--no-warn-script-location', ...requirements], { env });
+    // The venv is provisioned only when created: one left without its packages would be skipped next time.
+    try { execute(interpreter, install, { env }); }
+    catch (error) { fs.rmSync(venv, { recursive: true, force: true }); throw error; }
   }
   execute(process.execPath, [path.join(__dirname, 'native-rtc', 'bootstrap.cjs'), 'fetch',
     `--python=${toolchain.python}`, `--gclient-python=${interpreter}`,

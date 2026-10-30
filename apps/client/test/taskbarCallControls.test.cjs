@@ -70,7 +70,7 @@ function fixture({ dark = true, scaleFactor = 1 } = {}) {
       this.destroyed = false;
       this.applied = [];
       this.sent = [];
-      this.webContents = { send: (channel) => this.sent.push(channel) };
+      this.webContents = { isDestroyed: () => this.destroyed, send: (channel) => this.sent.push(channel) };
     }
     isDestroyed() { return this.destroyed; }
     setThumbarButtons(buttons) { this.applied.push(buttons); return true; }

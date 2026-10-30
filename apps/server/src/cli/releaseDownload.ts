@@ -2,7 +2,9 @@ import { createHash } from 'crypto';
 import fs from 'fs';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
-import { isReleaseVersion } from '@monky/shared';
+import {
+  MONKY_RELEASE_HOSTS, TrustedFetchError, fetchTrusted, isReleaseVersion, linkedSignal, parseSha256Manifest, readLimitedText,
+} from '@monky/shared';
 import { t } from './i18n/index';
 
 export interface CliReleaseArtifact {
@@ -18,10 +20,8 @@ export interface CliTransferProgress {
   total: number;
 }
 
-const TRUSTED_HOSTS = new Set([
-  'github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com',
-]);
 const MAX_PACKAGE_BYTES = 350 * 1024 * 1024;
+const MAX_CHECKSUMS_BYTES = 256 * 1024;
 
 export function validateCliArtifact(artifact: CliReleaseArtifact): void {
   if (!isReleaseVersion(artifact.version) ||
@@ -33,34 +33,16 @@ export function validateCliArtifact(artifact: CliReleaseArtifact): void {
   }
 }
 
-async function requestArtifact(url: string, signal: AbortSignal, request: typeof fetch): Promise<Response> {
-  for (let redirects = 0; redirects <= 5; redirects++) {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port ||
-        !TRUSTED_HOSTS.has(parsed.hostname)) throw new Error(t('update.invalidArtifact'));
-    const response = await request(url, { redirect: 'manual', signal, headers: { 'User-Agent': 'monky-cli' } });
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      await response.body?.cancel();
-      const location = response.headers.get('location');
-      if (!location) throw new Error(t('update.invalidArtifact'));
-      url = new URL(location, url).href;
-      continue;
-    }
-    if (!response.ok || !response.body) {
-      await response.body?.cancel();
-      throw new Error(t('update.downloadFailed', { reason: `HTTP ${response.status}` }));
-    }
-    return response;
-  }
-  throw new Error(t('update.invalidArtifact'));
+function requestArtifact(url: string, signal: AbortSignal, request: typeof fetch): Promise<Response> {
+  return fetchTrusted(url, { hosts: MONKY_RELEASE_HOSTS, signal, request, headers: { 'User-Agent': 'monky-cli' } });
 }
 
-export function checksumForArtifact(text: string, name: string): string | null {
-  const matches = text.split(/\r?\n/).flatMap((line) => {
-    const match = /^([a-fA-F0-9]{64})[ \t]+[* ]?(.+)$/.exec(line);
-    return match && (match[2] === name || match[2] === `./${name}`) ? [match[1].toLowerCase()] : [];
-  });
-  return matches.length === 1 ? matches[0] : null;
+/** An HTTP failure keeps its status; anything else about the release files means the artifact cannot be trusted. */
+function transferFailure(error: unknown): unknown {
+  if (!(error instanceof TrustedFetchError)) return error;
+  return new Error(error.failure === 'http'
+    ? t('update.downloadFailed', { reason: `HTTP ${error.status}` })
+    : t('update.invalidArtifact'));
 }
 
 async function artifactChecksum(
@@ -68,25 +50,8 @@ async function artifactChecksum(
 ): Promise<string> {
   if (artifact.digest) return artifact.digest.slice('sha256:'.length).toLowerCase();
   const url = `https://github.com/MonkyOrg/Monky/releases/download/v${artifact.version}/checksums-sha256.txt`;
-  const response = await requestArtifact(url, signal, request);
-  if (!response.body) throw new Error(t('update.invalidArtifact'));
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let received = 0;
-  let text = '';
-  try {
-    for (;;) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      received += chunk.value.byteLength;
-      if (received > 256 * 1024) throw new Error(t('update.invalidArtifact'));
-      text += decoder.decode(chunk.value, { stream: true });
-    }
-    text += decoder.decode();
-  } finally {
-    reader.releaseLock();
-  }
-  const checksum = checksumForArtifact(text, artifact.name);
+  const manifest = await readLimitedText(await requestArtifact(url, signal, request), MAX_CHECKSUMS_BYTES);
+  const checksum = parseSha256Manifest(manifest, artifact.name);
   if (!checksum) throw new Error(t('update.invalidArtifact'));
   return checksum;
 }
@@ -103,16 +68,13 @@ export async function downloadCliArtifact(
   } = {},
 ): Promise<void> {
   validateCliArtifact(artifact);
-  const controller = new AbortController();
-  const abort = () => controller.abort(options.signal?.reason);
-  options.signal?.addEventListener('abort', abort, { once: true });
-  if (options.signal?.aborted) abort();
-  const timer = setTimeout(() => controller.abort(new Error('Download deadline exceeded.')), options.timeoutMs ?? 600_000);
-  timer.unref();
+  const transfer = linkedSignal(options.signal, {
+    ms: options.timeoutMs ?? 600_000, reason: () => new Error('Download deadline exceeded.'),
+  });
   const request = options.request ?? globalThis.fetch;
   try {
-    const checksum = await artifactChecksum(artifact, controller.signal, request);
-    const response = await requestArtifact(artifact.url, controller.signal, request);
+    const checksum = await artifactChecksum(artifact, transfer.signal, request);
+    const response = await requestArtifact(artifact.url, transfer.signal, request);
     if (!response.body) throw new Error(t('update.invalidArtifact'));
     const length = response.headers.get('content-length');
     if (length !== null && Number(length) !== artifact.size) throw new Error(t('update.invalidArtifact'));
@@ -136,14 +98,16 @@ export async function downloadCliArtifact(
       }
     }
     await pipeline(Readable.from(chunks()), fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }), {
-      signal: controller.signal,
+      signal: transfer.signal,
     });
     options.onVerifying?.();
     if (received !== artifact.size || hash.digest('hex') !== checksum) throw new Error(t('update.invalidArtifact'));
+  } catch (error) {
+    throw transferFailure(error);
   } finally {
-    controller.abort();
-    clearTimeout(timer);
-    options.signal?.removeEventListener('abort', abort);
+    // Also tears down a body the failure left half-read.
+    transfer.abort();
+    transfer.dispose();
   }
 }
 

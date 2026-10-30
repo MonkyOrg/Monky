@@ -3,6 +3,7 @@
 const { NativeAudioPort, nativeAudioPortErrorData } = require('./nativeAudioPort.cjs');
 const { NativePcmAudioSink } = require('./nativePcmAudioSink.cjs');
 const { NativeAudioClockClient } = require('./nativeAudioClockClient.cjs');
+const { notifyObserver } = require('./asyncTools.cjs');
 
 const cancelled = () => new DOMException('Native audio Renderer startup was cancelled.', 'AbortError');
 
@@ -64,12 +65,7 @@ class NativeAudioPortRenderer {
 
   observe(error) {
     if (this.errors.length < 32) this.errors.push(error instanceof Error ? error : new Error(String(error)));
-    try {
-      const observed = this.onError(error, this.info);
-      if (typeof observed?.then === 'function') void observed.catch(observerError => {
-        console.error('Native audio Renderer error observer failed:', observerError);
-      });
-    } catch (observerError) { console.error('Native audio Renderer error observer failed:', observerError); }
+    notifyObserver('Native audio Renderer error observer', this.onError, error, this.info);
   }
 
   fail(error, notifyRemote = true) {
@@ -162,12 +158,7 @@ function registerNativeAudioPortReceiver(ipcRenderer, protocol, { workletUrl, on
   const errors = [];
   const report = error => {
     if (errors.length < 64) errors.push(error instanceof Error ? error.message : String(error));
-    try {
-      const observed = onError(error);
-      if (typeof observed?.then === 'function') void observed.catch(observerError => {
-        console.error('Native audio preload error observer failed:', observerError);
-      });
-    } catch (observerError) { console.error('Native audio preload error observer failed:', observerError); }
+    notifyObserver('Native audio preload error observer', onError, error);
   };
   const receive = (event, info) => {
     const ports = event?.ports;

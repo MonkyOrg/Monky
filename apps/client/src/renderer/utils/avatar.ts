@@ -1,20 +1,42 @@
 import { networkClient } from '../core/NetworkClient';
+import { toHttpBase } from './serverAddress';
 
 const DEFAULT_AVATAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="64" height="64"><rect width="24" height="24" fill="#1c232d" rx="12"/><circle cx="12" cy="8" r="4" fill="#9da7b3"/><path d="M4 20c0-4.418 3.582-8 8-8s8 3.582 8 8" fill="#9da7b3"/></svg>`;
 
 export const DEFAULT_AVATAR_URL = `data:image/svg+xml;base64,${btoa(DEFAULT_AVATAR_SVG)}`;
 
+/** Avatar files a server stores: `/avatars/<prefix><uuid>.<ext>`. */
+const SERVER_AVATAR_PATH = /^\/avatars\/[A-Za-z0-9._-]+$/;
+/** Pictures the app inlines: cropped PNGs, DM thumbnails and SVG placeholders. */
+const INLINE_AVATAR = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,[A-Za-z0-9+/]+={0,2}$/;
+/** A web address with a host; quotes, angle brackets and spaces would leave the HTML attribute. */
+const WEB_AVATAR = /^https?:\/\/[^\s"'<>`/?#][^\s"'<>`]*$/i;
+
+/**
+ * Where a picture is drawn from: a file the server stores (`/avatars/<name>`:
+ * avatars, server icons, banners, covers and carousel images), resolved
+ * against `baseUrl`, the address of the server that sent it; a web address;
+ * or a picture inlined by the app. Anything else (a local file, a script
+ * address, another path on the server or a value carrying markup) is no
+ * picture at all, so a hostile server cannot reach past it even where a
+ * template forgot to escape it.
+ */
+export function resolveImageUrl(url: string | null | undefined, baseUrl: string): string | null {
+  const value = typeof url === 'string' ? url.trim() : '';
+  if (INLINE_AVATAR.test(value)) return value;
+  // Relative paths must be resolved against the server that sent them.
+  const candidate = SERVER_AVATAR_PATH.test(value) ? `${baseUrl}${value}` : value;
+  return WEB_AVATAR.test(candidate) ? candidate : null;
+}
+
+/** An avatar as `resolveImageUrl` finds it, or the default silhouette. */
+export function resolveAvatarUrl(url: string | null | undefined, baseUrl: string): string {
+  return resolveImageUrl(url, baseUrl) ?? DEFAULT_AVATAR_URL;
+}
+
+/** Avatar address for the server on screen; see `resolveAvatarUrl`. */
 export function getAvatarUrl(url?: string | null): string {
-  if (url && url.trim().length > 0) {
-    // Relative avatar paths (served over HTTP by the server) must be resolved
-    // against the connected server's HTTP base URL.
-    if (url.startsWith('/avatars/')) {
-      const base = networkClient.getHttpBaseUrl();
-      return base ? `${base}${url}` : DEFAULT_AVATAR_URL;
-    }
-    return url;
-  }
-  return DEFAULT_AVATAR_URL;
+  return resolveAvatarUrl(url, networkClient.getHttpBaseUrl());
 }
 
 /**
@@ -28,10 +50,7 @@ export function toAbsoluteServerIconUrl(
   port: number,
   iconUrl?: string | null
 ): string | null {
-  if (!iconUrl || iconUrl.trim().length === 0) return null;
-  if (!iconUrl.startsWith('/')) return iconUrl;
-  const cleanHost = host.trim().replace(/^wss?:\/\//, '').replace(/^https?:\/\//, '');
-  return `http://${cleanHost}:${port}${iconUrl}`;
+  return resolveImageUrl(iconUrl, toHttpBase({ host, port }));
 }
 
 /**

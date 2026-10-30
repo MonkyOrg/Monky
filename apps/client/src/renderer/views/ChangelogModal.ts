@@ -1,10 +1,10 @@
 import type { ReleaseHistoryEntry, ReleaseNotesResult } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
-import { getLanguage, t, tCount, type SupportedLanguage, type TranslationKey } from '../i18n';
+import { getLanguage, t, tCount, type TranslationKey } from '../i18n';
 import { CLIENT_NOTE_GROUPS, parseClientReleaseNotes, type ClientNoteGroup, type ClientReleaseNotes } from '../utils/clientReleaseNotes';
 import { escapeHtml } from '../utils/html';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
-import { enableBackdropClose } from '../utils/modal';
+import { openModal, type ModalShell } from '../utils/modalShell';
+import { openExternalUrl } from '../utils/feedback';
 import { animateEnter } from '../utils/surfaceMotion';
 import { bindVersionCopyButton, renderVersionCopyButton } from './VersionCopyButton';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
@@ -53,6 +53,7 @@ const HISTORY_PREFETCH_PX = 160;
  * lazily loads older releases, one GitHub page at a time.
  */
 export class ChangelogModal {
+  private shell: ModalShell | null = null;
   private modalEl: HTMLElement | null = null;
   private bodyEl: HTMLElement | null = null;
   private currentEl: HTMLElement | null = null;
@@ -61,7 +62,6 @@ export class ChangelogModal {
   private titleEl: HTMLElement | null = null;
   private unbind: Array<() => void> = [];
   private unbindVersionCopy: (() => void) | null = null;
-  private previousFocus: HTMLElement | null = null;
   private pendingOpen: Promise<boolean> | null = null;
   private requestId = 0;
   private tag: string | undefined;
@@ -69,7 +69,6 @@ export class ChangelogModal {
   private notes: ClientReleaseNotes = { kind: 'empty' };
   private celebrate = false;
   private githubUrl = RELEASES_URL;
-  private linkFailed = false;
   private history: HistoryRelease[] = [];
   private historyBases = new Set<string>();
   private historyAnchor: string | null = null;
@@ -120,6 +119,12 @@ export class ChangelogModal {
   }
 
   public close(): void {
+    if (this.shell) this.shell.close('api');
+    else this.finishClose();
+  }
+
+  /** Drops what an open (or one still loading) left behind. */
+  private finishClose(): void {
     this.requestId++;
     this.pendingOpen = null;
     this.stopHistory();
@@ -127,10 +132,8 @@ export class ChangelogModal {
     this.unbindVersionCopy = null;
     this.unbind.forEach((fn) => fn());
     this.unbind = [];
-    if (this.modalEl) {
-      exitModal(this.modalEl);
-      this.modalEl = null;
-    }
+    this.shell = null;
+    this.modalEl = null;
     this.bodyEl = null;
     this.currentEl = null;
     this.historyEl = null;
@@ -139,9 +142,6 @@ export class ChangelogModal {
     this.result = null;
     this.notes = { kind: 'empty' };
     this.githubUrl = RELEASES_URL;
-    this.linkFailed = false;
-    if (this.previousFocus?.isConnected) this.previousFocus.focus();
-    this.previousFocus = null;
   }
 
   private async fetchNotes(tag?: string): Promise<ReleaseNotesResult> {
@@ -157,37 +157,36 @@ export class ChangelogModal {
   }
 
   private buildShell(): void {
-    const backdrop = document.createElement('div');
-    backdrop.className = 'modal-backdrop';
-    backdrop.innerHTML = `
-      <div class="modal-card changelog-card" role="dialog" aria-modal="true" aria-labelledby="changelog-title" style="max-width: 560px; width: 92%; display: flex; flex-direction: column;">
+    const shell = openModal({
+      card: `
+      <div class="modal-card changelog-card" aria-labelledby="changelog-title" style="max-width: 560px; width: 92%; display: flex; flex-direction: column;">
         <div class="modal-header">
           <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
             <span class="material-symbols-outlined" aria-hidden="true" style="color: var(--accent-primary);">${this.celebrate ? 'celebration' : 'auto_awesome'}</span>
             <span data-el="title" id="changelog-title">${escapeHtml(t('changelog.title'))}</span>
           </div>
-          <button type="button" id="modal-close" class="modal-close-btn" aria-label="${escapeHtml(t('common.close'))}">&times;</button>
+          <button type="button" id="modal-close" class="modal-close-btn" data-modal-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
         </div>
         <div data-el="body" class="changelog-body" style="max-height: 55vh; overflow-y: auto; padding: 4px 4px 2px; line-height: 1.6; font-size: 13px;">
           <div data-el="current" aria-live="polite"></div>
           <div data-el="history" class="changelog-history" hidden></div>
           <div data-el="history-status" class="changelog-history-status"></div>
         </div>
-        <p data-el="link-error" role="alert" class="changelog-error" hidden></p>
         <div class="modal-footer">
           <button type="button" id="changelog-retry" class="btn btn-secondary" hidden></button>
           <button type="button" id="changelog-github" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px;">
             <span class="material-symbols-outlined md-16" aria-hidden="true" style="margin-right: 4px;">open_in_new</span>
             <span data-el="github-label">${escapeHtml(t('changelog.viewOnGithub'))}</span>
           </button>
-          <button type="button" id="changelog-close" class="btn btn-primary" style="font-size: 12px; padding: 6px 12px;">${escapeHtml(t('common.close'))}</button>
+          <button type="button" id="changelog-close" class="btn btn-primary" data-modal-close style="font-size: 12px; padding: 6px 12px;">${escapeHtml(t('common.close'))}</button>
         </div>
       </div>
-    `;
-
-    this.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    document.body.appendChild(backdrop);
-    enterModal(backdrop);
+    `,
+      initialFocus: '#modal-close',
+      onClose: () => { if (this.shell === shell) this.finishClose(); },
+    });
+    const backdrop = shell.element;
+    this.shell = shell;
     this.modalEl = backdrop;
     this.bodyEl = backdrop.querySelector('[data-el="body"]');
     this.currentEl = backdrop.querySelector('[data-el="current"]');
@@ -195,36 +194,12 @@ export class ChangelogModal {
     this.historyStatusEl = backdrop.querySelector('[data-el="history-status"]');
     this.titleEl = backdrop.querySelector('[data-el="title"]');
 
-    backdrop.querySelector('#modal-close')?.addEventListener('click', () => this.close());
-    backdrop.querySelector('#changelog-close')?.addEventListener('click', () => this.close());
     backdrop.querySelector('#changelog-github')?.addEventListener('click', () => { void this.openGithub(); });
     backdrop.querySelector('#changelog-retry')?.addEventListener('click', () => { void this.retry(); });
     this.historyStatusEl?.addEventListener('click', (event) => {
       if ((event.target as HTMLElement).closest('[data-history-retry]')) void this.loadMoreHistory();
     });
-    enableBackdropClose(backdrop, () => this.close());
-
-    const onKeyDown = (e: KeyboardEvent): void => {
-      if (!handlesModalKey(backdrop, e)) return;
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        this.close();
-      } else if (e.key === 'Tab') {
-        const buttons = Array.from(backdrop.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
-          .filter((button) => button.checkVisibility());
-        const first = buttons[0];
-        const last = buttons[buttons.length - 1];
-        if (first && last && (e.shiftKey ? document.activeElement === first : document.activeElement === last)) {
-          e.preventDefault();
-          (e.shiftKey ? last : first).focus();
-        }
-      }
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    this.unbind.push(() => window.removeEventListener('keydown', onKeyDown, true));
-    this.unbind.push(appEvents.on<SupportedLanguage>('i18n.language_changed', () => this.renderState()));
-    backdrop.querySelector<HTMLButtonElement>('#modal-close')?.focus();
+    this.unbind.push(appEvents.on('i18n.language_changed', () => this.renderState()));
   }
 
   private renderState(): void {
@@ -239,11 +214,6 @@ export class ChangelogModal {
     if (retry) {
       retry.textContent = t('changelog.retry');
       retry.hidden = this.result?.ok !== false && this.notes.kind !== 'invalid';
-    }
-    const linkError = this.modalEl.querySelector<HTMLElement>('[data-el="link-error"]');
-    if (linkError) {
-      linkError.hidden = !this.linkFailed;
-      linkError.textContent = this.linkFailed ? t('changelog.openFailed') : '';
     }
     this.bodyEl.setAttribute('aria-busy', String(!this.result));
     const current = this.currentEl;
@@ -442,24 +412,7 @@ export class ChangelogModal {
   }
 
   private async openGithub(): Promise<void> {
-    const modal = this.modalEl;
-    if (this.linkFailed) {
-      this.linkFailed = false;
-      this.renderState();
-    }
-    try {
-      if (!window.api?.openExternal) {
-        window.open(this.githubUrl, '_blank', 'noopener');
-        return;
-      }
-      const result = await window.api.openExternal(this.githubUrl);
-      if (!result.success) throw new Error('Could not open release page');
-    } catch (error) {
-      console.warn('[ChangelogModal] Could not open GitHub', error);
-      if (this.modalEl !== modal) return;
-      this.linkFailed = true;
-      this.renderState();
-    }
+    await openExternalUrl(this.githubUrl, t('changelog.openFailed'));
   }
 }
 

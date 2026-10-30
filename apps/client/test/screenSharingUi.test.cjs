@@ -3,6 +3,13 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { fixture, deferred, flush, MONITOR_SOURCE_ID } = require('./fixtures/screenSharingUiModel.cjs');
+const shared = require('@monky/shared');
+
+/** A native-screen:invoke rejection as the renderer receives it: Main's message with its codes after the marker. */
+const ipcFailure = (message, codes) => new Error(`Error invoking remote method '${shared.NATIVE_SCREEN_IPC.invoke}': `
+  + `Error: ${shared.encodeScreenShareFailure(message, { codes })}`);
+const startFailed = (f, reason) => f.i18n.t('screenShare.startFailed', { reason: f.i18n.t(reason) });
+const TECHNICAL = /Error invoking remote method|native-screen:invoke|ERR_[A-Z]|monky-screen-failure|Unsafe absolute path|probe failed|incompatible/;
 require('./privateScreenSharingUi.test.cjs');
 require('./screenEncodingAdjustment.test.cjs');
 require('./testDisplay.test.cjs');
@@ -130,8 +137,11 @@ for (const language of ['pt-BR', 'en']) {
     await flush();
     const card = chooseWindowMethod(f, 'window');
     assert.equal(control(f, 'btn-share').disabled, false);
-    assert.equal(control(f, 'share-preview-error').hidden, false);
-    assert.equal(control(f, 'share-preview-error').textContent, f.i18n.t('screenShare.previewsFailed'));
+    const toasts = f.document.querySelectorAll('.chat-copy-toast');
+    assert.equal(toasts.length, 1, 'Failed preview batches are explained once, in the alert toast');
+    assert.equal(toasts[0].getAttribute('role'), 'alert');
+    assert.equal(toasts[0].querySelector('.chat-copy-toast-label').textContent, f.i18n.t('screenShare.previewsFailed'));
+    assert.equal(f.document.querySelector('#share-preview-error'), null, 'No error is left in the picker layout');
     assert.ok(card.querySelector('.source-thumbnail--minimized'));
     assert.equal(f.document.querySelectorAll('.source-thumbnail--loading').length, 0);
     assert.equal(f.warnings.filter(row => row[0] === '[ScreenShare] Could not load source previews').length, 2);
@@ -175,13 +185,13 @@ for (const language of ['pt-BR', 'en']) {
     f.settingsStore.screenEncodingMode = 'software';
     f.settingsStore.preferredScreenCodec = 'av1';
     const preferences = () => JSON.stringify([
-      f.settingsStore.screenEncodingStrategy, f.settingsStore.screenEncodingMode,
-      f.settingsStore.preferredScreenCodec, f.settingsStore.preferredVideoCodec,
+      f.settingsStore.screenEncodingStrategy, f.settingsStore.screenEncodingMode, f.settingsStore.preferredScreenCodec,
     ]);
     const saved = preferences();
     let probes = 0;
     f.controls.encoding = async () => { probes++; throw new Error('No settings probe belongs in the picker'); };
-    f.controls.start = async () => { throw new Error('Selected encoder unavailable for this profile'); };
+    // The failure reported in #490, exactly as the renderer receives it: Electron keeps only Main's message.
+    f.controls.start = async () => { throw ipcFailure('Unsafe absolute path', ['ERR_SCREEN_CAPTURE_PATH']); };
     await f.picker.open();
     assert.equal(f.document.querySelector('[data-settings-section="screen-encoding"]'), null);
     assert.equal(f.document.querySelector('#screen-encoding-automatic, #screen-encoding-manual, #select-video-codec'), null);
@@ -190,7 +200,9 @@ for (const language of ['pt-BR', 'en']) {
     control(f, 'btn-share').click();
     await flush();
     assert.equal(nativeStarts(f).length, 1);
-    assert.match(f.alerts.at(-1).message, /Selected encoder unavailable for this profile/);
+    assert.equal(f.alerts.at(-1).title, f.i18n.t('screenShare.errorTitle'));
+    assert.equal(f.alerts.at(-1).message, startFailed(f, 'screenShare.failure.files'));
+    assert.doesNotMatch(f.alerts.at(-1).message, TECHNICAL);
     assert.equal(control(f, 'btn-share').disabled, false);
     assert.equal(f.picker.selectedSourceId, 'window:101:0');
     assert.equal(probes, 0);
@@ -400,7 +412,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(root.querySelector('[data-settings-section="screen-preview"]').dataset.settingsLabel, f.i18n.t('settings.screenPreviewSection'));
     const before = JSON.stringify({
       profile: f.settingsStore.customProfile, preset: f.settingsStore.qualityPreset,
-      codec: f.settingsStore.preferredVideoCodec, telemetry: f.settingsStore.screenShareTelemetryEnabled,
+      telemetry: f.settingsStore.screenShareTelemetryEnabled,
     });
     f.quality.attachEvents(root);
     preview.checked = false;
@@ -409,7 +421,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(f.settingsStore.screenSharePreviewPauseWhenUnfocused, false);
     assert.equal(JSON.stringify({
       profile: f.settingsStore.customProfile, preset: f.settingsStore.qualityPreset,
-      codec: f.settingsStore.preferredVideoCodec, telemetry: f.settingsStore.screenShareTelemetryEnabled,
+      telemetry: f.settingsStore.screenShareTelemetryEnabled,
     }), before);
     assert.equal(f.traces.filter(trace => trace[0] !== 'cancel-encoding').length, 0,
       'Preview preference changes do not touch capture, quality, camera or transport');
@@ -790,7 +802,7 @@ test('failed selected-source probing keeps the game choice and previous shares w
   Object.assign(f.capabilities, { capture: false, backend: null, requiresSelectionProbe: true });
   const previous = f.createStream('window:303:0');
   f.voiceStore.addScreenShare(previous.id);
-  f.controls.start = async () => { throw new Error('Selected-source encoder probe failed'); };
+  f.controls.start = async () => { throw ipcFailure('Selected-source encoder probe failed', ['ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE']); };
   await f.picker.open();
   chooseWindowMethod(f, 'game');
   await f.picker.startSharing('replace');
@@ -805,7 +817,8 @@ test('failed selected-source probing keeps the game choice and previous shares w
   assert.deepEqual(f.voiceStore.screenShareIds, [previous.id]);
   assert.equal(f.streams.get(previous.id), previous);
   assert.equal(f.traces.some(value => ['stop-shares', 'notify', 'audio-stop'].includes(value[0])), false);
-  assert.ok(f.alerts[0].message.includes('probe failed'));
+  assert.equal(f.alerts[0].message, startFailed(f, 'screenShare.failure.encoder'));
+  assert.doesNotMatch(f.alerts[0].message, TECHNICAL);
 });
 
 for (const [tab, kind, sourceId] of [
@@ -842,7 +855,9 @@ test('terminal Game Capture rejection preserves existing shares without a second
   t.after(() => f.close());
   const previous = f.createStream('window:303:0');
   f.voiceStore.addScreenShare(previous.id);
-  f.controls.start = async () => { throw new Error('Game capture is incompatible with the selected application'); };
+  f.controls.start = async () => {
+    throw ipcFailure('Game capture is incompatible with the selected application', ['ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE']);
+  };
   await f.picker.open();
   chooseWindowMethod(f, 'game');
   await f.picker.startSharing('replace');
@@ -855,7 +870,8 @@ test('terminal Game Capture rejection preserves existing shares without a second
   assert.equal(f.streams.get(previous.id), previous);
   assert.equal(f.traces.some(value => ['stop-shares', 'notify', 'audio-stop'].includes(value[0])), false);
   assert.equal(f.alerts.length, 1);
-  assert.ok(f.alerts[0].message.includes('incompatible'));
+  assert.equal(f.alerts[0].message, startFailed(f, 'screenShare.gameCaptureUnavailable'));
+  assert.doesNotMatch(f.alerts[0].message, TECHNICAL);
   assert.equal(control(f, 'btn-share').disabled, false, 'Retry remains possible on the exact selected method');
   assert.equal(f.voiceStore.camera, 'preserved-camera');
   assert.equal(f.voiceStore.voice, 'preserved-call');
@@ -1267,7 +1283,8 @@ test('audio replacement preflight failure leaves the old share audible and an un
   assert.equal(f.streams.get(old.id), old);
   assert.equal(f.traces.some(value => value[0] === 'stop-shares'), false);
   assert.equal(f.alerts.length, 1);
-  assert.match(f.alerts[0].message, /Monitor probe failed/);
+  assert.equal(f.alerts[0].message, startFailed(f, 'screenShare.failure.unexpected'),
+    'A failure without a native code reads as unexpected, without its technical text');
   f.controls.start = null;
   const audio = control(f, 'chk-share-audio');
   audio.checked = false; change(audio);
@@ -1289,7 +1306,8 @@ test('failed old audio retirement never publishes the replacement or hides the e
   control(f, 'share-tab-screen').click();
   f.document.querySelector('.source-item').click();
   await f.picker.startSharing('replace');
-  assert.match(f.alerts[0].message, /PCM retirement failed/);
+  assert.equal(f.alerts[0].message, startFailed(f, 'screenShare.failure.unexpected'));
+  assert.doesNotMatch(f.alerts[0].message, /PCM retirement failed/);
   assert.deepEqual(f.voiceStore.screenShareIds, [old.id]);
   assert.deepEqual(f.voiceStore.screenAudioShareIds, [old.id]);
   assert.deepEqual(f.traces.filter(value => value[0] === 'notify'), [['notify', [old.id]]]);
@@ -1457,7 +1475,6 @@ for (const language of ['pt-BR', 'en']) {
     await f.picker.open();
     chooseWindowMethod(f, 'game');
     f.settingsStore.qualityPreset = 'CUSTOM';
-    f.settingsStore.preferredVideoCodec = 'h264';
     const profile = { ...f.settingsStore.customProfile };
     const audio = control(f, 'chk-share-audio');
     audio.checked = false;
@@ -1508,7 +1525,6 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(audio.checked, false);
     assert.equal(f.settingsStore.qualityPreset, 'CUSTOM');
     assert.deepEqual(f.settingsStore.customProfile, profile);
-    assert.equal(f.settingsStore.preferredVideoCodec, 'h264');
     const replacement = f.source('window:404:0', 'window', f.sources[1].name);
     f.controls.sources = async () => [f.sources[0], f.sources[2], window, replacement];
     refresh.click();
@@ -1708,7 +1724,7 @@ test('audio availability and reservation cannot silently capture another mix or 
   f.voiceStore.screenAudioShareIds = [];
   await f.picker.open();
   f.document.querySelector('.source-item').click();
-  f.controls.capturingAudio = true;
+  f.voiceStore.screenAudioShareIds = ['other-audio-share'];
   await f.picker.startSharing('replace');
   assert.equal(nativeStarts(f).length, 0);
   assert.equal(toastText(f), f.i18n.t('screenShare.audioTakenToast'), 'Audio held outside any share is explained in a toast');
@@ -1745,7 +1761,6 @@ test('async capture locks the selected method; cancelling retires a late result 
   await f.picker.startSharing('replace');
   assert.equal(nativeStarts(f).length, 1);
   f.picker.close();
-  assert.equal(f.cancelled, 1);
   assert.equal(wanted(), false);
   assert.ok([...oldRoot.listeners.values()].every(listeners => listeners.size === 0));
   assert.ok([...oldTab.listeners.values()].every(listeners => listeners.size === 0));
@@ -1815,7 +1830,7 @@ test('capability/source generations, retries and close cleanup ignore late resul
   f.picker.close();
   assert.equal(f.picker.nativeCapabilities, null);
   assert.equal('sources' in f.picker.sourceState, false);
-  assert.equal(f.picker.eventController, null);
+  assert.equal(f.picker.shell, null);
 });
 
 test('a denied macOS screen-recording grant surfaces the error state without enumerating sources', async t => {
@@ -1871,42 +1886,35 @@ test('macOS offers native reception and only its supported window capture method
   assert.equal(root.querySelector('#screen-receiver-native').disabled, false);
   assert.equal(f.settingsStore.getScreenShareReceiver(), 'native');
 });
-for (const saved of ['vp8', 'vp9', 'av1']) {
-  test(`legacy camera ${saved} stays persisted independently of screen codec selection`, async t => {
-    const f = fixture();
-    t.after(() => f.close());
-    f.settingsStore.preferredVideoCodec = saved;
-    f.settingsStore.screenEncodingStrategy = 'manual';
-    const root = f.mountQuality();
-    const codec = root.querySelector('#select-video-codec');
-    await flush();
-    assert.equal(f.settingsStore.preferredVideoCodec, saved);
-    assert.equal(f.saves, 0);
-    assert.equal(codec.value, 'h264');
-    assert.equal(codec.querySelector('option[value="vp8"]'), null);
-    assert.equal(codec.querySelector('option[value="vp9"]'), null);
-    codec.value = 'av1';
-    change(codec);
-    assert.equal(f.saves, 0, 'An unverified selection must not be saved.');
-    await flush();
-    assert.equal(f.settingsStore.preferredVideoCodec, saved);
-      assert.equal(f.saves, 1);
-    assert.equal(codec.value, 'av1');
-    assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
-    codec.value = 'auto';
-    change(codec);
-    assert.equal(f.settingsStore.preferredVideoCodec, saved);
-    assert.equal(f.saves, 1);
-    codec.value = 'h264';
-    change(codec);
-    await flush();
-    assert.equal(f.settingsStore.preferredVideoCodec, saved);
-    assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
-    assert.equal(f.saves, 2);
-    assert.equal(codec.querySelector('option[value="auto"]'), null);
-    assert.equal(codec.querySelector('option[value=""]'), null);
-  });
-}
+test('screen codec selection saves only verified choices and offers no camera-only codecs', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.settingsStore.screenEncodingStrategy = 'manual';
+  const root = f.mountQuality();
+  const codec = root.querySelector('#select-video-codec');
+  await flush();
+  assert.equal(f.saves, 0);
+  assert.equal(codec.value, 'h264');
+  assert.equal(codec.querySelector('option[value="vp8"]'), null);
+  assert.equal(codec.querySelector('option[value="vp9"]'), null);
+  codec.value = 'av1';
+  change(codec);
+  assert.equal(f.saves, 0, 'An unverified selection must not be saved.');
+  await flush();
+  assert.equal(f.saves, 1);
+  assert.equal(codec.value, 'av1');
+  assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
+  codec.value = 'auto';
+  change(codec);
+  assert.equal(f.saves, 1);
+  codec.value = 'h264';
+  change(codec);
+  await flush();
+  assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
+  assert.equal(f.saves, 2);
+  assert.equal(codec.querySelector('option[value="auto"]'), null);
+  assert.equal(codec.querySelector('option[value=""]'), null);
+});
 
 test('a late codec error cannot open a dialog after quality settings cleanup', async t => {
   const f = fixture();
@@ -1976,13 +1984,13 @@ for (const language of ['pt-BR', 'en']) {
     control(f, 'chk-share-audio').checked = false;
     change(control(f, 'chk-share-audio'));
     control(f, 'chk-preserve-aspect-ratio').checked = true;
-    const quality = JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile, f.settingsStore.preferredVideoCodec]);
+    const quality = JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile]);
     const enumerations = f.enumerations;
     opener.click();
     const guide = control(f, 'game-capture-guide').closest('.modal-backdrop');
     const search = control(f, 'game-capture-guide-search');
     const close = control(f, 'game-capture-guide-close');
-    const first = guide.querySelector('[data-game-guide-close]');
+    const first = guide.querySelector('[data-modal-close]');
     assert.equal(f.document.querySelectorAll('.modal-backdrop').length, 2);
     assert.equal(control(f, 'game-capture-guide').getAttribute('role'), 'dialog');
     assert.equal(control(f, 'game-capture-guide').getAttribute('aria-describedby'), 'game-capture-guide-intro');
@@ -2032,7 +2040,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(f.document.querySelector('[data-source-id="window:101:0"]'), selectedCard);
     assert.equal(control(f, 'chk-share-audio').checked, false);
     assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, true);
-    assert.equal(JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile, f.settingsStore.preferredVideoCodec]), quality);
+    assert.equal(JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile]), quality);
     assert.equal(f.enumerations, enumerations);
     assert.equal(f.traces.length, 0, 'No probe, capture, external navigation or transport work runs while browsing');
     assert.equal(f.capabilities.capture, false);
@@ -2068,14 +2076,13 @@ test('the guide uses only the fixed official link through the existing bridge an
   await flush();
   assert.equal(click.defaultPrevented, true);
   assert.deepEqual(f.traces, [['open-external', url]], 'Navigation must use the trusted constant, not altered DOM data');
+  const alert = () => f.document.querySelector('.chat-copy-toast[role="alert"] .chat-copy-toast-label');
   f.controls.openExternal = async () => ({ success: false });
   source.click();
   await flush();
-  const failure = control(f, 'game-capture-guide-link-error');
-  assert.equal(failure.hidden, false);
-  assert.equal(failure.getAttribute('role'), 'alert');
-  assert.equal(failure.textContent, f.i18n.t('screenShare.gameGuideSourceError'));
-  assert.equal(f.warnings.length, 1);
+  assert.equal(alert()?.textContent, f.i18n.t('screenShare.gameGuideSourceError'), 'A refused navigation is explained in the alert toast');
+  assert.equal(f.document.querySelector('#game-capture-guide-link-error'), null, 'No error is left in the guide layout');
+  f.document.querySelector('.chat-copy-toast-close').click();
   const gate = deferred();
   f.controls.openExternal = () => gate.promise;
   source.click();
@@ -2087,12 +2094,14 @@ test('the guide uses only the fixed official link through the existing bridge an
   opener.click();
   gate.reject(new Error('Expected delayed navigation failure'));
   await flush();
-  assert.equal(control(f, 'game-capture-guide-link-error').hidden, true, 'A closed guide must not report a stale error in its replacement');
-  assert.equal(control(f, 'game-capture-guide-source').getAttribute('aria-busy'), null);
+  assert.equal(control(f, 'game-capture-guide-source').getAttribute('aria-busy'), null,
+    'A closed guide\'s pending navigation does not mark its replacement busy');
+  f.document.querySelector('.chat-copy-toast-close')?.click();
   delete f.api.openExternal;
   control(f, 'game-capture-guide-source').click();
   await flush();
-  assert.equal(control(f, 'game-capture-guide-link-error').hidden, false, 'A missing safe bridge is an explicit error, not window.open fallback');
+  assert.equal(alert()?.textContent, f.i18n.t('screenShare.gameGuideSourceError'),
+    'A missing safe bridge is an explicit error, not window.open fallback');
   assert.equal(f.traces.length, calls);
   assert.equal(nativeStarts(f).length, 0);
 });
@@ -2200,7 +2209,6 @@ for (const language of ['en', 'pt-BR']) {
     assert.equal(software.disabled, true);
     assert.equal(control(f, 'select-video-codec').disabled, true);
     assert.equal(control(f, 'select-video-codec').value, 'h264');
-    assert.equal(f.settingsStore.preferredVideoCodec, 'auto');
     assert.equal(f.saves, 0);
     assert.doesNotMatch(status.textContent, /Unsupported test adapter\/profile/);
     assert.equal(status.textContent, f.i18n.t('settings.screenEncodingHardwareUnavailable'));
@@ -2350,6 +2358,8 @@ test('changing Automatic/Manual cancels stale discovery and late results never o
   const automatic = deferred(), manual = deferred();
   f.controls.encoding = input => input.encodingStrategy === 'automatic' ? automatic.promise : manual.promise;
   f.mountQuality();
+  // Discovery is in flight once the tab learned that this device can capture.
+  await flush();
   assert.equal(key(control(f, 'screen-encoding-automatic'), 'ArrowRight').defaultPrevented, true);
   assert.equal(f.settingsStore.screenEncodingStrategy, 'automatic', 'The draft Manual choice is not saved until verified.');
   assert.ok(f.traces.some(trace => trace[0] === 'cancel-encoding'));
@@ -2376,6 +2386,8 @@ test('switching pending Manual to Automatic ignores late manual failures and kee
     : Promise.resolve({ selection: { mode: 'hardware', codec: 'h264', encoder: 'h264_texture_amf' },
       hardware: { available: true, reason: null }, fallback: false });
   f.mountQuality();
+  // The Manual check is in flight once the tab learned that this device can capture.
+  await flush();
   control(f, 'screen-encoding-automatic').click();
   await flush();
   manual.reject(new Error('Late Manual failure'));

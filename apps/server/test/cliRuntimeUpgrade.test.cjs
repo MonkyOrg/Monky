@@ -164,6 +164,7 @@ async function restartFixture(t, { command, changed = true, deletionFails = fals
   t.mock.method(console, 'log', value => output.push(String(value)));
   t.mock.method(pm2, 'requirePm2', () => true);
   t.mock.method(pm2, 'ensurePm2', () => {});
+  t.mock.method(pm2, 'listPm2Processes', () => []);
   t.mock.method(pm2, 'findPm2Process', () => entry);
   t.mock.method(pm2, 'findLegacyProcessFor', () => null);
   t.mock.method(pm2, 'isMonkyServerRegistered', () => !!entry);

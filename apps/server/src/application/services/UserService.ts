@@ -5,7 +5,8 @@ import {
   normalizePublicKeyHex,
 } from '@monky/shared';
 import { IUserRepository } from '../../domain/repositories';
-import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
+import type { UserRecord } from '../../domain/entities';
+import { AvatarStorageService, publicImageUrl } from '../../infrastructure/security/AvatarStorageService';
 import { Logger } from '../../infrastructure/logger/Logger';
 
 export class UserService {
@@ -64,19 +65,9 @@ export class UserService {
     await this.userRepo.update(userId, { nickname: trimmed });
     user.nickname = trimmed;
 
-    const updatedUser: UserSummary = {
-      id: user.id,
-      clientId: user.clientId,
-      publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
-      nickname: user.nickname,
-      avatarUrl: this.avatarStorage.getPublicUrl(user.avatarPath),
-      status: 'ONLINE',
-      joinedAt: user.lastSeenAt,
-    };
-
     return {
       success: true,
-      updatedUser,
+      updatedUser: toUserSummary(user, 'ONLINE', user.lastSeenAt),
     };
   }
 
@@ -92,11 +83,11 @@ export class UserService {
       };
     }
 
+    // The record goes first: a member who cannot be removed keeps their picture.
+    await this.userRepo.delete(userId);
     if (user.avatarPath) {
       this.avatarStorage.deleteAvatar(user.avatarPath);
     }
-
-    await this.userRepo.delete(userId);
     Logger.info('NETWORK', `Member ${user.nickname} (${userId}) removed from the server`);
 
     return { success: true, nickname: user.nickname };
@@ -117,68 +108,41 @@ export class UserService {
 
     // Handle avatar removal
     if (!avatarBase64OrDataUrl || avatarBase64OrDataUrl.trim() === '') {
+      await this.userRepo.update(userId, { avatarPath: null });
       if (user.avatarPath) {
         this.avatarStorage.deleteAvatar(user.avatarPath);
       }
-      await this.userRepo.update(userId, { avatarPath: null });
       user.avatarPath = null;
-
-      const updatedUser: UserSummary = {
-        id: user.id,
-        clientId: user.clientId,
-        publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
-        nickname: user.nickname,
-        avatarUrl: null,
-        status: 'ONLINE',
-        joinedAt: user.lastSeenAt,
-      };
-
-      return {
-        success: true,
-        updatedUser,
-      };
+      return { success: true, updatedUser: toUserSummary(user, 'ONLINE', user.lastSeenAt) };
     }
 
-    // Extract base64
-    let rawBase64 = avatarBase64OrDataUrl;
-    if (avatarBase64OrDataUrl.includes(',')) {
-      rawBase64 = avatarBase64OrDataUrl.split(',')[1];
+    const image = this.avatarStorage.decodeImage(avatarBase64OrDataUrl);
+    if (!image.ok) {
+      return { success: false, errorCode: image.code, errorMessage: image.message };
     }
 
-    const buffer = Buffer.from(rawBase64, 'base64');
-    const validation = this.avatarStorage.validateAvatarBuffer(buffer);
-
-    if (!validation.isValid || !validation.extension) {
-      return {
-        success: false,
-        errorCode: ProtocolErrorCode.AVATAR_INVALID_TYPE,
-        errorMessage: validation.error || 'Formato de imagem inválido. Utilize PNG, JPEG ou WebP.',
-      };
-    }
-
-    // Delete old avatar if exists
-    if (user.avatarPath) {
-      this.avatarStorage.deleteAvatar(user.avatarPath);
-    }
-
-    // Save new avatar safely
-    const newFilename = await this.avatarStorage.saveAvatar(buffer, validation.extension);
-    await this.userRepo.update(userId, { avatarPath: newFilename });
-    user.avatarPath = newFilename;
-
-    const updatedUser: UserSummary = {
-      id: user.id,
-      clientId: user.clientId,
-      publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
-      nickname: user.nickname,
-      avatarUrl: this.avatarStorage.getPublicUrl(newFilename),
-      status: 'ONLINE',
-      joinedAt: user.lastSeenAt,
-    };
-
-    return {
-      success: true,
-      updatedUser,
-    };
+    user.avatarPath = await this.avatarStorage.replaceImage(user.avatarPath, image,
+      (filename) => this.userRepo.update(userId, { avatarPath: filename }));
+    return { success: true, updatedUser: toUserSummary(user, 'ONLINE', user.lastSeenAt) };
   }
+}
+
+/**
+ * A stored member as the others see them. Every summary built from a member
+ * record comes from here (S-APP-10); `session` names the connection when the
+ * summary describes one.
+ */
+export function toUserSummary(
+  user: UserRecord, status: UserSummary['status'], joinedAt: number, session?: { sessionId: string; connectedAt: number },
+): UserSummary {
+  return {
+    id: user.id,
+    clientId: user.clientId,
+    publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
+    nickname: user.nickname,
+    avatarUrl: publicImageUrl(user.avatarPath),
+    status,
+    joinedAt,
+    ...(session ? { sessionId: session.sessionId, connectedAt: session.connectedAt } : {}),
+  };
 }

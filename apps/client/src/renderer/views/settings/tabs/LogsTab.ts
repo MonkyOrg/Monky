@@ -2,6 +2,7 @@ import { CLIENT_LOG_DEFAULTS } from '@monky/shared';
 import { clientLog } from '../../../core/ClientLogService';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { renderSwitch } from '../../../utils/formControls';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -32,10 +33,7 @@ export class LogsTab {
               ${t('settings.logsEnabledDesc')}
             </div>
           </div>
-          <label class="toggle-switch" aria-label="${t('settings.logsEnabled')}">
-            <input id="checkbox-logs-enabled" type="checkbox">
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'checkbox-logs-enabled', label: t('settings.logsEnabled'), checked: false })}
         </div>
       </div>
 

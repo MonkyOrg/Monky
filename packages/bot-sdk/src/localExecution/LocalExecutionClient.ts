@@ -2,11 +2,11 @@ import { randomUUID } from 'crypto';
 import { isDeepStrictEqual } from 'util';
 import type WebSocket from 'ws';
 import {
-  LOCAL_EXECUTION_PROTOCOL_LIMITS, LOCAL_OPERATION_CAPABILITY, MessageType, ProtocolErrorCode,
+  LOCAL_EXECUTION_PROTOCOL_LIMITS, LOCAL_OPERATION_CAPABILITY, MessageType, ProtocolErrorCode, deferred,
   localMediaSignalSchema, localOperationNegotiated, localRequestContextSchema, localSourceRequestSchema, localSourceResultSchema,
   localTaskAcceptMatchesOffer, localTaskEventSchema, localTaskMatchesSource, localTaskOfferSchema,
   localTaskRequestSchema,
-  type CommandCallerContext, type LocalMediaSignal, type LocalOperation, type LocalRequestContext, type LocalSourceContext,
+  type CommandCallerContext, type Deferred, type LocalMediaSignal, type LocalOperation, type LocalRequestContext, type LocalSourceContext,
   type LocalSourceRequest, type LocalSourceResult, type LocalTaskControl, type LocalTaskEvent,
   type LocalTaskOffer, type LocalTaskRequest, type LocalTaskSpec, type LocalWirePreviewResult,
   type LocalWireTaskResult,
@@ -21,6 +21,14 @@ import type { LocalOpusReceiver } from './LocalOpusReceiver';
 export type LocalExecutionCaller = Pick<
   CommandCallerContext, 'botId' | 'channelId' | 'invokerId' | 'invokerSessionId'
 >;
+
+/** The person behind an interaction; local execution is always scoped to them. */
+export function localExecutionCaller(caller: CommandCallerContext): LocalExecutionCaller {
+  return Object.freeze({
+    botId: caller.botId, channelId: caller.channelId,
+    invokerId: caller.invokerId, invokerSessionId: caller.invokerSessionId,
+  });
+}
 type InteractionContext = Exclude<LocalRequestContext, { kind: 'source' }>;
 
 export interface LocalExecutionConnection {
@@ -57,11 +65,6 @@ interface IncomingMessage {
   type: string;
   requestId?: string;
   payload?: unknown;
-}
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
-  reject(error: Error): void;
 }
 interface ExecutorBinding {
   context: LocalRequestContext;
@@ -127,13 +130,11 @@ const toError = (error: unknown): Error => error instanceof Error ? error : new 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (error: Error) => void;
-  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
-  // Observe early internal failures without replacing the rejected public promise.
-  void promise.catch(() => undefined);
-  return { promise, resolve, reject };
+/** Observes early internal failures without replacing the rejected public promise. */
+function observedDeferred<T>(): Deferred<T> {
+  const result = deferred<T>();
+  void result.promise.catch(() => undefined);
+  return result;
 }
 
 function abortError(): Error {
@@ -361,7 +362,7 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
   ): Promise<LocalSourceResult> {
     this.assertLifetime(connection, lifetime, signal);
     if (this.sourceRequests.size >= MAX_SOURCE_REQUESTS) throw new Error('Too many pending local source requests.');
-    const result = deferred<LocalSourceResult>();
+    const result = observedDeferred<LocalSourceResult>();
     const requestId = this.nextRequestId();
     const source: PendingSource = {
       requestId, connection, request, lifetime, result,
@@ -465,10 +466,10 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
         !localTaskMatchesSource(source, request.spec))) {
       throw new Error('The local task does not match its retained source.');
     }
-    const result = deferred<TaskResult>();
+    const result = observedDeferred<TaskResult>();
     const task: PendingTask = {
       requestId: this.nextRequestId(), connection, request, lifetime: binding.lifetime, source, result,
-      closed: deferred<void>(), controller: new AbortController(),
+      closed: observedDeferred<void>(), controller: new AbortController(),
       timer: setTimeout(() => this.timeoutTask(task), LOCAL_EXECUTION_PROTOCOL_LIMITS.taskStartTimeoutMs),
       unsubscribe: () => undefined, localReady: false, serverReady: false, started: false, terminal: false, revision: 0,
     };
@@ -695,7 +696,7 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
       this.rejectControl(task, new Error('Local execution control was superseded by a newer revision.'));
       const revision = this.nextRevision(task);
       const requestId = this.nextRequestId();
-      const result = deferred<void>();
+      const result = observedDeferred<void>();
       const control: PendingControl = {
         requestId, revision, paused, result,
         timer: setTimeout(() => this.timeoutTask(task), CONTROL_TIMEOUT_MS),

@@ -1,7 +1,7 @@
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { reportError } from '../utils/feedback';
 import { showCopyToast } from './CopyToast';
-import { showAlert } from './Dialog';
 
 export function renderVersionCopyButton(id: string, version = ''): string {
   const label = version ? t('versionCopy.copy', { version }) : t('versionCopy.loading');
@@ -29,10 +29,7 @@ export function bindVersionCopyButton(button: HTMLButtonElement): () => void {
     try {
       await navigator.clipboard.writeText(version);
     } catch (error) {
-      console.warn('[VersionCopyButton] Could not copy version', error);
-      if (current === requestId && button.isConnected) {
-        void showAlert({ message: t('versionCopy.failed'), variant: 'danger' });
-      }
+      if (current === requestId && button.isConnected) clearToast = reportError(t('versionCopy.failed'), { log: 'APP', error });
       return;
     }
     if (current === requestId && button.isConnected) {

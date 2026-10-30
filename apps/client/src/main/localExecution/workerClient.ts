@@ -1,6 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import type { Stats } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -12,11 +11,12 @@ import {
 } from '@monky/shared';
 import type { LocalRuntimeFactory, LocalRuntimeTask } from './service';
 import type { LocalTools, LocalToolPaths } from './LocalTools';
-import { LOCAL_TASK_CACHE_MAX_BYTES, LOCAL_TOOLS_CACHE_MAX_BYTES } from './LocalTools';
-import { localToolDirectory, missingLocalToolFile } from './localToolsStorage';
+import { localToolDirectory } from './localToolsStorage';
 import { LocalExecutionError, localFailure } from './errors';
+import { assertTaskCacheDirectory, leaseTaskCache, type TaskCacheLease } from './taskCacheLease';
+import { localWorkerEnvironment, workerDirectories } from './workerEnvironment';
 import {
-  parseWorkerCommand, parseWorkerReply, workerBase64, workerDeferred, workerDirectories,
+  parseWorkerCommand, parseWorkerReply, workerBase64, workerDeferred,
   workerError, workerId, workerInteger, workerPaths, WORKER_LIMITS,
   type WorkerCommand, type WorkerReply, type WorkerStart,
 } from './workerProtocol';
@@ -30,188 +30,16 @@ type StartInput =
   | Omit<Extract<WorkerStart, { mode: 'task' }>, 'directory'>
   | Omit<Extract<WorkerStart, { mode: 'probe' }>, 'directory'>;
 
-/** Construct a child-only environment; never clone ambient interpreter/loader settings or PATH. */
-export function localWorkerEnvironment(
-  paths: LocalToolPaths, directory: string, id: string, inherited: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
-  const retained = new Set([
-    'SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'COMSPEC', 'PATHEXT',
-    'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
-    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-    'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
-    'NODE_EXTRA_CA_CERTS', 'NODE_USE_SYSTEM_CA', 'NODE_USE_ENV_PROXY',
-  ]);
-  for (const [key, value] of Object.entries(inherited)) {
-    if (retained.has(key.toUpperCase()) && value !== undefined) {
-      if (/[\0\r\n]/.test(value)) throw new LocalExecutionError('invalid_request');
-      environment[process.platform === 'win32' ? key.toUpperCase() : key] = value;
-    }
-  }
-  const directories = workerDirectories(directory);
-  const search = [paths.node, paths.ytDlp, paths.ffmpeg].map(executable => path.dirname(executable));
-  if (process.platform === 'win32') {
-    const systemRoot = inherited.SystemRoot ?? inherited.SYSTEMROOT ?? inherited.windir ?? 'C:\\Windows';
-    if (!path.isAbsolute(systemRoot) || /[\0\r\n]/.test(systemRoot)) throw new LocalExecutionError('invalid_request');
-    environment.SYSTEMROOT = systemRoot;
-    search.push(path.join(systemRoot, 'System32'), systemRoot);
-    environment.HOMEDRIVE = path.parse(directories.home).root.replace(/[\\/]+$/, '');
-    environment.HOMEPATH = directories.home.slice(environment.HOMEDRIVE.length);
-  } else {
-    search.push('/usr/bin', '/bin');
-  }
-  return {
-    ...environment,
-    PATH: [...new Set(search)].join(path.delimiter),
-    TEMP: directories.temp, TMP: directories.temp, TMPDIR: directories.temp,
-    HOME: directories.home, USERPROFILE: directories.home,
-    APPDATA: directories.config, LOCALAPPDATA: directories.cache,
-    XDG_CONFIG_HOME: directories.config, XDG_CACHE_HOME: directories.cache,
-    XDG_DATA_HOME: directories.data, XDG_STATE_HOME: directories.state, XDG_RUNTIME_DIR: directories.runtime,
-    NODE_DISABLE_COMPILE_CACHE: '1', NODE_TLS_REJECT_UNAUTHORIZED: '1',
-    PYTHONNOUSERSITE: '1', PYTHONSAFEPATH: '1', PYTHONDONTWRITEBYTECODE: '1', PYTHONUTF8: '1',
-    MONKY_LOCAL_WORKER_ID: id,
-  };
-}
-
-interface CacheLease {
-  directory: string;
-  bufferedBytes: number;
-  failure?: LocalExecutionError;
-  onFailure?: (error: LocalExecutionError) => void;
-  pool: CachePool;
-}
-
-const pools = new Map<string, CachePool>();
-
-class CachePool {
-  readonly leases = new Map<string, CacheLease>();
-  private scanning: Promise<void> | undefined;
-  private timer: ReturnType<typeof setTimeout> | undefined;
-
-  constructor(readonly root: string) {}
-
-  private fail(lease: CacheLease, error: LocalExecutionError): void {
-    lease.failure ??= error;
-    lease.onFailure?.(lease.failure);
-  }
-
-  check(): Promise<void> {
-    if (this.scanning) return this.scanning;
-    const scan = this.scan();
-    this.scanning = scan;
-    void scan.then(
-      () => this.schedule(),
-      error => {
-        for (const lease of this.leases.values()) this.fail(lease, workerError(error, 'storage_failed'));
-        this.schedule();
-      },
-    );
-    return scan;
-  }
-
-  private schedule(): void {
-    this.scanning = undefined;
-    if (this.timer) clearTimeout(this.timer);
-    if (!this.leases.size) return;
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      // check() reports errors to the owners; its failure promise remains observed there.
-      void this.check();
-    }, WORKER_LIMITS.cachePollMs);
-  }
-
-  private async scan(): Promise<void> {
-    const deadline = performance.now() + WORKER_LIMITS.cacheScanMs;
-    const leases = [...this.leases.values()];
-    const requiredDirectories = new Set(leases.map(lease => lease.directory));
-    let entries = 0;
-    const sizes = new Map<string, number>();
-    const visit = async (filename: string, depth: number, required = false): Promise<number> => {
-      if (++entries > WORKER_LIMITS.cacheEntries || depth > WORKER_LIMITS.cacheDepth || performance.now() > deadline) {
-        throw new LocalExecutionError('storage_failed');
-      }
-      let stat: Stats;
-      try { stat = await fs.lstat(filename); }
-      catch (error) {
-        if (!required && missingLocalToolFile(error)) return 0;
-        throw workerError(error, 'storage_failed');
-      }
-      if (stat.isSymbolicLink() || required && !stat.isDirectory()) throw new LocalExecutionError('storage_failed');
-      if (stat.isFile()) return stat.size;
-      if (!stat.isDirectory()) throw new LocalExecutionError('storage_failed');
-      let bytes = 0;
-      try {
-        for await (const entry of await fs.opendir(filename)) {
-          bytes += await visit(path.join(filename, entry.name), depth + 1);
-          if (!Number.isSafeInteger(bytes) || bytes > LOCAL_TOOLS_CACHE_MAX_BYTES) throw new LocalExecutionError('storage_failed');
-        }
-      } catch (error) {
-        if (!required && missingLocalToolFile(error)) return 0;
-        throw error;
-      }
-      return bytes;
-    };
-    await localToolDirectory(this.root);
-    let total = 0;
-    for await (const entry of await fs.opendir(this.root)) {
-      const directory = path.join(this.root, entry.name);
-      const bytes = await visit(directory, 0, requiredDirectories.has(directory));
-      sizes.set(directory, bytes);
-      total += bytes;
-      if (!Number.isSafeInteger(total) || total > LOCAL_TOOLS_CACHE_MAX_BYTES) throw new LocalExecutionError('storage_failed');
-    }
-    // Extractor descendants may disappear, but the cache root and each scanned lease must survive the walk.
-    await localToolDirectory(this.root);
-    for (const lease of leases) {
-      await localToolDirectory(lease.directory);
-      const size = sizes.get(lease.directory);
-      if (size === undefined || size + lease.bufferedBytes > LOCAL_TASK_CACHE_MAX_BYTES) {
-        this.fail(lease, new LocalExecutionError('storage_failed'));
-      }
-      total += lease.bufferedBytes;
-    }
-    if (total > LOCAL_TOOLS_CACHE_MAX_BYTES || performance.now() > deadline) throw new LocalExecutionError('storage_failed');
-  }
-
-  async release(lease: CacheLease): Promise<void> {
-    if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
-    try { await this.scanning; }
-    finally {
-      this.leases.delete(lease.directory);
-      if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
-      if (this.leases.size) this.schedule();
-      else pools.delete(this.root);
-    }
-  }
-}
-
-function assertCacheDirectory(directory: string): void {
-  if (!path.isAbsolute(directory) || !/^task-[a-f0-9-]{36}$/.test(path.basename(directory)) ||
-      path.basename(path.dirname(directory)) !== 'cache' || directory !== path.resolve(directory) ||
-      /[\0\r\n]/.test(directory)) throw new LocalExecutionError('storage_failed');
-}
-
-function reserveCache(directory: string): CacheLease {
-  assertCacheDirectory(directory);
-  const root = path.dirname(directory);
-  let pool = pools.get(root);
-  if (!pool) { pool = new CachePool(root); pools.set(root, pool); }
-  if (pool.leases.has(directory) ||
-      (pool.leases.size + 1) * LOCAL_TASK_CACHE_MAX_BYTES > LOCAL_TOOLS_CACHE_MAX_BYTES) {
-    throw new LocalExecutionError('storage_failed');
-  }
-  const lease: CacheLease = { directory, pool, bufferedBytes: 0 };
-  pool.leases.set(directory, lease);
-  return lease;
-}
-
 interface Pending {
   command: RequestCommand;
   response: ReturnType<typeof workerDeferred<WorkerReply>>;
   timer?: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * Main's side of one worker process: its IPC protocol, its stop and forced termination, and the release of
+ * its private cache, which waits until the worker confirms that its native descendants are gone.
+ */
 class WorkerHost {
   private readonly ready = workerDeferred<void>();
   private readonly output = workerDeferred<Output>();
@@ -228,6 +56,7 @@ class WorkerHost {
   private resultReceived = false;
   private closedReceived = false;
   private childClosed = false;
+  private abandoned = false;
   private stopping = false;
   private eof = false;
   private reading = false;
@@ -246,7 +75,7 @@ class WorkerHost {
     private readonly start: WorkerStart,
     private readonly signal: AbortSignal,
     private readonly tools: CacheTools,
-    private readonly lease: CacheLease,
+    private readonly lease: TaskCacheLease,
     private readonly logError: LogError,
   ) {
     this.cacheOwner = tools.registerTaskCacheOwner(start.directory, () => this.close());
@@ -264,7 +93,7 @@ class WorkerHost {
       try {
         for (const directory of Object.values(workerDirectories(this.start.directory))) await fs.mkdir(directory, { mode: 0o700 });
       } catch (error) { throw workerError(error, 'storage_failed'); }
-      await this.lease.pool.check();
+      await this.lease.check();
       if (this.lease.failure) throw this.lease.failure;
       this.signal.throwIfAborted();
       if (this.stopping) throw this.failure ?? this.stopReason;
@@ -469,20 +298,23 @@ class WorkerHost {
     try {
       await this.startupFinished.promise;
       await this.termination;
-      try { await this.lease.pool.check(); }
+      try { await this.lease.check(); }
       catch (error) { this.fail(workerError(error, 'storage_failed')); }
       if (this.lease.failure) this.failure = this.lease.failure;
-      try { await this.lease.pool.release(this.lease); }
+      try { await this.lease.release(); }
       catch (error) { this.fail(workerError(error, 'storage_failed')); }
       if (this.child?.pid !== undefined && !this.closedReceived) {
+        // Killed, crashed or unresponsive: nothing can confirm this worker's descendants anymore. Its
+        // files stay until the next start, but its task, cache slot and shutdown are released.
         cleanupError = new LocalExecutionError('worker_failed', {
-          cause: new Error('Worker did not confirm native cleanup; its private cache has been retained.'),
+          cause: new Error('Worker did not confirm native cleanup; its private cache is retained until the next start.'),
         });
-        this.nativeCleanup.reject(cleanupError);
+        this.cacheOwner.abandon();
+        this.abandoned = true;
       } else {
         this.cacheOwner.confirmNativeClosed();
-        this.nativeCleanup.resolve(undefined);
       }
+      this.nativeCleanup.resolve(undefined);
     } catch (error) {
       cleanupError = workerError(error, 'storage_failed');
       this.nativeCleanup.reject(cleanupError);
@@ -514,6 +346,7 @@ class WorkerHost {
     if (this.cleanupAttempt) return this.cleanupAttempt;
     const attempt = (async () => {
       await this.nativeCleanup.promise;
+      if (this.abandoned) return;
       try { await this.tools.removeTaskCache(this.start.directory); }
       catch (error) { throw workerError(error, 'storage_failed'); }
     })();
@@ -607,15 +440,15 @@ async function startWorker(
 ): Promise<WorkerHost> {
   signal.throwIfAborted();
   const directory = await tools.allocateTaskCache();
-  let lease: CacheLease | undefined;
+  let lease: TaskCacheLease | undefined;
   let host: WorkerHost | undefined;
   let owned = false;
   try {
-    assertCacheDirectory(directory);
+    assertTaskCacheDirectory(directory);
     owned = true;
     const start = parseWorkerCommand({ ...input, directory });
     if (start.type !== 'start') throw new LocalExecutionError('invalid_request');
-    lease = reserveCache(directory);
+    lease = leaseTaskCache(directory);
     host = new WorkerHost(start, signal, tools, lease, logError);
     await host.started();
     return host;
@@ -625,7 +458,7 @@ async function startWorker(
       await host.finish();
     } else {
       const cleanup = await Promise.allSettled([
-        lease?.pool.release(lease),
+        lease?.release(),
       ]);
       try {
         await tools.removeTaskCache(directory);

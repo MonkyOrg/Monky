@@ -17,7 +17,10 @@
               "Release": {
                 "msbuild_toolset": "v143",
                 "msvs_settings": {
-                  "VCCLCompilerTool": { "RuntimeLibrary": 2, "RuntimeTypeInfo": "true" }
+                  "VCCLCompilerTool": {
+                    "RuntimeLibrary": 0,  # /MT: Electron ships no Visual C++ runtime for this addon to load
+                    "RuntimeTypeInfo": "true"
+                  }
                 }
               },
               "Debug": {
@@ -28,7 +31,6 @@
               }
             },
             "sources": [
-              "src/win/wasapi_loopback.cpp",
               "src/win/wasapi_capture.cpp",
               "src/win/wasapi_format.cpp",
               "src/packet_capture.cpp",
@@ -64,7 +66,7 @@
         [
           "OS=='mac'",
           {
-            "sources": ["src/mac/sc_capture.mm", "src/mac/window_owners.mm", "src/packet_capture.cpp", "src/mac/packet_source.mm"],
+            "sources": ["src/mac/window_owners.mm", "src/packet_capture.cpp", "src/mac/packet_source.mm"],
             "xcode_settings": {
               "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
               "GCC_ENABLE_CPP_RTTI": "YES",

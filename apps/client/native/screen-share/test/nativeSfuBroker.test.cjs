@@ -460,7 +460,7 @@ function assertEmpty(f) {
   assert.equal(f.broker.snapshot().pendingCallbacks, 0);
   assert.equal(f.broker.snapshot().pendingOperations, 0);
   assert.equal(f.broker.snapshot().pendingRpc, 0);
-  assert.equal(f.broker.nativeRetirementWaiters.size, 0);
+  assert.equal(f.broker.ledger.waiting, 0);
   assert.equal(f.broker.tentativeNativeOwners.size, 0);
   assert.equal(f.native.size, 0);
   assert.equal(f.server.size, 0);
@@ -1432,15 +1432,48 @@ test('failed respond retires the server allocation and retains tracking until th
   assertEmpty(f);
 });
 
-test('optional request-ID exposure eagerly cancels only its matching native creation before callbacks exist', async () => {
+test('closing a consumer never cancels its statistics command, whose native rollback would close the transport', async () => {
+  const f = fixture(), held = deferred();
+  const consumed = await consumption(f);
+  let statsId;
+  f.nativeHooks.set('sfu.getStats', command => { statsId = command.id; return held.promise; });
+  const reading = f.broker.getStats(consumed.consumerId);
+  await until(() => statsId);
+  const closing = f.broker.close();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.cancellations.includes(statsId), false);
+  held.resolve([]);
+  await assert.rejects(reading, error => hasCode(error, 'STALE'));
+  await closing;
+  assert.deepEqual(f.cancellations, []);
+  assertEmpty(f);
+});
+
+test('a command the broker cancelled because its resource retires settles as stale, not as a reported native failure', async () => {
+  const f = fixture(), cancellable = new Map();
+  let creationId;
+  const cancel = f.engine.cancel;
+  f.engine.cancel = id => {
+    cancel(id);
+    cancellable.get(id)?.(Object.assign(new Error('Server request was cancelled'), { code: 'ERR_RTC_CANCELLED' }));
+  };
+  f.nativeHooks.set('sfu.createTransport', command => new Promise((_resolve, reject) => {
+    creationId = command.id;
+    cancellable.set(command.id, reject);
+  }));
+  const creating = f.broker.createTransport('send');
+  await until(() => creationId);
+  const closing = f.broker.close();
+  await assert.rejects(creating, error => hasCode(error, 'STALE'));
+  await closing;
+  assert.deepEqual(f.cancellations, [creationId]);
+  assert.deepEqual(f.errors, []);
+  assertEmpty(f);
+});
+
+test('the real request ID eagerly cancels only its matching native creation before callbacks exist', async () => {
   const f = fixture(), held = deferred();
   let allocated, creationId;
-  const request = f.commands.request.bind(f.commands);
-  f.commands.request = (operation, target, data) => {
-    const result = request(operation, target, data);
-    Object.defineProperty(result, 'requestId', { value: f.nativeCalls.at(-1).id });
-    return result;
-  };
   f.nativeHooks.set('sfu.createTransport', async (command, next) => {
     creationId = command.id;
     allocated = await next();
@@ -1484,7 +1517,6 @@ for (const phase of ['connect', 'produce', 'initial-pause', 'enable', 'raw-sourc
     Object.assign(f.engine, {
       ready: Promise.resolve(),
       submitEncodedFrame() { assert.fail('The drain fixture must not submit media.'); },
-      submitFrame() { assert.fail('The drain fixture must not submit textures.'); },
       releaseFrame() { assert.fail('The drain fixture must not own textures.'); },
     });
     f.nativeHooks.set('source.createEncodedVideo', async () => ({ sourceId: 1000 }));
@@ -1542,16 +1574,16 @@ for (const phase of ['connect', 'produce', 'initial-pause', 'enable', 'raw-sourc
   });
 }
 
-test('forged optional request-ID metadata cannot cancel a separate call operation', async () => {
+test('a forged request ID cannot cancel a separate call operation', async () => {
   const f = fixture(), held = deferred(), callHeld = deferred();
   f.nativeHooks.set('peer.create', () => callHeld.promise);
   const separateCall = f.commands.request('peer.create', 0, { syncGroup: 'browser-call-double' });
   const callRequestId = f.nativeCalls.at(-1).id;
   const request = f.commands.request.bind(f.commands);
   f.commands.request = (operation, target, data) => {
-    const result = request(operation, target, data);
-    Object.defineProperty(result, 'requestId', { value: callRequestId });
-    return result;
+    const forged = request(operation, target, data).then(value => value);
+    Object.defineProperty(forged, 'requestId', { value: callRequestId });
+    return forged;
   };
   let allocated;
   f.nativeHooks.set('sfu.createTransport', async (command, next) => { allocated = await next(); return await held.promise; });

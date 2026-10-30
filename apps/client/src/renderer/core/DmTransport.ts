@@ -1,5 +1,4 @@
 import {
-  LIMITS,
   MessageType,
   normalizePublicKeyHex,
   type DmApi,
@@ -10,13 +9,20 @@ import {
   type UserSummary,
 } from '@monky/shared';
 import { clientLog } from './ClientLogService';
+import { RelayPacer } from './dmRelayPacer';
 import { sessionManager, type ServerSession } from './SessionManager';
+import { resolveImageUrl } from '../utils/avatar';
 
 const TICK_MS = 3_000;
 const OUTGOING_EVERY_MS = 20_000;
 const BLIND_HELLO_EVERY_MS = 5 * 60_000;
 const SENDER_TTL_MS = 10 * 60_000;
 const DELIVER_EVENT = `message.${MessageType.DM_RELAY_DELIVER}`;
+const RELAY_ACK_EVENT = `message.${MessageType.DM_RELAY_ACK}`;
+const SERVER_ERROR_EVENT = `message.${MessageType.SERVER_ERROR}`;
+
+/** What the transport asks of the main process. */
+export type DmRelayApi = Pick<DmApi, 'ingest' | 'outgoing' | 'hello' | 'helloTo' | 'setSelfNickname' | 'observePeer'>;
 
 interface Link {
   key: string;
@@ -29,13 +35,35 @@ interface Link {
   senders: Map<string, number>;
   lastBlindHello: number;
   observed: Map<string, string>;
+  /** Keeps what goes out on this connection within the server's DM rate limit. */
+  pacer: RelayPacer;
 }
 
-function relayReady(session: ServerSession): boolean {
+/**
+ * The identity a session is signed in as. After an identity import, sessions
+ * opened before keep the old one until they reconnect (#490).
+ */
+function sessionIdentity(session: ServerSession): string | null {
+  const publicKey = session.serverStore.currentUser?.publicKey;
+  if (!publicKey) return null;
+  try {
+    return normalizePublicKeyHex(publicKey);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the session can carry this identity's DMs. A session signed in as
+ * another identity cannot: friends drop envelopes whose server-stamped sender
+ * does not match, and DMs for this identity are not routed to it.
+ */
+function relayReady(session: ServerSession, me: string): boolean {
   const details = session.serverStore.serverDetails;
   return session.client.getStatus() === 'CONNECTED'
     && !!details?.protocol?.features.includes('dm-relay')
-    && details.dmRelayEnabled !== false;
+    && details.dmRelayEnabled !== false
+    && sessionIdentity(session) === me;
 }
 
 function identityOf(user: UserSummary): string | null {
@@ -47,8 +75,12 @@ function identityOf(user: UserSummary): string | null {
   }
 }
 
-function itemLength(item: DmRelayItem): number {
-  return item.data.length + item.to.length + 16;
+function relayIdOf(data: unknown): string | null {
+  return data !== null && typeof data === 'object' && 'relayId' in data && typeof data.relayId === 'string' ? data.relayId : null;
+}
+
+function errorCodeOf(data: unknown): string | null {
+  return data !== null && typeof data === 'object' && 'code' in data && typeof data.code === 'string' ? data.code : null;
 }
 
 /**
@@ -67,7 +99,7 @@ export class DmTransport {
   private known = new Set<string>();
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly api: DmApi) {}
+  constructor(private readonly api: DmRelayApi) {}
 
   start(): void {
     if (this.timer) return;
@@ -78,14 +110,18 @@ export class DmTransport {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    for (const link of this.links.values()) link.off();
+    for (const link of this.links.values()) this.detach(link);
     this.links.clear();
   }
 
   /** Kept in sync by the DM store from each snapshot. */
   setIdentity(me: string | null, friends: Iterable<string>, known: Iterable<string> = friends): void {
     if (me !== this.me) {
-      for (const link of this.links.values()) link.observed.clear();
+      // Another identity (an import): every link has to prove it is signed in as it, and greet again.
+      for (const link of this.links.values()) {
+        this.reset(link);
+        link.observed.clear();
+      }
     }
     this.me = me;
     const next = new Set(friends);
@@ -141,6 +177,14 @@ export class DmTransport {
     if (dispatch.peers) {
       for (const items of Object.values(dispatch.peers)) {
         if (items.length) this.route(items, origin);
+      }
+    }
+    if (dispatch.everywhere) {
+      for (const [recipient, items] of Object.entries(dispatch.everywhere)) {
+        if (!items.length) continue;
+        for (const link of this.links.values()) {
+          if (link.ready && this.linkPeers(link).has(recipient)) this.send(link, items);
+        }
       }
     }
   }
@@ -217,21 +261,7 @@ export class DmTransport {
 
   private send(link: Link, items: DmRelayItem[]): void {
     if (link.session.client.getStatus() !== 'CONNECTED') return;
-    let batch: DmRelayItem[] = [];
-    let size = 0;
-    const flush = () => {
-      if (batch.length === 0) return;
-      link.session.client.send(MessageType.DM_RELAY_SEND, { relayId: crypto.randomUUID(), items: batch });
-      batch = [];
-      size = 0;
-    };
-    for (const item of items) {
-      const length = itemLength(item);
-      if (batch.length >= LIMITS.DM_RELAY_MAX_ITEMS || size + length > LIMITS.DM_RELAY_TOTAL_DATA_MAX_LENGTH) flush();
-      batch.push(item);
-      size += length;
-    }
-    flush();
+    link.pacer.enqueue(items);
   }
 
   private attach(session: ServerSession): Link {
@@ -244,15 +274,49 @@ export class DmTransport {
       senders: new Map(),
       lastBlindHello: 0,
       observed: new Map(),
+      pacer: new RelayPacer({
+        send: (relayId, items) => {
+          if (session.client.getStatus() !== 'CONNECTED') return false;
+          session.client.send(MessageType.DM_RELAY_SEND, { relayId, items });
+          return true;
+        },
+        onDropped: (code, items) => clientLog.info('DM', 'The server refused a relay batch', { code, items }),
+      }),
     };
     link.off = session.client.onEvent((event, data) => {
       if (event === DELIVER_EVENT) this.deliver(link, data);
-      else if (event === 'network.disconnected' || event === 'network.disposed') link.ready = false;
+      else if (event === RELAY_ACK_EVENT) {
+        const relayId = relayIdOf(data);
+        if (relayId) link.pacer.accepted(relayId);
+      } else if (event === SERVER_ERROR_EVENT) {
+        // Refusals of DM batches carry their relayId; every other error belongs to someone else.
+        const relayId = relayIdOf(data);
+        const code = errorCodeOf(data);
+        if (relayId && code) link.pacer.refused(relayId, code);
+      }
+      // A new sign-in may be as another identity, and the server forgot who was greeted: start the link over.
+      else if (event === 'network.connected' || event === 'network.disconnected' || event === 'network.disposed') {
+        this.reset(link);
+      }
     });
     return link;
   }
 
+  private detach(link: Link): void {
+    link.off();
+    link.pacer.reset();
+  }
+
+  private reset(link: Link): void {
+    link.ready = false;
+    link.visibleFriends.clear();
+    link.senders.clear();
+    link.pacer.reset();
+  }
+
   private deliver(link: Link, data: unknown): void {
+    // Items reaching a session signed in as another identity are not for this store.
+    if (!this.me || sessionIdentity(link.session) !== this.me) return;
     const payload = data as Partial<DmRelayDeliverPayload> | null;
     if (!payload || typeof payload.from !== 'string' || typeof payload.data !== 'string' || typeof payload.kind !== 'string') return;
     let from: string;
@@ -271,7 +335,7 @@ export class DmTransport {
     const keys = new Set(sessions.map((session) => session.key));
     for (const [key, link] of this.links) {
       if (!keys.has(key) || link.session !== sessionManager.get(key)) {
-        link.off();
+        this.detach(link);
         this.links.delete(key);
       }
     }
@@ -282,7 +346,7 @@ export class DmTransport {
 
     const now = Date.now();
     for (const link of this.links.values()) {
-      const ready = relayReady(link.session);
+      const ready = relayReady(link.session, this.me);
       if (!ready) {
         link.ready = false;
         link.visibleFriends.clear();
@@ -311,8 +375,9 @@ export class DmTransport {
         const visible = peers.has(friend);
         if (visible && !link.visibleFriends.has(friend)) {
           link.visibleFriends.add(friend);
+          // Their answer to this greeting is what brings them the outbox (and ours to theirs, them ours):
+          // a hello means its sender listens, while being listed as online does not yet.
           this.call(() => this.api.helloTo(friend), link.key);
-          this.call(() => this.api.outgoing([friend], true), link.key);
         } else if (!visible) {
           link.visibleFriends.delete(friend);
         }
@@ -332,7 +397,8 @@ export class DmTransport {
       if (!result.ok) return;
       const items = [...(result.value.broadcast ?? []), ...(result.value.reply ?? [])];
       if (items.length && link.ready) this.send(link, items);
-      if (result.value.peers) this.execute({ peers: result.value.peers }, link.key);
+      const { peers, everywhere } = result.value;
+      if (peers || everywhere) this.execute({ peers, everywhere }, link.key);
     }).catch(() => undefined);
   }
 
@@ -343,9 +409,7 @@ export class DmTransport {
       const identity = identityOf(member);
       // Not cached until the main process has a record, or the first look would be lost.
       if (!identity || identity === this.me || !this.known.has(identity)) continue;
-      const avatar = member.avatarUrl
-        ? (member.avatarUrl.startsWith('/') && base ? `${base}${member.avatarUrl}` : member.avatarUrl)
-        : null;
+      const avatar = resolveImageUrl(member.avatarUrl, base);
       const signature = `${member.nickname}\n${avatar ?? ''}`;
       if (link.observed.get(identity) === signature) continue;
       link.observed.set(identity, signature);

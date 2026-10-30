@@ -1,9 +1,8 @@
 import { settingsStore } from '../../../stores/settingsStore';
 import { keybindService, KEYBIND_ACTIONS, KeybindActionDefinition } from '../../../core/KeybindService';
 import { t, type TranslationKey } from '../../../i18n';
-import { escapeHtml } from '../../../utils/html';
-import { enterModal, exitModal } from '../../../utils/modalSurface';
-import { captureShortcut } from '../../../utils/keybind';
+import { escapeHtml, html } from '../../../utils/html';
+import { openShortcutCaptureDialog } from '../../ShortcutCaptureDialog';
 
 export class KeybindsTab {
   public renderHtml(): string {
@@ -95,58 +94,21 @@ export class KeybindsTab {
   private openKeybindModal(container: HTMLElement, actionId: string): void {
     const actionDef = KEYBIND_ACTIONS.find((a) => a.id === actionId);
     const actionName = actionDef ? t(actionDef.nameKey as TranslationKey) : actionId;
-
-    const backdrop = document.createElement('div');
-    backdrop.className = 'modal-backdrop';
-    backdrop.style.zIndex = '10002';
-
-    backdrop.innerHTML = `
-      <div class="modal-card" style="width: 360px; text-align: center;">
-        <div class="modal-header">
-          <div class="modal-title">${t('keybinds.recordShortcut')}</div>
-        </div>
-        <div class="modal-body" style="padding: 16px;">
-          <div style="font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">
-            ${escapeHtml(actionName)}
-          </div>
-          <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 14px;">
-            ${t('keybinds.pressKeyPrompt')}
-          </div>
-          <div id="keybind-capture-box" style="padding: 16px; background: var(--bg-card); border: 2px dashed var(--accent-primary); border-radius: var(--radius-md); font-family: var(--font-mono); font-size: 14px; font-weight: 600; color: var(--accent-primary); min-height: 52px; display: flex; align-items: center; justify-content: center;">
-            ${t('keybinds.recording')}
-          </div>
-          <div style="font-size: 11px; color: var(--text-muted); margin-top: 10px;">
-            ${t('soundboard.cancelEsc')}
-          </div>
-        </div>
-        <div class="modal-footer" style="justify-content: center;">
-          <button id="btn-cancel-action-keybind" class="btn btn-secondary">${t('common.cancel')}</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(backdrop);
-    enterModal(backdrop);
-
-    const disposeCapture = captureShortcut(backdrop, backdrop.querySelector('#keybind-capture-box'), (combo) => {
-      settingsStore.keybindShortcuts[actionId] = combo;
-      settingsStore.save();
-      keybindService.syncShortcuts();
-
-      cleanup();
-
-      const listContainer = container.querySelector<HTMLElement>('#keybinds-actions-list-container');
-      if (listContainer) {
-        listContainer.innerHTML = this.renderActionsList();
-        this.attachEvents(container);
-      }
-    }, () => cleanup(), container);
-
-    const cleanup = () => {
-      disposeCapture();
-      exitModal(backdrop);
-    };
-
-    backdrop.querySelector('#btn-cancel-action-keybind')?.addEventListener('click', cleanup);
+    openShortcutCaptureDialog({
+      idPrefix: 'keybind-capture',
+      title: t('keybinds.recordShortcut'),
+      prompt: html`<strong style="color: var(--text-primary);">${actionName}</strong><br>${t('keybinds.pressKeyPrompt')}`,
+      owner: container,
+      onCaptured: (combo) => {
+        settingsStore.keybindShortcuts[actionId] = combo;
+        settingsStore.save();
+        keybindService.syncShortcuts();
+        const listContainer = container.querySelector<HTMLElement>('#keybinds-actions-list-container');
+        if (listContainer) {
+          listContainer.innerHTML = this.renderActionsList();
+          this.attachEvents(container);
+        }
+      },
+    });
   }
 }

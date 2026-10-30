@@ -3,8 +3,9 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_PERMISSIONS, MessageType, NATIVE_POLL_VOTER_PREVIEW_LIMIT, PROTOCOL_VERSION, Permission, ProtocolErrorCode, createProtocolOffer, eventTimeInZone, eventOccurrenceStart, eventSaveSchema, eventInterestedListResultSchema, eventResultSchema, type EventSave, type NativePollEdit } from '@monky/shared';
+import { DEFAULT_PERMISSIONS, MessageType, NATIVE_POLL_VOTER_PREVIEW_LIMIT, PROTOCOL_VERSION, Permission, ProtocolErrorCode, createProtocolOffer, eventTimeInZone, eventOccurrenceStart, eventSaveSchema, eventInterestedListResultSchema, eventResultSchema, type EventSave, type LogEntry, type NativePollEdit } from '@monky/shared';
 import { CommunityService, CommunityError } from './application/services/CommunityService';
+import { Logger } from './infrastructure/logger/Logger';
 import { BotSelectorService } from './application/services/BotSelectorService';
 import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
 import { SqliteCommunityRepository } from './infrastructure/database/SqliteCommunityRepository';
@@ -223,14 +224,15 @@ test('event reads never disclose details or interested members when access chang
   const f = await setup(t);
   const event = await f.service.saveEvent(f.owner.id, f.draft, f.now);
   await f.service.setInterest(f.owner.id, event.id, true);
-  const access = f.channelService.canUserAccessChannel;
+  const access = f.channelService.getAccessContext;
   const version = f.wsServer.getChannelAccessVersion;
   let changed = false;
   t.mock.method(f.wsServer, 'getChannelAccessVersion', () => {
     const value = version.call(f.wsServer);
     return changed && value !== null ? value + 1 : value;
   });
-  t.mock.method(f.channelService, 'canUserAccessChannel', async (userId: string, channelId: string) => {
+  // Every access check reads the member's context through here.
+  t.mock.method(f.channelService, 'getAccessContext', async (userId: string, channelId?: string) => {
     const result = await access.call(f.channelService, userId, channelId);
     if (userId === f.member.id) changed = true;
     return result;
@@ -1052,6 +1054,33 @@ test('native polls accept several answers atomically and retain staged carousel 
   assert.ok(voted.payload.closedAt);
 });
 
+test('a disk failure while keeping poll images is logged, never shown with its server path (S-APP-8)', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Poll owner');
+  const channelId = text(records(record(owner.auth.payload.server).channels)
+    .find(channel => channel.type === 'TEXT')?.id);
+  const uploaded = await owner.peer.request(MessageType.COMMUNITY_IMAGE_UPLOAD, { channelId, imageData: PNG_DATA });
+  const where = path.join(f.dataDir, 'avatars');
+  const rename = f.avatars.renameAvatar;
+  f.avatars.renameAvatar = () => {
+    throw Object.assign(new Error(`EPERM: operation not permitted, rename '${where}'`), { code: 'EPERM' });
+  };
+  t.after(() => { f.avatars.renameAvatar = rename; });
+  const logged: LogEntry[] = [];
+  t.after(Logger.subscribe(entry => { logged.push(entry); }));
+
+  const refused = await owner.peer.request(MessageType.POLL_CREATE, {
+    channelId, clientMessageId: 'disk-failure-poll', question: 'Keep it?', maxVoters: 5,
+    options: [{ label: 'Yes', emoji: null }, { label: 'No', emoji: null }], imageAssetRefs: [text(uploaded.payload.ref)],
+  });
+  assert.equal(refused.type, MessageType.SERVER_ERROR);
+  assert.equal(refused.payload.code, ProtocolErrorCode.BAD_REQUEST);
+  assert.equal(refused.payload.message, 'Could not store image.');
+  assert.ok(!JSON.stringify(refused.payload).includes(f.dataDir), 'BAD_REQUEST words are shown to the person');
+  assert.ok(logged.some(entry => entry.level === 'ERROR' && entry.message.includes(where)), 'the operator still sees it');
+});
+
 test('poll votes toggle per answer, keep voter order and never reveal anonymous voters', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-poll-voters-'));
   const database = await DatabaseConnection.create(path.join(root, 'server.db'));
@@ -1420,4 +1449,21 @@ test('automatic start notices survive an in-progress permission change without d
   await f.member.peer.wait(message => message.type === MessageType.EVENT_STARTED);
   await new Promise(resolve => setTimeout(resolve, 1100));
   assert.equal(f.member.peer.messages.filter(message => message.type === MessageType.EVENT_STARTED).length, 1);
+});
+
+test('community refreshes asked before the queued one starts share it, so a burst of votes costs one round (S-WS-4)', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const member = await f.human('Coalesced member');
+  // Past the scheduler's first round, which publishes to everyone once.
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  await member.peer.request(MessageType.COMMANDS_LIST);
+  const community = f.wsServer['community'];
+  assert.ok(community);
+  const since = member.peer.messages.length;
+  await Promise.all([community.refresh(), community.refresh(), community.refresh()]);
+  await community.refresh();
+  await member.peer.barrier();
+  assert.equal(member.peer.messages.slice(since).filter(message => message.type === MessageType.COMMUNITY_SNAPSHOT).length, 2,
+    'three refreshes asked together share one round, and one asked after it ran gets its own');
 });

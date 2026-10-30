@@ -19,7 +19,7 @@ import {
 } from '../context';
 import { DecryptedIdentity, decryptIdentityExport } from '../identity';
 import { t } from '../i18n/index';
-import { describeSfuPortProblem, parseOption, parseMemberLimit, parsePositiveInt, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable } from '../formatters';
+import { describeSfuPortProblem, parseOption, parseMemberLimit, parsePort, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable } from '../formatters';
 import { estimateHostCapacity, printCapacityEstimate } from '../capacity';
 import { hasServerDatabase, registerServer } from '../registry';
 import { setConfig } from './config';
@@ -53,11 +53,9 @@ export async function getUniqueNickname(ctx: CliContext, preferred?: string, exc
 
 export async function applyBootstrap(
   ctx: CliContext,
-  identityCode: string,
-  identityPassword: string,
+  identity: DecryptedIdentity,
   nicknameOverride: string
 ): Promise<void> {
-  const identity = decryptIdentityExport(identityCode, identityPassword);
   const publicKey = normalizePublicKeyHex(identity.publicKey);
   const server = await ctx.serverRepo.getServer();
   if (!server) {
@@ -183,7 +181,7 @@ export async function createCommand(globalArgs: GlobalArgs, args: string[]): Pro
   const serverName = parseOption(args, '--name') || (await ask(t('create.serverName'), t('create.defaultServerName')));
   const portValue = parseOption(args, '--port') || (await ask(t('create.serverPort'), String(DEFAULT_BOOTSTRAP_PORT)));
   const serverPassword = parseOption(args, '--password') ?? (await promptPassword(t('create.serverPassword')));
-  const port = parsePositiveInt('port', portValue);
+  const port = parsePort(portValue);
   const maxUsers = await askMemberLimit(args);
 
   const rawVoiceMode = parseOption(args, '--voice-mode');
@@ -228,8 +226,10 @@ export async function createCommand(globalArgs: GlobalArgs, args: string[]): Pro
     return;
   }
 
+  // A wrong password or an unreadable code fails before any server data exists.
+  const identity = await decryptIdentityExport(identityCode, identityPassword);
   await withContext(dataDir, async (ctx) => {
-    await applyBootstrap(ctx, identityCode, identityPassword, DEFAULT_OWNER_NICKNAME);
+    await applyBootstrap(ctx, identity, DEFAULT_OWNER_NICKNAME);
     await setConfig(ctx, 'name', serverName);
     await setConfig(ctx, 'password', serverPassword);
     await setConfig(ctx, 'maxUsers', String(maxUsers));

@@ -133,8 +133,9 @@ separado antes de continuar; não pare um relay compartilhado.
 :::
 
 ```bash
+monky stop
 monky config set turn true
-monky restart
+monky start
 ```
 
 O Monky tenta instalar coturn pelo gerenciador de pacotes da distribuição
@@ -155,8 +156,8 @@ command -v turnserver
 ```
 
 Em outras distribuições, use o pacote `coturn` e o gerenciador de serviços
-correspondentes. Depois volte a `monky config set turn true` e `monky restart`
-com **o mesmo usuário que administra o servidor**, sem executar o Monky
+correspondentes. Depois volte a `monky stop`, `monky config set turn true` e
+`monky start` com **o mesmo usuário que administra o servidor**, sem executar o Monky
 inteiro como root.
 
 Se você clonou o repositório, há também um helper. Execute a partir da raiz
@@ -225,8 +226,9 @@ confira com `monky logs`.
 ## Desligando
 
 ```bash
+monky stop
 monky config set turn false
-monky restart
+monky start
 ```
 
 O coturn permanece instalado mas não é iniciado. Nenhuma porta extra precisa

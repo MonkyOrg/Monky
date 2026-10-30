@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import {
-  LIMITS,
   LOCAL_EXECUTION_PROTOCOL_LIMITS as limits,
   LOCAL_MEDIA_PROTOCOL,
   LOCAL_OPERATION_CAPABILITY,
@@ -16,192 +15,58 @@ import {
   localTaskMatchesSource,
   localTaskOfferSchema,
   localTaskRequestSchema,
-  type LocalCapabilityId,
+  raceSignal,
   type LocalMediaSignal,
-  type LocalOperation,
   type LocalPreviewReference,
   type LocalRequestContext,
   type LocalSourceContext,
   type LocalTaskCancellationCause,
-  type LocalTaskControl,
   type LocalTaskEvent,
   type LocalTaskFailureReason,
   type LocalTaskOffer,
   type LocalTaskRequest,
-  type LocalWirePreviewResult,
-  type LocalWireTaskResult,
-  type ProtocolMessage,
+  type ServerMessage,
 } from '@monky/shared';
+import {
+  LocalAdmissionError,
+  MAX_PREVIEW_PROOFS,
+  MAX_SOURCES,
+  MAX_TASKS,
+  botChange,
+  invokerChange,
+  localAdmissionError,
+  pinBot,
+  type BotLocalContext,
+  type BotLocalExecutionTransport,
+  type BotLocalSession,
+  type LocalAdmissionFailure,
+  type PinnedBot,
+  type PinnedInvoker,
+  type PreviewProof,
+  type ReleasedSource,
+  type RetiredTask,
+  type Source,
+  type Task,
+} from './botLocalExecutionRecords';
+import { BotLocalAdmissions, type Admission } from './BotLocalAdmissions';
 
-/** Socket identity is deliberately opaque to the application layer. */
-export interface BotLocalSession {
-  ws: object;
-  user?: { id: string };
-  sessionId?: string;
-  isBot?: boolean;
-  botId?: string;
-  botPublicKey?: string;
-}
+export type { BotLocalContext, BotLocalExecutionTransport, BotLocalSession } from './botLocalExecutionRecords';
 
-export interface BotLocalContext<Session extends BotLocalSession> {
-  origin: Session;
-  bot: Session;
-  requestId: string;
-  invokerId: string;
-  originChannelId: string;
-  commandName: string;
-  capability: LocalCapabilityId;
-  expiresAt: number;
-  isCurrent(): boolean;
-}
+/** How duringTask tells a dropped task apart from a failure of the operation it was awaiting. */
+const TASK_DROPPED = Symbol('task dropped');
 
-export interface BotLocalExecutionTransport<Session extends BotLocalSession> {
-  isCurrent(session: Session): boolean;
-  /** Whether this peer's negotiated protocol includes the operation; older clients drop unknown offers silently. */
-  negotiated(session: Session, operation: LocalOperation): boolean;
-  accessVersion(): string | null;
-  authorizeContext(
-    session: Session, context: Exclude<LocalRequestContext, { kind: 'source' }>, capability: LocalCapabilityId,
-  ): Promise<BotLocalContext<Session> | undefined>;
-  authorizeCaller(userId: string, channelId: string): Promise<boolean>;
-  authorizeVoice(origin: Session, bot: Session, channelId: string): Promise<boolean>;
-  botIdentity(session: Session): Promise<LocalTaskOffer['bot'] | undefined>;
-  botBinding(botId: string): Promise<string | undefined>;
-  commandHasCapability(botId: string, commandName: string, capability: LocalCapabilityId): boolean;
-  voiceChannelId(session: Session): string | null;
-  iceServers(session: Session): Promise<NonNullable<LocalTaskOffer['media']>['iceServers']>;
-  send(session: Session, message: ProtocolMessage): boolean;
-  error(session: Session, code: ProtocolErrorCode, reason: string, requestId?: string): void;
-  reportError(error: unknown): void;
-}
-
-type Failure = LocalTaskFailureReason | LocalTaskCancellationCause;
-
-class LocalAdmissionError extends Error {
-  constructor(readonly reason: Failure, readonly code = ProtocolErrorCode.PERMISSION_DENIED) {
-    super(reason);
-  }
-}
-
-interface Source<Session extends BotLocalSession> {
-  value: LocalSourceContext;
-  origin: Session;
-  originSocket: object;
-  commandName: string;
-}
-
-interface ReleasedSource {
-  botId: string;
-  botPublicKey: string;
-  expiresAt: number;
-}
-
-interface Task<Session extends BotLocalSession> {
-  id: string;
-  context: LocalRequestContext;
-  scope: BotLocalContext<Session>;
-  source?: Source<Session>;
-  origin: Session;
-  originSocket: object;
-  bot: Session;
-  botSocket: object;
-  botId: string;
-  botPublicKey: string;
-  botSessionId: string;
-  invokerSessionId: string;
-  requestId: string;
-  spec: LocalTaskRequest['spec'];
-  voiceChannelId?: string;
-  expiresAt: number;
-  setupDeadline: number;
-  generation: number;
-  botOffer?: LocalTaskOffer;
-  executorOffer?: LocalTaskOffer;
-  botAssigned: boolean;
-  offered: boolean;
-  accepted?: LocalWireTaskResult;
-  ready: boolean;
-  botReady: boolean;
-  executorReady: boolean;
-  offerRelayed: boolean;
-  answerRelayed: boolean;
-  candidates: number;
-  queuedSignals: { endpoint: 'bot' | 'executor'; payload: LocalMediaSignal }[];
-  revision: number;
-  control?: LocalTaskControl;
-  confirmedControl?: LocalTaskControl;
-  setupTimer: NodeJS.Timeout;
-  lifetimeTimer: NodeJS.Timeout;
-  mediaTimer?: NodeJS.Timeout;
-  controlTimer?: NodeJS.Timeout;
-  controller: AbortController;
-}
-
-interface PreviewProof<Session extends BotLocalSession> {
-  result: LocalWirePreviewResult;
-  contextId: string;
-  bot: Session;
-  botSocket: object;
-  botId: string;
-  botPublicKey: string;
-  origin: Session;
-  originSocket: object;
-  expiresAt: number;
-}
-
-interface RetiredTask<Session extends BotLocalSession> {
-  origin: Session;
-  originSocket: object;
-  invokerId: string;
-  invokerSessionId: string;
-  bot: Session;
-  botSocket: object;
-  botId: string;
-  botPublicKey: string;
-  botSessionId: string;
-  generation?: number;
-  revision: number;
-  expiresAt: number;
-}
-
-interface Admission<Session extends BotLocalSession> {
-  kind: 'task' | 'source' | 'operation';
-  botId: string;
-  bot?: Session;
-  botSocket?: object;
-  botSessionId?: string;
-  botPublicKey?: string;
-  context?: LocalRequestContext;
-  scope?: BotLocalContext<Session>;
-  source?: Source<Session>;
-  task?: Task<Session>;
-  origin?: Session;
-  originSocket?: object;
-  invokerId?: string;
-  invokerSessionId?: string;
-  voiceChannelId?: string;
-  accessVersion: string | null;
-  deadline: number;
-  controller: AbortController;
-  timer?: NodeJS.Timeout;
-  taskAbort?: () => void;
-  failure?: LocalAdmissionError;
-  pending: number;
-  finished: boolean;
-}
-
-// Per-owner limits alone do not bound churn through disconnected/revoked bots.
-const MAX_SOURCES = limits.sourceContextsPerBot * LIMITS.MAX_BOTS_DEFAULT;
-const MAX_TASKS = LIMITS.MAX_BOT_INVOCATIONS;
-const MAX_PREVIEW_PROOFS = LIMITS.MAX_BOT_AUDIO_PREVIEW_REQUESTS;
-
+/**
+ * Local execution between a bot and the person whose app runs it: retained sources, task offers, private
+ * media signalling and task events, each revoked as soon as either side loses its connection or access.
+ * Every request in flight is bounded by BotLocalAdmissions.
+ */
 export class BotLocalExecutionService<Session extends BotLocalSession> {
   private readonly sources = new Map<string, Source<Session>>();
   private readonly released = new Map<string, ReleasedSource>();
   private readonly tasks = new Map<string, Task<Session>>();
   private readonly previews = new Map<string, PreviewProof<Session>>();
   private readonly retired = new Map<string, RetiredTask<Session>>();
-  private readonly admissions = new Set<Admission<Session>>();
+  private readonly admissions: BotLocalAdmissions<Session>;
   private readonly sweepTimer: NodeJS.Timeout;
   private closed = false;
   private generation = 0;
@@ -209,6 +74,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
   private reconcileRequested = false;
 
   constructor(private readonly transport: BotLocalExecutionTransport<Session>) {
+    this.admissions = new BotLocalAdmissions(transport, this.tasks, this.sources, () => this.expire());
     this.sweepTimer = setInterval(() => this.expire(), 1000);
     this.sweepTimer.unref();
   }
@@ -257,183 +123,6 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     }
   }
 
-  private admissionError(reason: Failure): LocalAdmissionError {
-    return new LocalAdmissionError(reason, reason === 'busy' ? ProtocolErrorCode.BOT_COMMAND_BUSY
-      : reason === 'bot_disconnected' ? ProtocolErrorCode.BOT_OFFLINE
-        : reason === 'permission_denied' || reason === 'permission_revoked' ? ProtocolErrorCode.PERMISSION_DENIED
-          : ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
-  }
-
-  private reserveAdmission(
-    botId: string, kind: Admission<Session>['kind'], context?: LocalRequestContext, bot?: Session, voiceChannelId?: string,
-  ): Admission<Session> {
-    if (this.closed) throw this.admissionError('server_shutdown');
-    if (bot && (!bot.isBot || !botId || bot.botId !== botId || bot.user?.id !== botId ||
-        !bot.botPublicKey || !bot.sessionId || !this.transport.isCurrent(bot))) {
-      throw this.admissionError('permission_denied');
-    }
-    this.expire();
-    const pending = [...this.admissions];
-    if (pending.length >= MAX_TASKS || pending.filter((entry) => entry.botId === botId).length >= limits.tasksPerBot) {
-      throw this.admissionError('busy');
-    }
-    if (kind === 'task') {
-      const reserved = pending.filter((entry) => entry.kind === 'task' && (!entry.task || this.tasks.get(entry.task.id) !== entry.task));
-      if (this.tasks.size + reserved.length >= MAX_TASKS ||
-          [...this.tasks.values()].filter((task) => task.botId === botId).length +
-          reserved.filter((entry) => entry.botId === botId).length >= limits.tasksPerBot) throw this.admissionError('busy');
-    } else if (kind === 'source') {
-      const reserved = pending.filter((entry) => entry.kind === 'source' &&
-        (!entry.source || this.sources.get(entry.source.value.sourceContextId) !== entry.source));
-      if (this.sources.size + reserved.length >= MAX_SOURCES ||
-          [...this.sources.values()].filter((source) => source.value.botId === botId).length +
-          reserved.filter((entry) => entry.botId === botId).length >= limits.sourceContextsPerBot) throw this.admissionError('busy');
-    }
-    const admission: Admission<Session> = {
-      kind, botId, context, bot, botSocket: bot?.ws, botSessionId: bot?.sessionId, botPublicKey: bot?.botPublicKey,
-      voiceChannelId, accessVersion: this.transport.accessVersion(), deadline: Date.now() + limits.taskStartTimeoutMs,
-      controller: new AbortController(), pending: 0, finished: false,
-    };
-    this.admissions.add(admission);
-    this.armAdmission(admission);
-    return admission;
-  }
-
-  private armAdmission(admission: Admission<Session>): void {
-    if (admission.timer) clearTimeout(admission.timer);
-    const expiresAt = admission.scope?.expiresAt ?? admission.source?.value.expiresAt ?? Infinity;
-    admission.timer = setTimeout(() => this.abortAdmission(admission,
-      this.admissionError(expiresAt <= admission.deadline ? 'expired' : 'timeout')),
-    Math.max(0, Math.min(admission.deadline, expiresAt) - Date.now()));
-    admission.timer.unref();
-  }
-
-  private bindAdmission(admission: Admission<Session>, scope: BotLocalContext<Session>, source?: Source<Session>): void {
-    if (scope.bot !== admission.bot || (admission.scope && admission.scope !== scope)) throw this.admissionError('permission_denied');
-    if (!admission.origin) {
-      admission.origin = scope.origin;
-      admission.originSocket = source?.originSocket ?? scope.origin.ws;
-      admission.invokerId = scope.invokerId;
-      admission.invokerSessionId = source?.value.invokerSessionId ?? scope.origin.sessionId;
-    }
-    admission.scope = scope;
-    admission.source = source;
-    this.assertAdmission(admission);
-    const others = [...this.admissions].filter((entry) => entry !== admission &&
-      entry.origin === admission.origin && entry.originSocket === admission.originSocket);
-    if (others.length >= limits.tasksPerExecutor) throw this.admissionError('busy');
-    if (admission.kind === 'task' && !admission.task) {
-      const reserved = others.filter((entry) => entry.kind === 'task' && (!entry.task || this.tasks.get(entry.task.id) !== entry.task));
-      if ([...this.tasks.values()].filter((task) => task.origin === admission.origin && task.originSocket === admission.originSocket).length +
-          reserved.length >= limits.tasksPerExecutor) throw this.admissionError('busy');
-    }
-    this.armAdmission(admission);
-  }
-
-  private bindAdmissionTask(admission: Admission<Session>, task: Task<Session>): void {
-    if (admission.task === task) return;
-    admission.origin = task.origin;
-    admission.originSocket = task.originSocket;
-    admission.invokerId = task.scope.invokerId;
-    admission.invokerSessionId = task.invokerSessionId;
-    admission.task = task;
-    this.bindAdmission(admission, task.scope, task.source);
-    admission.taskAbort = () => this.abortAdmission(admission,
-      task.controller.signal.reason instanceof LocalAdmissionError ? task.controller.signal.reason : this.admissionError('expired'));
-    if (task.controller.signal.aborted) admission.taskAbort();
-    else task.controller.signal.addEventListener('abort', admission.taskAbort, { once: true });
-  }
-
-  private admissionFailure(admission: Admission<Session>): LocalAdmissionError | undefined {
-    if (admission.failure) return admission.failure;
-    if (this.closed) return this.admissionError('server_shutdown');
-    const bot = admission.bot;
-    if (bot && (!this.transport.isCurrent(bot) || bot.ws !== admission.botSocket || bot.sessionId !== admission.botSessionId)) {
-      return this.admissionError('bot_disconnected');
-    }
-    if (bot && (!bot.isBot || bot.botId !== admission.botId || bot.user?.id !== admission.botId ||
-        bot.botPublicKey !== admission.botPublicKey)) return this.admissionError('permission_denied');
-    const origin = admission.origin;
-    if (origin && (!this.transport.isCurrent(origin) || origin.ws !== admission.originSocket ||
-        !admission.invokerSessionId || origin.sessionId !== admission.invokerSessionId ||
-        origin.isBot || origin.user?.id !== admission.invokerId)) return this.admissionError('requester_disconnected');
-    if (admission.source && this.sources.get(admission.source.value.sourceContextId) !== admission.source) {
-      return this.admissionError('source_released');
-    }
-    if ((admission.scope && (!admission.scope.isCurrent() || Date.now() >= admission.scope.expiresAt)) ||
-        (admission.source && Date.now() >= admission.source.value.expiresAt)) return this.admissionError('expired');
-    if (Date.now() >= admission.deadline) return this.admissionError('timeout');
-    if (admission.voiceChannelId) {
-      if (origin && this.transport.voiceChannelId(origin) !== admission.voiceChannelId) return this.admissionError('requester_left_voice');
-      if (bot && this.transport.voiceChannelId(bot) !== admission.voiceChannelId) return this.admissionError('bot_left_voice');
-    }
-    if (admission.scope && !this.transport.commandHasCapability(admission.botId, admission.scope.commandName, admission.scope.capability)) {
-      return this.admissionError('permission_denied');
-    }
-    if (admission.accessVersion === null || admission.accessVersion !== this.transport.accessVersion()) return this.admissionError('busy');
-    return undefined;
-  }
-
-  private assertAdmission(admission: Admission<Session>): void {
-    const failure = this.admissionFailure(admission);
-    if (failure) { this.abortAdmission(admission, failure); throw failure; }
-  }
-
-  private abortAdmission(admission: Admission<Session>, failure: LocalAdmissionError): void {
-    if (admission.failure) return;
-    admission.failure = failure;
-    if (admission.timer) clearTimeout(admission.timer);
-    admission.controller.abort();
-  }
-
-  private async withAdmission<T>(admission: Admission<Session>, operation: (admission: Admission<Session>) => Promise<T>): Promise<T> {
-    try {
-      this.assertAdmission(admission);
-      return await operation(admission);
-    } finally {
-      admission.finished = true;
-      this.abortAdmission(admission, this.admissionError('expired'));
-      if (admission.taskAbort) admission.task?.controller.signal.removeEventListener('abort', admission.taskAbort);
-      if (admission.pending === 0) this.admissions.delete(admission);
-    }
-  }
-
-  private async duringAdmission<T>(admission: Admission<Session>, operation: () => Promise<T>): Promise<T> {
-    this.assertAdmission(admission);
-    const pending = operation();
-    admission.pending++;
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const signal = admission.controller.signal;
-      const cancel = () => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener('abort', cancel);
-        reject(admission.failure ?? this.admissionError('expired'));
-      };
-      if (signal.aborted) cancel();
-      else signal.addEventListener('abort', cancel, { once: true });
-      const finish = () => {
-        admission.pending--;
-        if (admission.finished && admission.pending === 0) this.admissions.delete(admission);
-        signal.removeEventListener('abort', cancel);
-      };
-      // Cancellation settles the caller, not an arbitrary dependency. Keep its quota until BOTH
-      // success and failure paths actually settle, including siblings of a rejected Promise.all.
-      void pending.then((value) => {
-        finish();
-        if (settled) return;
-        settled = true;
-        try { this.assertAdmission(admission); resolve(value); } catch (error) { reject(error); }
-      }, (error: unknown) => {
-        finish();
-        if (settled) return;
-        settled = true;
-        reject(error);
-      });
-    });
-  }
-
   private reportError(error: unknown): void {
     try { this.transport.reportError(error); } catch (reportingError) {
       // A broken diagnostic adapter must not strand shutdown or hide the original failure.
@@ -445,7 +134,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     try { this.transport.error(session, code, reason, requestId); } catch (error) { this.reportError(error); }
   }
 
-  private send(session: Session, message: ProtocolMessage): boolean {
+  private send(session: Session, message: ServerMessage): boolean {
     try { return this.transport.send(session, message); } catch (error) { this.reportError(error); return false; }
   }
 
@@ -456,22 +145,23 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
   }
 
   private async authenticateBot(session: Session, admission: Admission<Session>): Promise<LocalTaskOffer['bot']> {
-    if (!session.isBot || !session.botId || session.user?.id !== session.botId || !session.botPublicKey ||
-        !session.sessionId || !this.transport.isCurrent(session)) throw new LocalAdmissionError('permission_denied');
-    const socket = session.ws;
-    const key = session.botPublicKey;
-    const botId = session.botId;
-    const sessionId = session.sessionId;
-    const identity = await this.duringAdmission(admission, () => this.transport.botIdentity(session));
-    this.assertAdmission(admission);
-    const binding = identity ? await this.duringAdmission(admission, () => this.transport.botBinding(identity.botId)) : undefined;
-    this.assertAdmission(admission);
-    if (this.closed || !this.transport.isCurrent(session) || session.ws !== socket || session.sessionId !== sessionId) {
+    const pinned = pinBot(session);
+    if (!pinned || !this.transport.isCurrent(session)) throw new LocalAdmissionError('permission_denied');
+    const identity = await this.admissions.during(admission, () => this.transport.botIdentity(session));
+    this.admissions.assert(admission);
+    const binding = identity ? await this.admissions.during(admission, () => this.transport.botBinding(identity.botId)) : undefined;
+    this.admissions.assert(admission);
+    // The session checks below (closed, isCurrent, changed) are a second line that never decides today: the
+    // assert above, like the ledger after every await, already refused a changed socket, login or identity
+    // with these same pins. So an identity change mid-request is refused there, without the invalidateBot
+    // below, which only the identity or binding read from storage reaches.
+    const changed = botChange(session, pinned);
+    if (this.closed || !this.transport.isCurrent(session) || changed === 'connection' || changed === 'session') {
       throw new LocalAdmissionError('bot_disconnected', ProtocolErrorCode.BOT_OFFLINE);
     }
-    if (!identity || binding !== key || identity.botId !== botId || session.botId !== botId || identity.botPublicKey !== key ||
-        session.botPublicKey !== key || !session.isBot || session.user?.id !== identity.botId) {
-      this.invalidateBot(botId);
+    if (changed || !identity || identity.botId !== pinned.botId || identity.botPublicKey !== pinned.botPublicKey ||
+        binding !== pinned.botPublicKey) {
+      this.invalidateBot(pinned.botId);
       throw new LocalAdmissionError('permission_denied');
     }
     return identity;
@@ -484,14 +174,14 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     const context: LocalRequestContext | undefined = request.action === 'retain'
       ? { kind: 'invocation', invocationId: request.invocationId }
       : request.action === 'check' ? { kind: 'source', sourceContextId: request.sourceContextId } : undefined;
-    return this.withAdmission(this.reserveAdmission(session.botId ?? '',
+    return this.admissions.run(this.admissions.reserve(session.botId ?? '',
       request.action === 'retain' ? 'source' : 'operation', context, session,
       request.action === 'check' ? request.voiceChannelId : undefined), async (admission) => {
       if (request.action === 'check') {
         const { scope } = this.bindSourceAdmission(session, request.sourceContextId, admission);
         const bot = await this.authenticateBot(session, admission);
         await this.authorizeAdmission(admission, session, bot.botPublicKey, scope, request.voiceChannelId);
-        this.assertAdmission(admission);
+        this.admissions.assert(admission);
         this.send(session, {
           type: MessageType.BOT_LOCAL_SOURCE_RESULT, requestId,
           payload: { status: 'available', sourceContextId: request.sourceContextId, voiceChannelId: request.voiceChannelId },
@@ -499,7 +189,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
         return;
       }
       const bot = await this.authenticateBot(session, admission);
-      this.assertAdmission(admission);
+      this.admissions.assert(admission);
       if (request.action === 'release') {
         const source = this.sources.get(request.sourceContextId);
         const owner = source?.value ?? this.released.get(request.sourceContextId);
@@ -516,13 +206,13 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
         });
         return;
       }
-      const scope = await this.duringAdmission(admission, () => this.transport.authorizeContext(session,
+      const scope = await this.admissions.during(admission, () => this.transport.authorizeContext(session,
         { kind: 'invocation', invocationId: request.invocationId }, 'youtube-audio'));
-      this.assertAdmission(admission);
+      this.admissions.assert(admission);
       if (!scope) throw new LocalAdmissionError('permission_denied');
-      this.bindAdmission(admission, scope);
+      this.admissions.bind(admission, scope);
       await this.authorizeAdmission(admission, session, bot.botPublicKey, scope);
-      this.assertAdmission(admission);
+      this.admissions.assert(admission);
       if (this.sources.size >= MAX_SOURCES ||
           [...this.sources.values()].filter((source) => source.value.botId === bot.botId).length >= limits.sourceContextsPerBot) {
         throw new LocalAdmissionError('busy', ProtocolErrorCode.BOT_COMMAND_BUSY);
@@ -548,7 +238,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     const parsed = localTaskRequestSchema.safeParse(payload);
     if (!parsed.success) throw new LocalAdmissionError('invalid_request', ProtocolErrorCode.BAD_REQUEST);
     const input = parsed.data;
-    return this.withAdmission(this.reserveAdmission(session.botId ?? '', 'task', input.context, session, input.voiceChannelId),
+    return this.admissions.run(this.admissions.reserve(session.botId ?? '', 'task', input.context, session, input.voiceChannelId),
       (admission) => this.admitTask(session, input, requestId, admission));
   }
 
@@ -562,9 +252,10 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     if (spec && !localTaskMatchesSource(source.value, spec)) {
       throw new LocalAdmissionError('invalid_request', ProtocolErrorCode.BAD_REQUEST);
     }
-    if (!this.transport.isCurrent(source.origin) || source.origin.ws !== source.originSocket ||
-        source.origin.sessionId !== source.value.invokerSessionId || source.origin.user?.id !== source.value.invokerId ||
-        source.origin.isBot) {
+    const invoker: PinnedInvoker = {
+      originSocket: source.originSocket, invokerSessionId: source.value.invokerSessionId, invokerId: source.value.invokerId,
+    };
+    if (!this.transport.isCurrent(source.origin) || invokerChange(source.origin, invoker)) {
       throw new LocalAdmissionError('requester_disconnected', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
     }
     const scope: BotLocalContext<Session> = {
@@ -573,7 +264,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
       capability: source.value.capability, expiresAt: source.value.expiresAt,
       isCurrent: () => this.sources.get(source.value.sourceContextId) === source && Date.now() < source.value.expiresAt,
     };
-    this.bindAdmission(admission, scope, source);
+    this.admissions.bind(admission, scope, source);
     return { source, scope };
   }
 
@@ -589,12 +280,12 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
       ({ source, scope } = this.bindSourceAdmission(session, input.context.sourceContextId, admission, input.spec));
     }
     const bot = await this.authenticateBot(session, admission);
-    this.assertAdmission(admission);
+    this.admissions.assert(admission);
     if (input.context.kind !== 'source') {
       const context = input.context;
-      scope = await this.duringAdmission(admission, () => this.transport.authorizeContext(session, context, capability));
-      this.assertAdmission(admission);
-      if (scope) this.bindAdmission(admission, scope);
+      scope = await this.admissions.during(admission, () => this.transport.authorizeContext(session, context, capability));
+      this.admissions.assert(admission);
+      if (scope) this.admissions.bind(admission, scope);
     }
     if (!scope) throw new LocalAdmissionError('permission_denied');
     // Refuse before any offer: an outdated executor would ignore it and leave the bot waiting for the timeout.
@@ -602,7 +293,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
       throw new LocalAdmissionError('executor_unavailable', ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
     }
     await this.authorizeAdmission(admission, session, bot.botPublicKey, scope, input.voiceChannelId);
-    this.assertAdmission(admission);
+    this.admissions.assert(admission);
     if (Date.now() >= startDeadline) throw new LocalAdmissionError('timeout', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
     if (this.tasks.size >= MAX_TASKS ||
         [...this.tasks.values()].filter((task) => task.botId === bot.botId).length >= limits.tasksPerBot ||
@@ -621,7 +312,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     const task: Task<Session> = {
       id, context: input.context, scope, source, origin: scope.origin, originSocket: scope.origin.ws,
       bot: session, botSocket: session.ws, botId: bot.botId, botPublicKey: bot.botPublicKey,
-      botSessionId, invokerSessionId, requestId, spec: input.spec, voiceChannelId: input.voiceChannelId,
+      botSessionId, invokerId: scope.invokerId, invokerSessionId, requestId, spec: input.spec, voiceChannelId: input.voiceChannelId,
       expiresAt: scope.expiresAt, setupDeadline,
       generation: this.generation = this.generation === 0xffffffff ? 1 : this.generation + 1, offered: false, botAssigned: false,
       ready: false, botReady: false, executorReady: false, offerRelayed: false, answerRelayed: false,
@@ -629,18 +320,18 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     };
     this.tasks.set(id, task);
     try {
-      this.bindAdmissionTask(admission, task);
+      this.admissions.bindTask(admission, task);
       const accessVersion = this.transport.accessVersion();
       const negotiation = input.spec.operation === 'youtube.stream'
         ? await this.duringTask(task, Promise.all([
-          this.duringAdmission(admission, () => this.transport.iceServers(session)),
-          this.duringAdmission(admission, () => this.transport.iceServers(task.origin)),
+          this.admissions.during(admission, () => this.transport.iceServers(session)),
+          this.admissions.during(admission, () => this.transport.iceServers(task.origin)),
         ])) : undefined;
       if (negotiation && !negotiation.active) return;
-      this.assertAdmission(admission);
+      this.admissions.assert(admission);
       const ice = negotiation?.active ? negotiation.value : undefined;
       if (!(await this.authorizeTask(task, admission))) return;
-      this.assertAdmission(admission);
+      this.admissions.assert(admission);
       if (accessVersion === null || accessVersion !== this.transport.accessVersion()) {
         this.failTask(task, 'busy');
         return;
@@ -677,31 +368,32 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
   private async authorizeAdmission(
     admission: Admission<Session>, bot: Session, botPublicKey: string, scope: BotLocalContext<Session>, voiceChannelId?: string,
   ): Promise<void> {
-    const originSocket = scope.origin.ws;
-    const originSessionId = scope.origin.sessionId;
-    const botSocket = bot.ws;
-    const botSessionId = bot.sessionId;
-    const botId = bot.botId;
+    // Both connections as they were before the awaits below; the bot must still present the key it was admitted with.
+    const pinnedBot: PinnedBot = { botSocket: bot.ws, botSessionId: bot.sessionId, botId: bot.botId, botPublicKey };
+    const invoker: PinnedInvoker = { originSocket: scope.origin.ws, invokerSessionId: scope.origin.sessionId, invokerId: scope.invokerId };
+    const { botId } = pinnedBot;
     if (scope.bot !== bot) throw new LocalAdmissionError('permission_denied');
     const version = this.transport.accessVersion();
     if (version === null) throw new LocalAdmissionError('busy', ProtocolErrorCode.BOT_COMMAND_BUSY);
     const [allowed, voiceAllowed] = await Promise.all([
-      this.duringAdmission(admission, () => this.transport.authorizeCaller(scope.invokerId, scope.originChannelId)),
-      voiceChannelId ? this.duringAdmission(admission, () => this.transport.authorizeVoice(scope.origin, bot, voiceChannelId)) : true,
+      this.admissions.during(admission, () => this.transport.authorizeCaller(scope.invokerId, scope.originChannelId)),
+      voiceChannelId ? this.admissions.during(admission, () => this.transport.authorizeVoice(scope.origin, bot, voiceChannelId)) : true,
     ]);
-    this.assertAdmission(admission);
-    const binding = botId ? await this.duringAdmission(admission, () => this.transport.botBinding(botId)) : undefined;
-    this.assertAdmission(admission);
-    if (this.closed || !this.transport.isCurrent(bot) || bot.ws !== botSocket || bot.sessionId !== botSessionId) {
+    this.admissions.assert(admission);
+    const binding = botId ? await this.admissions.during(admission, () => this.transport.botBinding(botId)) : undefined;
+    this.admissions.assert(admission);
+    // The connection checks below (closed, isCurrent, botChanged, invokerChange) are a second line that never
+    // decides today: the assert above, like the ledger after every await, already refused a changed socket,
+    // login or identity of either side with these same pins. So an identity change mid-request is refused
+    // there, without the invalidateBot below, which only the binding read from storage reaches.
+    const botChanged = botChange(bot, pinnedBot);
+    if (this.closed || !this.transport.isCurrent(bot) || botChanged === 'connection' || botChanged === 'session') {
       throw new LocalAdmissionError('bot_disconnected', ProtocolErrorCode.BOT_OFFLINE);
     }
-    if (!this.transport.isCurrent(scope.origin) || scope.origin.ws !== originSocket ||
-        scope.origin.sessionId !== originSessionId || !originSessionId ||
-        scope.origin.isBot || scope.origin.user?.id !== scope.invokerId) {
+    if (!invoker.invokerSessionId || !this.transport.isCurrent(scope.origin) || invokerChange(scope.origin, invoker)) {
       throw new LocalAdmissionError('requester_disconnected', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
     }
-    if (binding !== botPublicKey || bot.botPublicKey !== botPublicKey || !bot.isBot ||
-        bot.botId !== botId || bot.user?.id !== botId) {
+    if (botChanged || binding !== botPublicKey) {
       if (bot.botId) this.invalidateBot(bot.botId);
       throw new LocalAdmissionError('permission_denied');
     }
@@ -720,12 +412,8 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
   }
 
   private endpoint(session: Session, task: Task<Session> | RetiredTask<Session>): 'bot' | 'executor' {
-    if (session === task.bot && session.ws === task.botSocket && session.isBot &&
-        session.botId === task.botId && session.user?.id === task.botId && session.botPublicKey === task.botPublicKey &&
-        session.sessionId === task.botSessionId) return 'bot';
-    if (session === task.origin && session.ws === task.originSocket && !session.isBot &&
-        session.user?.id === ('scope' in task ? task.scope.invokerId : task.invokerId) &&
-        session.sessionId === task.invokerSessionId) return 'executor';
+    if (session === task.bot && !botChange(session, task)) return 'bot';
+    if (session === task.origin && !invokerChange(session, task)) return 'executor';
     throw new LocalAdmissionError('permission_denied');
   }
 
@@ -738,13 +426,12 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
 
   private liveFailure(task: Task<Session>): LocalTaskCancellationCause | undefined {
     if (this.closed) return 'server_shutdown';
-    if (!this.transport.isCurrent(task.bot) || task.bot.ws !== task.botSocket) return 'bot_disconnected';
-    if (!this.transport.isCurrent(task.origin) || task.origin.ws !== task.originSocket) return 'requester_disconnected';
-    if (task.bot.sessionId !== task.botSessionId || task.bot.botId !== task.botId || task.bot.user?.id !== task.botId ||
-        !task.bot.isBot || task.bot.botPublicKey !== task.botPublicKey ||
-        task.origin.sessionId !== task.invokerSessionId || task.origin.user?.id !== task.scope.invokerId || task.origin.isBot) {
-      return 'permission_revoked';
-    }
+    const botChanged = botChange(task.bot, task);
+    const invokerChanged = invokerChange(task.origin, task);
+    if (!this.transport.isCurrent(task.bot) || botChanged === 'connection') return 'bot_disconnected';
+    if (!this.transport.isCurrent(task.origin) || invokerChanged === 'connection') return 'requester_disconnected';
+    // Another login or identity on the same socket is not a departure: the access this task was granted is gone.
+    if (botChanged || invokerChanged) return 'permission_revoked';
     if (Date.now() >= task.expiresAt || (!task.ready && Date.now() >= task.setupDeadline)) return 'expired';
     if (task.voiceChannelId) {
       if (this.transport.voiceChannelId(task.origin) !== task.voiceChannelId) return 'requester_left_voice';
@@ -766,11 +453,11 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     if (!this.taskActive(task)) return false;
     try {
       const authorize = (lease: Admission<Session>) => {
-        this.bindAdmissionTask(lease, task);
+        this.admissions.bindTask(lease, task);
         return this.duringTask(task, this.authorizeAdmission(lease, task.bot, task.botPublicKey, task.scope, task.voiceChannelId));
       };
       const authorization = admission ? await authorize(admission)
-        : await this.withAdmission(this.reserveAdmission(task.botId, 'operation', task.context, task.bot, task.voiceChannelId), authorize);
+        : await this.admissions.run(this.admissions.reserve(task.botId, 'operation', task.context, task.bot, task.voiceChannelId), authorize);
       if (!authorization.active) return false;
     } catch (error) {
       if (this.tasks.get(task.id) !== task) return false;
@@ -998,21 +685,21 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     const proof = this.previews.get(result.taskId);
     if (!proof || !bot.botId || proof.bot !== bot || proof.origin !== origin) return false;
     try {
-      return await this.withAdmission(this.reserveAdmission(bot.botId, 'operation',
+      return await this.admissions.run(this.admissions.reserve(bot.botId, 'operation',
         { kind: 'audio-preview', requestId: contextId }, bot), async (admission) => {
         admission.origin = proof.origin;
         admission.originSocket = proof.originSocket;
         admission.invokerSessionId = proof.result.executorSessionId;
         admission.invokerId = proof.origin.user?.id;
         admission.deadline = Math.min(admission.deadline, proof.expiresAt);
-        this.armAdmission(admission);
-        const scope = await this.duringAdmission(admission, () =>
+        this.admissions.arm(admission);
+        const scope = await this.admissions.during(admission, () =>
           this.transport.authorizeContext(bot, { kind: 'audio-preview', requestId: contextId }, 'youtube-audio'));
-        this.assertAdmission(admission);
+        this.admissions.assert(admission);
         if (!scope) return false;
-        this.bindAdmission(admission, scope);
-        const binding = await this.duringAdmission(admission, () => this.transport.botBinding(proof.botId));
-        this.assertAdmission(admission);
+        this.admissions.bind(admission, scope);
+        const binding = await this.admissions.during(admission, () => this.transport.botBinding(proof.botId));
+        this.admissions.assert(admission);
         if (binding !== proof.botPublicKey) {
           this.invalidateBot(proof.botId);
           return false;
@@ -1042,7 +729,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
         : candidate.kind !== 'invocation' && context.kind !== 'invocation' &&
           candidate.requestId === context.requestId);
     for (const admission of this.admissions) {
-      if (admission.context && matches(admission.context)) this.abortAdmission(admission, this.admissionError(cause));
+      if (admission.context && matches(admission.context)) this.admissions.abort(admission, localAdmissionError(cause));
     }
     for (const task of this.tasks.values()) if (matches(task.context)) this.cancelTask(task, cause);
     if (context.kind === 'audio-preview') {
@@ -1052,9 +739,9 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
 
   disconnect(session: Session): void {
     for (const admission of this.admissions) {
-      if (admission.bot === session && admission.botSocket === session.ws) this.abortAdmission(admission, this.admissionError('bot_disconnected'));
+      if (admission.bot === session && admission.botSocket === session.ws) this.admissions.abort(admission, localAdmissionError('bot_disconnected'));
       else if (admission.origin === session && admission.originSocket === session.ws) {
-        this.abortAdmission(admission, this.admissionError('requester_disconnected'));
+        this.admissions.abort(admission, localAdmissionError('requester_disconnected'));
       }
     }
     for (const task of this.tasks.values()) {
@@ -1067,11 +754,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
   }
 
   voiceChanged(): void {
-    for (const admission of this.admissions) {
-      if (!admission.voiceChannelId || admission.finished) continue;
-      const failure = this.admissionFailure(admission);
-      if (failure) this.abortAdmission(admission, failure);
-    }
+    this.admissions.recheck((admission) => !!admission.voiceChannelId);
     for (const task of this.tasks.values()) {
       if (!task.voiceChannelId) continue;
       const failure = this.liveFailure(task);
@@ -1081,7 +764,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
 
   voiceModeChanged(): void {
     for (const admission of this.admissions) {
-      if (admission.voiceChannelId) this.abortAdmission(admission, this.admissionError('voice_mode_changed'));
+      if (admission.voiceChannelId) this.admissions.abort(admission, localAdmissionError('voice_mode_changed'));
     }
     for (const task of this.tasks.values()) if (task.voiceChannelId) this.cancelTask(task, 'voice_mode_changed');
   }
@@ -1090,7 +773,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     for (const admission of this.admissions) {
       if (admission.botId === botId && (!admission.scope ||
           !this.transport.commandHasCapability(botId, admission.scope.commandName, admission.scope.capability))) {
-        this.abortAdmission(admission, this.admissionError('permission_revoked'));
+        this.admissions.abort(admission, localAdmissionError('permission_revoked'));
       }
     }
     for (const source of this.sources.values()) {
@@ -1108,7 +791,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
 
   settingsChanged(botId: string): void {
     for (const admission of this.admissions) {
-      if (admission.botId === botId) this.abortAdmission(admission, this.admissionError('permission_revoked'));
+      if (admission.botId === botId) this.admissions.abort(admission, localAdmissionError('permission_revoked'));
     }
     for (const task of this.tasks.values()) if (task.botId === botId) this.cancelTask(task, 'permission_revoked');
     for (const [id, proof] of this.previews) if (proof.botId === botId) this.previews.delete(id);
@@ -1117,7 +800,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
   deleteChannel(channelId: string): void {
     for (const admission of this.admissions) {
       if (admission.scope?.originChannelId === channelId || admission.source?.value.originChannelId === channelId ||
-          admission.voiceChannelId === channelId) this.abortAdmission(admission, this.admissionError('permission_revoked'));
+          admission.voiceChannelId === channelId) this.admissions.abort(admission, localAdmissionError('permission_revoked'));
     }
     for (const source of this.sources.values()) if (source.value.originChannelId === channelId) this.removeSource(source, 'permission_revoked');
     for (const task of this.tasks.values()) {
@@ -1127,7 +810,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
 
   invalidateBot(botId: string): void {
     for (const admission of this.admissions) {
-      if (admission.botId === botId) this.abortAdmission(admission, this.admissionError('permission_revoked'));
+      if (admission.botId === botId) this.admissions.abort(admission, localAdmissionError('permission_revoked'));
     }
     for (const source of this.sources.values()) if (source.value.botId === botId) this.removeSource(source, 'permission_revoked');
     for (const [id, released] of this.released) if (released.botId === botId) this.released.delete(id);
@@ -1163,17 +846,17 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     // One bounded, sequential pass per bot, rather than thousands of uncancellable source checks.
     await Promise.all([...owners].map(async ([botId, sources]) => {
       try {
-        await this.withAdmission(this.reserveAdmission(botId, 'operation'), async (admission) => {
+        await this.admissions.run(this.admissions.reserve(botId, 'operation'), async (admission) => {
           for (const source of sources) {
             if (this.sources.get(source.value.sourceContextId) !== source) continue;
             admission.source = source;
-            this.armAdmission(admission);
+            this.admissions.arm(admission);
             try {
-              const allowed = await this.duringAdmission(admission, () =>
+              const allowed = await this.admissions.during(admission, () =>
                 this.transport.authorizeCaller(source.value.invokerId, source.value.originChannelId));
-              this.assertAdmission(admission);
-              const binding = await this.duringAdmission(admission, () => this.transport.botBinding(source.value.botId));
-              this.assertAdmission(admission);
+              this.admissions.assert(admission);
+              const binding = await this.admissions.during(admission, () => this.transport.botBinding(source.value.botId));
+              this.admissions.assert(admission);
               // Removing this source must not cancel the remaining sources in this pass.
               admission.source = undefined;
               if (binding !== source.value.botPublicKey) { this.invalidateBot(botId); return; }
@@ -1197,7 +880,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     this.closed = true;
     this.reconcileRequested = false;
     clearInterval(this.sweepTimer);
-    for (const admission of this.admissions) this.abortAdmission(admission, this.admissionError('server_shutdown'));
+    this.admissions.close();
     for (const task of this.tasks.values()) this.cancelTask(task, 'server_shutdown');
     this.sources.clear();
     this.released.clear();
@@ -1211,11 +894,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     for (const [id, source] of this.released) if (now >= source.expiresAt) this.released.delete(id);
     for (const [id, proof] of this.previews) if (now >= proof.expiresAt) this.previews.delete(id);
     for (const [id, task] of this.retired) if (now >= task.expiresAt) this.retired.delete(id);
-    for (const admission of this.admissions) {
-      if (admission.finished || admission.failure) continue;
-      const failure = this.admissionFailure(admission);
-      if (failure) this.abortAdmission(admission, failure);
-    }
+    this.admissions.recheck();
   }
 
   private rememberRelease(source: LocalSourceContext): void {
@@ -1234,12 +913,12 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     if (this.sources.get(source.value.sourceContextId) !== source) return;
     this.sources.delete(source.value.sourceContextId);
     for (const admission of this.admissions) {
-      if (admission.source === source) this.abortAdmission(admission, this.admissionError(cause));
+      if (admission.source === source) this.admissions.abort(admission, localAdmissionError(cause));
     }
     for (const task of this.tasks.values()) if (task.source === source) this.cancelTask(task, cause);
   }
 
-  private dropTask(task: Task<Session>, failure = this.admissionError('expired')): boolean {
+  private dropTask(task: Task<Session>, failure = localAdmissionError('expired')): boolean {
     if (this.tasks.get(task.id) !== task) return false;
     this.tasks.delete(task.id);
     if (task.botAssigned) this.rememberTask(task);
@@ -1253,30 +932,14 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     return true;
   }
 
-  private duringTask<T>(task: Task<Session>, operation: Promise<T>): Promise<{ active: true; value: T } | { active: false }> {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const signal = task.controller.signal;
-      const cancel = () => {
-        settled = true;
-        signal.removeEventListener('abort', cancel);
-        resolve({ active: false });
-      };
-      if (signal.aborted) cancel();
-      else signal.addEventListener('abort', cancel, { once: true });
-      // Observing the original operation also consumes a late rejection after cancellation.
-      void operation.then((value) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener('abort', cancel);
-        resolve({ active: true, value });
-      }, (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener('abort', cancel);
-        reject(error);
-      });
-    });
+  /** Once the task is dropped this settles inactive, and a late outcome of `operation` is ignored. */
+  private async duringTask<T>(task: Task<Session>, operation: Promise<T>): Promise<{ active: true; value: T } | { active: false }> {
+    try {
+      return { active: true, value: await raceSignal(operation, task.controller.signal, { abortReason: () => TASK_DROPPED }) };
+    } catch (error) {
+      if (error === TASK_DROPPED) return { active: false };
+      throw error;
+    }
   }
 
   private rememberTask(task: Task<Session>): void {
@@ -1287,7 +950,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
       if (!oldest.done) this.retired.delete(oldest.value);
     }
     this.retired.set(task.id, {
-      origin: task.origin, originSocket: task.originSocket, invokerId: task.scope.invokerId, invokerSessionId: task.invokerSessionId,
+      origin: task.origin, originSocket: task.originSocket, invokerId: task.invokerId, invokerSessionId: task.invokerSessionId,
       bot: task.bot, botSocket: task.botSocket, botId: task.botId, botPublicKey: task.botPublicKey, botSessionId: task.botSessionId,
       generation: task.spec.operation === 'youtube.stream' ? task.generation : undefined,
       revision: task.revision, expiresAt: Date.now() + limits.taskStartTimeoutMs,
@@ -1340,11 +1003,11 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
   }
 
   private cancelTask(task: Task<Session>, cause: LocalTaskCancellationCause): void {
-    if (this.dropTask(task, this.admissionError(cause))) this.sendEvent(task, { state: 'cancelled', taskId: task.id, cause });
+    if (this.dropTask(task, localAdmissionError(cause))) this.sendEvent(task, { state: 'cancelled', taskId: task.id, cause });
   }
 
   private failTask(task: Task<Session>, reason: LocalTaskFailureReason): void {
-    if (this.dropTask(task, this.admissionError(reason))) this.sendEvent(task, { state: 'failed', taskId: task.id, reason });
+    if (this.dropTask(task, localAdmissionError(reason))) this.sendEvent(task, { state: 'failed', taskId: task.id, reason });
   }
 
   private cancelById(id: string, cause: LocalTaskCancellationCause): void {
@@ -1357,7 +1020,7 @@ export class BotLocalExecutionService<Session extends BotLocalSession> {
     if (task) this.failTask(task, reason);
   }
 
-  private failureReason(reason: Failure): LocalTaskFailureReason {
+  private failureReason(reason: LocalAdmissionFailure): LocalTaskFailureReason {
     switch (reason) {
       case 'requested':
       case 'permission_revoked':

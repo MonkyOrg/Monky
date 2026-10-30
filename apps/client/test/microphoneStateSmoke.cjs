@@ -73,6 +73,8 @@ async function runMicrophoneStateSmoke() {
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  // Importing has no side effects (R-MEDIA-3): the main window starts push-to-talk and the gate.
+  audio.init();
   const state = (open, pressed, message) => {
     check(voice.microphoneOpen === open && voice.pttPressed === pressed,
       `${message}: got open=${voice.microphoneOpen}, pressed=${voice.pttPressed}`);

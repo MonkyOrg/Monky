@@ -327,6 +327,11 @@ async function* runRegression(language, sharedModule) {
     field('.floating-context-menu [role="menuitem"]').click();
   };
   const locked = () => field('#btn-done')?.disabled === true;
+  // Refused edits are explained in the shared alert toast (#490), never in a banner of the modal.
+  const failure = () => field('.chat-copy-toast--danger');
+  const failed = (text) => failure()?.getAttribute('role') === 'alert' && failure().textContent.includes(text)
+    && !field('#server-settings-banner') && !field('.role-dialog-errors');
+  const clearToasts = () => document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
   const mainBackdrop = () => field('.server-settings-modal-card')?.closest('.modal-backdrop');
   modal.open();
   await flush();
@@ -361,7 +366,7 @@ async function* runRegression(language, sharedModule) {
   await flush();
   reject('COMMUNITY_UPDATE_SETTINGS', 'Events update failed');
   await flush();
-  check(!field('#community-events-enabled').checked && field('#server-settings-banner').textContent.includes('Events update failed'),
+  check(!field('#community-events-enabled').checked && failed('Events update failed'),
     'Rejected event changes restore persisted state and display the failure');
   store.myPermissions = Permission.MANAGE_EVENTS;
   appEvents.emit('server.updated');
@@ -485,7 +490,7 @@ async function* runRegression(language, sharedModule) {
   for (const dismiss of [
     () => field('#btn-done').click(),
     () => field('#modal-close').click(),
-    () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })),
+    () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })),
     () => original.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })),
     () => modal.close(),
     () => modal.open('storage'),
@@ -561,13 +566,13 @@ async function* runRegression(language, sharedModule) {
   change('#input-afk-channel-name', 'x');
   await flush();
   check(requests.length === beforeInvalidAfk && field('#input-afk-channel-name').value === 'Dormindo'
-    && field('#server-settings-banner').textContent.includes(t('serverSettings.afkChannelNameInvalid')),
-  'A too short AFK name is refused without sending and the persisted name returns');
+    && failed(t('serverSettings.afkChannelNameInvalid')) && field('#input-afk-channel-name').getAttribute('aria-invalid') === 'true',
+  'A too short AFK name is refused without sending, marked, and the persisted name returns');
   change('#input-afk-channel-name', 'Dormindo agora');
   await flush();
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
-  check(!field('#server-settings-banner').classList.contains('show'), 'Correcting the AFK name clears its error');
+  check(!field('#input-afk-channel-name').hasAttribute('aria-invalid'), 'Correcting the AFK name clears its error');
   change('#checkbox-afk-channel', false);
   await flush();
   check(locked() && document.querySelector('.dialog-card')?.textContent.includes('Dormindo agora'),
@@ -591,7 +596,8 @@ async function* runRegression(language, sharedModule) {
   reject('SERVER_UPDATE_SETTINGS', 'TURN failed to bind');
   await flush();
   check(!locked() && !field('#checkbox-turn-enabled').checked, 'Rejected TURN activation restores persisted false and releases the guard');
-  check(field('#server-settings-banner').textContent.includes('TURN failed'), 'The actual activation error remains explicit');
+  check(failed('TURN failed') && field('#checkbox-turn-enabled').getAttribute('aria-invalid') === 'true',
+    'The actual activation error remains explicit');
   change('#checkbox-turn-enabled', true);
   await flush();
   acknowledge('SERVER_UPDATE_SETTINGS');
@@ -606,7 +612,7 @@ async function* runRegression(language, sharedModule) {
   await flush();
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
-  check(!field('#server-settings-banner').classList.contains('show'), 'Correcting a rejected field clears its error');
+  check(!field('#input-attach-file-mb').hasAttribute('aria-invalid'), 'Correcting a rejected field clears its error');
   tab('notifications');
   check(field('#input-delete-undo').value === '60' && !field('#input-delete-undo').disabled, 'Undo starts at the persisted server default');
   change('#input-delete-undo', '90');
@@ -698,8 +704,10 @@ async function* runRegression(language, sharedModule) {
   acknowledge('ROLE_UPDATE');
   await flush();
   check((store.everyonePermissions & 256) === 0, 'Everyone permission changes persist in the store');
-  field('[data-role-editor] [data-role-dialog-close]').click();
+  // The footer's Done, not the header's X: each one has to close the dialog on its own.
+  field('[data-role-editor] .modal-footer [data-role-dialog-close]').click();
   await flush();
+  check(!field('[data-role-editor]') && !mainBackdrop().inert, 'Done in the footer closes the Everyone editor');
   yield 'role-menu-open';
   await flush();
   const roleMenu = field('.floating-context-menu');
@@ -759,16 +767,17 @@ async function* runRegression(language, sharedModule) {
     !memberPicker.querySelector('.modal-footer').textContent.includes(t('serverSettings.applying', { count: 1 })) &&
     Math.abs(memberPicker.querySelector('.modal-footer').getBoundingClientRect().top - pickerFooterTop) < 1,
     'Pending membership changes keep the footer stable with no visible loading text or premature success toast');
-  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   memberPicker.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
   check(field('[data-role-member-picker]') === memberPicker && locked() &&
     requests.filter(request => !request.done && request.type === 'ROLE_ASSIGN').length === 1,
     'Assignments block duplicate clicks, Escape and backdrop dismissal until acknowledged');
   reject('ROLE_ASSIGN', 'Assignment denied');
   await flush();
-  check(field('.chat-copy-toast') === beforeAddToast, 'Rejected assignments do not produce a success toast');
+  check(failed('Assignment denied') && !field('.chat-copy-toast:not(.chat-copy-toast--danger)'),
+    'Rejected assignments are explained in the alert toast, never as a success');
   check(!field('[data-role-member-action="add"][data-user-id="bob"]').disabled && !locked(), 'Role assignment failure keeps the candidate available for retry');
-  check(memberPicker.querySelector('.role-dialog-errors.show').textContent.includes('Assignment denied'), 'Assignment failures appear in the active dialog');
+  clearToasts();
   addBob();
   await flush();
   acknowledge('ROLE_ASSIGN');
@@ -794,17 +803,17 @@ async function* runRegression(language, sharedModule) {
   check(!field('[data-role-editor] [data-role-permission-bit]') && !field('[data-role-editor] .permission-three-state'),
     'Normal roles use on/off switches like Everyone, not Deny/Inherit/Allow');
   for (const permission of [Permission.MANAGE_BOTS, Permission.USE_BOT_COMMANDS, Permission.VIEW_SERVER_MONITOR]) {
-    check(roleSwitch(permission)?.type === 'checkbox' && roleSwitch(permission).closest('.permission-switch'),
+    check(roleSwitch(permission)?.type === 'checkbox' && roleSwitch(permission).getAttribute('role') === 'switch' && roleSwitch(permission).closest('.toggle-switch'),
       `The opened role editor exposes permission ${permission} as an on/off switch`);
   }
   check(roleSwitch(Permission.SPEAK).checked && !roleSwitch(Permission.MANAGE_BOTS).checked,
     'Role switches reflect the permissions the role grants');
-  check(roleSwitch(Permission.VIEW_SERVER_MONITOR).closest('.permission-switch').getAttribute('aria-label') === t('permissions.viewServerMonitor'),
+  check(roleSwitch(Permission.VIEW_SERVER_MONITOR).getAttribute('aria-label') === t('permissions.viewServerMonitor'),
     'The monitor permission in the actual role dialog has a localized accessible label');
   check(!roleSwitch(Permission.VIEW_AUDIT_LOG), 'Servers without an audit log do not offer its permission');
   check(field('[data-role-editor] #role-editor-tab-permissions').textContent.includes(t('roles.permissionSwitchesHint')),
     'Normal roles explain that a switch only grants on top of Everyone');
-  const managementCopy = roleSwitch(8192).closest('.permission-switch').parentElement.textContent;
+  const managementCopy = roleSwitch(8192).closest('.toggle-switch').parentElement.textContent;
   check(managementCopy.includes(t('permissions.manageBotsDesc')) && managementCopy.includes('token') &&
     !/editar o perfil|editing their profiles/i.test(managementCopy),
   'MANAGE_BOTS permission copy no longer claims admins can edit bot profiles');
@@ -872,8 +881,9 @@ async function* runRegression(language, sharedModule) {
   reject('ROLE_UPDATE', 'Color update denied');
   await flush();
   check(field('#role-editor-color').value === '#3158af' && store.getRole('editors').color === '#3158af'
-    && roleEditor.querySelector('.role-dialog-errors').textContent.includes('Color update denied') && !locked(),
+    && failed('Color update denied') && !locked(),
     'A rejected color change restores the acknowledged role color and reports the failure');
+  clearToasts();
   change('#role-editor-is-default', true);
   await flush();
   acknowledge('ROLE_UPDATE');
@@ -885,10 +895,10 @@ async function* runRegression(language, sharedModule) {
   await flush();
   reject('ROLE_UNASSIGN', 'Removal denied');
   await flush();
-  check(field('.chat-copy-toast') === beforeRemoveToast, 'Rejected removals do not produce a success toast');
-  check(field('[data-role-member-action="remove"][data-user-id="bob"]') &&
-    roleEditor.querySelector('.role-dialog-errors.show').textContent.includes('Removal denied'),
-    'Failed removal keeps acknowledged membership and shows its error locally');
+  check(!field('.chat-copy-toast:not(.chat-copy-toast--danger)'), 'Rejected removals do not produce a success toast');
+  check(field('[data-role-member-action="remove"][data-user-id="bob"]') && failed('Removal denied'),
+    'Failed removal keeps acknowledged membership and explains its error');
+  clearToasts();
   field('[data-role-member-action="remove"][data-user-id="bob"]').click();
   await flush();
   acknowledge('ROLE_UNASSIGN');
@@ -947,9 +957,12 @@ async function* runRegression(language, sharedModule) {
     'The add dialog explains when everyone already has the role');
   store.updateRoles(store.roles, currentAssignments);
   await flush();
-  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  field('[data-role-member-picker] .modal-footer [data-role-dialog-close]').click();
   await flush();
-  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(!field('[data-role-member-picker]') && field('[data-role-editor]') && !field('[data-role-editor]').inert
+    && document.activeElement === field('#btn-role-add-members'),
+  'Done, the only button of the member picker footer, closes just the picker and returns to Add members');
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   await flush();
   check(!field('[data-role-editor]') && !mainBackdrop().inert && document.activeElement === field('[data-role-menu="editors"]'),
     'Closing the role editor restores settings and its three-dot button');
@@ -962,9 +975,10 @@ async function* runRegression(language, sharedModule) {
   yield 'role-create-clean-footer';
   field('#btn-role-save').click();
   await flush();
-  check(field('[data-role-editor] .role-dialog-errors.show').textContent.includes(t('serverSettings.roleNameInvalid')) &&
+  check(field('[data-role-editor]') && failed(t('serverSettings.roleNameInvalid')) &&
     !requests.some(request => !request.done && request.type === 'ROLE_CREATE'),
     'Invalid creation stays in the modal with actionable validation');
+  clearToasts();
   change('#role-editor-name', 'Created role');
   field('#btn-role-save').click();
   await flush();
@@ -998,7 +1012,7 @@ async function* runRegression(language, sharedModule) {
   await flush();
   check(store.getRole('created-role') && field('[data-role-editor]') && !locked(),
     'Cancelling deletion preserves the role and its editor');
-  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   await flush();
   field('[data-role-menu="created-role"]').click();
   field('.floating-context-menu .danger').click();
@@ -1009,8 +1023,9 @@ async function* runRegression(language, sharedModule) {
   await flush();
   reject('ROLE_DELETE', 'Role deletion denied');
   await flush();
-  check(store.getRole('created-role') && field('#server-settings-banner').textContent.includes('Role deletion denied') && !locked(),
+  check(store.getRole('created-role') && failed('Role deletion denied') && !locked(),
     'Rejected role deletion remains explicit and keeps the role');
+  clearToasts();
   openRoleEditor('created-role');
   field('#btn-role-delete').click();
   await flush();
@@ -1084,6 +1099,17 @@ async function* runRegression(language, sharedModule) {
   acknowledge('BOT_REVOKE');
   await flush();
   check(!document.querySelector('[data-bot-configure="created-bot"]') && !locked(), 'Acknowledged unlinking updates the list');
+  const beforeManifest = requests.length;
+  field('#btn-install-bot').click();
+  await flush();
+  check(failed(t('bots.manifestUrlRequired')) && field('#bot-manifest-url').getAttribute('aria-invalid') === 'true'
+    && requests.length === beforeManifest && !document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card'),
+  'An empty manifest URL is explained in the alert toast, on the marked field, without a request');
+  change('#bot-manifest-url', 'ftp://example.invalid/bot.json');
+  field('#btn-install-bot').click();
+  await flush();
+  check(failed(t('bots.manifestUrlInvalid')) && requests.length === beforeManifest, 'A manifest URL that is not on the web is refused the same way');
+  clearToasts();
   change('#bot-manifest-url', 'https://example.invalid/bot.json');
   field('#btn-install-bot').click();
   await flush();
@@ -1118,6 +1144,28 @@ async function* runRegression(language, sharedModule) {
   store.myPermissions = 0xFFFFFFFF;
   appEvents.emit('server.updated');
   await flush();
+  // A token already on screen: losing the permission removes it in the same tick, with no exit animation.
+  tab('bots');
+  await flush();
+  field('#btn-create-bot').click();
+  await flush();
+  field('.dialog-card [data-action="confirm"]').click();
+  await flush();
+  acknowledge('BOT_CREATE');
+  await flush();
+  const tokenReveal = field('#bot-token-reveal');
+  check(!tokenReveal.hidden && tokenReveal.checkVisibility() && field('#bot-token-value').textContent === 'non-secret-test-token',
+    'An acknowledged manual link shows its token');
+  store.myPermissions = 0;
+  appEvents.emit('server.updated');
+  check(tokenReveal.hidden && !tokenReveal.checkVisibility() && field('#bot-token-value').textContent === '',
+    'Permission loss removes a visible token in the same tick, without waiting for any animation');
+  await flush();
+  // The token was revoked with the permission: the server no longer lists that bot.
+  bots = bots.filter((entry) => entry.id !== 'created-bot');
+  store.myPermissions = 0xFFFFFFFF;
+  appEvents.emit('server.updated');
+  await flush();
   field('#btn-create-bot').click();
   await flush();
   field('.dialog-card [data-action="confirm"]').click();
@@ -1126,8 +1174,8 @@ async function* runRegression(language, sharedModule) {
   store.myPermissions = 0;
   appEvents.emit('server.updated');
   await flush();
-  check(field('#bot-token-reveal').style.display === 'none' && field('#bot-token-value').textContent === '',
-    'Permission loss clears any visible token while hiding bot management controls');
+  check(field('#bot-token-reveal').hidden && field('#bot-token-value').textContent === '',
+    'Permission loss with a link still pending leaves no token area');
   revokedCreate.done = true;
   revokedCreate.resolve({ bot: botInfo({ id: 'created-bot', name: 'Bot', bound: false, profilePending: true }), token: 'revoked-secret-token' });
   await flush();
@@ -1202,7 +1250,8 @@ async function* runRegression(language, sharedModule) {
     check(!locked() && field('#select-server-chat-sound').value === 'all', 'An actual quota failure unlocks the modal and restores the persisted control');
     check(settingsStore.chatSoundServerOverrides === previousOverrides &&
       localStorage.getItem('monky_settings') === previousSettings, 'Failed actual persistence leaves the previous map and stored bytes intact');
-    check(document.querySelector('.server-settings-modal-card').textContent.includes('Synthetic quota exceeded'), 'An actual quota failure is explicit rather than reported as saved');
+    check(failed('Synthetic quota exceeded') && field('#select-server-chat-sound').getAttribute('aria-invalid') === 'true',
+      'An actual quota failure is explicit rather than reported as saved');
     check(modal.close() === true, 'A rejected preference write cannot permanently trap dismissal');
   } finally {
     Storage.prototype.setItem = storageWrite;

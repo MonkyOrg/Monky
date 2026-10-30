@@ -1,4 +1,5 @@
-import { EventBus } from './EventBus';
+import { EventBus, type AppEventBus } from './EventBus';
+import type { AppEvents } from './appEventMap';
 
 /**
  * Bus that swallows everything emitted into it.
@@ -7,7 +8,7 @@ import { EventBus } from './EventBus';
  * change notifications must not reach the views — otherwise a message arriving
  * on the server you left would repaint the server you are looking at (#400).
  */
-export const silentBus = new EventBus();
+export const silentBus: AppEventBus = new EventBus<AppEvents>();
 
 /**
  * Builds an object that always forwards to whichever instance is currently

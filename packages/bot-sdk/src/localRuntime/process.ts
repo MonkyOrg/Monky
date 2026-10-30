@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { raceSignal } from '@monky/shared';
 import { MediaError, aborted } from './errors';
 
 let activeCaptures = 0;
@@ -156,30 +157,12 @@ function runCapture(executable: string, args: string[], signal: AbortSignal, tim
   });
 }
 
+const cancelled = (): MediaError => new MediaError('cancelled');
+
 export function bounded<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: number): Promise<T> {
-  return waitFor(promise, signal, timeoutMs);
+  return raceSignal(promise, signal, { abortReason: cancelled, timeout: { ms: timeoutMs, reason: () => new MediaError('timeout') } });
 }
 
 export function cancellable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  return waitFor(promise, signal);
-}
-
-function waitFor<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs?: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const cancel = (): void => finish({ ok: false, error: new MediaError('cancelled') });
-    const timer = timeoutMs === undefined ? undefined
-      : setTimeout(() => finish({ ok: false, error: new MediaError('timeout') }), timeoutMs);
-    let settled = false;
-    const finish = (result: { ok: true; value: T } | { ok: false; error: unknown }): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal.removeEventListener('abort', cancel);
-      if (result.ok) resolve(result.value);
-      else reject(result.error);
-    };
-    signal.addEventListener('abort', cancel, { once: true });
-    promise.then((value) => finish({ ok: true, value }), (error: unknown) => finish({ ok: false, error }));
-    if (signal.aborted) cancel();
-  });
+  return raceSignal(promise, signal, { abortReason: cancelled });
 }
