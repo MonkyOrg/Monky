@@ -395,8 +395,10 @@ stopping the track; a timeout retains resources for a subsequent retry.
 
 Preload loads only `@monky/screen-share/renderer` (presentation and audio), and
 only when its window watches the first native screen. Capture, transport and
-processes stay in Main, behind the main entry; `afterPack` compares both
-entries byte for byte with the packaged copy.
+processes stay in Main, behind the main entry, which Main also loads only on
+first screen use; listing and resolving sources uses `@monky/screen-share/target`,
+which only validates capture targets. `afterPack` compares the three entries
+byte for byte with the packaged copy.
 
 Stopping a source or receiver may return `retired-with-errors` when the original
 owners prove retirement but report a cleanup error. The renderer logs the warning

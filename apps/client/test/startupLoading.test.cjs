@@ -41,12 +41,30 @@ function eagerPackages(entry) {
   return packages;
 }
 
-test('opening Monky never loads the hosted server, electron-updater or the whole bot SDK into Main', () => {
+test('opening Monky never loads the hosted server, electron-updater, the whole bot SDK or the native screen runtime into Main', () => {
   const packages = eagerPackages(path.join(mainRoot, 'main.ts'));
   assert.ok(packages.has('@monky/shared') && packages.has('electron'), 'the import graph of main.ts is followed');
-  for (const lazy of ['@monky/server', 'electron-updater', '@monky/bot-sdk']) {
+  for (const lazy of ['@monky/server', 'electron-updater', '@monky/bot-sdk', '@monky/screen-share']) {
     assert.ok(!packages.has(lazy), `${packages.get(lazy)} loads ${lazy} at startup; load it when it is first used`);
   }
+  assert.ok(packages.has('@monky/screen-share/target'), 'listing sources validates targets through the light entry (#851)');
+});
+
+test('the target entry of the native runtime only validates capture targets (#851)', () => {
+  const nativeRoot = path.resolve(__dirname, '..', 'native', 'screen-share');
+  const probe = `
+    const entry = require('@monky/screen-share/target');
+    process.stdout.write(JSON.stringify({ exports: Object.keys(entry).sort(), files: Object.keys(require.cache) }));
+  `;
+  const result = require('node:child_process').spawnSync(process.execPath, ['-e', probe], { cwd: nativeRoot, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const loaded = JSON.parse(result.stdout);
+  assert.deepEqual(loaded.exports, ['validateCaptureTarget']);
+  const runtime = loaded.files.filter(file => file.startsWith(path.join(nativeRoot, 'runtime') + path.sep))
+    .map(file => path.relative(path.join(nativeRoot, 'runtime'), file)).sort();
+  assert.deepEqual(runtime, ['captureProtocol.cjs', 'captureTarget.cjs', path.join('mac', 'target.cjs')].sort());
+  const full = require(path.join(nativeRoot, 'index.cjs'));
+  assert.equal(require(path.join(nativeRoot, 'target.cjs')).validateCaptureTarget, full.validateCaptureTarget);
 });
 
 test('the preload leaves the native screen runtime unloaded until its window watches a native screen (E-MAIN-8)', async () => {

@@ -6,9 +6,8 @@ import {
   getScreenShareProfile, type NativeScreenCapabilities, type NativeScreenVideoProfile,
   type ScreenEncodingAvailability, type ScreenEncodingSelection,
 } from '@monky/shared';
-import {
-  assertMacCaptureBridgeClosed, createCaptureBridge, probeCaptureCapabilities, type CaptureBridge,
-  type NativeScreenCaptureCapability, type NativeScreenCaptureTarget, type NativeScreenRuntime,
+import type {
+  CaptureBridge, NativeScreenCaptureCapability, NativeScreenCaptureTarget, NativeScreenRuntime,
 } from '@monky/screen-share';
 import { canonicalDirectory, samePath } from '../canonicalDirectory';
 import { isRecord } from '../ipc/guards';
@@ -16,6 +15,7 @@ import { selectScreenEncoding } from '../screenEncodingPolicy';
 import { ScreenEncodingCache, type ScreenEncodingRequest } from '../screenEncodingCache';
 import type { NativeScreenDiagnostics } from './diagnosticLog';
 import { diagnosticProfile } from './errorDiagnostics';
+import { screenShareModule } from './screenShareModule';
 
 /** Capture runs share one canonical folder: the native helper refuses any redirected component of their path. */
 export function captureRoot(): Promise<string> {
@@ -68,7 +68,7 @@ export class SelectedCaptureProbe {
       signal.throwIfAborted();
       this.sharedHost = target.platform === 'darwin';
       const { width, height, fps, maxBitrateKbps } = video;
-      this.bridge = createCaptureBridge({
+      this.bridge = screenShareModule().createCaptureBridge({
         host: this.runtime.host, runtime: this.runtime.obs, runId: this.runId, runDirectory: this.directory,
         encoder: encoding.encoder, video: { width, height, fps, bitrateKbps: maxBitrateKbps,
           scaleMode: preserveAspectRatio ? 'fit' : 'stretch' },
@@ -124,7 +124,7 @@ export class SelectedCaptureProbe {
       const snapshot = this.bridge.snapshot();
       if (this.sharedHost) {
         try {
-          assertMacCaptureBridgeClosed(this.bridge);
+          screenShareModule().assertMacCaptureBridgeClosed(this.bridge);
           if (!snapshot.nativeClosed || snapshot.forcedTermination)
             throw new Error('The original macOS selected-source probe has not proved clean lease retirement.');
         } catch (error) {
@@ -209,7 +209,7 @@ export class EncoderDiscovery {
         let retirementConfirmed = true;
         let capability: NativeScreenCaptureCapability | undefined;
         try {
-          const proof = await probeCaptureCapabilities({
+          const proof = await screenShareModule().probeCaptureCapabilities({
             host: runtime.host, runtime: runtime.obs, runId, runDirectory: directory, encoder: selection.encoder,
             video: { width: profile.width, height: profile.height, fps: profile.fps, bitrateKbps: profile.maxBitrateKbps },
           }, abort);

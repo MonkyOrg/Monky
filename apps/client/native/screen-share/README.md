@@ -410,8 +410,10 @@ de parar a trilha; timeout mantém os recursos retidos para nova tentativa.
 
 O preload carrega só `@monky/screen-share/renderer` (apresentação e áudio), e
 apenas quando a janela assiste a primeira tela nativa. Captura, transporte e
-processos ficam no Main, na entrada principal; o `afterPack` compara as duas
-entradas byte a byte com a cópia empacotada.
+processos ficam no Main, na entrada principal, que o Main também só carrega no
+primeiro uso da tela; listar e resolver fontes usa `@monky/screen-share/target`,
+que só valida o alvo de captura. O `afterPack` compara as três entradas byte a
+byte com a cópia empacotada.
 
 Parar uma fonte ou recepção pode retornar `retired-with-errors` quando os
 proprietários originais comprovam o encerramento, mas reportam um erro de limpeza.

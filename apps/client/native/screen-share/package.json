@@ -9,10 +9,11 @@
   "exports": {
     ".": { "types": "./index.d.ts", "default": "./index.cjs" },
     "./renderer": { "types": "./renderer.d.ts", "default": "./renderer.cjs" },
+    "./target": { "types": "./target.d.ts", "default": "./target.cjs" },
     "./runtime/*": "./runtime/*",
     "./package.json": "./package.json"
   },
-  "files": ["index.cjs", "index.d.ts", "renderer.cjs", "renderer.d.ts", "runtime", "bin", "licenses", "LICENSE", "THIRD_PARTY_NOTICES", "README.md", "README.en.md"],
+  "files": ["index.cjs", "index.d.ts", "renderer.cjs", "renderer.d.ts", "target.cjs", "target.d.ts", "runtime", "bin", "licenses", "LICENSE", "THIRD_PARTY_NOTICES", "README.md", "README.en.md"],
   "scripts": {
     "test": "node --test test/*.test.cjs",
     "test:capture": "node test/nativeCaptureSmoke.cjs"
