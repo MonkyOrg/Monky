@@ -226,11 +226,11 @@ if (!process.versions.electron) {
         show: false, width: 1280, height: 1000,
         webPreferences: {
           contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false,
-          sandbox: false, backgroundThrottling: false, offscreen: true,
+          sandbox: true, backgroundThrottling: false, offscreen: true,
           // Exercise real HTML fullscreen without macOS Spaces transitions on a hidden window.
           disableHtmlFullscreenWindowResize: true,
           partition: `voice-screen-${id}`,
-          preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.js'),
+          preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.cjs'),
         },
       });
       windows.push(window);

@@ -41,13 +41,11 @@ function sourceLoader(overrides = new Map(), globals = {}) {
   };
 }
 
-/** Isolated compilation: never overwrites dist or a peer's build artifacts. */
+/** Isolated compilation: never overwrites dist or a peer's build artifacts. The preloads are bundled by the smoke. */
 function compileRecovery(root) {
   const files = [
-    ...['crashRecovery', 'crashDiagnostics', 'crashRecoveryPage', 'i18n'].map(name =>
+    ...['crashRecovery', 'crashDiagnostics', 'crashRecoveryPage', 'i18n', 'windowPreferences'].map(name =>
       [path.join(client, 'src', 'main', `${name}.ts`), path.join('main', `${name}.js`)]),
-    ...['crashRecoveryPreload', 'preload', 'ipc'].map(name =>
-      [path.join(client, 'src', 'preload', `${name}.ts`), path.join('preload', `${name}.js`)]),
     ...['ipc', 'bugReport'].map(name => [path.join(sharedSource, `${name}.ts`), path.join('shared', `${name}.js`)]),
   ];
   for (const [source, relative] of files) {

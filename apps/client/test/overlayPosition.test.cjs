@@ -12,6 +12,7 @@ function fixture(platform = process.platform) {
     constructor(options) {
       super();
       this.bounds = { x: options.x, y: options.y, width: options.width, height: options.height };
+      this.webPreferences = options.webPreferences;
       this.moves = [];
       this.aspects = [];
       this.events = [];
@@ -89,6 +90,11 @@ test('the overlay loads its own page, never the app, built or from the dev serve
   const built = fixture();
   t.after(() => built.manager.close());
   assert.match(built.windows[0].page.replace(/\\/g, '/'), /\/dist\/overlay\.html$/);
+  const preferences = built.windows[0].webPreferences;
+  assert.equal(preferences.sandbox, true, 'the overlay runs sandboxed (#826)');
+  assert.equal(preferences.contextIsolation, true);
+  assert.equal(preferences.nodeIntegration, false);
+  assert.match(preferences.preload.replace(/\\/g, '/'), /\/preload\/overlayPreload\.cjs$/, 'its preload is the bundle');
   const previous = process.env.VITE_DEV_SERVER_URL;
   process.env.VITE_DEV_SERVER_URL = 'http://localhost:5173/';
   try {

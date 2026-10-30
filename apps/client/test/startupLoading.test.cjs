@@ -52,15 +52,16 @@ test('opening Monky never loads the hosted server, electron-updater or the whole
 test('the preload leaves the native screen runtime unloaded until its window watches a native screen (E-MAIN-8)', async () => {
   const preload = loadPreload();
   assert.ok(preload.api, 'the preload exposes the window API');
-  assert.deepEqual([...new Set(preload.requested)].sort(), ['@monky/shared', 'electron', 'node:fs'],
-    'opening a window loads only Electron, the file system and the shared contracts');
+  assert.deepEqual([...new Set(preload.requested)].sort(),
+    ['@monky/screen-share/runtime/nativePcmPlayout.worklet.js?raw', '@monky/shared', 'electron'],
+    'opening a window loads only Electron, the shared contracts and the worklet source its bundle embeds');
   assert.deepEqual(preload.marks, ['monky:preload'], 'the end of the preload is marked for the startup timing');
 
   await preload.api.nativeScreenCommand({ action: 'watch' });
   await preload.api.attachNativeScreenPresentation({ presentationId: 'fixture' });
   await preload.api.stopNativeScreenPresentation('fixture');
   await preload.api.nativeScreenCommand({ action: 'watch' });
-  assert.deepEqual(preload.requested.filter(request => request.startsWith('@monky/screen-share')), ['@monky/screen-share/renderer'],
+  assert.deepEqual(preload.requested.filter(request => request === '@monky/screen-share/renderer'), ['@monky/screen-share/renderer'],
     'watching loads only the renderer half of the runtime, once');
   assert.deepEqual(preload.rendererCalls, ['audio', 'presentation']);
 });
@@ -71,9 +72,10 @@ test('the renderer entry of the native runtime carries presentation and audio, n
     const Module = require('node:module');
     const builtins = new Set();
     const load = Module._load;
-    Module._load = function (request, ...rest) {
-      if (Module.isBuiltin(request)) builtins.add(request.replace(/^node:/, ''));
-      return load.call(this, request, ...rest);
+    Module._load = function (request, parent, ...rest) {
+      // Packages such as the shared contracts are bundled with their browser build.
+      if (Module.isBuiltin(request) && !parent?.filename?.includes('node_modules')) builtins.add(request.replace(/^node:/, ''));
+      return load.call(this, request, parent, ...rest);
     };
     const entry = require('@monky/screen-share/renderer');
     process.stdout.write(JSON.stringify({ exports: Object.keys(entry).sort(), files: Object.keys(require.cache), builtins: [...builtins] }));
@@ -88,7 +90,7 @@ test('the renderer entry of the native runtime carries presentation and audio, n
     'captureBridge.cjs', 'runtimeFiles.cjs', path.join('mac', 'index.cjs')]) {
     assert.ok(!runtime.includes(mainOnly), `the renderer entry loaded ${mainOnly}`);
   }
-  assert.ok(!loaded.builtins.includes('child_process'), 'the renderer entry must not start processes');
+  assert.deepEqual(loaded.builtins, [], 'a sandboxed preload bundles this entry and can require no Node built-in module');
 
   const full = require(path.join(nativeRoot, 'index.cjs'));
   const renderer = require(path.join(nativeRoot, 'renderer.cjs'));

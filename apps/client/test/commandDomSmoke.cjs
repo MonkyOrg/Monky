@@ -313,8 +313,8 @@ async function runNativeAudioPreviewSmoke(url) {
   const nativeWindow = new BrowserWindow({
     show: false,
     webPreferences: {
-      contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false, offscreen: true,
-      preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.js'),
+      contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false, offscreen: true,
+      preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.cjs'),
     },
   });
   const owner = nativeWindow.webContents.id;

@@ -148,9 +148,9 @@ if (!process.versions.electron) {
     window = new BrowserWindow({
       show: false, width: 1100, height: 900,
       webPreferences: {
-        contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false, sandbox: false,
+        contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false, sandbox: true,
         backgroundThrottling: false, offscreen: true, partition: 'miniapp-storage',
-        preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.js'),
+        preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.cjs'),
       },
     });
     bindBotScreenIsolation(window.webContents);

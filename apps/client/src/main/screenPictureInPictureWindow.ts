@@ -116,12 +116,13 @@ export class ScreenPictureInPictureWindows {
     const contents = window.webContents;
     contents.setWindowOpenHandler(() => ({ action: 'deny' }));
     contents.on('will-navigate', event => event.preventDefault());
+    // 'move' and 'resize' report every change, including setBounds; a popup closed by its
+    // sandboxed opener is destroyed without 'close', so the bounds are kept as they change.
     const remember = (): void => {
       if (!window.isDestroyed() && !window.isMinimized()) this.lastBounds = window.getBounds();
     };
-    window.on('moved', remember);
-    window.on('resized', remember);
-    window.on('close', remember);
+    window.on('move', remember);
+    window.on('resize', remember);
     let hovering = false;
     let css: Promise<string | null> = Promise.resolve(null);
     const reveal = (visible: boolean): void => {
