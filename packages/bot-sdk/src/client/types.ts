@@ -1,5 +1,6 @@
 // Public contracts of BotClient: what a bot declares and what its handlers receive.
 // The package entry point re-exports every type here.
+import type { KeyObject } from 'node:crypto';
 import type {
   BotCapability,
   BotForm,
@@ -37,6 +38,13 @@ export interface BotOptions {
   token?: string;
   /** Ed25519 public key in hex (DER/SPKI), used for TOFU binding. */
   publicKey: string;
+  /**
+   * Ed25519 private key matching `publicKey` (PEM or KeyObject). With it the bot
+   * proves it holds the key when signing in, so a leaked token alone cannot
+   * impersonate it. Defaults to the identity of the bot runtime CLI. A bot that
+   * proved its key once on a server must keep proving it there.
+   */
+  privateKey?: string | KeyObject;
   autoReconnect?: boolean;
   /** Optional profile to synchronize, including already-added bot accounts. */
   name?: string;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { listOnlineHumans } from './application/services/onlineHumans';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, sign } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -10,6 +10,8 @@ import { WebSocket } from 'ws';
 import {
   DEFAULT_PERMISSIONS,
   EVERYONE_ROLE_ID,
+  botAuthChallenge,
+  createProtocolOffer,
   resolveMemberPermissions,
   LIMITS,
   MessageType,
@@ -537,6 +539,73 @@ test('bot voice uses real authentication metadata, room admission and originatin
   await owner.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT &&
     message.payload.sessionId === botSessionId, leaveSince);
   assert.equal(f.wsServer['signalingService'].getVoiceState(botSessionId), undefined);
+});
+
+// A bot token travels in manifests, logs and plain ws://; the public key is no secret either.
+// Only the private key proves the bot is itself (#822).
+test('bots offering bot-key-proof sign a token-bound challenge, and one that proved its key never signs in without it', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Key owner');
+  const createBot = async () => {
+    const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+    return { id: text(record(created.payload.bot).id), token: text(created.payload.token) };
+  };
+  const { id: botId, token } = await createBot();
+  const keys = identity();
+  const offer = createProtocolOffer('bot');
+  assert.ok(offer.features.includes('bot-key-proof'));
+  const withoutProof = { ...offer, features: offer.features.filter((feature) => feature !== 'bot-key-proof') };
+  const signWith = (privateKey = keys.privateKey, botToken = token) => (nonce: string) =>
+    sign(null, Buffer.from(botAuthChallenge(nonce, botToken), 'utf8'), privateKey).toString('hex');
+  const attempt = async (protocolOffer: unknown, signer?: (nonce: string) => string) => {
+    const peer = await f.connect();
+    const first = await peer.request(MessageType.AUTH_CONNECT, {
+      protocolVersion: PROTOCOL_VERSION, protocolOffer, nickname: 'Proving bot', publicKey: keys.publicKey, botToken: token,
+    });
+    if (first.type !== MessageType.AUTH_CHALLENGE) return { first, final: first };
+    assert.ok(signer, 'The server only challenges bots that offered bot-key-proof');
+    return { first, final: await peer.request(MessageType.AUTH_CHALLENGE_RESPONSE, { signature: signer(text(first.payload.nonce)) }) };
+  };
+  const stored = async () => f.botRepo.findById(botId);
+
+  for (const signer of [signWith(identity().privateKey), signWith(keys.privateKey, `${token}-relayed`), () => 'zz']) {
+    const { first, final } = await attempt(offer, signer);
+    assert.equal(first.type, MessageType.AUTH_CHALLENGE);
+    assert.match(text(first.payload.nonce), /^[0-9a-f]{64}$/);
+    assert.equal(final.type, MessageType.AUTH_FAILED);
+    assert.equal(final.payload.code, ProtocolErrorCode.UNAUTHORIZED);
+    assert.equal((await stored())?.boundPublicKey, null, 'A key is only bound once its holder proved it');
+  }
+
+  const proven = await attempt(offer, signWith());
+  assert.equal(proven.final.type, MessageType.AUTH_SUCCESS);
+  assert.equal(record(proven.final.payload.currentUser).id, botId);
+  const agreed = record(record(proven.final.payload.server).protocol).features;
+  assert.ok(Array.isArray(agreed) && agreed.includes('bot-key-proof'));
+  assert.equal((await stored())?.boundPublicKey, keys.publicKey);
+  assert.equal((await stored())?.keyProofRequired, true);
+
+  for (const protocolOffer of [undefined, withoutProof]) {
+    const { final } = await attempt(protocolOffer);
+    assert.equal(final.type, MessageType.AUTH_FAILED, 'A captured token cannot sign in by not offering the proof');
+    assert.equal(final.payload.code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  }
+  assert.equal((await attempt(offer, signWith())).final.type, MessageType.AUTH_SUCCESS);
+
+  const authFailures = [...f.rateLimiter['userMessageTimestamps'].entries()]
+    .filter(([key]) => key.startsWith('auth:')).reduce((total, [, times]) => total + times.length, 0);
+  assert.equal(authFailures, 5, 'Each refused bot sign-in spends the address quota, as a wrong password does');
+
+  const legacy = await createBot();
+  await f.bot(legacy.token);
+  const explicit = await f.connect();
+  const legacyAuth = await explicit.request(MessageType.AUTH_CONNECT, {
+    protocolVersion: PROTOCOL_VERSION, protocolOffer: withoutProof, nickname: 'Legacy bot',
+    publicKey: (await f.botRepo.findById(legacy.id))?.boundPublicKey, botToken: legacy.token,
+  });
+  assert.equal(legacyAuth.type, MessageType.AUTH_SUCCESS, 'Bots without the feature keep signing in as before');
+  assert.equal((await f.botRepo.findById(legacy.id))?.keyProofRequired, false);
 });
 
 test('bot voice rejects inaccessible/full rooms but approved publishing does not require a human role', async (t) => {
@@ -1470,7 +1539,7 @@ test('bot identity migration preserves legacy profiles and persists new pending 
   database.close();
   database = await DatabaseConnection.create(filename);
   const repository = new SqliteBotRepository(database.getDb());
-  assert.deepEqual(await repository.findById(legacy.id), { ...legacy, lastProtocolVersion: null, manifestUrl: null });
+  assert.deepEqual(await repository.findById(legacy.id), { ...legacy, lastProtocolVersion: null, manifestUrl: null, keyProofRequired: false });
   assert.equal(record(database.getDb().prepare('SELECT count(*) AS count FROM schema_migrations WHERE version = ?')
     .get('024_bot_profile_authority.sql')).count, 1);
   const service = new BotService(repository, new SqliteServerRepository(database.getDb()),
@@ -1486,7 +1555,7 @@ test('bot identity migration preserves legacy profiles and persists new pending 
   database.close();
   database = await DatabaseConnection.create(filename);
   const restored = new SqliteBotRepository(database.getDb());
-  assert.deepEqual(await restored.findById(legacy.id), { ...legacy, lastProtocolVersion: null, manifestUrl: null });
+  assert.deepEqual(await restored.findById(legacy.id), { ...legacy, lastProtocolVersion: null, manifestUrl: null, keyProofRequired: false });
   assert.deepEqual(await restored.findById(pending.bot.id), before);
 });
 
@@ -1509,17 +1578,19 @@ test('bot manifest URL migration keeps existing links unrecorded and persists in
   database.close();
   database = await DatabaseConnection.create(filename);
   let repository = new SqliteBotRepository(database.getDb());
-  assert.deepEqual(await repository.findById(legacy.id), { ...legacy, lastProtocolVersion: null, manifestUrl: null });
+  assert.deepEqual(await repository.findById(legacy.id), { ...legacy, lastProtocolVersion: null, manifestUrl: null, keyProofRequired: false });
   assert.equal(record(database.getDb().prepare('SELECT count(*) AS count FROM schema_migrations WHERE version = ?')
     .get('052_bot_manifest_url.sql')).count, 1);
   const installed = { ...legacy, id: 'installed', tokenHash: BotService.hashToken('installed-token'), createdAt: 2,
     manifestUrl: 'https://bots.example.test:7780/manifest' };
   await repository.create(installed);
   await repository.update(installed.id, { name: 'Renamed by the bot' });
+  await repository.update(installed.id, { keyProofRequired: true });
   database.close();
   database = await DatabaseConnection.create(filename);
   repository = new SqliteBotRepository(database.getDb());
   assert.equal((await repository.findById(installed.id))?.manifestUrl, installed.manifestUrl);
+  assert.equal((await repository.findById(installed.id))?.keyProofRequired, true, 'The proof requirement survives a restart');
   assert.equal((await repository.findByTokenHash(installed.tokenHash))?.manifestUrl, installed.manifestUrl);
   assert.deepEqual((await repository.listAll()).map((bot) => [bot.id, bot.manifestUrl]),
     [[legacy.id, null], [installed.id, installed.manifestUrl]]);

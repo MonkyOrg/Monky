@@ -225,7 +225,7 @@ export class CommandRuntime {
       this.host.report(error, conn);
       return;
     }
-    if (!def || conn.invocations.size >= LIMITS.MAX_BOT_INVOCATIONS) {
+    if (!def || conn.commandWork >= LIMITS.MAX_BOT_INVOCATIONS) {
       this.host.send(conn, {
         type: MessageType.COMMAND_FINISH,
         payload: { invocationId: payload.invocationId, failed: true },
@@ -361,12 +361,14 @@ export class CommandRuntime {
     };
     Object.defineProperty(ctx, 'settings', { writable: false, configurable: false });
     let failed = false;
+    conn.commandWork++;
     try {
       await def.handler(ctx);
     } catch (error) {
       failed = true;
       if (!invocation.controller.signal.aborted) this.host.report(error, conn);
     } finally {
+      conn.commandWork--;
       if (conn.invocations.get(payload.invocationId) === invocation) {
         conn.invocations.delete(payload.invocationId);
         this.end(invocation);

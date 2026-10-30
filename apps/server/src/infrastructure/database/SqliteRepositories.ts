@@ -108,6 +108,7 @@ const BOT_COLUMNS: { readonly [K in keyof BotRecord]?: string } = {
   boundPublicKey: 'bound_public_key',
   lastProtocolVersion: 'last_protocol_version',
   manifestUrl: 'manifest_url',
+  keyProofRequired: 'key_proof_required',
 };
 
 export class SqliteServerRepository implements IServerRepository {
@@ -969,7 +970,7 @@ export class SqliteRoleRepository implements IRoleRepository {
   }
 }
 
-type BotRow = Omit<BotRecord, 'profilePending'> & { profilePending: number };
+type BotRow = Omit<BotRecord, 'profilePending' | 'keyProofRequired'> & { profilePending: number; keyProofRequired: number };
 
 export class SqliteBotRepository implements IBotRepository {
   constructor(private db: IDatabaseDriver) {}
@@ -987,7 +988,7 @@ export class SqliteBotRepository implements IBotRepository {
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
               created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion,
-              manifest_url as manifestUrl
+              manifest_url as manifestUrl, key_proof_required as keyProofRequired
        FROM bots WHERE id = ?`
     ).get(id) as BotRow | undefined;
     return row ? this.mapRow(row) : null;
@@ -998,7 +999,7 @@ export class SqliteBotRepository implements IBotRepository {
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
               created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion,
-              manifest_url as manifestUrl
+              manifest_url as manifestUrl, key_proof_required as keyProofRequired
        FROM bots WHERE token_hash = ?`
     ).get(tokenHash) as BotRow | undefined;
     return row ? this.mapRow(row) : null;
@@ -1009,7 +1010,7 @@ export class SqliteBotRepository implements IBotRepository {
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
               created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion,
-              manifest_url as manifestUrl
+              manifest_url as manifestUrl, key_proof_required as keyProofRequired
        FROM bots ORDER BY created_at ASC`
     ).all() as BotRow[];
     return rows.map((r) => this.mapRow(r));
@@ -1042,6 +1043,7 @@ export class SqliteBotRepository implements IBotRepository {
       createdAt: row.createdAt,
       lastProtocolVersion: row.lastProtocolVersion ?? null,
       manifestUrl: row.manifestUrl ?? null,
+      keyProofRequired: row.keyProofRequired === 1,
     };
   }
 }

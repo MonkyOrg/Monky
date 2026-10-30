@@ -213,17 +213,37 @@ acesso restrito, não registre o token em logs (o evento `registered` não o
 inclui) e, no modo Marketplace, use HTTPS com `publicUrl`. Para falar com o
 servidor, prefira `wss://`.
 
-A **chave pública Ed25519** só identifica o bot. Na primeira conexão, o servidor
+A **chave pública Ed25519** identifica o bot. Na primeira conexão, o servidor
 vincula ao bot a chave apresentada (TOFU, *Trust On First Use*) e passa a recusar
-conexões com outra chave. Esse vínculo evita trocar de identidade por engano, mas
-**não** protege um token vazado: a chave é pública (vai no manifest e nos
-comandos), e o servidor não pede prova de posse da chave privada. No modo
-Marketplace, o vínculo acontece durante a instalação.
+conexões com outra chave. No modo Marketplace, o vínculo acontece durante a
+instalação.
+
+A chave pública não é segredo (vai no manifest e nos comandos), então o que
+protege um token vazado é a **prova de posse da chave privada**. Quando o bot tem
+a chave privada, o SDK oferece o recurso `bot-key-proof`: o servidor manda um
+desafio, e o bot o assina com a chave privada, amarrado ao token daquela conexão.
+Na primeira prova válida, o servidor passa a exigi-la daquele bot em toda
+conexão. A partir daí, quem tiver só o token e a chave pública é recusado
+(`FEATURE_REQUIRES_UPDATE`) sem derrubar o bot verdadeiro. Rodando pelo CLI do
+bot, isso já vem ligado; no código, informe a chave em `privateKey`:
+
+```ts
+const bot = new BotClient({
+  requestedCapabilities: [],
+  publicKey: 'SUA_CHAVE_ED25519_HEX',
+  privateKey: readFileSync('.keys/private.pem', 'utf8'), // PEM ou KeyObject
+});
+```
+
+Bots e servidores antigos, sem o recurso, continuam se conectando só com o token.
+Por isso, um bot que nunca provou a chave segue protegido apenas pelo token.
+Cada tentativa recusada (token inválido, assinatura errada ou prova ausente)
+gasta a cota de tentativas de conexão do endereço, como uma senha errada.
 
 Se um token vazar, revogue o bot no servidor e adicione-o de novo. O vínculo novo
 recebe outro token, e o bot mantém a mesma identidade.
 
-> 💡 O [Monky Bot](https://github.com/MonkyOrg/MonkyBot) gera o par Ed25519 automaticamente e o reutiliza. Ao criar seu próprio bot com o SDK, gere e persista sua chave com as APIs de criptografia do Node.js e passe a chave pública em `publicKey`; não gere uma identidade nova a cada reinício.
+> 💡 O [Monky Bot](https://github.com/MonkyOrg/MonkyBot) gera o par Ed25519 automaticamente e o reutiliza. Ao criar seu próprio bot com o SDK, gere e persista sua chave com as APIs de criptografia do Node.js e passe a chave pública em `publicKey` e a privada em `privateKey`; não gere uma identidade nova a cada reinício.
 
 ## Fotos dos bots
 

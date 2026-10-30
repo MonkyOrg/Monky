@@ -10,7 +10,7 @@ import { spawn, spawnSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const { WebSocket } = require('ws');
 const { MonkyServer } = require('../apps/server/dist/server.js');
-const { BotClient, BotRequestError, BOT_CAPABILITIES, BOT_STORAGE_LIMITS, LIMITS, MessageType, PROTOCOL_VERSION } = require('../packages/bot-sdk/dist/index.js');
+const { BotClient, BotRequestError, BOT_CAPABILITIES, BOT_STORAGE_LIMITS, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } = require('../packages/bot-sdk/dist/index.js');
 const { rtcSignalSchema } = require('@monky/shared');
 
 function identity() {
@@ -285,7 +285,7 @@ try {
   const avatar = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJfcAAAAASUVORK5CYII=';
   bot = new BotClient({
     requestedCapabilities: [...BOT_CAPABILITIES],
-    serverUrl: url, token: created.token, publicKey: botKeys.publicKey, autoReconnect: false,
+    serverUrl: url, token: created.token, publicKey: botKeys.publicKey, privateKey: botKeys.privateKey, autoReconnect: false,
     name: 'Identity Bot', avatarBase64: avatar,
   });
   const sdkErrors = [];
@@ -435,6 +435,20 @@ try {
   bot.connect({ serverId: 'e2e' });
   await owner.wait((message) => message.type === MessageType.COMMANDS_LIST_RESPONSE &&
     message.payload.commands?.some((command) => command.botId === botId && command.name === 'guided'), 'command discovery');
+
+  // The bot proved its key when signing in (#822): its token and public key alone no longer let anyone in,
+  // and the refused impostor does not displace the real bot.
+  const impostor = new BotClient({
+    requestedCapabilities: [...BOT_CAPABILITIES], serverUrl: url, token: created.token, publicKey: botKeys.publicKey,
+    autoReconnect: false,
+  });
+  impostor.on('error', () => {});
+  const impostorRefused = once(impostor, 'auth_failed');
+  impostor.connect({ serverId: 'impostor' });
+  const [refusal] = await impostorRefused;
+  assert.equal(refusal.code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  await impostor.close();
+  assert.ok(bot.getPermissions('e2e'), 'The real bot stays connected');
 
   const invoke = (peer, question) => peer.request(MessageType.COMMAND_INVOKE, {
     botId, channelId, commandName: 'guided', options: { question, count: 20, enabled: false }, locale: 'en',
