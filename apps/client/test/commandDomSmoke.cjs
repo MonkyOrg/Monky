@@ -4295,6 +4295,62 @@ async function runDomSmoke(sharedModule) {
   server.myPermissions = 2147483647;
   events.appEvents.emit('server.roles_updated');
   check(!find('.bot-inline-form button[type="submit"]').disabled, 'Restored access must restore form editing');
+  {
+    // #850: with a text channel open, what changes elsewhere on the server leaves its
+    // composer, its bot cards and its public selectors alone; a role list refreshes once.
+    const [{ BotChatView }, { ChatFeedController }, { ChatComposerController }] = await Promise.all([
+      import('/views/BotChatView.ts'), import('/views/chat/ChatFeedController.ts'), import('/views/chat/ChatComposerController.ts'),
+    ]);
+    const counted = { composer: 0, cards: 0, chat: 0, selectors: 0 };
+    const spies = [
+      [BotChatView.prototype, 'renderComposer', 'composer'],
+      [ChatFeedController.prototype, 'renderInvocationCard', 'cards'],
+      [ChatComposerController.prototype, 'refreshSettings', 'chat'],
+    ].map(([target, name, key]) => {
+      const original = target[name];
+      target[name] = function (...args) { counted[key]++; return original.apply(this, args); };
+      return () => { target[name] = original; };
+    });
+    const listSelectors = client.sendRequest;
+    client.sendRequest = (messageType, ...args) => {
+      if (messageType === 'SELECTOR_LIST') counted.selectors++;
+      return listSelectors.call(client, messageType, ...args);
+    };
+    const reset = () => { for (const key of Object.keys(counted)) counted[key] = 0; };
+    try {
+      check(store.getInvocations('one').length > 0, 'The open channel shows a bot card for this case');
+      server.updateChannel({ ...server.getChannel('two'), name: 'renamed elsewhere' });
+      server.setCategories([]);
+      await frame();
+      check(Object.values(counted).every(count => count === 0),
+        `Another channel or the categories changing rebuild neither the composer nor the bot cards, and list no selectors (${JSON.stringify(counted)})`);
+      // The fixture's permissions are set by hand: the first role list recomputes them.
+      server.updateRoles(server.roles, server.userRoles);
+      await frame();
+      reset();
+      server.updateRoles(server.roles, server.userRoles);
+      await frame();
+      check(Object.values(counted).every(count => count === 0),
+        `A role list that changes nothing for this member redraws nothing (${JSON.stringify(counted)})`);
+      server.myPermissions = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES;
+      events.appEvents.emit('server.roles_updated');
+      events.appEvents.emit('server.updated');
+      await frame();
+      check(counted.chat === 1 && counted.composer === 1 && counted.cards === store.getInvocations('one').length
+        && find('#chat-message-input').readOnly,
+      `A role list taking away sending refreshes the chat once, and the composer at once (#246) (${JSON.stringify(counted)})`);
+      reset();
+      server.myPermissions = 2147483647;
+      events.appEvents.emit('server.roles_updated');
+      events.appEvents.emit('server.updated');
+      await frame();
+      check(counted.chat === 1 && !find('#chat-message-input').readOnly, 'Sending given back restores the composer once');
+    } finally {
+      client.sendRequest = listSelectors;
+      for (const restore of spies) restore();
+      server.updateChannel({ ...server.getChannel('two'), name: 'other' });
+    }
+  }
   const pendingSubmitRequest = client.sendRequest;
   client.sendRequest = (messageType, ...args) => messageType === 'COMMAND_SUBMIT'
     ? Promise.reject(new Error('Retry this form')) : pendingSubmitRequest(messageType, ...args);
@@ -4583,6 +4639,19 @@ async function runDomSmoke(sharedModule) {
     selectorFeed.querySelector('[data-selector-value="a"]').dataset.selectorDisabled === 'true',
     'Disabled channels must block public selector responses for admins too');
   server.updateChannel({ ...server.getChannel('one'), botCommandsEnabled: true });
+  await frame();
+  const selectorLists = () => publicRequests.filter((request) => request.type === 'SELECTOR_LIST').length;
+  const listsBefore = selectorLists();
+  const otherChannel = server.getChannel('two');
+  server.updateChannel({ ...otherChannel, name: 'renamed elsewhere' });
+  server.setCategories([]);
+  await frame();
+  check(selectorLists() === listsBefore, 'Another channel or the categories changing list no public selectors again (#850)');
+  server.updateChannel({ ...server.getChannel('one'), botCommandsEnabled: false });
+  server.updateChannel({ ...server.getChannel('one'), botCommandsEnabled: true });
+  await frame();
+  check(selectorLists() > listsBefore, 'A change to the selectors\' own channel still lists them again');
+  server.updateChannel(otherChannel);
   publicSnapshot = { ...publicSnapshot, closedAt: Date.now(), canRespond: false };
   language.setLanguage('pt-BR');
   events.appEvents.emit('message.SELECTOR_SNAPSHOT', publicSnapshot);

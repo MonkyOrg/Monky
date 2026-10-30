@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { WebSocket, WebSocketServer } from 'ws';
-import { DEFAULT_PERMISSIONS, MessageType, Permission, ProtocolErrorCode, messageSearchSchema, type UserSummary } from '@monky/shared';
+import { DEFAULT_PERMISSIONS, MentionMatcher, MessageType, Permission, ProtocolErrorCode, messageSearchSchema, type UserSummary } from '@monky/shared';
 import { MessageSearchService, MessageSearchError } from './application/services/MessageSearchService';
+import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
+import { MESSAGE_SEARCH_MENTIONS_MIGRATION } from './infrastructure/database/messageSearchMentions';
 import { SqliteMessageSearchRepository } from './infrastructure/database/SqliteMessageSearchRepository';
+import { SqlJsDriver, type IDatabaseDriver } from './infrastructure/database/SqliteWrapper';
 import { MessageSearchHandler, type MessageSearchSession } from './infrastructure/websocket/MessageSearchHandler';
 import { createFixture, Peer, record, records, text } from './testFixtures/bots';
 
@@ -281,4 +287,113 @@ test('search handler crosses a real WebSocket and denies bot, stale session, and
   session.isBot = false;
   sessions.delete(session);
   await handler.handle(session, {}, randomUUID());
+});
+
+const MENTION_MEMBERS = [['lu', 'Lu'], ['lucas', 'Lucas'], ['erica', 'érica'], ['mail', 'mail']] as const;
+
+function addMembers(db: IDatabaseDriver): void {
+  for (const [id, nickname] of MENTION_MEMBERS) {
+    db.prepare('INSERT INTO users (id, client_id, nickname, created_at, last_seen_at) VALUES (?, ?, ?, 1, 1)').run(id, id, nickname);
+  }
+}
+
+const MENTION_CASES: Array<[string, string]> = [
+  ['prefix', 'bom dia @Lucas'],
+  ['email', 'escreva para ana@mail.com'],
+  ['code', 'use `@Lu` no comando'],
+  ['fence', '```\n@Lucas\n```'],
+  ['link', 'veja https://example.org/@Lu agora'],
+  ['accent', 'valeu @ÉRICA!'],
+  ['short', '(@lu) e **@mail**'],
+];
+
+function mentioned(db: IDatabaseDriver, messageId: string): string[] {
+  return (db.prepare('SELECT user_id AS id FROM message_search_mentions WHERE message_id = ? ORDER BY user_id')
+    .all(messageId) as Array<{ id: string }>).map(row => row.id);
+}
+
+test('"menciona:" follows the chat mention rule on creation, edit, restoration and bot translations (#834)', async t => {
+  const f = await setup(t);
+  const db = f.database.getDb();
+  addMembers(db);
+  for (const [id, content] of MENTION_CASES) await f.insert(id, content);
+  const nicknames = (db.prepare('SELECT nickname FROM users').all() as Array<{ nickname: string }>).map(row => row.nickname);
+  // The search results highlight with this matcher, over the same members.
+  const highlight = new MentionMatcher(nicknames);
+  for (const [id, nickname] of MENTION_MEMBERS) {
+    const expected = MENTION_CASES.filter(([, content]) => highlight.find(content)
+      .some(mention => mention.name.toLowerCase() === nickname.toLowerCase())).map(([message]) => message).sort();
+    const found = (await f.service.search(f.owner.id, { mentionsUserIds: [id] })).messages.map(message => message.id).sort();
+    assert.deepEqual(found, expected, `menciona:${nickname}`);
+  }
+  assert.deepEqual(mentioned(db, 'prefix'), ['lucas'], '@Lucas does not mention "Lu"');
+  assert.deepEqual(mentioned(db, 'email'), [], 'an e-mail address mentions nobody');
+  assert.deepEqual(mentioned(db, 'code'), []);
+  assert.deepEqual(mentioned(db, 'fence'), []);
+  assert.deepEqual(mentioned(db, 'link'), []);
+  assert.deepEqual(mentioned(db, 'accent'), ['erica'], 'accented capitals match like the chat');
+  assert.deepEqual(mentioned(db, 'short'), ['lu', 'mail']);
+
+  await f.messageRepo.updateContent('email', 'obrigado @ÉRICA e @Lucas', 2000);
+  assert.deepEqual(mentioned(db, 'email'), ['erica', 'lucas'], 'an edit indexes the new text with the same rule');
+  await f.messageRepo.updateContent('accent', 'sem menções', 2000);
+  assert.deepEqual(mentioned(db, 'accent'), []);
+
+  await f.messageRepo.markDeleted('prefix', 3000, f.owner.id, 9000);
+  assert.deepEqual(mentioned(db, 'prefix'), []);
+  const deleted = await f.messageRepo.findById('prefix');
+  assert.ok(deleted);
+  assert.equal(await f.messageRepo.restoreDeleted('prefix', f.owner.id, 3000, deleted.revision ?? 0, 4000), true);
+  assert.deepEqual(mentioned(db, 'prefix'), ['lucas'], 'undoing a deletion indexes the restored text');
+
+  const botId = randomUUID();
+  await f.botRepo.create({ id: botId, name: 'Mention bot', profilePending: false, tokenHash: randomUUID(),
+    avatarPath: null, boundPublicKey: null, createdByUserId: f.owner.id, createdAt: 1 });
+  await f.messageRepo.createBotMessage({
+    id: 'bot-mention', channelId: f.publicChannel, userId: botId, content: 'Hello @Lu', createdAt: 5000,
+    botAuthor: { id: botId, name: 'Mention bot', avatarPath: null, ownerUserId: f.owner.id },
+    localizations: { en: 'Hello @Lucas', 'pt-BR': 'Olá @érica' },
+  });
+  assert.deepEqual(mentioned(db, 'bot-mention'), ['erica', 'lu', 'lucas'], 'every language of a bot post counts');
+});
+
+test('the #834 migration rebuilds the legacy substring index with the chat rule', async t => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-search-mentions-'));
+  const filename = path.join(folder, 'server.db');
+  const opened: Array<{ close(): void }> = [];
+  t.after(() => {
+    for (const database of opened) database.close();
+    fs.rmSync(folder, { recursive: true, force: true });
+  });
+  const legacy = await SqlJsDriver.create(filename);
+  opened.push(legacy);
+  legacy.setForeignKeys(false);
+  const migrations = path.join(__dirname, 'infrastructure', 'database', 'migrations');
+  legacy.exec('CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+  for (const file of fs.readdirSync(migrations).filter(name => name.endsWith('.sql') && name < MESSAGE_SEARCH_MENTIONS_MIGRATION).sort()) {
+    legacy.transaction(() => {
+      legacy.exec(fs.readFileSync(path.join(migrations, file), 'utf8'));
+      legacy.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(file, 0);
+    })();
+  }
+  legacy.exec("INSERT INTO server_meta (id, name, password_hash, created_at) VALUES ('server', 'Legacy', 'hash', 1)");
+  legacy.exec("INSERT INTO channels (id, server_id, name, type, created_at) VALUES ('general', 'server', 'general', 'TEXT', 1)");
+  addMembers(legacy);
+  for (const [id, content] of MENTION_CASES) {
+    legacy.prepare("INSERT INTO messages (id, channel_id, user_id, content, created_at) VALUES (?, 'general', 'lucas', ?, 1)").run(id, content);
+  }
+  // The old triggers matched substrings with ASCII-only lower().
+  assert.deepEqual(mentioned(legacy, 'prefix'), ['lu', 'lucas']);
+  assert.deepEqual(mentioned(legacy, 'email'), ['mail']);
+  assert.deepEqual(mentioned(legacy, 'accent'), []);
+  legacy.close();
+
+  const database = await DatabaseConnection.create(filename);
+  opened.push(database);
+  const db = database.getDb();
+  assert.deepEqual(MENTION_CASES.map(([id]) => [id, mentioned(db, id)]), [
+    ['prefix', ['lucas']], ['email', []], ['code', []], ['fence', []], ['link', []], ['accent', ['erica']], ['short', ['lu', 'mail']],
+  ]);
+  db.prepare("INSERT INTO messages (id, channel_id, user_id, content, created_at) VALUES ('raw', 'general', 'lucas', '@Lucas', 2)").run();
+  assert.deepEqual(mentioned(db, 'raw'), [], 'the triggers no longer index mentions on their own');
 });

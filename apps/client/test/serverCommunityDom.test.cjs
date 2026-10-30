@@ -1282,6 +1282,29 @@ async function* regression(locale, inviteModule) {
     && !livePollModal.querySelector('.native-poll-option-check, .native-poll-option .material-symbols-outlined')
     && livePollModal.querySelector('.native-poll-view-votes')?.textContent.includes(t('poll.viewVotes')),
   'Like WhatsApp, each answer shows its voters\' avatars beside the vote count on the right, with no check or percentage');
+  // #842: someone else's vote reaches the open live action without a new community snapshot.
+  const snapshotsBeforeVote = calls.filter(call => call.type === 'COMMUNITY_GET').length;
+  const otherVote = structuredClone(poll);
+  otherVote.revision = 1;
+  otherVote.myVoteOptionIds = null;
+  otherVote.totalVotes = 3;
+  otherVote.options[1] = { ...otherVote.options[1], votes: 1, voters: [{ userId: 'guest', userNickname: 'Guest', userAvatarUrl: null }] };
+  emit('message.POLL_UPDATED', otherVote);
+  await flush();
+  check(livePollModal.querySelector('[data-native-poll-option=no]').nextElementSibling
+    ?.querySelector('[data-native-poll-count]')?.textContent === '1'
+    && livePollModal.querySelector('[data-native-poll-option=yes]').getAttribute('aria-pressed') === 'true'
+    && feed.snapshot.polls[0].myVoteOptionIds?.join(',') === 'yes'
+    && calls.filter(call => call.type === 'COMMUNITY_GET').length === snapshotsBeforeVote,
+  'A vote broadcast updates the live-action poll in place, keeps this member\'s own vote and asks for no snapshot');
+  emit('message.POLL_UPDATED', { ...structuredClone(poll), revision: 0, totalVotes: 9 });
+  await flush();
+  check(feed.snapshot.polls[0].totalVotes === 3, 'An older poll revision never replaces a newer one');
+  // Back to the fixture's tally, at the revision the feed now holds.
+  poll.revision = 1;
+  pollRevision = 1;
+  emit('message.POLL_UPDATED', structuredClone(poll));
+  await flush();
   const voteCallsBefore = calls.filter(call => call.type === 'POLL_VOTE').length;
   let releaseVote;
   pollVoteGate = new Promise(resolve => { releaseVote = resolve; });
@@ -1407,7 +1430,7 @@ async function* regression(locale, inviteModule) {
   document.querySelector('[data-action=confirm]').click();
   await flush();
   const refreshedLoss = t('poll.editLossChanged', { option: 'Yes', count: 3 });
-  check(calls.filter(call => call.type === 'POLL_EDIT').at(-1)?.payload.expectedRevision === 0
+  check(calls.filter(call => call.type === 'POLL_EDIT').at(-1)?.payload.expectedRevision === poll.revision
     && document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('poll.editChanged'))
     && editWizard.querySelector('.native-poll-edit-summary--loss')?.textContent.includes(refreshedLoss)
     && editWizard.querySelector('[data-poll-option]') === null,
@@ -4148,11 +4171,11 @@ async function* regression(locale, inviteModule) {
   keptPending[0](snapshot);
   await keptLoad; await flush();
   const shownSnapshot = kept.snapshot;
-  for (const listener of keptListeners) listener('message.ROLES_LIST', {});
-  check(shownSnapshot && kept.snapshot === shownSnapshot && keptPending.length === 2,
-    'Another member\'s role change keeps the banner and toolbar up while the community refreshes');
-  keptPending[1](snapshot);
-  await flush();
+  for (const type of ['ROLES_LIST', 'CATEGORIES_UPDATED', 'CHANNEL_UPDATED']) {
+    for (const listener of keptListeners) listener(`message.${type}`, {});
+  }
+  check(shownSnapshot && kept.snapshot === shownSnapshot && keptPending.length === 1,
+    'Role, category and channel changes that keep this member\'s access ask for no new community snapshot (#842)');
   allowed = !allowed;
   for (const listener of keptListeners) listener('message.ROLES_LIST', {});
   check(kept.snapshot === null, 'Losing access still clears the community snapshot at once');

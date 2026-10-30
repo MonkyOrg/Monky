@@ -592,6 +592,24 @@ export function accessSignature(
   return JSON.stringify([granted(), roleIds, channels]);
 }
 
+/**
+ * What a view of one channel reads from the server, as a comparable value (#850):
+ * the member's access to it, the channel itself and the server's own settings.
+ * `server.updated` does not say what changed; with this, a view stays as it is
+ * when another channel, the categories or someone else's roles change.
+ */
+export function channelViewSignature(
+  server: Pick<ServerStore, 'serverDetails' | 'currentUser' | 'hasPermission'> & { userRoles?: UserRoleSummary[] },
+  channelId: string | null,
+): string {
+  const details = server.serverDetails;
+  if (!details) return '';
+  // Lists (channels, members, roles) and live state belong to other views; the protocol decides what may be sent.
+  const settings = Object.entries(details).filter(([key, value]) => key === 'protocol' || value === null || typeof value !== 'object');
+  return JSON.stringify([accessSignature(server, channelId ? [channelId] : []),
+    details.channels.find((channel) => channel.id === channelId) ?? null, settings]);
+}
+
 let activeServerStore = createServerStore();
 
 export function setActiveServerStore(store: ServerStore): void {

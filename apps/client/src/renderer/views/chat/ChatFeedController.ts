@@ -289,12 +289,12 @@ export class ChatFeedController {
         next.setSelectionRange(selection?.start ?? 0, selection?.end ?? 0);
       }
     }
-    if (shouldScroll) feed.scrollToEnd();
+    if (shouldScroll) feed.scrollToEnd({ keepReveal: true });
   }
 
   /** Keeps the newest message in view while the reader is following the end of the conversation. */
   public followEnd(): void {
-    if (this.list?.followsEnd()) this.list.scrollToEnd();
+    this.list?.followEnd();
   }
 
   /** Reactions and replies follow the permission to talk; a reply also waits for an edit to end. */

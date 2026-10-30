@@ -1,5 +1,6 @@
 import {
-  MessageType, communitySnapshotSchema, eventStartedSchema, type CommunitySnapshot,
+  MessageType, communitySnapshotSchema, eventStartedSchema, nativePollSchema, survivingNativePollSelection,
+  type CommunitySnapshot, type NativePoll,
 } from '@monky/shared';
 import type { NetworkClient } from './NetworkClient';
 import { accessSignature, type ServerStore } from '../stores/serverStore';
@@ -50,7 +51,7 @@ export class CommunityFeed {
         const result = communitySnapshotSchema.safeParse(value);
         if (result.success) {
           this.generation++;
-          this.snapshot = result.data;
+          this.snapshot = this.keepNewerPolls(result.data);
           this.access = accessSignature(this.server);
           this.server.communityEventsEnabled = result.data.settings.eventsEnabled;
           this.error = false;
@@ -73,21 +74,47 @@ export class CommunityFeed {
           title: notice.title, serverName: server.serverDetails?.name ?? '',
         });
       }
+      if (event === `message.${MessageType.POLL_UPDATED}`) {
+        const result = nativePollSchema.safeParse(value);
+        if (result.success) this.applyPoll(result.data);
+      }
       if ([MessageType.CHANNEL_DELETED, MessageType.CHANNEL_UPDATED, MessageType.CATEGORIES_UPDATED, MessageType.ROLES_LIST]
         .some((type) => event === `message.${type}`)) {
-        // Stores already applied the change. Only lost access must clear what is shown at once;
-        // otherwise the banner and toolbar stay up while the fresh copy loads.
+        // Stores already applied the change. With the same access, the shown snapshot is still
+        // the one the server would send (#842); lost access must clear what is shown at once.
         const access = accessSignature(this.server);
-        const revalidate = this.snapshot !== null && access === this.access;
+        if (this.snapshot !== null && access === this.access) return;
         this.access = access;
         this.generation++;
-        if (!revalidate) {
-          this.snapshot = null;
-          this.emit();
-        }
+        this.snapshot = null;
+        this.emit();
         void this.load();
       }
     });
+  }
+
+  /**
+   * A vote changes one poll: the live-action banner and lists take it from here instead of
+   * waiting for a whole snapshot. The broadcast carries no personal vote, so the one shown stays.
+   */
+  private applyPoll(poll: NativePoll): void {
+    const snapshot = this.snapshot;
+    const index = snapshot?.polls.findIndex(entry => entry.id === poll.id) ?? -1;
+    if (!snapshot || index < 0 || poll.revision < snapshot.polls[index].revision) return;
+    const shown = snapshot.polls[index];
+    this.snapshot = { ...snapshot, polls: snapshot.polls.map(entry => entry !== shown ? entry : {
+      ...poll, myVoteOptionIds: poll.myVoteOptionIds ?? survivingNativePollSelection(poll, shown.myVoteOptionIds),
+    }) };
+    this.emit();
+  }
+
+  /** A snapshot fetched before a vote arrived keeps the newer poll the vote brought. */
+  private keepNewerPolls(next: CommunitySnapshot): CommunitySnapshot {
+    const shown = new Map((this.snapshot?.polls ?? []).map(poll => [poll.id, poll]));
+    return { ...next, polls: next.polls.map(poll => {
+      const newer = shown.get(poll.id);
+      return newer && newer.revision > poll.revision ? newer : poll;
+    }) };
   }
 
   subscribe(listener: () => void): () => void {
@@ -120,7 +147,7 @@ export class CommunityFeed {
       const result: unknown = await this.client.sendRequest(MessageType.COMMUNITY_GET, {});
       const parsed = communitySnapshotSchema.parse(result);
       if (this.disposed || generation !== this.generation) return;
-      this.snapshot = parsed;
+      this.snapshot = this.keepNewerPolls(parsed);
       this.access = accessSignature(this.server);
       this.server.communityEventsEnabled = parsed.settings.eventsEnabled;
       this.error = false;

@@ -1179,6 +1179,7 @@ async function runEditorContextSmoke(window, locale) {
     check(await value()==='Before Monky after', 'The same link menu also updates an existing message edit');
     await click('#btn-cancel-message-edit');
     await draft('ABCDE',1,4);
+    await evaluate('window.messageEditingFixture.feedAtRest()');
     await evaluate(`void (window.api.editorCommand=()=>new Promise(resolve=>{window.editorMenuTest.resolveCommand=resolve}))`);
     await context();
     await click(item(2));
@@ -2003,6 +2004,18 @@ async function installFixture() {
       active.session.chatStore.updateMessage({ ...original, content });
       view.composer.startEditingMessage(original.id);
       await settle();
+      await this.feedAtRest();
+    },
+    // The rows and the composer change size as an edit starts or ends. With the feed kept at
+    // the newest message since the channel opened (#840), it comes to rest before a menu is
+    // opened over it: any scroll closes an open menu.
+    async feedAtRest() {
+      const feed = document.querySelector('.chat-messages-feed');
+      for (let frame = 0, quiet = 0, top = feed?.scrollTop; feed && frame < 120 && quiet < 6; frame++) {
+        await new Promise(requestAnimationFrame);
+        quiet = feed.scrollTop === top ? quiet + 1 : 0;
+        top = feed.scrollTop;
+      }
     },
     async deletedUndo(duration) {
       const now = Date.now();

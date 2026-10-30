@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Ao abrir um canal, a última mensagem não fica mais escondida atrás da caixa de mensagem quando ela cresce logo depois de abrir, como numa janela estreita ou em canais com comandos de bot.",
+  "en": "When you open a channel, the latest message no longer ends up hidden behind the message box when it grows right after opening, such as in a narrow window or in channels with bot commands."
+}

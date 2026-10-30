@@ -3,6 +3,7 @@ import type { MessageRecord, NativePollRecord, NativePollVoterRecord } from '../
 import type { INativePollRepository } from '../../domain/repositories';
 import type { IDatabaseDriver } from './SqliteWrapper';
 import { SqliteResourceAudienceRepository } from './SqliteResourceAudienceRepository';
+import { indexMessageMentions } from './messageSearchMentions';
 
 interface PollRow {
   id: string;
@@ -107,6 +108,7 @@ export class SqliteNativePollRepository implements INativePollRepository {
         (id, channel_id, user_id, content, created_at, is_system)
         VALUES (?, ?, ?, ?, ?, 0)`)
         .run(message.id, message.channelId, message.userId, message.content, message.createdAt);
+      indexMessageMentions(this.db, message.id);
       this.db.prepare(`INSERT INTO native_polls
         (id, message_id, channel_id, creator_user_id, question, allow_multiple, anonymous_votes, images_json,
          options_json, allow_change, closes_at, max_voters, closed_at, live_action, created_at, revision,
