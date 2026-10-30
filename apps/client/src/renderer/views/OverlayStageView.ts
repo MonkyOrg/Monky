@@ -20,7 +20,7 @@ type OverlayTile = {
   key: string;
 };
 
-/** Deve acompanhar a duração das animações overlayCardIn/Out do theme.css. */
+/** Deve acompanhar a duração das animações overlayCardIn/Out do overlayStage.css. */
 const CARD_FADE_MS = 260;
 /** Loopback host candidates arrive at once; the answer never waits longer than this for them. */
 const ICE_GATHERING_TIMEOUT_MS = 300;

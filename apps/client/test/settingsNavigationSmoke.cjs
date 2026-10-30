@@ -58,6 +58,12 @@ if (!process.versions.electron) {
         name: 'settings-navigation-fixture',
         configureServer(server) {
           server.middlewares.use((request, response, next) => {
+            // The overlay window's own sheet (#852), as overlay.html links it.
+            if (request.url === '/__overlay_window__') {
+              response.setHeader('Content-Type', 'text/html');
+              response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/overlay.css"></head><body></body></html>');
+              return;
+            }
             if (request.url !== '/__settings_navigation__') return next();
             response.setHeader('Content-Type', 'text/html');
             response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css"></head><body></body></html>');
@@ -95,10 +101,32 @@ if (!process.versions.electron) {
       const { runOverlayParticipantSmoke } = require('./overlayParticipantSmoke.cjs');
       const { runOverlayLinkSmoke } = require('./overlayLinkSmoke.cjs');
       let checks = 0;
+      const overlayPage = async () => {
+        await window.loadURL(`http://127.0.0.1:${address.port}/__overlay_window__`);
+        const selectors = await evaluate(`(async () => {
+          await Promise.all([...document.querySelectorAll('link[rel=stylesheet]')].map(link => link.sheet
+            ? null : new Promise(resolve => link.addEventListener('load', resolve, { once: true }))));
+          const selectors = [];
+          const visit = rules => {
+            for (const rule of rules) {
+              if (rule.selectorText) selectors.push(rule.selectorText);
+              if (rule.styleSheet) visit(rule.styleSheet.cssRules);
+              if (rule.cssRules) visit(rule.cssRules);
+            }
+          };
+          for (const sheet of document.styleSheets) visit(sheet.cssRules);
+          return selectors;
+        })()`);
+        // .titlebar and .btn belong only to the app's theme.css; the stage only to overlayStage.css.
+        if (selectors.some(selector => /^\.(titlebar|btn)\b/.test(selector)) || !selectors.includes('.overlay-stage-root'))
+          throw new Error('The overlay window must load its own sheet, never theme.css');
+        checks++;
+      };
+      const settingsPage = () => window.loadURL(`http://127.0.0.1:${address.port}/__settings_navigation__`);
       for (const [width, height] of [[600, 400], [340, 240]]) {
         window.setContentSize(width, height);
+        await overlayPage();
         checks += await evaluate(`(${runOverlayWindowSmoke.toString()})()`);
-        checks += await evaluate(`(${runOverlayConfigPositionSmoke.toString()})()`);
         checks += await evaluate(`(${runOverlayParticipantSmoke.toString()})()`);
         for (const state of ['Idle', 'Hover']) {
           await evaluate(`(async () => {
@@ -110,7 +138,11 @@ if (!process.versions.electron) {
           fs.writeFileSync(path.join(clientRoot, 'dist-test', `overlay-window-${state.toLowerCase()}-${width}.png`),
             (await window.webContents.capturePage()).toPNG());
         }
+        // The configuration modal lives in the main window, under the app's sheet.
+        await settingsPage();
+        checks += await evaluate(`(${runOverlayConfigPositionSmoke.toString()})()`);
       }
+      await overlayPage();
       checks += await evaluate(`(${runOverlayLinkSmoke.toString()})()`);
       console.log(`Overlay window: ${checks} checks passed, frame/resize/drag/controls, video link negotiation and frame cap`);
       await finish(0);

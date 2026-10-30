@@ -113,3 +113,58 @@ test('the renderer entry of the native runtime carries presentation and audio, n
   assert.equal(renderer.createNativeScreenPresentation, full.createNativeScreenPresentation);
   assert.equal(renderer.registerNativeAudioPortReceiver, full.registerNativeAudioPortReceiver);
 });
+
+/** Stylesheets a page links, each followed through its local `@import`s, in cascade order. */
+function pageStylesheets(page) {
+  const renderer = path.resolve(__dirname, '..', 'src', 'renderer');
+  const sheets = [];
+  const visit = file => {
+    sheets.push(path.relative(renderer, file).split(path.sep).join('/'));
+    for (const [, target] of fs.readFileSync(file, 'utf8').matchAll(/@import\s+'(\.[^']+)'/g)) visit(path.resolve(path.dirname(file), target));
+  };
+  const html = fs.readFileSync(path.join(renderer, page), 'utf8');
+  for (const [, href] of html.matchAll(/<link rel="stylesheet" href="\.\/([^"]+)">/g)) visit(path.join(renderer, href));
+  return sheets;
+}
+
+test('the overlay window loads its own stylesheet, never the whole app theme (#852)', () => {
+  const overlay = pageStylesheets('overlay.html');
+  assert.deepEqual(overlay, ['styles/fonts.css', 'styles/overlay.css', 'styles/base.css', 'styles/audioStateIcon.css',
+    'styles/overlayStage.css']);
+  const app = pageStylesheets('index.html');
+  assert.ok(app.includes('styles/theme.css') && app.includes('styles/base.css') && app.includes('styles/audioStateIcon.css'),
+    'the app and the overlay share the tokens and the audio state icons from one place');
+  assert.ok(!app.includes('styles/overlayStage.css'), 'the main window never draws the overlay stage');
+});
+
+/** Local modules the renderer entry loads before its first paint: `import()` and type-only imports load nothing. */
+function rendererStartupModules(entry) {
+  const renderer = path.resolve(__dirname, '..', 'src', 'renderer');
+  const seen = new Set();
+  const visit = file => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = ts.createSourceFile(file, fs.readFileSync(file, 'utf8'), ts.ScriptTarget.ES2022, true);
+    for (const statement of source.statements) {
+      if (!(ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) || !statement.moduleSpecifier) continue;
+      if (ts.isImportDeclaration(statement) && statement.importClause?.isTypeOnly) continue;
+      const specifier = statement.moduleSpecifier.text;
+      if (!specifier.startsWith('.')) continue;
+      const target = path.resolve(path.dirname(file), specifier);
+      const resolved = [`${target}.ts`, path.join(target, 'index.ts'), target].find(candidate =>
+        fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+      if (resolved) visit(resolved);
+    }
+  };
+  visit(path.join(renderer, entry));
+  return new Set([...seen].map(file => path.relative(renderer, file).split(path.sep).join('/')));
+}
+
+test('the rare server screens and their stylesheets load with their first opening, not with the app (#852)', () => {
+  const startup = rendererStartupModules('main.ts');
+  assert.ok(startup.has('views/MainView.ts') && startup.has('views/main/ServerHeader.ts'), 'the renderer graph is followed');
+  for (const lazy of ['views/ServerSettingsModal.ts', 'views/ServerMonitorModal.ts', 'views/ServerAuditModal.ts',
+    'styles/serverAudit.css', 'styles/serverMonitor.css', 'views/serverSettings/serverSettingsImmediate.css']) {
+    assert.ok(!startup.has(lazy), `${lazy} is loaded at startup; load it with import() when the screen first opens`);
+  }
+});

@@ -1,0 +1,6 @@
+/* The overlay window's stylesheet (#852): it stays open over the game, so it
+   carries only the shared tokens and defaults, the audio state icons and its
+   own stage, never the app's theme.css. */
+@import './base.css';
+@import './audioStateIcon.css';
+@import './overlayStage.css';

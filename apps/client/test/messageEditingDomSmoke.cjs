@@ -1792,6 +1792,15 @@ async function installFixture() {
       appEvents.emit('server.updated', server.serverDetails);
       check(find('#chat-message-input').maxLength === 123, 'A live limit update changes the editor without reconnecting');
       const { OverlayStageView } = await import('/views/OverlayStageView.ts');
+      // The stage is styled by the overlay window's own sheet, not theme.css (#852).
+      const stageSheet = document.createElement('link');
+      stageSheet.rel = 'stylesheet';
+      stageSheet.href = '/styles/overlayStage.css';
+      await new Promise((resolve, reject) => {
+        stageSheet.addEventListener('load', resolve, { once: true });
+        stageSheet.addEventListener('error', reject, { once: true });
+        document.head.append(stageSheet);
+      });
       const overlayRoot = document.createElement('div');
       overlayRoot.style.cssText = 'position:fixed;left:0;top:0;width:600px;height:400px';
       document.body.append(overlayRoot);
@@ -1837,7 +1846,7 @@ async function installFixture() {
         overlay.isHovered = false;
         overlay.applyHoverState();
         check(getComputedStyle(root, '::after').opacity === '0', 'Leaving the overlay hides the frame');
-      } finally { overlay.destroy(); overlayRoot.remove(); document.body.classList.remove('overlay-window-mode'); }
+      } finally { overlay.destroy(); overlayRoot.remove(); stageSheet.remove(); document.body.classList.remove('overlay-window-mode'); }
       return checks;
     },
     async prepare(locale) {

@@ -17,13 +17,13 @@ function properties(block) {
   return new Map([...block.matchAll(/(--motion-[a-z-]+)\s*:\s*([^;]+);/g)].map(match => [match[1], match[2].trim()]));
 }
 
-// A token the stylesheets use but theme.css never defines silently runs its fallback,
+// A token the stylesheets use but base.css never defines silently runs its fallback,
 // so the motion keeps its duration even when the system asks for reduced motion (#490).
 test('every motion token in the stylesheets is defined and stops under reduced motion', () => {
-  const theme = fs.readFileSync(path.join(renderer, 'styles', 'theme.css'), 'utf8');
+  const theme = fs.readFileSync(path.join(renderer, 'styles', 'base.css'), 'utf8');
   const root = /:root\s*\{([^}]*)\}/.exec(theme)?.[1];
   const reduced = /@media \(prefers-reduced-motion: reduce\)\s*\{\s*:root\s*\{([^}]*)\}/.exec(theme)?.[1];
-  assert.ok(root && reduced, 'theme.css defines the motion tokens and their reduced-motion values');
+  assert.ok(root && reduced, 'base.css defines the motion tokens and their reduced-motion values');
   const defined = properties(root);
   const zeroed = properties(reduced);
   const used = new Map();
@@ -37,7 +37,7 @@ test('every motion token in the stylesheets is defined and stops under reduced m
   }
   assert.ok(used.size > 0, 'the stylesheets use the motion tokens');
   for (const [token, places] of used) {
-    assert.ok(defined.has(token), `${token} (used in ${[...places].join(', ')}) is not defined in theme.css`);
+    assert.ok(defined.has(token), `${token} (used in ${[...places].join(', ')}) is not defined in base.css`);
     if (token.endsWith('-duration')) {
       assert.equal(zeroed.get(token), '0ms', `${token} must be 0ms with prefers-reduced-motion: reduce`);
     }

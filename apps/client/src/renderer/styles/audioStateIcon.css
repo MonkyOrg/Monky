@@ -1,0 +1,36 @@
+/* Microphone and headphone state icons (views/AudioStateIcon.ts), drawn by
+   the app and by the overlay. */
+
+.audio-state-icon {
+  position: relative;
+  display: inline-flex;
+  width: 1em;
+  height: 1em;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.audio-state-icon > .material-symbols-outlined {
+  font-size: inherit;
+  line-height: 1;
+}
+.audio-state-icon--status { color: var(--text-muted); }
+.audio-state-icon--status.audio-state-icon--blocked { color: var(--danger); }
+.audio-state-icon > .audio-state-block {
+  position: absolute;
+  top: -.15em;
+  right: -.25em;
+  font-size: .65em;
+  border-radius: 50%;
+  color: var(--danger);
+  background: var(--bg-secondary);
+}
+.audio-state-block[hidden] { display: none; }
+
+.bot-voice-listening {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--warning);
+  font-size: 11px;
+  white-space: nowrap;
+}
