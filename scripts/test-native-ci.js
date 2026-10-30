@@ -1010,6 +1010,8 @@ test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only
       'Exercise native screen contracts and legal metadata'])
       for (const line of step(packaging, name).run.split('\n').map(text => text.trim()).filter(Boolean))
         assert.ok(labels.includes(line), line);
+    assert.equal(labels.includes('npm run test:packet-capture --workspace=apps/client'), platform === 'win32',
+      'The device-free screen audio contracts run locally wherever CI runs them (Windows).');
     const skipped = steps.filter(candidate => candidate.skip).map(candidate => candidate.label);
     assert.ok(skipped.includes('node apps/client/test/messageClipboardDomSmoke.cjs --system-clipboard'));
     assert.ok(skipped.some(label => label.startsWith('node scripts/ci-build-artifact.js collect')));
