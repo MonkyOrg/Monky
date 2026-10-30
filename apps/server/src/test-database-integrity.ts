@@ -651,11 +651,11 @@ test('the integrity migration keeps removed members\' history and bots, narrows 
 
   // The rebuilt tables lost only their references to users.
   const after = schemaShape(db);
-  // Later migrations may add objects of their own; everything that existed must come back unchanged.
+  // Later migrations may add or redefine objects of their own; everything else must come back unchanged.
   const later = fs.readdirSync(migrations).filter(name => name.endsWith('.sql') && name >= '058')
     .map(name => fs.readFileSync(path.join(migrations, name), 'utf8')).join('\n');
-  assert.deepEqual(after.objects.filter(object => before.objects.some(entry => entry.name === object.name) || !later.includes(object.name)),
-    before.objects, 'indexes and triggers are recreated as they were');
+  const untouched = (object: { name: string }) => !later.includes(object.name);
+  assert.deepEqual(after.objects.filter(untouched), before.objects.filter(untouched), 'indexes and triggers are recreated as they were');
   for (const [index, table] of before.tables.entries()) {
     assert.deepEqual(after.tables[index].columns, table.columns, table.table);
     const expected: Array<{ parent: string }> = table.foreignKeys;
@@ -693,7 +693,8 @@ test('the integrity migration keeps removed members\' history and bots, narrows 
     "SELECT category_id AS category, inherit_category_permissions AS inherits FROM channels WHERE id = 'uncategorized'").get();
   assert.deepEqual({ ...uncategorized }, { category: null, inherits: 0 });
   assert.deepEqual(ids(db, 'mentions'), ['stayer-mention']);
-  assert.deepEqual(ids(db, 'message_search_mentions', "message_id || ':' || user_id"), ['owner-message:stayer']);
+  // #834: the search index follows the chat rule; "@Kicked" names a removed member, nobody else.
+  assert.deepEqual(ids(db, 'message_search_mentions', "message_id || ':' || user_id"), []);
   assert.deepEqual(ids(db, 'message_reactions', 'message_id'), ['kicked-message']);
   assert.deepEqual(ids(db, 'message_deletion_backups', 'message_id'), []);
   assert.deepEqual(ids(db, 'native_poll_votes', "poll_id || ':' || user_id"), ['kicked-poll:owner']);

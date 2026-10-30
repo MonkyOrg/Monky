@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O filtro \"menciona:\" da busca agora segue a mesma regra das menções do chat: @Lucas não conta como menção de \"Lu\", e-mails, códigos e links não contam, apelidos acentuados funcionam em maiúsculas e uma mensagem editada continua aparecendo para quem ela menciona.",
+  "en": "The search \"mentions:\" filter now follows the same rule as chat mentions: @Lucas no longer counts as a mention of \"Lu\", e-mails, code and links don't count, accented nicknames work in capitals, and an edited message still shows up for whoever it mentions."
+}

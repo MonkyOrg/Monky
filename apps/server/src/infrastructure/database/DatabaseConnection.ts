@@ -4,6 +4,7 @@ import { Logger } from '../logger/Logger';
 import { type DatabaseCloseOptions, type DatabaseOpenOptions, IDatabaseDriver, SqlJsDriver } from './SqliteWrapper';
 import { ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { FOREIGN_KEY_INTEGRITY_MIGRATION, logPrivateResourcesToReview } from './privateResourceReview';
+import { MESSAGE_SEARCH_MENTIONS_MIGRATION, rebuildMessageSearchMentions } from './messageSearchMentions';
 
 export class DatabaseConnection {
   private db: IDatabaseDriver;
@@ -73,6 +74,8 @@ export class DatabaseConnection {
         const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
         this.db.transaction(() => {
           this.db.exec(sql);
+          // The mention rule lives in code (MentionMatcher), so SQL alone cannot rebuild the index.
+          if (file === MESSAGE_SEARCH_MENTIONS_MIGRATION) rebuildMessageSearchMentions(this.db);
           this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(file, Date.now());
         })();
         Logger.info('DATABASE', `Migration ${file} applied successfully`);
