@@ -1767,7 +1767,7 @@ async function run() {
   await fs.mkdir(allowed, { recursive: true });
   for (const label of ['publisher', 'viewer', ...(incompatibleViewer ? ['incompatible'] : [])]) {
     phase(`opening-normal-${label}`);
-    const runId = randomUUID(), root = path.join(allowed, `home-${runId}`), profile = path.join(root, 'client');
+    const runId = randomUUID(), root = path.join(allowed, protocolContracts.developmentQaRunName(runId)), profile = path.join(root, 'client');
     await fs.mkdir(root); roots.push(root);
     for (const child of ['', 'scratch', 'AppData\\Roaming', 'AppData\\Local', 'config', 'cache', 'data', 'cli'])
       await fs.mkdir(path.join(profile, child), { recursive: true });
