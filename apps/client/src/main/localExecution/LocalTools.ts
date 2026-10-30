@@ -26,6 +26,7 @@ import {
   type LocalToolReceipt,
 } from '@monky/shared';
 import { LocalExecutionError, localFailure } from './errors';
+import { canonicalDirectory } from '../canonicalDirectory';
 import {
   localToolDirectory,
   localToolFingerprint,
@@ -69,6 +70,11 @@ export interface LocalToolsOptions {
 export interface LocalTaskCacheOwner {
   /** An exit code alone does not confirm that native descendants are gone. */
   confirmNativeClosed(): void;
+  /**
+   * The worker is gone without that confirmation, and nothing can give it anymore. The cache stays on
+   * disk until the next start of the app, but no longer holds a task slot, maintenance or shutdown.
+   */
+  abandon(): void;
 }
 
 export const LOCAL_TASK_CACHE_MAX_BYTES = 64 * 1024 * 1024;
@@ -81,6 +87,14 @@ const PROBE_TIMEOUT: Readonly<Record<LocalToolId, number>> = { node: 10_000, 'yt
 const PROGRESS_INTERVAL = 200;
 const UUID = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
 const STAGING_NAME = new RegExp(`^\\.stage-(?:node|yt-dlp|ffmpeg)-${UUID}$`);
+const TASK_CACHE_NAME = new RegExp(`^task-${UUID}$`);
+
+/**
+ * Task caches this process created and has not deleted: live ones, and those kept after a worker exited
+ * without confirming its descendants. Startup only sweeps caches left by an earlier run, and a later
+ * LocalTools in the same process (macOS reopens the window without quitting) never deletes these.
+ */
+const processTaskCaches = new Set<string>();
 
 interface Recipe {
   name: string;
@@ -176,7 +190,7 @@ async function joinPreparation(preparation: Preparation | null): Promise<void> {
 }
 
 export class LocalTools {
-  private readonly root: string;
+  private root: string;
   private readonly platform: NodeJS.Platform;
   private readonly arch: string;
   private readonly onChanged: () => void;
@@ -333,10 +347,12 @@ export class LocalTools {
     return this.maintain(async () => {
       this.assertNativeOwnersClosed();
       await localToolDirectory(this.cacheDirectory());
-      const directories = new Set([
-        ...this.caches,
-        ...(await fs.readdir(this.cacheDirectory())).map((name) => localToolPath(this.root, 'cache', name)),
-      ]);
+      const directories = new Set(this.caches);
+      for (const name of await fs.readdir(this.cacheDirectory())) {
+        const directory = localToolPath(this.root, 'cache', name);
+        // A cache kept after an unconfirmed worker exit waits for the next start.
+        if (!processTaskCaches.has(directory)) directories.add(directory);
+      }
       for (const directory of directories) await this.removeCacheDirectory(directory);
       this.notify();
     });
@@ -345,8 +361,7 @@ export class LocalTools {
   async allocateTaskCache(): Promise<string> {
     const generation = this.generation;
     this.assertAvailable(this.lifetime.signal, generation);
-    const directory = localToolPath(this.root, 'cache', `task-${randomUUID()}`);
-    return this.queueCacheOperation(() => this.allocateCache(directory, generation));
+    return this.queueCacheOperation(() => this.allocateCache(generation));
   }
 
   /** Register before native startup; close must confirm closure and release this exact cache. */
@@ -358,12 +373,24 @@ export class LocalTools {
     }
     const owner: CacheOwner = { close, confirmed: false, closing: null };
     this.cacheOwners.set(directory, owner);
+    const current = (): void => {
+      if (this.cacheOwners.get(directory) !== owner || !this.caches.has(directory)) {
+        throw new LocalExecutionError('invalid_request');
+      }
+    };
     return {
       confirmNativeClosed: () => {
-        if (this.cacheOwners.get(directory) !== owner || !this.caches.has(directory)) {
-          throw new LocalExecutionError('invalid_request');
-        }
+        current();
         owner.confirmed = true;
+      },
+      abandon: () => {
+        current();
+        if (owner.confirmed) throw new LocalExecutionError('invalid_request');
+        // Deleting files a surviving descendant may still use stays forbidden, but waiting for a
+        // confirmation that can never come must not pin the task slot, maintenance or quitting.
+        this.cacheOwners.delete(directory);
+        this.caches.delete(directory);
+        this.notify();
       },
     };
   }
@@ -451,12 +478,15 @@ export class LocalTools {
   private async load(): Promise<void> {
     const signal = new AbortController().signal;
     try {
+      // A junction above the profile is the user's layout; links are refused only from the app's folder down.
+      this.root = path.join(await canonicalDirectory(path.dirname(this.root)), path.basename(this.root));
       await localToolDirectory(path.dirname(this.root));
       await localToolDirectory(this.root, true);
       await localToolDirectory(this.toolsDirectory(), true);
       await localToolDirectory(this.cacheDirectory(), true);
       this.support = await localToolExtractionSupport(this.platform, this.arch);
       await this.cleanStages();
+      await this.removeEarlierTaskCaches();
       await this.refresh(signal);
     } catch (error) {
       throw toolError(error, 'storage_failed');
@@ -468,6 +498,21 @@ export class LocalTools {
     await localToolDirectory(this.toolsDirectory());
     for (const name of await fs.readdir(this.toolsDirectory())) {
       if (STAGING_NAME.test(name)) await removeLocalToolTree(this.root, localToolPath(this.root, 'tools', name));
+    }
+  }
+
+  /** Caches kept after an unconfirmed worker exit would otherwise hold their slots in every later run. */
+  private async removeEarlierTaskCaches(): Promise<void> {
+    await localToolDirectory(this.cacheDirectory());
+    for (const name of await fs.readdir(this.cacheDirectory())) {
+      const directory = localToolPath(this.root, 'cache', name);
+      if (!TASK_CACHE_NAME.test(name) || processTaskCaches.has(directory)) continue;
+      try {
+        await removeLocalToolTree(this.root, directory);
+      } catch (error) {
+        // A descendant that outlived its worker may still hold a file (EBUSY/EPERM); a later start retries.
+        if (!(error instanceof LocalExecutionError) || error.reason !== 'storage_failed') throw error;
+      }
     }
   }
 
@@ -778,6 +823,7 @@ export class LocalTools {
       if (path.dirname(directory) === this.toolsDirectory()) this.assertNativeOwnersClosed();
       else this.assertCacheOwnerClosed(directory);
       await removeLocalToolTree(this.root, directory);
+      processTaskCaches.delete(directory);
       this.failedCleanups.delete(directory);
       if (!this.failedCleanups.size) this.cleanupFailure = null;
     } catch (error) {
@@ -912,13 +958,16 @@ export class LocalTools {
     }
   }
 
-  private async allocateCache(directory: string, generation: number): Promise<string> {
+  private async allocateCache(generation: number): Promise<string> {
+    let directory: string | undefined;
     let created = false;
     try {
       this.assertAvailable(this.lifetime.signal, generation);
       await this.initialize();
       this.assertAvailable(this.lifetime.signal, generation);
       if (this.caches.size >= MAX_TASK_CACHES) throw new LocalExecutionError('storage_failed');
+      // Named only after initialization has settled the canonical root.
+      directory = localToolPath(this.root, 'cache', `task-${randomUUID()}`);
       this.caches.add(directory);
       await localToolDirectory(this.cacheDirectory());
       const entries = await fs.readdir(this.cacheDirectory());
@@ -944,13 +993,16 @@ export class LocalTools {
       this.assertAvailable(this.lifetime.signal, generation);
       await fs.mkdir(directory, { mode: 0o700 });
       created = true;
+      processTaskCaches.add(directory);
       this.assertAvailable(this.lifetime.signal, generation);
       this.notify();
       this.assertAvailable(this.lifetime.signal, generation);
       return directory;
     } catch (error) {
-      if (created) await this.cleanup(directory);
-      this.caches.delete(directory);
+      if (directory !== undefined) {
+        if (created) await this.cleanup(directory);
+        this.caches.delete(directory);
+      }
       throw toolError(error, 'storage_failed');
     }
   }
@@ -969,6 +1021,7 @@ export class LocalTools {
   private async removeCacheDirectory(directory: string): Promise<void> {
     this.assertCacheOwnerClosed(directory);
     await removeLocalToolTree(this.root, directory);
+    processTaskCaches.delete(directory);
     this.caches.delete(directory);
     this.cacheOwners.delete(directory);
   }

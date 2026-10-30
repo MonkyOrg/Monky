@@ -8,12 +8,23 @@ import {
   type LiveActionRecord,
   type NativeLiveFormRecord,
   type NativeLiveFormResponse,
+  type ResourceAudience,
   type ServerEvent,
 } from '@monky/shared';
 import type { IDatabaseDriver } from './SqliteWrapper';
 import { SqliteResourceAudienceRepository } from './SqliteResourceAudienceRepository';
 
 interface SnapshotRow { snapshot: string }
+
+/**
+ * Reads take the audience from its own tables. A copy in the snapshot could
+ * only go stale and bring back someone removed since (S-APP-2), so none is kept.
+ */
+function snapshotOf<T extends { audience: ResourceAudience }>(record: T): string {
+  const { audience: _audience, ...snapshot } = record;
+  return JSON.stringify(snapshot);
+}
+
 export class SqliteCommunityRepository {
   private readonly audiences: SqliteResourceAudienceRepository;
   constructor(private readonly db: IDatabaseDriver) {
@@ -60,7 +71,7 @@ export class SqliteCommunityRepository {
       this.db.prepare(`INSERT INTO server_events (id, snapshot, status, starts_at, ends_at) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET snapshot = excluded.snapshot, status = excluded.status,
         starts_at = excluded.starts_at, ends_at = excluded.ends_at`)
-        .run(event.id, JSON.stringify(event), event.status, event.startsAt, event.endsAt);
+        .run(event.id, snapshotOf(event), event.status, event.startsAt, event.endsAt);
       this.audiences.replace('event', event.id, event.audience);
     })();
   }
@@ -109,7 +120,7 @@ export class SqliteCommunityRepository {
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO bot_live_actions (id, bot_id, channel_id, expires_at, snapshot) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET expires_at = excluded.expires_at, snapshot = excluded.snapshot`)
-        .run(action.id, action.botId, action.channelId, action.expiresAt, JSON.stringify(action));
+        .run(action.id, action.botId, action.channelId, action.expiresAt, snapshotOf(action));
       this.audiences.replace('live_action', action.id, action.audience);
     })();
   }
@@ -146,7 +157,7 @@ export class SqliteCommunityRepository {
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET expires_at = excluded.expires_at,
           closed_at = excluded.closed_at, snapshot = excluded.snapshot`)
-        .run(form.id, form.channelId, form.creatorUserId, form.expiresAt, form.closedAt, JSON.stringify(form));
+        .run(form.id, form.channelId, form.creatorUserId, form.expiresAt, form.closedAt, snapshotOf(form));
       this.audiences.replace('native_form', form.id, form.audience);
     })();
   }
@@ -162,12 +173,13 @@ export class SqliteCommunityRepository {
   }
 
   closeExpiredNativeForms(now: number): NativeLiveFormRecord[] {
-    return this.db.transaction(() => {
-      const rows: Array<{ id: string }> = this.db.prepare(`SELECT id FROM native_live_forms
-        WHERE closed_at IS NULL AND expires_at <= ?`).all(now);
-      return rows.map(row => this.closeNativeForm(row.id, this.nativeForm(row.id)?.expiresAt ?? now))
-        .filter((form): form is NativeLiveFormRecord => !!form);
-    })();
+    // Polled every second: the transaction only opens when a form is due.
+    const rows: Array<{ id: string }> = this.db.prepare(`SELECT id FROM native_live_forms
+      WHERE closed_at IS NULL AND expires_at <= ?`).all(now);
+    if (rows.length === 0) return [];
+    return this.db.transaction(() => rows
+      .map(row => this.closeNativeForm(row.id, this.nativeForm(row.id)?.expiresAt ?? now))
+      .filter((form): form is NativeLiveFormRecord => !!form))();
   }
 
   deleteClosedNativeForms(closedBefore: number): number {

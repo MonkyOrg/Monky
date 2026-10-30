@@ -14,7 +14,7 @@ import { DM_MAX_FILE_BYTES_OPTIONS, MessageType, normalizeNickname } from '@monk
 import { dmStore } from '../../../stores/dmStore';
 import { formatBytes } from '../../../utils/attachment';
 import { appEvents } from '../../../core/EventBus';
-import { currentPresenceStatus, type PresenceStatus } from '../../../core/SessionManager';
+import { currentPresenceStatus, sessionManager, type PresenceStatus } from '../../../core/SessionManager';
 import { CustomStatusEditor } from '../../CustomStatusModal';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { customStatusLabel } from '../../../utils/presenceTag';
@@ -415,6 +415,8 @@ export class AccountTab {
         connectionStore.clientId = imported.clientId;
         connectionStore.publicKey = imported.publicKey;
         connectionStore.hasIdentity = true;
+        // Connections already open stay signed in as before; when they reconnect, they sign in as this identity.
+        for (const session of sessionManager.getAll()) session.client.adoptIdentity(imported);
         // The imported identity brings its own friends and conversations.
         void dmStore.reload();
         const restored = imported.restoredScopes ?? [];

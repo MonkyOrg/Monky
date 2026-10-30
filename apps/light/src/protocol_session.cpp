@@ -13,7 +13,7 @@ using namespace std::chrono_literals;
 
 constexpr auto authTimeout = 15s;
 constexpr auto rpcTimeout = 10s;
-// NetworkClient uses 12s, not the unrelated shared 35s timeout.
+// NetworkClient uses 12s, inside the server's 20s shared heartbeat timeout.
 constexpr auto pongTimeout = 12s;
 constexpr auto transitionTimeout = 30s;
 constexpr auto earlySignalTimeout = 5s;

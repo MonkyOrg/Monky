@@ -3,6 +3,7 @@ import { constants, type Stats } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { samePath } from '../canonicalDirectory';
 import { LocalExecutionError } from './errors';
 
 const MAX_TREE_ENTRIES = 10_000;
@@ -43,12 +44,6 @@ export function localToolPath(root: string, ...parts: string[]): string {
     throw new LocalExecutionError('invalid_request');
   }
   return filename;
-}
-
-function samePath(first: string, second: string): boolean {
-  return process.platform === 'win32'
-    ? path.normalize(first).toLowerCase() === path.normalize(second).toLowerCase()
-    : path.normalize(first) === path.normalize(second);
 }
 
 export async function localToolStat(filename: string): Promise<Stats | null> {

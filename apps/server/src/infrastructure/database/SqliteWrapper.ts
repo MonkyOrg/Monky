@@ -22,6 +22,13 @@ export interface IDatabaseDriver {
   transaction<T>(fn: () => T): () => T;
   transactionAsync<T>(fn: () => Promise<T>): Promise<T>;
   pragma(pragmaStr: string): void;
+  /**
+   * Writable connections always enforce foreign keys; only the schema
+   * migrations turn them off, as SQLite's table rebuilds require.
+   */
+  setForeignKeys(enabled: boolean): void;
+  /** Persists pending changes now instead of at the end of the debounce. */
+  flush(): void;
   close(options?: DatabaseCloseOptions): void;
 }
 
@@ -30,7 +37,11 @@ export class SqlJsDriver implements IDatabaseDriver {
   private dbPath: string;
   private inTransaction: number = 0;
   private isClosed: boolean = false;
+  /** The file lacks changes the in-memory database has. */
   private dirty: boolean = false;
+  /** The open transaction changed rows: they are persisted only if it commits. */
+  private transactionWrote = false;
+  private foreignKeys = true;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly SAVE_DEBOUNCE_MS = 3000;
 
@@ -63,6 +74,7 @@ export class SqlJsDriver implements IDatabaseDriver {
         // get/all can also execute SQL with side effects, so SQLite enforces the snapshot.
         db.exec('PRAGMA query_only = ON;');
       } else {
+        driver.applyForeignKeys();
         // A failed initial write must not publish an unpersisted database.
         driver.flushToDisk(true);
       }
@@ -76,22 +88,29 @@ export class SqlJsDriver implements IDatabaseDriver {
     if (this.readOnly) throw new Error('Cannot modify a read-only database snapshot.');
   }
 
+  /** Changed rows reach the file after the debounce, or when the open transaction commits. */
+  private recordWrite(): void {
+    if (this.inTransaction > 0) this.transactionWrote = true;
+    else this.markDirty();
+  }
+
   /**
    * Marks the in-memory database as needing persistence and schedules a
    * debounced flush. This avoids exporting and rewriting the entire database
    * file on every single write, which is prohibitively expensive with sql.js.
    */
-  private saveToDisk(): void {
-    if (this.isClosed || this.inTransaction > 0) {
-      return;
-    }
+  private markDirty(): void {
+    if (this.isClosed) return;
     this.dirty = true;
-    if (this.saveTimer === null) {
-      this.saveTimer = setTimeout(() => {
-        this.saveTimer = null;
-        this.flushToDisk();
-      }, SqlJsDriver.SAVE_DEBOUNCE_MS);
-    }
+    this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
+    if (this.isClosed || this.saveTimer !== null) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.flushToDisk();
+    }, SqlJsDriver.SAVE_DEBOUNCE_MS);
   }
 
   /** Synchronously exports the in-memory database to disk if dirty. */
@@ -108,16 +127,31 @@ export class SqlJsDriver implements IDatabaseDriver {
     }
     try {
       const data = this.db.export();
-      const buffer = Buffer.from(data);
-      this.writeSnapshot(buffer);
-      this.dirty = false;
+      try {
+        this.writeSnapshot(data);
+        this.dirty = false;
+      } finally {
+        // sql.js 1.14 closes and reopens the connection inside export(), which
+        // resets every pragma; versions that keep it open make this a no-op (S-APP-1).
+        this.applyForeignKeys();
+      }
     } catch (e) {
       console.error('[DATABASE] Error persisting sqlite database to disk:', e);
       if (throwOnError) throw e;
     }
   }
 
-  private writeSnapshot(buffer: Buffer): void {
+  /** Applies the foreign key enforcement this driver promises and checks SQLite took it. */
+  private applyForeignKeys(): void {
+    const expected = this.foreignKeys ? 1 : 0;
+    this.db.exec(`PRAGMA foreign_keys = ${expected};`);
+    const [result] = this.db.exec('PRAGMA foreign_keys;');
+    if (result?.values[0]?.[0] !== expected) {
+      throw new Error(`SQLite did not ${expected ? 'enable' : 'disable'} foreign key enforcement.`);
+    }
+  }
+
+  private writeSnapshot(data: Uint8Array): void {
     const temporaryPath = `${this.dbPath}.tmp-${randomUUID()}`;
     let created = false;
     try {
@@ -127,7 +161,10 @@ export class SqlJsDriver implements IDatabaseDriver {
       let writeFailed = false;
       let writeError: unknown;
       try {
-        fs.writeFileSync(descriptor, buffer);
+        fs.writeFileSync(descriptor, data);
+        // The rename must not publish bytes still in the OS cache: a power loss
+        // would leave a truncated or zeroed database in place of the old one.
+        fs.fsyncSync(descriptor);
       } catch (error) {
         writeFailed = true;
         writeError = error;
@@ -202,9 +239,12 @@ export class SqlJsDriver implements IDatabaseDriver {
             stmt.bind(params);
           }
           stmt.step();
-          self.saveToDisk();
+          // run() only executes DML, so the count is this statement's own. One
+          // that changed nothing must not rewrite the database file (S-APP-3).
+          const changes = db.getRowsModified();
+          if (changes > 0) self.recordWrite();
           return {
-            changes: db.getRowsModified(),
+            changes,
             lastInsertRowid: 0,
           };
         } finally {
@@ -214,10 +254,11 @@ export class SqlJsDriver implements IDatabaseDriver {
     };
   }
 
+  /** Schema changes and scripts report no row count, so they are always persisted. */
   public exec(sql: string): void {
     this.assertWritable();
     this.db.exec(sql);
-    this.saveToDisk();
+    this.recordWrite();
   }
 
   public transaction<T>(fn: () => T): () => T {
@@ -226,12 +267,15 @@ export class SqlJsDriver implements IDatabaseDriver {
       self.assertWritable();
       self.inTransaction++;
       if (self.inTransaction === 1) {
+        self.transactionWrote = false;
         self.db.exec('BEGIN TRANSACTION;');
       }
+      let committed = false;
       try {
         const result = fn();
         if (self.inTransaction === 1) {
           self.db.exec('COMMIT;');
+          committed = true;
         }
         return result;
       } catch (err) {
@@ -244,7 +288,9 @@ export class SqlJsDriver implements IDatabaseDriver {
       } finally {
         self.inTransaction--;
         if (self.inTransaction === 0) {
-          self.saveToDisk();
+          // Read-only and rolled-back transactions leave the file as it was (S-APP-3).
+          if (committed && self.transactionWrote) self.markDirty();
+          self.transactionWrote = false;
         }
       }
     };
@@ -262,16 +308,16 @@ export class SqlJsDriver implements IDatabaseDriver {
     }
     this.db.exec('BEGIN TRANSACTION;');
     this.inTransaction = 1;
-    let settled = false;
+    this.transactionWrote = false;
+    let committed = false;
     try {
       const result = await fn();
       this.db.exec('COMMIT;');
-      settled = true;
+      committed = true;
       return result;
     } catch (error) {
       try {
         this.db.exec('ROLLBACK;');
-        settled = true;
       } catch (rollbackError) {
         throw new AggregateError(
           [error, rollbackError],
@@ -282,7 +328,10 @@ export class SqlJsDriver implements IDatabaseDriver {
       throw error;
     } finally {
       this.inTransaction = 0;
-      if (settled) this.saveToDisk();
+      if (committed && this.transactionWrote) this.dirty = true;
+      this.transactionWrote = false;
+      // The flush cancelled above may still owe earlier changes to the file.
+      if (this.dirty) this.scheduleFlush();
     }
   }
 
@@ -293,6 +342,20 @@ export class SqlJsDriver implements IDatabaseDriver {
     } catch (e) {
       // Ignore unsupported pragmas in WASM
     }
+  }
+
+  public setForeignKeys(enabled: boolean): void {
+    this.assertWritable();
+    // SQLite silently ignores the pragma inside a transaction.
+    if (this.inTransaction > 0) throw new Error('Foreign key enforcement cannot change inside a transaction.');
+    this.foreignKeys = enabled;
+    this.applyForeignKeys();
+  }
+
+  public flush(): void {
+    // An export would end the open transaction.
+    if (this.inTransaction > 0) throw new Error('Cannot persist the database while a transaction is open.');
+    this.flushToDisk(true);
   }
 
   public close(options: DatabaseCloseOptions = {}): void {

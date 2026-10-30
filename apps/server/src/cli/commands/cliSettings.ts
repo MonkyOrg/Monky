@@ -1,5 +1,5 @@
 import type { GlobalArgs } from '../context';
-import { withContext } from '../context';
+import { withReadOnlyContext } from '../context';
 import { resolveTargetServer } from '../target';
 import { askChoice } from '../prompts';
 import {
@@ -40,7 +40,7 @@ export async function cliSettingsMenu(globalArgs: GlobalArgs): Promise<void> {
     if (action === 'language') await cliLanguageCommand([]);
     else if (action === 'server') {
       const target = await resolveTargetServer(globalArgs, t('action.manage'));
-      await withContext(target.dataDir, showConfig);
+      await withReadOnlyContext(target.dataDir, showConfig);
     } else throw new Error(t('prompt.invalidOption'));
   }
 }

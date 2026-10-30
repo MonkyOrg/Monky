@@ -69,7 +69,7 @@ test('identity, backup, hosting, media files, downloads and auto-start are wired
   visit(source);
   assert.equal(guardFactory, 'mainFrameHandle(ipcMain, mainWindow)');
   const sensitive = [
-    'identity:has', 'identity:get', 'identity:get-client-id', 'identity:sign-challenge',
+    'identity:status', 'identity:create', 'identity:get', 'identity:get-client-id', 'identity:sign-challenge',
     'identity:export', 'identity:import', 'identity:logout',
     'backup:encrypt', 'backup:decrypt', 'backup:save-file', 'backup:open-file',
     'server-host:start', 'server-host:stop', 'server-host:status', 'server-host:logs',

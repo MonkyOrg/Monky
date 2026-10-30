@@ -44,7 +44,8 @@ function fixture(create) {
   const events = [];
   const errors = [];
   const logListeners = new Set();
-  const io = { directories: [], removed: [], renamed: [], existing: new Set(), failure: null, entries: [], snapshots: [] };
+  const io = { directories: [], removed: [], renamed: [], existing: new Set(), failure: null, entries: [], snapshots: [],
+    removal: null, removalFailure: null };
   const fakeFs = {
     existsSync: name => io.existing.has(name),
     mkdirSync(name) {
@@ -52,7 +53,16 @@ function fixture(create) {
       if (io.failure) throw io.failure;
     },
     renameSync: (from, to) => { io.renamed.push([from, to]); },
-    rmSync: name => { io.removed.push(name); },
+    rmSync: () => assert.fail('Deleting server data must not block the main process'),
+    promises: {
+      async rm(name, options) {
+        assert.equal(options.recursive, true);
+        assert.equal(options.force, true);
+        io.removed.push(name);
+        if (io.removal) await io.removal.promise;
+        if (io.removalFailure) throw io.removalFailure;
+      },
+    },
     readdirSync: () => io.entries.map(name => ({ name, isDirectory: () => true, isSymbolicLink: () => false })),
   };
   const fakeWindow = {
@@ -394,6 +404,32 @@ test('data deletion waits for pending lifecycle mutations and never removes an o
   await stop;
   assert.equal((await deleteAfterStop).success, true);
   assert.deepEqual(f.io.removed, [path.join('C:\\', 'synthetic-monky-profile', 'server-data', 'a')]);
+});
+
+test('data deletion runs off the main thread and holds the lifecycle queue until the folder is gone', async () => {
+  const server = runtime();
+  const f = fixture(async () => server);
+  const removal = deferred();
+  f.io.removal = removal;
+  const deletion = f.manager.deleteServerData('a');
+  await flush();
+  assert.deepEqual(f.io.removed, [path.join('C:\\', 'synthetic-monky-profile', 'server-data', 'a')]);
+  const start = f.manager.startServer(serverA);
+  await flush();
+  assert.equal(f.configCalls.length, 0, 'the same data folder cannot be reopened while it is being deleted');
+  assert.deepEqual(structuredClone(f.manager.getStatus()), stopped);
+  removal.resolve();
+  assert.equal((await deletion).success, true);
+  assert.equal((await start).success, true);
+  assert.equal(server.starts, 1);
+  await f.manager.stopServer(serverA.port);
+  f.io.removal = null;
+  f.io.removalFailure = new Error('Synthetic sharing violation');
+  const failed = await f.manager.deleteServerData('a');
+  assert.equal(failed.success, false);
+  assert.equal(failed.error, 'Synthetic sharing violation');
+  f.io.removalFailure = null;
+  assert.equal((await f.manager.startServer(serverA)).success, true, 'a failed deletion does not wedge the queue');
 });
 
 test('invalid IPC start inputs are rejected before any filesystem access or server creation', async () => {

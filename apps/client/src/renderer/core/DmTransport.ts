@@ -31,11 +31,31 @@ interface Link {
   observed: Map<string, string>;
 }
 
-function relayReady(session: ServerSession): boolean {
+/**
+ * The identity a session is signed in as. After an identity import, sessions
+ * opened before keep the old one until they reconnect (#490).
+ */
+function sessionIdentity(session: ServerSession): string | null {
+  const publicKey = session.serverStore.currentUser?.publicKey;
+  if (!publicKey) return null;
+  try {
+    return normalizePublicKeyHex(publicKey);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the session can carry this identity's DMs. A session signed in as
+ * another identity cannot: friends drop envelopes whose server-stamped sender
+ * does not match, and DMs for this identity are not routed to it.
+ */
+function relayReady(session: ServerSession, me: string): boolean {
   const details = session.serverStore.serverDetails;
   return session.client.getStatus() === 'CONNECTED'
     && !!details?.protocol?.features.includes('dm-relay')
-    && details.dmRelayEnabled !== false;
+    && details.dmRelayEnabled !== false
+    && sessionIdentity(session) === me;
 }
 
 function identityOf(user: UserSummary): string | null {
@@ -85,7 +105,11 @@ export class DmTransport {
   /** Kept in sync by the DM store from each snapshot. */
   setIdentity(me: string | null, friends: Iterable<string>, known: Iterable<string> = friends): void {
     if (me !== this.me) {
-      for (const link of this.links.values()) link.observed.clear();
+      // Another identity (an import): every link has to prove it is signed in as it, and greet again.
+      for (const link of this.links.values()) {
+        this.reset(link);
+        link.observed.clear();
+      }
     }
     this.me = me;
     const next = new Set(friends);
@@ -247,12 +271,23 @@ export class DmTransport {
     };
     link.off = session.client.onEvent((event, data) => {
       if (event === DELIVER_EVENT) this.deliver(link, data);
-      else if (event === 'network.disconnected' || event === 'network.disposed') link.ready = false;
+      // A new sign-in may be as another identity, and the server forgot who was greeted: start the link over.
+      else if (event === 'network.connected' || event === 'network.disconnected' || event === 'network.disposed') {
+        this.reset(link);
+      }
     });
     return link;
   }
 
+  private reset(link: Link): void {
+    link.ready = false;
+    link.visibleFriends.clear();
+    link.senders.clear();
+  }
+
   private deliver(link: Link, data: unknown): void {
+    // Items reaching a session signed in as another identity are not for this store.
+    if (!this.me || sessionIdentity(link.session) !== this.me) return;
     const payload = data as Partial<DmRelayDeliverPayload> | null;
     if (!payload || typeof payload.from !== 'string' || typeof payload.data !== 'string' || typeof payload.kind !== 'string') return;
     let from: string;
@@ -282,7 +317,7 @@ export class DmTransport {
 
     const now = Date.now();
     for (const link of this.links.values()) {
-      const ready = relayReady(link.session);
+      const ready = relayReady(link.session, this.me);
       if (!ready) {
         link.ready = false;
         link.visibleFriends.clear();

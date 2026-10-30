@@ -82,7 +82,7 @@ In **Settings → Bot tools**, the person can inspect installed tools, versions,
 - **Tools:** portable Node.js, yt-dlp, and FFmpeg come from Monky-known recipes with integrity verification. They are not global installations or changes to the person's `PATH`.
 - **Sharing:** bots may reuse the same installed files; their authorizations remain separate.
 - **Revocation and removal:** stop affected work. Removing a tool revokes dependent capabilities; the bot cannot silently reinstall it.
-- **Clear cache:** stops local tasks but keeps tools and permissions. Displayed space is retained storage, not the total audio already transmitted.
+- **Clear cache:** stops local tasks but keeps tools and permissions. Displayed space is retained storage, not the total audio already transmitted. If a task's process is ended from outside (from the Task Manager, for example), the task ends as failed without blocking new tasks or quitting Monky; its temporary files are kept until Monky next starts, which removes them.
 
 ::: warning Trust and connectivity limits
 A separate process improves lifecycle isolation but **is not an operating-system sandbox**. The SDK requests fixed operations; it does not receive a shell API, executable paths, or bot-supplied scripts. Electron Main validates consent, rather than a renderer preference granting it.

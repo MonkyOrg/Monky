@@ -106,7 +106,6 @@ const unbindBotDeviceStorage = bindBotDeviceStorage(isMainWindowContents, botDev
 app.once('will-quit', () => {
   unbindBotScreenDocuments();
   unbindBotDeviceStorage();
-  void botDeviceStorage.dispose();
 });
 const serverInviteInbox = new ServerInviteInbox();
 let overlayManager: OverlayManager | null = null;
@@ -122,6 +121,14 @@ let leaveAnnounced = false;
 let localExecution: ReturnType<typeof setupIpcHandlers> | null = null;
 let localExecutionStopping = false;
 let localExecutionStopped = false;
+/**
+ * How long quitting waits for hosted servers to stop and bot storage to finish writing. A server
+ * flushes its database only at the end of its stop (sql.js writes every few seconds), so exiting
+ * without waiting loses what was saved just before; a stop that hangs still cannot keep Monky open.
+ */
+const HOSTED_SHUTDOWN_TIMEOUT_MS = 8000;
+let hostedServicesStopping = false;
+let hostedServicesStopped = false;
 
 function notifyServerInvite(): void {
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
@@ -262,6 +269,22 @@ function shutdownServer(): void {
   if (isShuttingDown) return;
   isShuttingDown = true;
   void serverManager.stopAll().catch(() => {});
+}
+
+/** The last quit phase: once hosted servers and bot storage settle, or the deadline passes, quit for real. */
+function stopHostedServicesThenQuit(): void {
+  if (hostedServicesStopping) return;
+  hostedServicesStopping = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), HOSTED_SHUTDOWN_TIMEOUT_MS); });
+  // stopAll logs its own failures; a failed stop must not keep the app open either.
+  const stopping = Promise.allSettled([serverManager.stopAll(), botDeviceStorage.dispose()]);
+  void Promise.race([stopping, deadline]).then((outcome) => {
+    clearTimeout(timer);
+    if (outcome === 'timeout') console.warn('[ServerManager] Hosted servers did not stop in time; quitting anyway.');
+    hostedServicesStopped = true;
+    app.quit();
+  });
 }
 
 function quitApplication(): void {
@@ -685,9 +708,14 @@ app.on('before-quit', (event) => {
     return;
   }
 
+  if (!hostedServicesStopped) {
+    event.preventDefault();
+    stopHostedServicesThenQuit();
+    return;
+  }
+
   crashRecovery?.dispose();
   clientLogger?.shutdown();
-  shutdownServer();
   trayManager?.destroy();
   overlayManager?.close();
 });

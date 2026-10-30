@@ -53,7 +53,7 @@ function fixture(restricted = true) {
     const ws = Object.create(WebSocket.prototype) as WebSocket;
     Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
     return {
-      ws, sessionId: id, isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+      ws, sessionId: id, lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
       user: { id, sessionId: id, clientId: id, nickname: id, status: 'ONLINE', joinedAt: 1 },
     };
   };

@@ -129,7 +129,7 @@ async function setupHomeDiscordSmoke() {
   const second = saved('second.test', 5102, 1);
 
   window.api = {
-    hasIdentity: async () => true,
+    getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => identity,
     signChallenge: async nonce => { signatures.push(nonce); return `fixture-signature:${nonce}`; },
     getClientLogConfig: async () => ({ enabled: false }),
@@ -394,7 +394,7 @@ async function setupFirstLaunchGuideSmoke() {
   const sockets = [];
   const unsubscribe = () => () => {};
   window.api = {
-    hasIdentity: async () => true,
+    getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => ({ clientId: 'fixture-client', publicKey: 'fixture-public-key' }),
     signChallenge: async nonce => `fixture-signature:${nonce}`,
     getClientLogConfig: async () => ({ enabled: false }),

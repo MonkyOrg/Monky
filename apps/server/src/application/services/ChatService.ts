@@ -50,6 +50,17 @@ function isMessageChannel(type: string): boolean {
   return type === 'TEXT' || type === 'VOICE';
 }
 
+/**
+ * The newest `limit` messages, oldest first, plus the older ones sharing the
+ * oldest kept millisecond: that timestamp is the client's next
+ * `beforeTimestamp`, which would skip them (S-APP-11).
+ */
+function newestPage(messages: MessageRecord[], limit: number): MessageRecord[] {
+  let start = Math.max(0, messages.length - limit);
+  while (start > 0 && messages[start - 1].createdAt === messages[start].createdAt) start--;
+  return messages.slice(start);
+}
+
 const forwardRequestSchema = z.object({ sourceMessageId: messageReferenceSchema.optional() }).strict();
 
 export class ChatService {
@@ -601,6 +612,8 @@ export class ChatService {
   public async expireDeletedMessages(): Promise<void> {
     const now = Date.now();
     const messageIds = await this.messageRepo.listExpiredDeletionMessageIds(now);
+    // Swept every few seconds; an undo backup only expires with its message (S-APP-3).
+    if (messageIds.length === 0) return;
     this.polls?.deleteForMessages(messageIds);
     // Before the purge below stops listing them, so a failure is retried on the next sweep.
     await this.attachmentService.purgeForMessages(messageIds);
@@ -682,7 +695,7 @@ export class ChatService {
     for (const message of rawMessages) {
       if (await this.canViewMessage(viewerUserId, message)) visible.push(message);
     }
-    return this.hydrateMessages(visible.slice(-boundedLimit), viewerUserId);
+    return this.hydrateMessages(newestPage(visible, boundedLimit), viewerUserId);
   }
 
   /** Shared by history and search so replies, blocks and deleted content have one policy. */

@@ -3690,6 +3690,8 @@ test('bot permission migration preserves existing roles and channels and runs on
   const dbPath = path.join(dataDir, 'server.db');
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const legacy = await SqlJsDriver.create(dbPath);
+  // Versions this old wrote without foreign keys, and the fixture has no server row.
+  legacy.setForeignKeys(false);
   const migrations = path.join(__dirname, 'infrastructure', 'database', 'migrations');
   legacy.exec('CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
   for (const file of fs.readdirSync(migrations).filter((name) => name.endsWith('.sql') && name < '017').sort()) {

@@ -1,7 +1,7 @@
 import { LIMITS, LOG_LEVELS, LogLevel } from '@monky/shared';
 import { SqliteServerRepository } from '../../infrastructure/database/SqliteRepositories';
 import { ANSI, color, DEFAULT_SERVER_NAME } from '../constants';
-import { formatBotCompatibilityWarnings, printBotCompatibilityWarning } from '../botCompatibility';
+import { formatBotCompatibilityWarnings, printBotCompatibility, printBotCompatibilityWarning, waitForLocalServerPreview } from '../botCompatibility';
 import { GlobalArgs, readLocalConfig, withContext } from '../context';
 import { describeTurnPortProblem, describeTurnUnavailability, formatBool, formatProcessStatus, parseOption, parsePositiveInt, pad } from '../formatters';
 import {
@@ -27,6 +27,7 @@ import { CoturnManager, TURN_LISTENING_PORT } from '../../infrastructure/turn/Co
 import { getCliLanguage, t } from '../i18n/index';
 import { prepareUpdateRestart } from '../../infrastructure/lifecycle/updateRestart';
 import { Logger } from '../../infrastructure/logger/Logger';
+import { updateTiming } from '../updateSafety';
 
 /**
  * Flags that only ever applied while the database was being created.
@@ -206,28 +207,37 @@ export async function stopServerCommand(globalArgs: GlobalArgs): Promise<void> {
   console.log(color(t('lifecycle.logsAvailable'), ANSI.dim));
 }
 
-export async function restartServerCommand(globalArgs: GlobalArgs, args: string[] = []): Promise<void> {
-  if (!requirePm2(t('action.restart'))) return;
+/** Resolves `true` only when the server was actually restarted. */
+export async function restartServerCommand(globalArgs: GlobalArgs, args: string[] = []): Promise<boolean> {
+  if (!requirePm2(t('action.restart'))) return false;
 
   const fresh = args.includes('--fresh');
+  const afterUpdate = args.includes('--after-update');
   const target = await resolveTargetServer(globalArgs, t('action.restart'));
   const processName = getPm2ProcessName(target.dataDir);
 
   if (!isMonkyServerRegistered(processName) && !findLegacyProcessFor(target.dataDir)) {
     console.log(color(t('lifecycle.notRegisteredStart'), ANSI.yellow));
-    return;
+    return false;
+  }
+
+  const current = findPm2Process(processName) ?? findLegacyProcessFor(target.dataDir);
+  // An update only reloads servers that were running: one the operator
+  // stopped on purpose must not come back up at 4am.
+  if (afterUpdate && !(current?.pm2_env?.status === 'online' && current.pid)) {
+    console.log(color(t('lifecycle.updateLeftStopped'), ANSI.dim));
+    return false;
   }
 
   // A restart drops every open session, same as a stop (#334).
-  if (!(await confirmDisconnectingUsers(target, t('action.restart')))) return;
+  if (!(await confirmDisconnectingUsers(target, t('action.restart')))) return false;
 
   // Rewriting the ecosystem before restarting is what makes a port or name
   // changed in the meantime actually take effect.
   const plan = await buildStartPlan(target.dataDir, args);
   const ecosystemPath = writeEcosystem(plan);
-  const current = findPm2Process(processName) ?? findLegacyProcessFor(target.dataDir);
   let clearIntent: (() => void) | undefined;
-  if (args.includes('--after-update') && current?.pm2_env?.status === 'online' && current.pid) {
+  if (afterUpdate && current?.pid) {
     try { clearIntent = prepareUpdateRestart(target.dataDir, current.pid); }
     catch (error) {
       Logger.error('ERROR', 'Could not prepare the update restart notice.', error);
@@ -254,9 +264,22 @@ export async function restartServerCommand(globalArgs: GlobalArgs, args: string[
   runSync('pm2', ['save'], { stdio: 'ignore' });
   registerServer(target.dataDir, { name: plan.serverName, port: plan.port });
 
+  if (afterUpdate) {
+    // Exiting with an error is what lets the updater roll the version back.
+    const preview = await waitForLocalServerPreview(plan.port, updateTiming.startupMs);
+    if (!preview) {
+      throw new Error(t('lifecycle.updateStartFailed', { port: plan.port, seconds: updateTiming.startupMs / 1000 }));
+    }
+    console.log(color(t('lifecycle.restarted'), ANSI.green));
+    console.log(t('target.portSuffix', { port: plan.port }));
+    printBotCompatibility(preview);
+    return true;
+  }
+
   console.log(color(t('lifecycle.restarted'), ANSI.green));
   console.log(t('target.portSuffix', { port: plan.port }));
   await printBotCompatibilityWarning(plan.port, { waitForStartup: true });
+  return true;
 }
 
 /**

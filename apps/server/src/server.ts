@@ -60,6 +60,7 @@ import { SfuManager } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 import { closeHttpServer, listenHttpServer } from './infrastructure/lifecycle/httpLifecycle';
 import { ServerResourceScope } from './infrastructure/lifecycle/ServerResourceScope';
+import { acquireServerLock } from './infrastructure/lifecycle/serverLock';
 import { createHttpRequestListener } from './infrastructure/http/HttpRouter';
 import { publicRoutes } from './infrastructure/http/publicRoutes';
 import { attachmentRoutes } from './infrastructure/http/attachmentRoutes';
@@ -250,8 +251,16 @@ export class MonkyServer {
     return Logger.withScope(logScope, async () => {
       let setupComplete = false;
       try {
+        // Claimed before the database is read and released only after its last
+        // write, so the CLI never sees the directory as free while it is used.
+        const lock = acquireServerLock(config.dataDir);
+        let database: DatabaseConnection | undefined;
+        resources.defer('database', () => {
+          database?.close({ discardChanges: !setupComplete });
+          lock.release();
+        });
         const dbConn = await DatabaseConnection.create(path.join(config.dataDir, 'server.db'));
-        resources.defer('database', () => dbConn.close({ discardChanges: !setupComplete }));
+        database = dbConn;
         const server = await dbConn.getDb().transactionAsync(() => MonkyServer.createResources(config, dbConn, resources, logScope));
         setupComplete = true;
         return server;

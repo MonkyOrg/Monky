@@ -174,6 +174,9 @@ export async function createFixture(options: {
   const dataDir = path.join(__dirname, '..', '..', `.bot-test-data-${process.pid}-${randomUUID()}`);
   const database = await DatabaseConnection.create(path.join(dataDir, 'server.db'));
   const db = database.getDb();
+  // Production saves within seconds of its first write, and sql.js reopens the
+  // connection on every save: tests run from that state, not the pristine one (S-APP-1).
+  db.flush();
   const serverRepo = new SqliteServerRepository(db);
   const userRepo = new SqliteUserRepository(db);
   const channelRepo = new SqliteChannelRepository(db);

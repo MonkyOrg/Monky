@@ -1,18 +1,103 @@
 import readline from 'readline';
+import { Writable } from 'stream';
 import { ANSI, color } from './constants';
 import { t } from './i18n/index';
 
-export async function ask(question: string, defaultValue?: string): Promise<string> {
-  const label = defaultValue !== undefined ? `${question} (${defaultValue}): ` : `${question}: `;
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+/** Raised when the operator cancels a prompt or its input ends (EOF, Ctrl+C, Esc). */
+export class PromptCancelledError extends Error {
+  constructor() {
+    super(t('prompt.cancelled'));
+    this.name = 'PromptCancelledError';
+  }
+}
 
-  return new Promise((resolve) => {
-    rl.question(label, (answer) => {
+/**
+ * Lines of a redirected stdin, read by a single interface for the whole
+ * process. A readline per question dropped the rest of the chunk it was
+ * closed in, so the second answer of `printf 'a\nb\n' | monky ...` never
+ * arrived and the command quietly exited with status 0.
+ */
+class RedirectedLines {
+  private readonly lines: string[] = [];
+  private readonly waiting: Array<{ resolve: (line: string) => void; reject: (error: Error) => void }> = [];
+  private failure: Error | null = null;
+  private readonly reader: readline.Interface;
+
+  constructor(input: NodeJS.ReadableStream) {
+    this.reader = readline.createInterface({ input, terminal: false, crlfDelay: Infinity });
+    this.reader.on('line', (line) => {
+      const waiter = this.waiting.shift();
+      if (waiter) waiter.resolve(line);
+      else this.lines.push(line);
+      // Paused between questions so an idle stdin never keeps the process alive.
+      if (this.waiting.length === 0) this.reader.pause();
+    });
+    this.reader.on('close', () => this.end(new PromptCancelledError()));
+    input.on('error', () => this.end(new PromptCancelledError()));
+    this.reader.pause();
+  }
+
+  private end(error: Error): void {
+    this.failure ??= error;
+    for (const waiter of this.waiting.splice(0)) waiter.reject(error);
+  }
+
+  next(): Promise<string> {
+    const line = this.lines.shift();
+    if (line !== undefined) return Promise.resolve(line);
+    if (this.failure) return Promise.reject(this.failure);
+    return new Promise((resolve, reject) => {
+      this.waiting.push({ resolve, reject });
+      this.reader.resume();
+    });
+  }
+}
+
+const redirectedInputs = new WeakMap<NodeJS.ReadableStream, RedirectedLines>();
+
+function readRedirectedLine(): Promise<string> {
+  const input = process.stdin;
+  let lines = redirectedInputs.get(input);
+  if (!lines) {
+    lines = new RedirectedLines(input);
+    redirectedInputs.set(input, lines);
+  }
+  return lines.next();
+}
+
+async function askRedirected(label: string): Promise<string> {
+  process.stdout.write(label);
+  const answer = await readRedirectedLine();
+  process.stdout.write('\n');
+  return answer;
+}
+
+function askTerminal(label: string): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    // Without these, Ctrl+D or Ctrl+C left the question pending and the
+    // process exited with status 0 as if the command had succeeded.
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
       rl.close();
-      const trimmed = answer.trim();
-      resolve(trimmed || defaultValue || '');
+      reject(new PromptCancelledError());
+    };
+    rl.once('close', cancel);
+    rl.once('SIGINT', cancel);
+    rl.question(label, (answer) => {
+      settled = true;
+      rl.close();
+      resolve(answer);
     });
   });
+}
+
+export async function ask(question: string, defaultValue?: string): Promise<string> {
+  const label = defaultValue !== undefined ? `${question} (${defaultValue}): ` : `${question}: `;
+  const answer = process.stdin.isTTY ? await askTerminal(label) : await askRedirected(label);
+  return answer.trim() || defaultValue || '';
 }
 
 export function renderChoiceList(choices: string[], cursor: number, selected?: Set<number>): void {
@@ -38,7 +123,7 @@ export function clearLines(count: number): void {
 export async function askChoiceArrows(question: string, choices: string[]): Promise<string> {
   const stdin = process.stdin;
   const stdout = process.stdout;
-  if (stdin.destroyed || stdin.readableEnded) throw new Error(t('prompt.cancelled'));
+  if (stdin.destroyed || stdin.readableEnded) throw new PromptCancelledError();
   const wasRaw = !!stdin.isRaw;
   const wasFlowing = stdin.readableFlowing === true;
 
@@ -92,7 +177,7 @@ export async function askChoiceArrows(question: string, choices: string[]): Prom
       cleanup();
       reject(error);
     };
-    const cancel = () => fail(new Error(t('prompt.cancelled')));
+    const cancel = () => fail(new PromptCancelledError());
 
     const commitNumeric = () => {
       const value = Number.parseInt(numericBuffer, 10);
@@ -193,9 +278,17 @@ export async function confirm(question: string, defaultYes: boolean = true): Pro
   }
 }
 
+/**
+ * Same lifecycle as {@link askChoiceArrows}: Esc, Ctrl+C, Ctrl+D, EOF and
+ * stream errors cancel, and the terminal goes back to the raw and flowing
+ * state it had, instead of always leaving it cooked and paused.
+ */
 export async function askMultiChoiceArrows(question: string, choices: string[]): Promise<string[]> {
   const stdin = process.stdin;
   const stdout = process.stdout;
+  if (stdin.destroyed || stdin.readableEnded) throw new PromptCancelledError();
+  const wasRaw = !!stdin.isRaw;
+  const wasFlowing = stdin.readableFlowing === true;
 
   stdout.write(`${color(question, ANSI.bold)}\n`);
   stdout.write(color(`  ${t('prompt.multiSelect')}\n`, ANSI.dim));
@@ -205,68 +298,83 @@ export async function askMultiChoiceArrows(question: string, choices: string[]):
   renderChoiceList(choices, cursor, selected);
 
   return new Promise((resolve, reject) => {
+    let settled = false;
     stdin.resume();
     stdin.setEncoding('utf8');
     stdin.setRawMode(true);
 
     const cleanup = () => {
-      stdin.setRawMode(false);
-      stdin.pause();
+      if (!stdin.destroyed) stdin.setRawMode(wasRaw);
+      if (wasFlowing) stdin.resume(); else stdin.pause();
       stdin.removeListener('data', onData);
+      stdin.removeListener('end', cancel);
+      stdin.removeListener('close', cancel);
+      stdin.removeListener('error', fail);
+    };
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const cancel = () => fail(new PromptCancelledError());
+
+    const confirmSelection = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      clearLines(choices.length);
+      const result = choices.filter((_, i) => selected.has(i));
+      if (result.length) {
+        stdout.write(`${color('✔', ANSI.green)} ${result.join(', ')}\n`);
+      } else {
+        stdout.write(`${color('—', ANSI.dim)} ${t('prompt.noneSelected')}\n`);
+      }
+      resolve(result);
+    };
+
+    const redraw = () => {
+      clearLines(choices.length);
+      renderChoiceList(choices, cursor, selected);
     };
 
     const onData = (data: string) => {
-      if (data === '\u0003') {
-        cleanup();
-        reject(new Error(t('prompt.cancelled')));
+      if (data === '\u0003' || data === '\u0004' || data === '\u001b') {
+        cancel();
         return;
       }
       if (data === '\r' || data === '\n') {
-        cleanup();
-        clearLines(choices.length);
-        const result = choices.filter((_, i) => selected.has(i));
-        if (result.length) {
-          stdout.write(`${color('✔', ANSI.green)} ${result.join(', ')}\n`);
-        } else {
-          stdout.write(`${color('—', ANSI.dim)} ${t('prompt.noneSelected')}\n`);
-        }
-        resolve(result);
+        confirmSelection();
         return;
       }
       if (data === '\u001b[A' || data === 'k') {
-        clearLines(choices.length);
         cursor = (cursor - 1 + choices.length) % choices.length;
-        renderChoiceList(choices, cursor, selected);
+        redraw();
         return;
       }
       if (data === '\u001b[B' || data === 'j') {
-        clearLines(choices.length);
         cursor = (cursor + 1) % choices.length;
-        renderChoiceList(choices, cursor, selected);
+        redraw();
         return;
       }
       if (data === ' ') {
-        clearLines(choices.length);
-        if (selected.has(cursor)) {
-          selected.delete(cursor);
-        } else {
-          selected.add(cursor);
-        }
-        renderChoiceList(choices, cursor, selected);
+        if (selected.has(cursor)) selected.delete(cursor);
+        else selected.add(cursor);
+        redraw();
         return;
       }
       if (data === 'a') {
-        clearLines(choices.length);
-        if (selected.size === choices.length) {
-          selected.clear();
-        } else {
-          choices.forEach((_, i) => selected.add(i));
-        }
-        renderChoiceList(choices, cursor, selected);
+        if (selected.size === choices.length) selected.clear();
+        else choices.forEach((_, i) => selected.add(i));
+        redraw();
       }
     };
 
     stdin.on('data', onData);
+    stdin.once('end', cancel);
+    stdin.once('close', cancel);
+    stdin.once('error', fail);
   });
 }
 
@@ -312,57 +420,49 @@ export async function askMultiChoice(question: string, choices: string[]): Promi
   return askMultiChoiceFallback(question, choices);
 }
 
+/**
+ * Reads a password without echoing it.
+ *
+ * Line editing comes from readline with its output muted. Collecting raw
+ * keystrokes stored arrows, Home, Delete and other escape sequences inside the
+ * password without the operator seeing it, so the saved password differed
+ * from the one typed.
+ */
 export async function promptPassword(question: string): Promise<string> {
   if (!process.stdin.isTTY) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    return new Promise((resolve) => {
-      rl.question(question, (answer) => {
-        rl.close();
-        resolve(answer);
-      });
-    });
+    return askRedirected(question);
   }
 
+  const input = process.stdin;
+  const output = process.stdout;
+  const wasRaw = !!input.isRaw;
+  const wasFlowing = input.readableFlowing === true;
+  let muted = false;
+  const sink = new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      if (!muted) output.write(chunk);
+      callback();
+    },
+  });
+  Object.defineProperty(sink, 'columns', { get: () => output.columns ?? 80 });
+  const rl = readline.createInterface({ input, output: sink, terminal: true, historySize: 0 });
+
   return new Promise((resolve, reject) => {
-    let value = '';
-    const stdin = process.stdin;
-    const stdout = process.stdout;
-
-    const cleanup = () => {
-      stdin.off('data', onData);
-      if (stdin.isTTY) {
-        stdin.setRawMode(false);
-      }
-      stdin.pause();
+    let settled = false;
+    const finish = (answer: string | null) => {
+      if (settled) return;
+      settled = true;
+      rl.close();
+      sink.end();
+      if (!input.destroyed) input.setRawMode(wasRaw);
+      if (wasFlowing) input.resume(); else input.pause();
+      output.write('\n');
+      if (answer === null) reject(new PromptCancelledError());
+      else resolve(answer);
     };
-
-    const onData = (chunk: Buffer | string) => {
-      const input = chunk.toString('utf8');
-      for (const char of input) {
-        if (char === '\r' || char === '\n') {
-          stdout.write('\n');
-          cleanup();
-          resolve(value);
-          return;
-        }
-        if (char === '\u0003') {
-          stdout.write('\n');
-          cleanup();
-          reject(new Error(t('prompt.cancelled')));
-          return;
-        }
-        if (char === '\b' || char === '\u007f') {
-          value = value.slice(0, -1);
-          continue;
-        }
-        value += char;
-      }
-    };
-
-    stdout.write(question);
-    stdin.resume();
-    stdin.setEncoding('utf8');
-    stdin.setRawMode(true);
-    stdin.on('data', onData);
+    rl.once('close', () => finish(null));
+    rl.once('SIGINT', () => finish(null));
+    rl.question(question, (answer) => finish(answer));
+    muted = true;
   });
 }

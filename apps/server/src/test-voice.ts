@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import WebSocket from 'ws';
+import * as mediasoup from 'mediasoup';
 import type { types as MediasoupTypes } from 'mediasoup';
 import { AuthSuccessPayload, MessageType, Permission, ProtocolErrorCode, ServerDetails, ServerErrorPayload, UserSummary, VoiceConnectionHealth, VoiceUserJoinedPayload, SfuProducersListPayload, hasPermission } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
@@ -123,7 +125,7 @@ test('authentication supplies the current identity restriction before voice, aft
     const socket = Object.create(WebSocket.prototype) as WebSocket;
     Object.defineProperty(socket, 'readyState', { value: WebSocket.OPEN });
     const session: Parameters<WebSocketServer['handleAuthChallengeResponse']>[0] = {
-      ws: socket, isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+      ws: socket, lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     };
     server['sessions'].set(socket, session);
     auth.verifyChallengeResponse = async () => ({ success: true, user, serverDetails: details });
@@ -209,7 +211,7 @@ function moderationFixture() {
     const ws = Object.create(WebSocket.prototype) as WebSocket;
     Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
     return {
-      ws, sessionId: id, isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+      ws, sessionId: id, lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
       user: { id: ['moderator', 'bob'].includes(id) ? id : 'alice', clientId: id, sessionId: id, nickname: id, status: 'ONLINE', joinedAt: 1 },
     };
   });
@@ -421,7 +423,7 @@ test('voice join snapshot is captured after async broadcast and includes peers w
     const ws = Object.create(WebSocket.prototype) as WebSocket;
     Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
     return {
-      ws, sessionId: id, isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+      ws, sessionId: id, lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
       user: { id, sessionId: id, clientId: id, nickname: id, status: 'ONLINE', joinedAt: 1 },
     };
   };
@@ -548,7 +550,7 @@ test('real missing-producer consume path replies before the delayed close broadc
     sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'camera' },
   });
   const session: Parameters<WebSocketServer['handleSfuConsume']>[0] = {
-    ws: Object.create(WebSocket.prototype) as WebSocket, sessionId: 'self', isAlive: true, ip: '127.0.0.1',
+    ws: Object.create(WebSocket.prototype) as WebSocket, sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1',
     messageQueue: Promise.resolve(),
     user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
   };
@@ -592,7 +594,7 @@ test('permission-muted SFU participants can publish video but not microphone or 
   const ws = Object.create(WebSocket.prototype) as WebSocket;
   Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
   const session: Parameters<WebSocketServer['handleSfuProduce']>[0] = {
-    ws, sessionId: 'self', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    ws, sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
   };
   server['sessions'] = new Map([[ws, session]]);
@@ -709,7 +711,7 @@ test('SFU allocations completing after a human reconnect are reaped without touc
         return ws;
       };
       const session: Parameters<WebSocketServer['handleSfuCreateWebRtcTransport']>[0] = {
-        ws: makeSocket(), sessionId: 'self', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+        ws: makeSocket(), sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
         user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
       };
       server['sessions'] = new Map([[session.ws, session]]);
@@ -894,7 +896,7 @@ test('SFU media parameters are bounded before mediasoup and real client shapes p
   const ws = Object.create(WebSocket.prototype) as WebSocket;
   Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
   const session: Parameters<WebSocketServer['handleSfuProduce']>[0] = {
-    ws, sessionId: 'self', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    ws, sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
   };
   server['sessions'] = new Map([[ws, session]]);
@@ -1010,4 +1012,58 @@ test('SFU media parameters are bounded before mediasoup and real client shapes p
   }, 'second-microphone');
   assert.equal((reply('second-microphone')?.payload as ServerErrorPayload | undefined)?.code, ProtocolErrorCode.BAD_REQUEST);
   sfu.close();
+});
+
+test('a dead SFU worker marks the calls failed and closes their producers, without taking anyone out of the channel', async (t) => {
+  const worker = Object.create(EventEmitter.prototype) as MediasoupTypes.Worker;
+  Object.defineProperty(worker, 'died', { value: false });
+  worker.close = () => {};
+  t.mock.method(mediasoup, 'createWorker', () => Promise.resolve(worker));
+  t.mock.method(Logger, 'error', () => {});
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const member = await f.human('SFU member');
+  const witness = await f.human('SFU witness');
+  const outside = await f.human('Not in the call');
+  const voiceId = text(recordList(record(member.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  await f.serverRepo.updateServer({ voiceMode: 'sfu' });
+  for (const user of [member, witness]) {
+    assert.equal((await user.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId })).type, MessageType.VOICE_USER_JOINED);
+  }
+  assert.equal(await f.wsServer['sfuManager'].init(), true);
+  const sessionOf = (user: typeof member) => {
+    const found = [...f.wsServer['sessions'].values()].find((session) => session.user?.id === user.id);
+    assert.ok(found);
+    return found;
+  };
+  // Producers each client was told about before the crash.
+  for (const user of [witness, outside]) sessionOf(user).knownProducerIds = new Set(['lost-microphone']);
+  const since = new Map([witness, outside].map((user) => [user, user.peer.messages.length]));
+
+  worker.emit('died', new Error('Synthetic worker crash'));
+  const closed = await witness.peer.wait((message) => message.type === MessageType.SFU_PRODUCER_CLOSED, since.get(witness));
+  assert.deepEqual(closed.payload, { channelId: voiceId, producerId: 'lost-microphone' });
+  assert.equal(sessionOf(witness).knownProducerIds?.size, 0);
+  const memberSessionId = text(record(member.auth.payload.currentUser).sessionId);
+  const failed = await witness.peer.wait((message) => message.type === MessageType.VOICE_STATE_CHANGED &&
+    record(message.payload.voiceState).sessionId === memberSessionId, since.get(witness));
+  assert.equal(record(failed.payload.voiceState).connectionHealth, 'failed', 'failed is what makes clients rebuild');
+
+  await Promise.all([witness, outside].map((user) => user.peer.request(MessageType.PING)));
+  assert.equal(outside.peer.messages.slice(since.get(outside))
+    .some((message) => message.type === MessageType.SFU_PRODUCER_CLOSED), false, 'nobody outside the call is told');
+  assert.equal(witness.peer.messages.slice(since.get(witness))
+    .some((message) => message.type === MessageType.VOICE_USER_LEFT), false);
+  assert.equal(f.signalingService.getParticipantsInChannel(voiceId).length, 2, 'membership survives the media server');
+});
+
+test('the address a client reached the server by is announced to ICE only in a form ICE can dial', (t) => {
+  t.mock.method(os, 'networkInterfaces', () => ({}));
+  const announced = (listenIp: string, host: string) => new SfuManager({ listenIp })['getListenInfos'](host)
+    .flatMap((info) => info.protocol === 'udp' && info.announcedAddress ? [info.announcedAddress] : []);
+  assert.deepEqual(announced('0.0.0.0', 'monky.example.com'), ['monky.example.com', '127.0.0.1']);
+  assert.deepEqual(announced('0.0.0.0', '[2001:db8::1]'), ['127.0.0.1'],
+    'IPv4 sockets cannot be reached on an IPv6 address, bracketed or not');
+  assert.deepEqual(announced('::', '[2001:db8::1]'), ['2001:db8::1', '127.0.0.1'], 'no brackets in a candidate');
+  assert.deepEqual(announced('0.0.0.0', 'localhost'), ['127.0.0.1']);
 });

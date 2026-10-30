@@ -91,8 +91,12 @@ export class BotSelectorService {
   }
 
   expire(now = Date.now()): BotSelector[] {
+    // Polled every second: most ticks find nothing due and open no transaction.
+    // The repository is synchronous, so nothing changes the rows read here before it runs.
+    const expired = this.repository.listExpired(now);
+    if (expired.length === 0) return [];
     return this.repository.transaction(() => {
-      return this.repository.listExpired(now).map((selector) => {
+      return expired.map((selector) => {
         this.closeIfDue(selector, now);
         return selector;
       });

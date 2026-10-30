@@ -373,17 +373,29 @@ export class CommunityService {
   advance(now = Date.now()): { changed: boolean; started: ServerEvent[]; polls: NativePoll[] } {
     const started: ServerEvent[] = [];
     const expiredImageUrls: string[] = [];
-    let changed = false;
-    this.repository.transaction(() => {
-      if (this.settings().eventsEnabled) {
-        for (const event of this.repository.events()) {
+    // Runs every second, so the reads decide whether anything is due before a
+    // transaction opens. The repository is synchronous: nothing changes these
+    // rows before the transaction below.
+    const dueEvents = this.settings().eventsEnabled
+      ? this.repository.events().filter(event =>
+        (event.endsAt !== null && event.endsAt <= now) || (event.status === 'scheduled' && event.startsAt <= now))
+      : [];
+    const expiredActions = this.repository.liveActions().filter(action => {
+      const selector = action.content.kind === 'selector' ? this.selectors.get(action.content.selectorId) : undefined;
+      return action.expiresAt <= now || !this.botAllowed(action.botId) ||
+        (action.content.kind === 'selector' && (!selector || selector.closedAt !== null ||
+          (selector.expiresAt !== undefined && selector.expiresAt <= now)));
+    });
+    let changed = dueEvents.length > 0 || expiredActions.length > 0;
+    if (changed) {
+      this.repository.transaction(() => {
+        for (const event of dueEvents) {
           if (event.endsAt !== null && event.endsAt <= now) {
             event.status = 'ended';
             event.endedAt = event.endsAt;
             event.revision++;
             this.repository.saveEvent(event);
             this.scheduleNext(event, now);
-            changed = true;
           }
           if (event.status === 'scheduled' && event.startsAt <= now) {
             event.status = 'active';
@@ -391,21 +403,14 @@ export class CommunityService {
             event.revision++;
             this.repository.saveEvent(event);
             started.push(event);
-            changed = true;
           }
         }
-      }
-      for (const action of this.repository.liveActions()) {
-        const selector = action.content.kind === 'selector' ? this.selectors.get(action.content.selectorId) : undefined;
-        if (action.expiresAt <= now || !this.botAllowed(action.botId) ||
-            (action.content.kind === 'selector' && (!selector || selector.closedAt !== null ||
-              (selector.expiresAt !== undefined && selector.expiresAt <= now)))) {
+        for (const action of expiredActions) {
           this.repository.deleteLiveAction(action.id);
           expiredImageUrls.push(...action.imageUrls);
-          changed = true;
         }
-      }
-    });
+      });
+    }
     this.deleteImageUrls(expiredImageUrls);
     for (const [ref, image] of this.stagedImages) {
       if (image.expiresAt > now) continue;

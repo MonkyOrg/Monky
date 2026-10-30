@@ -78,6 +78,9 @@ const MAX_HISTORY_RESPONSE_BYTES = 600_000;
 const MAX_HISTORY_ROUNDS = 50;
 const MAX_DIGEST_PARTS = 200;
 const PENDING_DIGEST_TTL_MS = 60_000;
+/** Ids one ack envelope carries; the receiving side reads at most this many. */
+const MAX_ACK_IDS = 200;
+const MAX_TOMBSTONES = 500;
 
 type StatementType = 'request' | 'accept' | 'cancel' | 'remove';
 
@@ -180,7 +183,15 @@ interface StoredMessage {
   author: string;
   content: string;
   createdAt: number;
+  /** When this device last saw the text change: what marks the message as edited. */
   editedAt: number | null;
+  /**
+   * Last-writer-wins clock of the text (#490). Unlike `editedAt`, it also
+   * moves for an edit that keeps the text, so an older edit arriving later
+   * cannot bring back a text the author already replaced. Absent until the
+   * first edit, and in stores written before it existed: `editedAt` then.
+   */
+  contentAt?: number;
   deleted: boolean;
   replyTo: string | null;
   reactions: StoredReactions;
@@ -194,6 +205,11 @@ interface StoredConversation {
   version: 1;
   peer: string;
   messages: StoredMessage[];
+  /**
+   * Messages deleted before this device had them: a copy that arrives late stays
+   * out instead of showing up for good. Absent in stores written before #490.
+   */
+  tombstones?: Array<{ id: string; author: string }>;
 }
 
 interface AttachmentMeta {
@@ -297,7 +313,21 @@ function messageFingerprint(message: StoredMessage): string {
     .flatMap(([emoji, users]) => Object.entries(users).map(([user, value]) => `${emoji}:${user}:${value.on ? 1 : 0}:${value.ts}`))
     .sort()
     .join(',');
-  return `${message.id}|${message.deleted ? 1 : 0}|${message.editedAt ?? 0}|${reactions};`;
+  // Only when it tells something `editedAt` does not, so the usual message keeps the fingerprint older versions compute.
+  const clock = !message.deleted && message.contentAt !== undefined && message.contentAt !== message.editedAt
+    ? `~${message.contentAt}` : '';
+  return `${message.id}|${message.deleted ? 1 : 0}|${message.editedAt ?? 0}${clock}|${reactions};`;
+}
+
+/** The clock the text of a message is compared by (see `StoredMessage.contentAt`). */
+function contentClock(message: StoredMessage): number {
+  return message.contentAt ?? message.editedAt ?? 0;
+}
+
+/** Whether a text stamped `at` replaces the current one. Equal stamps keep the same text on every device. */
+function contentWins(at: number, content: string, message: StoredMessage): boolean {
+  const current = contentClock(message);
+  return at > current || (at === current && content > message.content);
 }
 
 interface DigestConversation {
@@ -360,6 +390,8 @@ export class DmService {
   private state: DmState;
   private readonly conversations = new Map<string, StoredConversation>();
   private readonly fileCache = new Map<string, { data: Buffer; expiresAt: number }>();
+  /** Partial downloads whose part file was checked in this run; later appends come from this process only. */
+  private readonly checkedParts = new Set<string>();
   private snapshotTimer: NodeJS.Timeout | null = null;
   private lastStamp = 0;
   /** Identifies this running device in own-device exchanges. */
@@ -371,6 +403,8 @@ export class DmService {
   private readonly pushedDays = new Map<string, Set<string>>();
   private readonly pendingDigests = new Map<string, PendingDigest>();
   private readonly dayBucketCache = new Map<string, Map<number, string>>();
+  /** Received items confirmed only once what they changed is on disk: the sender drops them from its outbox on the ack. */
+  private pendingAcks: Array<{ peer: string; id: string; needs: Set<string> }> = [];
 
   constructor(options: DmServiceOptions) {
     this.keyring = options.keyring;
@@ -379,6 +413,7 @@ export class DmService {
     this.now = options.now ?? Date.now;
     this.onEvent = options.onEvent ?? (() => undefined);
     this.state = this.loadState();
+    this.store.onWritten = (written) => this.releaseStoredAcks(written);
   }
 
   // ---------------------------------------------------------------------------
@@ -386,12 +421,9 @@ export class DmService {
   // ---------------------------------------------------------------------------
 
   private loadState(): DmState {
-    let loaded: DmState | null = null;
-    try {
-      loaded = this.store.readJson<DmState>(STATE_FILE);
-    } catch (error) {
-      console.error('[DM] Estado local ilegível; iniciando vazio.', error);
-    }
+    // A state that cannot be read right now throws instead of starting empty:
+    // the next save would otherwise replace friends and outbox with nothing.
+    const loaded = this.store.readJson(STATE_FILE, (value): value is DmState => isRecord(value) && value.identity === this.me);
     const empty: DmState = {
       version: 1,
       identity: this.me,
@@ -402,7 +434,7 @@ export class DmService {
       downloads: {},
       profile: emptyProfile(),
     };
-    if (!loaded || loaded.identity !== this.me) return empty;
+    if (!loaded) return empty;
     return {
       ...empty,
       ...loaded,
@@ -438,16 +470,12 @@ export class DmService {
   private conversation(peer: string): StoredConversation {
     const cached = this.conversations.get(peer);
     if (cached) return cached;
-    let loaded: StoredConversation | null = null;
-    try {
-      loaded = this.store.readJson<StoredConversation>(DmPersistence.peerFileName(peer));
-    } catch (error) {
-      console.error('[DM] Conversa ilegível; mantendo vazia.', error);
-    }
-    const conversation: StoredConversation =
-      loaded && loaded.peer === peer && Array.isArray(loaded.messages)
-        ? loaded
-        : { version: 1, peer, messages: [] };
+    // Throws while the file cannot be read (it stays on disk for the next try); a damaged one is set aside.
+    const loaded = this.store.readJson(
+      DmPersistence.peerFileName(peer),
+      (value): value is StoredConversation => isRecord(value) && value.peer === peer && Array.isArray(value.messages),
+    );
+    const conversation: StoredConversation = loaded ?? { version: 1, peer, messages: [] };
     this.conversations.set(peer, conversation);
     return conversation;
   }
@@ -461,11 +489,17 @@ export class DmService {
     this.store.flush();
   }
 
+  /** Whether received items wait for a write before their ack can leave (see {@link ackWhenStored}). */
+  hasPendingAcks(): boolean {
+    return this.pendingAcks.length > 0;
+  }
+
   /** Stops timers and forgets pending writes; used right before the store is deleted. */
   discard(): void {
     if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
     this.snapshotTimer = null;
     this.store.discardPending();
+    this.pendingAcks = [];
     this.conversations.clear();
     this.fileCache.clear();
   }
@@ -1012,6 +1046,30 @@ export class DmService {
     return this.conversation(peer).messages.find((message) => message.id === id) ?? null;
   }
 
+  private isTombstoned(peer: string, id: string, author: string): boolean {
+    const tombstones = this.conversation(peer).tombstones;
+    return Array.isArray(tombstones) && tombstones.some((entry) => entry.id === id && entry.author === author);
+  }
+
+  private addTombstone(peer: string, id: string, author: string): void {
+    const conversation = this.conversation(peer);
+    if (!Array.isArray(conversation.tombstones)) conversation.tombstones = [];
+    if (this.isTombstoned(peer, id, author)) return;
+    conversation.tombstones.push({ id, author });
+    if (conversation.tombstones.length > MAX_TOMBSTONES) {
+      conversation.tombstones.splice(0, conversation.tombstones.length - MAX_TOMBSTONES);
+    }
+  }
+
+  /** Drops queued operations of `types` that target `messageId`; a queued `msg` is matched by its own id. */
+  private dropQueued(peer: string, messageId: string, types: readonly string[]): void {
+    this.state.outbox[peer] = this.outbox(peer).filter((entry) => {
+      if (!types.includes(entry.type)) return true;
+      const target = entry.type === 'msg' ? entry.id : isRecord(entry.body) ? entry.body.messageId : undefined;
+      return target !== messageId;
+    });
+  }
+
   sendMessage(input: DmSendMessageInput): DmDispatch {
     const record = this.requireFriend(input.peer);
     const peer = record.publicKey;
@@ -1092,22 +1150,29 @@ export class DmService {
       throw new DmError('message-too-long', 'Mensagem muito longa.', { limit: DM_MAX_MESSAGE_LENGTH });
     }
     if (content === message.content) return {};
-    const editedAt = this.stamp();
+    // Newer than every edit of it this device has seen, so it wins on every device even when clocks disagree.
+    const editedAt = Math.max(this.stamp(), contentClock(message) + 1);
+    this.observeStamp(editedAt);
     message.content = content;
     message.editedAt = editedAt;
+    message.contentAt = editedAt;
     this.refreshMeta(peer);
     const body = { messageId, content, editedAt };
+    const items: Array<DmRelayItem | null> = [];
     const pendingMessage = this.outbox(peer).find((entry) => entry.id === messageId && entry.type === 'msg');
-    let item: DmRelayItem | null;
     if (pendingMessage && isRecord(pendingMessage.body)) {
-      pendingMessage.body = { ...pendingMessage.body, content };
-      item = this.outboxItem(record, pendingMessage);
-    } else {
-      item = this.queueEnvelope(record, 'edit', body);
+      // A copy not confirmed yet carries the new text and its clock, so whoever gets it from now on sees the
+      // final version, and an older edit still on its way cannot replace it. Older versions ignore the clock.
+      pendingMessage.body = { ...pendingMessage.body, content, contentAt: editedAt };
+      items.push(this.outboxItem(record, pendingMessage));
     }
+    // "Pending" only means no ack came back: the friend may already have the old text, so the edit always
+    // goes out too. Only the newest edit matters (last writer wins), so older queued ones are dropped.
+    this.dropQueued(peer, messageId, ['edit']);
+    items.push(this.queueEnvelope(record, 'edit', body));
     this.changed(peer);
     this.emitMessages(peer, [message]);
-    return this.dispatchFor(peer, [item], [this.selfCopy(peer, 'edit', newDmId(), editedAt, body)]);
+    return this.dispatchFor(peer, items, [this.selfCopy(peer, 'edit', newDmId(), editedAt, body)]);
   }
 
   private markDeleted(message: StoredMessage): void {
@@ -1133,11 +1198,10 @@ export class DmService {
     this.refreshMeta(peer);
     const body = { messageId };
     const items: Array<DmRelayItem | null> = [];
-    const outbox = this.outbox(peer);
-    const pendingIndex = outbox.findIndex((entry) => entry.id === messageId && entry.type === 'msg');
-    if (pendingIndex >= 0) {
-      outbox.splice(pendingIndex, 1);
-    } else if (record.relation === 'friend' && !record.blocked && record.cert) {
+    // A copy still queued never reaches anyone new, and neither do edits of it. But "pending" only means no
+    // ack came back: the friend may have the message already, so the delete always goes out.
+    this.dropQueued(peer, messageId, ['msg', 'edit', 'react', 'delete']);
+    if (record.relation === 'friend' && !record.blocked && record.cert) {
       items.push(this.queueEnvelope(record, 'delete', body));
     }
     this.changed(peer);
@@ -1634,6 +1698,8 @@ export class DmService {
             content: message.content,
             createdAt: message.createdAt,
             editedAt: message.editedAt,
+            // Only when it differs from editedAt, which is what the receiver assumes otherwise.
+            ...(message.contentAt !== undefined && message.contentAt !== message.editedAt ? { contentAt: message.contentAt } : {}),
             deleted: message.deleted,
             replyTo: message.replyTo,
             reactions: message.reactions,
@@ -1670,7 +1736,10 @@ export class DmService {
       if (author !== this.me && author !== peer) continue;
       const createdAt = typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt) ? Math.min(raw.createdAt, limit) : 0;
       const editedAt = typeof raw.editedAt === 'number' && Number.isFinite(raw.editedAt) ? Math.min(raw.editedAt, limit) : null;
-      const deleted = raw.deleted === true;
+      // Devices before #490 send no text clock; for them it is the edit time.
+      const contentAt = typeof raw.contentAt === 'number' && Number.isFinite(raw.contentAt) ? Math.min(raw.contentAt, limit) : editedAt;
+      // A delete that reached this device before the message itself also holds for copies from other devices.
+      const deleted = raw.deleted === true || this.isTombstoned(peer, raw.id, author);
       const content = typeof raw.content === 'string' ? raw.content.slice(0, DM_MAX_MESSAGE_LENGTH) : '';
       const reactions: StoredReactions = {};
       if (isRecord(raw.reactions)) {
@@ -1704,6 +1773,7 @@ export class DmService {
           content: deleted ? '' : content,
           createdAt,
           editedAt: deleted ? null : editedAt,
+          contentAt: deleted || contentAt === null ? undefined : contentAt,
           deleted,
           replyTo: isDmId(raw.replyTo) ? raw.replyTo : null,
           reactions: deleted ? {} : reactions,
@@ -1712,7 +1782,7 @@ export class DmService {
           forwarded: deleted ? null : sanitizeDmForward(raw.forwarded),
         };
         if (!this.insertMessage(peer, message)) continue;
-        this.observeStamp(createdAt);
+        this.observeStamp(Math.max(createdAt, message.contentAt ?? 0));
         if (author === this.me) meta.lastReadAt = Math.max(meta.lastReadAt, createdAt);
         changedMessages.push(message);
         inserted = true;
@@ -1723,10 +1793,19 @@ export class DmService {
       if (deleted && !existing.deleted) {
         this.markDeleted(existing);
         dirty = true;
-      } else if (!existing.deleted && !deleted && editedAt !== null && (existing.editedAt === null || editedAt > existing.editedAt)) {
-        existing.content = content;
-        existing.editedAt = editedAt;
-        dirty = true;
+      } else if (!existing.deleted && !deleted) {
+        // The text follows its own clock and the "edited" mark keeps the newest either device has, so every
+        // device ends with the same of both whatever order the edits reached them in.
+        if (contentAt !== null && contentWins(contentAt, content, existing)) {
+          existing.content = content;
+          existing.contentAt = contentAt;
+          this.observeStamp(contentAt);
+          dirty = true;
+        }
+        if (editedAt !== null && (existing.editedAt === null || editedAt > existing.editedAt)) {
+          existing.editedAt = editedAt;
+          dirty = true;
+        }
       }
       if (!existing.deleted) {
         for (const [emoji, users] of Object.entries(reactions)) {
@@ -1776,7 +1855,7 @@ export class DmService {
         for (const download of Object.values(this.state.downloads)) {
           if (download.peer !== peer) continue;
           if (!force && now - download.lastActivityAt < DOWNLOAD_STALL_MS) continue;
-          const request = this.nextFileRequest(download, true);
+          const request = this.requestFile(download, true);
           if (request) items.push(request);
         }
       }
@@ -1826,6 +1905,43 @@ export class DmService {
     return this.envelopeItem(record, 'ack', { ids });
   }
 
+  /**
+   * The ack for items whose effects are in memory now. It leaves at once when
+   * nothing waits for the disk; otherwise it waits for the write pass that
+   * saves them, so a crash right after acking can no longer lose a message the
+   * sender already dropped from its outbox. Acks released together travel in
+   * one envelope per peer.
+   */
+  private ackWhenStored(record: PeerRecord, ids: string[]): DmRelayItem | null {
+    const needs = this.store.pendingNames();
+    if (needs.size === 0) return this.ack(record, ids);
+    for (const id of ids) this.pendingAcks.push({ peer: record.publicKey, id, needs: new Set(needs) });
+    return null;
+  }
+
+  private releaseStoredAcks(written: ReadonlySet<string>): void {
+    if (this.pendingAcks.length === 0) return;
+    const ready = new Map<string, string[]>();
+    this.pendingAcks = this.pendingAcks.filter((pending) => {
+      for (const name of written) pending.needs.delete(name);
+      if (pending.needs.size > 0) return true;
+      const ids = ready.get(pending.peer) ?? [];
+      ids.push(pending.id);
+      ready.set(pending.peer, ids);
+      return false;
+    });
+    const peers: Record<string, DmRelayItem[]> = {};
+    for (const [peer, ids] of ready) {
+      const record = this.state.peers[peer];
+      if (!record || record.blocked) continue;
+      for (let start = 0; start < ids.length; start += MAX_ACK_IDS) {
+        const item = this.ack(record, ids.slice(start, start + MAX_ACK_IDS));
+        if (item) (peers[peer] ??= []).push(item);
+      }
+    }
+    if (Object.keys(peers).length > 0) this.onEvent({ type: 'dispatch', dispatch: { peers } });
+  }
+
   private ingestStatement(from: string, data: string): DmDispatch {
     let parsed: SignedStatement;
     try {
@@ -1853,10 +1969,10 @@ export class DmService {
     const record = this.ensurePeer(from, payload.nickname);
     record.cert = payload.cert;
     record.maxFileBytes = clampMaxFileBytes(payload.maxFileBytes, record.maxFileBytes);
-    const reply: Array<DmRelayItem | null> = [this.ack(record, [payload.id])];
+    const reply: Array<DmRelayItem | null> = [];
     if (record.seenStatements.includes(payload.id)) {
       this.saveState();
-      return { reply: reply.filter((item): item is DmRelayItem => !!item) };
+      return { reply: [this.ackWhenStored(record, [payload.id])].filter((item): item is DmRelayItem => !!item) };
     }
     record.seenStatements.push(payload.id);
     if (record.seenStatements.length > MAX_SEEN_STATEMENTS) {
@@ -1927,6 +2043,7 @@ export class DmService {
       }
     }
     this.changed();
+    reply.unshift(this.ackWhenStored(record, [payload.id]));
     const dispatch: DmDispatch = { reply: reply.filter((item): item is DmRelayItem => !!item) };
     if (broadcast.length > 0) dispatch.broadcast = broadcast;
     return dispatch;
@@ -1937,7 +2054,7 @@ export class DmService {
     const data = isRecord(body) ? body : {};
     switch (header.type) {
       case 'ack': {
-        const ids = Array.isArray(data.ids) ? data.ids.filter((id): id is string => typeof id === 'string').slice(0, 200) : [];
+        const ids = Array.isArray(data.ids) ? data.ids.filter((id): id is string => typeof id === 'string').slice(0, MAX_ACK_IDS) : [];
         if (ids.length === 0) return {};
         const acked = new Set(ids);
         const entries = this.state.outbox[peer] ?? [];
@@ -2003,9 +2120,8 @@ export class DmService {
       case 'delete':
       case 'react':
       case 'read': {
-        const reply: Array<DmRelayItem | null> = [this.ack(record, [header.id])];
-        reply.push(...this.applyOp(peer, peer, header, data, true));
-        return { reply: reply.filter((item): item is DmRelayItem => !!item) };
+        const replies = this.applyOp(peer, peer, header, data, true);
+        return { reply: [this.ackWhenStored(record, [header.id]), ...replies].filter((item): item is DmRelayItem => !!item) };
       }
       default:
         return {};
@@ -2029,6 +2145,8 @@ export class DmService {
     switch (header.type) {
       case 'msg': {
         if (!isDmId(header.id)) return [];
+        // Deleted before it got here: the delete that came first is final.
+        if (this.isTombstoned(peer, header.id, author)) return [];
         const content = typeof data.content === 'string' ? data.content.slice(0, DM_MAX_MESSAGE_LENGTH) : '';
         const attachmentsInput = Array.isArray(data.attachments) ? data.attachments.slice(0, DM_MAX_ATTACHMENTS) : [];
         const metas = attachmentsInput
@@ -2049,6 +2167,9 @@ export class DmService {
           // The author's timestamp is kept as-is so every device shares one time base for order and read receipts.
           createdAt: ts,
           editedAt: null,
+          // Set when the author edited it while it waited for delivery: older edits on their way stay behind it.
+          contentAt: typeof data.contentAt === 'number' && Number.isFinite(data.contentAt)
+            ? Math.min(data.contentAt, now + MAX_CLOCK_SKEW_MS) : undefined,
           deleted: false,
           replyTo,
           reactions: {},
@@ -2057,7 +2178,7 @@ export class DmService {
           forwarded: sanitizeDmForward(data.forwarded),
         };
         if (!this.insertMessage(peer, message)) return [];
-        this.observeStamp(message.createdAt);
+        this.observeStamp(Math.max(message.createdAt, message.contentAt ?? 0));
         meta.hidden = false;
         if (author === this.me) {
           meta.lastReadAt = Math.max(meta.lastReadAt, message.createdAt);
@@ -2077,7 +2198,7 @@ export class DmService {
           };
           this.store.resetPart(file.fileId);
           this.state.downloads[file.fileId] = download;
-          const request = this.nextFileRequest(download, false);
+          const request = this.requestFile(download, false);
           if (request) replies.push(request);
         }
         this.changed(peer);
@@ -2092,17 +2213,32 @@ export class DmService {
         if (!message || message.author !== author || message.deleted) return [];
         const content = typeof data.content === 'string' ? data.content.slice(0, DM_MAX_MESSAGE_LENGTH) : '';
         const editedAt = typeof data.editedAt === 'number' ? Math.min(data.editedAt, now + MAX_CLOCK_SKEW_MS) : ts;
-        if (message.editedAt !== null && message.editedAt >= editedAt) return [];
-        message.content = content;
-        message.editedAt = editedAt;
-        this.refreshMeta(peer);
+        // Last writer wins by the text's own clock, which also moves when the text stays: otherwise an older edit
+        // arriving later (A → B → A, delivered out of order) would leave each side with a different text.
+        if (!contentWins(editedAt, content, message)) return [];
+        message.contentAt = editedAt;
+        this.observeStamp(editedAt);
+        // Same text as shown (it arrived already edited, or went back to it): nothing to mark as edited.
+        if (content !== message.content) {
+          message.content = content;
+          message.editedAt = editedAt;
+          this.refreshMeta(peer);
+          this.emitMessages(peer, [message]);
+        }
         this.changed(peer);
-        this.emitMessages(peer, [message]);
         return [];
       }
       case 'delete': {
         const message = this.findMessage(peer, data.messageId);
-        if (!message || message.author !== author || message.deleted) return [];
+        if (!message) {
+          // Deleted before it got here (or its ack was lost and it is still on the way): keep it out for good.
+          if (isDmId(data.messageId)) {
+            this.addTombstone(peer, data.messageId, author);
+            this.saveConversation(peer);
+          }
+          return [];
+        }
+        if (message.author !== author || message.deleted) return [];
         this.markDeleted(message);
         this.refreshMeta(peer);
         this.changed(peer);
@@ -2287,9 +2423,14 @@ export class DmService {
   }
 
   private nextFileRequest(download: DownloadState, resume: boolean): DmRelayItem | null {
+    const received = this.receivedBytes(download);
+    if (received >= download.size) {
+      // Every byte is here but was never put together (the app closed, or the disk was full at that moment).
+      this.completeDownload(download);
+      return null;
+    }
     const record = this.state.peers[download.peer];
     if (!record || record.relation !== 'friend' || !record.cert) return null;
-    const received = this.receivedBytes(download);
     if (resume) download.requestedUntil = received;
     if (download.requestedUntil > received) return null;
     const count = FILE_WINDOW_CHUNKS;
@@ -2299,8 +2440,23 @@ export class DmService {
     return this.envelopeItem(record, 'file-req', { fileId: download.fileId, offset: received, count });
   }
 
+  /** The next file request, never throwing: a part file that cannot be read fails the download visibly. */
+  private requestFile(download: DownloadState, resume: boolean): DmRelayItem | null {
+    try {
+      return this.nextFileRequest(download, resume);
+    } catch (error) {
+      this.downloadFailed(download.fileId, error);
+      return null;
+    }
+  }
+
   private receivedBytes(download: DownloadState): number {
-    return Math.min(download.size, this.store.partChunkCount(download.fileId) * DM_FILE_CHUNK_BYTES);
+    // Checked once per download and run: a crash or a full disk during an append can leave a torn last record.
+    const chunks = this.checkedParts.has(download.fileId)
+      ? this.store.partChunkCount(download.fileId)
+      : this.store.repairPart(download.fileId);
+    this.checkedParts.add(download.fileId);
+    return Math.min(download.size, chunks * DM_FILE_CHUNK_BYTES);
   }
 
   private attachmentRef(peer: string, messageId: string, fileId: string): { message: StoredMessage; file: StoredAttachment } | null {
@@ -2320,19 +2476,17 @@ export class DmService {
     const chunk = Buffer.from(data.data, 'base64');
     const expected = Math.min(DM_FILE_CHUNK_BYTES, download.size - received);
     if (chunk.length !== expected) return [];
-    this.store.appendPart(fileId, Math.floor(received / DM_FILE_CHUNK_BYTES), chunk);
+    try {
+      this.store.appendPart(fileId, Math.floor(received / DM_FILE_CHUNK_BYTES), chunk);
+    } catch (error) {
+      this.downloadFailed(fileId, error);
+      return [];
+    }
     download.lastActivityAt = this.now();
     const total = received + chunk.length;
     const ref = this.attachmentRef(download.peer, download.messageId, fileId);
     if (total >= download.size) {
-      const content = this.store.readPart(fileId);
-      const hash = createHash('sha256').update(content).digest('hex');
-      if (content.length !== download.size || hash !== download.sha256) {
-        this.finishDownload(fileId, 'failed');
-        return [];
-      }
-      this.store.writeAttachment(fileId, content);
-      this.finishDownload(fileId, 'ready');
+      this.completeDownload(download);
       return [];
     }
     if (ref) {
@@ -2341,14 +2495,39 @@ export class DmService {
       this.emitMessages(download.peer, [ref.message]);
       this.saveConversation(download.peer);
     }
-    const next = this.nextFileRequest(download, false);
+    const next = this.requestFile(download, false);
     return next ? [next] : [];
+  }
+
+  /** All bytes arrived: keep the file if they match, or fail visibly so the user can try again. */
+  private completeDownload(download: DownloadState): void {
+    const fileId = download.fileId;
+    try {
+      const content = this.store.readPart(fileId);
+      const hash = createHash('sha256').update(content).digest('hex');
+      if (content.length !== download.size || hash !== download.sha256) {
+        this.finishDownload(fileId, 'failed');
+        return;
+      }
+      this.store.writeAttachment(fileId, content);
+    } catch (error) {
+      this.downloadFailed(fileId, error);
+      return;
+    }
+    this.finishDownload(fileId, 'ready');
+  }
+
+  /** A full disk or an unreadable part file: "failed" offers "try again", which starts over. */
+  private downloadFailed(fileId: string, error: unknown): void {
+    console.error('[DM] Attachment download failed; it can be tried again.', error);
+    this.finishDownload(fileId, 'failed');
   }
 
   private finishDownload(fileId: string, state: DmAttachmentState): void {
     const download = this.state.downloads[fileId];
     if (!download) return;
     delete this.state.downloads[fileId];
+    this.checkedParts.delete(fileId);
     this.store.resetPart(fileId);
     const ref = this.attachmentRef(download.peer, download.messageId, fileId);
     if (ref) {
@@ -2464,6 +2643,7 @@ export class DmService {
             content: typeof raw.content === 'string' ? raw.content.slice(0, DM_MAX_MESSAGE_LENGTH) : '',
             createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : 0,
             editedAt: typeof raw.editedAt === 'number' ? raw.editedAt : null,
+            contentAt: typeof raw.contentAt === 'number' && Number.isFinite(raw.contentAt) ? raw.contentAt : undefined,
             deleted: raw.deleted === true,
             replyTo: isDmId(raw.replyTo) ? raw.replyTo : null,
             reactions: isRecord(raw.reactions) ? (raw.reactions as StoredReactions) : {},

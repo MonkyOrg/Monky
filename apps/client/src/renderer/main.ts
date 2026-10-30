@@ -29,6 +29,7 @@ import {
   VoiceUserLeftPayload,
   hasEveryoneMention,
   getMessageText,
+  type AppIdentityStatus,
 } from '@monky/shared';
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
@@ -70,7 +71,7 @@ import { stopLocalScreenShares } from './core/screenShareControls';
 import { screenSharePickerModal } from './views/ScreenSharePickerModal';
 import { showAlert } from './views/Dialog';
 import { showInfoToast } from './views/CopyToast';
-import { showIdentityImportDialog } from './views/IdentityDialogs';
+import { showIdentityOnboarding } from './views/IdentityOnboarding';
 import { getLanguage, initI18n, t } from './i18n';
 import { translateProtocolError } from './i18n/protocolErrors';
 import { toAbsoluteServerIconUrl } from './utils/avatar';
@@ -234,14 +235,20 @@ class App {
     const developmentQa = await window.api?.getDevelopmentQaConfig?.() ?? null;
     if (developmentQa) await prepareDevelopmentQaProfile(developmentQa);
 
-    // Check if identity exists BEFORE rendering anything
-    if (window.api?.hasIdentity) {
-      connectionStore.hasIdentity = await window.api.hasIdentity();
-    }
+    // Check the identity BEFORE rendering anything. An identity that exists but
+    // could not be opened is never replaced on its own (#490): the onboarding
+    // offers to try again, import or explicitly create another one.
+    const identityStatus: AppIdentityStatus = window.api?.getIdentityStatus
+      ? await window.api.getIdentityStatus()
+      : { state: 'missing' };
+    connectionStore.hasIdentity = identityStatus.state === 'ready';
 
     if (!connectionStore.hasIdentity) {
-      // Show onboarding screen and wait for identity to be created/imported
-      await this.showIdentityOnboarding();
+      const identity = await showIdentityOnboarding(this.appContainer, identityStatus, () => this.signalRendererReady());
+      connectionStore.setIdentity(identity);
+      // Monky always runs maximized once an identity exists; only the compact
+      // first-launch identity card is shown in the smaller window.
+      void window.api?.maximize?.().catch(() => clientLog.warn('APP', 'Could not maximize after choosing an identity'));
     }
 
     // At this point, identity is guaranteed to exist
@@ -363,62 +370,6 @@ class App {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         window.api?.signalRendererReady?.();
-      });
-    });
-  }
-
-  private showIdentityOnboarding(): Promise<void> {
-    return new Promise((resolve) => {
-      const logoUrl = new URL('./assets/Logo.png', import.meta.url).href;
-      this.appContainer.innerHTML = `
-        <div class="identity-onboarding">
-          <img src="${logoUrl}" alt="Monky" style="width: 120px; height: 120px; object-fit: contain; margin-bottom: 16px; filter: drop-shadow(0 4px 16px rgba(88, 101, 242, 0.4));">
-          <h1 style="font-size: 28px; font-weight: 700; margin: 0 0 8px; color: var(--text-primary);">Monky</h1>
-          <p style="font-size: 14px; color: var(--text-secondary); margin: 0 0 32px; text-align: center; max-width: 360px; line-height: 1.5;">
-            ${t('identity.onboardingDesc')}
-          </p>
-          <div style="display: flex; flex-direction: column; gap: 12px; width: 280px;">
-            <button type="button" id="btn-onboard-create" class="btn btn-primary" style="padding: 14px 24px; font-size: 15px; font-weight: 600;">
-              <span class="material-symbols-outlined md-20" style="margin-right: 8px;">add_circle</span>
-              ${t('identity.onboardingCreate')}
-            </button>
-            <button type="button" id="btn-onboard-import" class="btn btn-secondary" style="padding: 14px 24px; font-size: 15px;">
-              <span class="material-symbols-outlined md-20" style="margin-right: 8px;">qr_code_scanner</span>
-              ${t('identity.onboardingImport')}
-            </button>
-          </div>
-        </div>
-      `;
-
-      // Onboarding is the first real paint for a user without an identity; let
-      // the main process lift the post-update splash here too (#498).
-      this.signalRendererReady();
-
-      // Monky always runs maximized once an identity exists; only the compact
-      // first-launch identity card above is shown in the smaller window.
-      const maximizeForApp = (): void => {
-        void window.api?.maximize?.().catch(() => clientLog.warn('APP', 'Could not maximize after choosing an identity'));
-      };
-
-      document.getElementById('btn-onboard-create')?.addEventListener('click', async () => {
-        // Generate identity
-        if (window.api?.getIdentity) {
-          const identity = await window.api.getIdentity();
-          connectionStore.setIdentity(identity);
-          connectionStore.hasIdentity = true;
-        }
-        maximizeForApp();
-        resolve();
-      });
-
-      document.getElementById('btn-onboard-import')?.addEventListener('click', async () => {
-        const result = await showIdentityImportDialog();
-        if (result) {
-          connectionStore.setIdentity(result);
-          connectionStore.hasIdentity = true;
-          maximizeForApp();
-          resolve();
-        }
       });
     });
   }

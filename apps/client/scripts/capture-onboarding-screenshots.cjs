@@ -312,7 +312,7 @@ async function setupFixture(language) {
   const noop = async () => {};
   const unsubscribe = () => () => {};
   window.api = {
-    hasIdentity: async () => true,
+    getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => ({ clientId: 'onboarding-shots', publicKey: key('f6') }),
     signChallenge: async (nonce) => `fixture:${nonce}`,
     getClientLogConfig: async () => ({ enabled: false }),

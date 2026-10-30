@@ -186,10 +186,11 @@ export class SqliteNativePollRepository implements INativePollRepository {
   }
 
   closeExpired(now: number): NativePollRecord[] {
+    // Polled every second: the transaction only opens when a poll is due.
+    const rows = this.db.prepare(`SELECT ${COLUMNS} FROM native_polls
+      WHERE closed_at IS NULL AND closes_at IS NOT NULL AND closes_at <= ?`).all(now) as PollRow[];
+    if (rows.length === 0) return [];
     return this.db.transaction(() => {
-      const rows = this.db.prepare(`SELECT ${COLUMNS} FROM native_polls
-        WHERE closed_at IS NULL AND closes_at IS NOT NULL AND closes_at <= ?`).all(now) as PollRow[];
-      if (rows.length === 0) return [];
       const statement = this.db.prepare('UPDATE native_polls SET closed_at = closes_at, revision = revision + 1 WHERE id = ? AND closed_at IS NULL');
       for (const row of rows) statement.run(row.id);
       return rows.map(row => this.findById(row.id)!).filter(Boolean);

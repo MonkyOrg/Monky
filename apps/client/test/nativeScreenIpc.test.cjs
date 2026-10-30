@@ -29,6 +29,11 @@ const occlusion = { exports: {} };
 vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(occlusionSource, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
 }).outputText}\n})`, { filename: occlusionSource })(occlusion.exports, require);
+// Evaluated per fixture, so the canonical capture root goes through the same modeled filesystem.
+const canonicalSource = path.join(path.dirname(sourceFile), 'canonicalDirectory.ts');
+const loadCanonical = vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(canonicalSource, 'utf8'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
+}).outputText}\n})`, { filename: canonicalSource });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => {
   let resolve;
@@ -240,7 +245,10 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   encoder = 'h264_texture_amf', probeFailure, probeFailureBeforeSpawn, probeStop,
   probeVerified = true, probeRetires = true, probeStopReportsFailure = false, logger, packetCapture,
   compiledEncoders = [encoder],
-  encodingProbe, arch = 'x64' } = {}) {
+  encodingProbe, arch = 'x64', profileAlias = false } = {}) {
+  // A modeled junction: the profile Electron reports resolves to another physical folder.
+  const profile = path.join(__dirname, profileAlias ? 'modeled-linked-profile' : 'modeled-native-profile');
+  const physicalProfile = path.join(__dirname, 'modeled-native-profile');
   const handlers = new Map(), sent = [], endpoints = [], selections = [], errors = [], captures = [], directories = [];
   const probes = [], removedDirectories = [], logs = [], ports = [], encodingProbes = [];
   const retiredMacProbes = new WeakSet();
@@ -266,7 +274,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   const electron = {
     app: Object.assign(new EventEmitter(), {
       getGPUInfo: async () => assert.fail('Adapter labels cannot establish native hardware availability.'),
-      getPath: () => path.join(__dirname, 'modeled-native-profile'),
+      getPath: () => profile,
     }),
     screen: new EventEmitter(),
     BrowserWindow: { getFocusedWindow: () => focused ? window : null },
@@ -398,6 +406,16 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       assert.fail('IPC/source admission cannot itself capture audio.');
     },
   };
+  const modeledFiles = {
+    async mkdir(filename) { directories.push(filename); if (directory) await directory.promise; },
+    async lstat() { return { isDirectory: () => true, isSymbolicLink: () => false }; },
+    async realpath(filename) { return filename.startsWith(profile) ? physicalProfile + filename.slice(profile.length) : filename; },
+    async readdir() { return []; },
+    async rm(filename) {
+      assert.match(path.basename(filename), /^monky-screen-capture-[a-f0-9]{32}$/);
+      assert.ok(directories.includes(filename)); removedDirectories.push(filename);
+    },
+  };
   const module = { exports: {} };
   load(module.exports, name => {
     if (name === 'electron') return electron;
@@ -422,15 +440,12 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       loadRuntime: () => ({ capture: { captureKinds: platform === 'darwin' ? ['window', 'monitor'] : ['window', 'monitor', 'game'],
         encoders: compiledEncoders, requiresHardwareProbe: true, hardwareQualified: false } }) };
     if (name === '@monky/screen-audio') return captureModule;
-    if (name === 'node:fs/promises') return {
-      async mkdir(filename) { directories.push(filename); if (directory) await directory.promise; },
-      async lstat() { return { isDirectory: () => true, isSymbolicLink: () => false }; },
-      async realpath(filename) { return filename; }, async readdir() { return []; },
-      async rm(filename) {
-        assert.match(path.basename(filename), /^monky-screen-capture-[a-f0-9]{32}$/);
-        assert.ok(directories.includes(filename)); removedDirectories.push(filename);
-      },
-    };
+    if (name === 'node:fs/promises') return modeledFiles;
+    if (name === './canonicalDirectory') {
+      const canonical = { exports: {} };
+      loadCanonical(canonical.exports, dependency => dependency === 'node:fs/promises' ? modeledFiles : require(dependency));
+      return canonical.exports;
+    }
     return require(name);
   }, module, sourceFile, path.dirname(sourceFile), {
     debug() {},
@@ -1039,6 +1054,25 @@ for (const encoder of ['h264_texture_amf', 'obs_nvenc_h264_tex']) {
     assert.equal(f.probes[0].closed, true);
   });
 }
+
+test('a junction above the profile gives probes, sources and cleanup one canonical capture folder', async t => {
+  const f = fixture(t, { profileAlias: true });
+  const physical = path.join(__dirname, 'modeled-native-profile', 'native-screen-capture');
+  await f.join(); await f.participants();
+  const { source } = await f.addSource();
+  await f.command({ action: 'signal', signal: {
+    fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+  } });
+  assert.equal(f.endpoints[0].options.captureDirectory, physical);
+  const runs = [...f.encodingProbes, ...f.probes.map(probe => probe.options)].map(options => options.runDirectory);
+  assert.ok(runs.length >= 2);
+  for (const run of runs) assert.equal(path.dirname(run), physical, 'The helper refuses redirected path components.');
+  assert.equal(f.probes[0].closed, true);
+  assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
+  assert.ok(f.removedDirectories.every(removed => path.dirname(removed) === physical));
+});
 
 for (const captureKind of ['window', 'monitor', 'game']) {
   for (const preserveAspectRatio of [undefined, false, true]) {

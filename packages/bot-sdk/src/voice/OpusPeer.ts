@@ -2,7 +2,8 @@ import { randomInt } from 'crypto';
 import {
   MediaStream, MediaStreamTrack, RTCPeerConnection, RTCRtpCodecParameters, RtpHeader, RtpPacket, SessionDescription,
 } from 'werift';
-import type { BotVoiceAuth, BotVoiceSignal, BotVoiceTransportOptions } from '@monky/shared';
+import type { BotVoiceAuth, BotVoiceSignal } from '@monky/shared';
+import { sfuCandidateLines, sfuTransportLines, type SfuTransport } from './mediasoupSdp';
 
 type VoiceCandidate = NonNullable<BotVoiceSignal['candidate']>;
 
@@ -240,7 +241,7 @@ export class OpusPeer {
     }
   }
 
-  async prepareSfu(options: BotVoiceTransportOptions): Promise<{
+  async prepareSfu(options: SfuTransport): Promise<{
     dtlsParameters: { role: 'client'; fingerprints: { algorithm: string; value: string }[] };
     rtpParameters: {
       codecs: { mimeType: string; payloadType: number; clockRate: number; channels: number; parameters: { useinbandfec: number; stereo: number }; rtcpFeedback: never[] }[];
@@ -251,19 +252,15 @@ export class OpusPeer {
     this.pc.getTransceivers()[0].direction = 'sendonly';
     await this.pc.setLocalDescription(await this.pc.createOffer());
     if (this.closed) throw new Error('Voice peer closed while gathering ICE.');
-    const fingerprint = options.dtlsParameters.fingerprints.find((entry) => entry.algorithm === 'sha-256');
-    if (!fingerprint) throw new Error('SFU is missing its SHA-256 certificate fingerprint.');
+    const transportLines = sfuTransportLines(options);
     const mid = this.pc.getTransceivers()[0].mid;
-    const candidates = options.iceCandidates.map((candidate) =>
-      `a=candidate:${candidate.foundation} 1 ${candidate.protocol.toUpperCase()} ${candidate.priority} ${candidate.ip} ${candidate.port} typ host${candidate.tcpType ? ` tcptype ${candidate.tcpType}` : ''}`);
     const answer = [
       'v=0', 'o=monky 1 1 IN IP4 0.0.0.0', 's=-', 't=0 0', 'a=ice-lite',
       `a=group:BUNDLE ${mid}`, `m=audio 9 UDP/TLS/RTP/SAVPF ${OPUS_PAYLOAD_TYPE}`, 'c=IN IP4 0.0.0.0',
       `a=mid:${mid}`, 'a=recvonly', 'a=rtcp-mux', 'a=rtcp-rsize',
-      `a=ice-ufrag:${options.iceParameters.usernameFragment}`, `a=ice-pwd:${options.iceParameters.password}`,
-      `a=fingerprint:${fingerprint.algorithm} ${fingerprint.value}`, 'a=setup:passive',
+      ...transportLines,
       `a=rtpmap:${OPUS_PAYLOAD_TYPE} opus/48000/2`, `a=fmtp:${OPUS_PAYLOAD_TYPE} minptime=10;useinbandfec=1;stereo=1`,
-      ...candidates, 'a=end-of-candidates', '',
+      ...sfuCandidateLines(options), '',
     ].join('\r\n');
     return {
       dtlsParameters: { role: 'client', fingerprints: this.sender.dtlsTransport.localParameters.fingerprints },

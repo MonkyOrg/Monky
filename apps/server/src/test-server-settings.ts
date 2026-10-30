@@ -21,7 +21,7 @@ function fixture() {
   const ws = Object.create(WebSocket.prototype) as WebSocket;
   Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
   const session: Parameters<WebSocketServer['handleServerUpdateSettings']>[0] = {
-    ws, sessionId: 'admin-session', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    ws, sessionId: 'admin-session', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     protocol: { version: 36, minimumVersion: 35, features: ['dm-relay'] },
     user: { id: 'admin', clientId: 'admin-key', sessionId: 'admin-session', nickname: 'Admin', status: 'ONLINE', joinedAt: 1 },
   };

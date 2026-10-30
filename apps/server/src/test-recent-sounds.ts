@@ -145,7 +145,7 @@ test('allows human members to list and download but denies bots', async () => {
   server['send'] = (_socket, message) => { messages.push(message); };
   Object.defineProperty(server, 'rateLimiter', { value: new RateLimiter() });
   const session: Parameters<WebSocketServer['handleRecentSoundsList']>[0] = {
-    ws, sessionId: 'session', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    ws, sessionId: 'session', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     protocol: { version: 34, minimumVersion: 31, features: ['recent-sounds'] },
     user: {
       id: 'user-1', clientId: 'client', sessionId: 'session',

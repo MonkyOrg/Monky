@@ -113,7 +113,7 @@ for (const foreignKeys of ['ON', 'OFF'] as const) {
   test(`deleting a channel, a forum post, a forum with its topics or the AFK room removes their files (foreign keys ${foreignKeys}, S-APP-6)`, async (t) => {
     const f = await createApprovedBotFixture();
     t.after(() => f.dispose());
-    // Production loses the foreign keys after its first save (S-APP-1): no cascade may be relied upon.
+    // Files must not depend on the cascade: databases from before foreign keys were enforced (S-APP-1).
     f.database.getDb().exec(`PRAGMA foreign_keys = ${foreignKeys}`);
     const owner = await f.human('Channel owner');
     const generalId = firstTextChannel(owner.auth);

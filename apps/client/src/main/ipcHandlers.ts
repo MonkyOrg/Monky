@@ -29,7 +29,7 @@ import { ScreenPictureInPictureWindows } from './screenPictureInPictureWindow';
 import { NativeThumbnailCapturer, loadThumbnailRuntime, createMacScreenProvider, type MacScreenProvider } from '@monky/screen-share';
 import { DesktopSourcePreviews } from './desktopSourcePreviews';
 import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
-import { deleteIdentity, exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
+import { createIdentity, deleteIdentity, exportIdentity, getClientId, getIdentity, getIdentityStatus, importIdentity, signChallenge } from './identityService';
 import { exportDirectMessages, importDirectMessages, resetDirectMessages, setupDmIpc, wipeDirectMessages, writeDmAttachment } from './dm/dmIpc';
 import { openBackup, sealBackup } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
@@ -506,7 +506,8 @@ export function setupIpcHandlers(
     }
   });
 
-  handleFromMainFrame('identity:has', async () => hasIdentity());
+  handleFromMainFrame('identity:status', async () => getIdentityStatus());
+  handleFromMainFrame('identity:create', async () => createIdentity());
   handleFromMainFrame('identity:get', async () => getIdentity(true));
   handleFromMainFrame('identity:get-client-id', async () => getClientId());
   handleFromMainFrame('identity:sign-challenge', async (_event, nonceHex: string) => signChallenge(nonceHex));
@@ -517,8 +518,11 @@ export function setupIpcHandlers(
       exportDirectMessages(dmMode === 'friends' || dmMode === 'history' ? dmMode : 'none'),
     )
   );
-  handleFromMainFrame('identity:import', async (_event, exportedIdentity: string, password: string) => {
-    const { dm, ...imported } = await importIdentity(exportedIdentity, password);
+  handleFromMainFrame('identity:import', async (_event, exportedIdentity: string, password: string, replace?: unknown) => {
+    const outcome = await importIdentity(exportedIdentity, password, typeof replace === 'string' ? replace : undefined);
+    // Waiting for the user to confirm another identity: friends and DMs stay as they are.
+    if (outcome.status !== 'imported') return outcome;
+    const { dm, ...imported } = outcome;
     resetDirectMessages();
     importDirectMessages(dm);
     return imported;

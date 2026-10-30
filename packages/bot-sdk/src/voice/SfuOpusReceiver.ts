@@ -1,5 +1,6 @@
 import { MediaStreamTrack, RTCPeerConnection, RtpPacket } from 'werift';
-import type { BotVoiceConsumer, BotVoiceTransportOptions } from '@monky/shared';
+import type { BotVoiceConsumer } from '@monky/shared';
+import { sfuCandidateLines, sfuTransportLines, type SfuTransport } from './mediasoupSdp';
 import { opusCodec } from './OpusPeer';
 
 export const voiceRtpCapabilities = {
@@ -31,7 +32,7 @@ export class SfuOpusReceiver {
   private readonly timer: ReturnType<typeof setTimeout>;
 
   constructor(
-    private readonly transport: BotVoiceTransportOptions,
+    private readonly transport: SfuTransport,
     private readonly packet: (sessionId: string, packet: RtpPacket) => void,
     private readonly failed: (error: Error) => void,
   ) {
@@ -124,10 +125,8 @@ export class SfuOpusReceiver {
   }
 
   private offerSdp(): string {
-    const fingerprint = this.transport.dtlsParameters.fingerprints.find((entry) => entry.algorithm === 'sha-256');
-    if (!fingerprint) throw new Error('SFU is missing its SHA-256 certificate fingerprint.');
-    const candidates = this.transport.iceCandidates.map((candidate) =>
-      `a=candidate:${candidate.foundation} 1 ${candidate.protocol.toUpperCase()} ${candidate.priority} ${candidate.ip} ${candidate.port} typ host${candidate.tcpType ? ` tcptype ${candidate.tcpType}` : ''}`);
+    const transportLines = sfuTransportLines(this.transport);
+    const candidateLines = sfuCandidateLines(this.transport);
     return [
       'v=0', `o=monky 1 ${++this.version} IN IP4 0.0.0.0`, 's=-', 't=0 0', 'a=ice-lite',
       `a=group:BUNDLE ${this.slots.map((_, index) => index).join(' ')}`, 'a=msid-semantic:WMS *',
@@ -137,12 +136,11 @@ export class SfuOpusReceiver {
         return [
           `m=audio 9 UDP/TLS/RTP/SAVPF ${pt}`, 'c=IN IP4 0.0.0.0', `a=mid:${index}`,
           consumer ? 'a=sendonly' : 'a=inactive', 'a=rtcp-mux', 'a=rtcp-rsize',
-          `a=ice-ufrag:${this.transport.iceParameters.usernameFragment}`, `a=ice-pwd:${this.transport.iceParameters.password}`,
-          `a=fingerprint:${fingerprint.algorithm} ${fingerprint.value}`, 'a=setup:passive',
+          ...transportLines,
           `a=rtpmap:${pt} opus/48000/2`, `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=1`,
           ...(ssrc ? [`a=msid:voice-${ssrc} mic-${ssrc}`, `a=ssrc:${ssrc} cname:monky`,
             `a=ssrc:${ssrc} msid:voice-${ssrc} mic-${ssrc}`] : []),
-          ...candidates, 'a=end-of-candidates',
+          ...candidateLines,
         ];
       }),
       '',

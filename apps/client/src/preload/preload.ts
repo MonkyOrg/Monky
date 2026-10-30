@@ -17,8 +17,9 @@ import type {
   AudioPreviewCancellation,
   AudioPreviewInput,
   AudioPreviewResult,
-  AppIdentityImportResult,
+  AppIdentityImportOutcome,
   AppIdentityResult,
+  AppIdentityStatus,
   BackupCryptoResult,
   ClientLogConfig,
   ClientLogEntry,
@@ -126,12 +127,19 @@ export interface ElectronApi {
   onLanDiscoveryFound: (cb: (server: DiscoveredLanServer) => void) => () => void;
   onLanDiscoveryLost: (cb: (server: DiscoveredLanServer) => void) => () => void;
   setLanguage: (language: string) => Promise<void>;
-  hasIdentity: () => Promise<boolean>;
+  /** Whether this computer has a usable identity, none yet, or one that could not be opened. */
+  getIdentityStatus: () => Promise<AppIdentityStatus>;
+  /** Creates an identity when there is no readable one; an unreadable file is set aside, never deleted. */
+  createIdentity: () => Promise<AppIdentityResult>;
   getIdentity: () => Promise<AppIdentityResult>;
   getClientId: () => Promise<string>;
   signChallenge: (nonceHex: string) => Promise<string>;
   exportIdentity: (password: string, extras?: string, dmMode?: DmExportMode) => Promise<string>;
-  importIdentity: (exportedIdentity: string, password: string) => Promise<AppIdentityImportResult>;
+  /**
+   * Imports an identity code. A code of another identity than the one in use answers `confirm-replace`
+   * without writing anything; calling again with `replace` set to that public key switches to it.
+   */
+  importIdentity: (exportedIdentity: string, password: string, replace?: string) => Promise<AppIdentityImportOutcome>;
   /** Deletes the identity, friends and DMs from this computer, then relaunches Monky. */
   logOut: () => Promise<{ success: boolean; error?: string }>;
   dm: DmApi;
@@ -387,12 +395,14 @@ const api: ElectronApi = {
     };
   },
   setLanguage: (language) => ipcRenderer.invoke('app:set-language', language),
-  hasIdentity: () => ipcRenderer.invoke('identity:has'),
+  getIdentityStatus: () => ipcRenderer.invoke('identity:status'),
+  createIdentity: () => ipcRenderer.invoke('identity:create'),
   getIdentity: () => ipcRenderer.invoke('identity:get'),
   getClientId: () => ipcRenderer.invoke('identity:get-client-id'),
   signChallenge: (nonceHex) => ipcRenderer.invoke('identity:sign-challenge', nonceHex),
   exportIdentity: (password, extras, dmMode) => ipcRenderer.invoke('identity:export', password, extras, dmMode),
-  importIdentity: (exportedIdentity, password) => ipcRenderer.invoke('identity:import', exportedIdentity, password),
+  importIdentity: (exportedIdentity, password, replace) =>
+    ipcRenderer.invoke('identity:import', exportedIdentity, password, replace),
   logOut: () => ipcRenderer.invoke('identity:logout'),
   dm: {
     snapshot: () => ipcRenderer.invoke(DM_IPC.snapshot),

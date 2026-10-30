@@ -5,7 +5,8 @@ import {
   GlobalArgs,
   isHelpArg,
   parseGlobalArgs,
-  withContext,
+  withReadOnlyContext,
+  withWritableContext,
 } from './cli/context';
 import { resolveTargetServer } from './cli/target';
 import { createCommand } from './cli/commands/create';
@@ -28,7 +29,7 @@ import {
   deleteRoleInteractive,
   listRoles,
 } from './cli/commands/roles';
-import { setConfig, showConfig } from './cli/commands/config';
+import { setConfigCommand, showConfig } from './cli/commands/config';
 import { cliLanguageCommand, cliSettingsMenu } from './cli/commands/cliSettings';
 import { updateCommand, getLocalVersion } from './cli/commands/update';
 import { destroyCommand } from './cli/commands/destroy';
@@ -257,7 +258,7 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
   if (section === 'members') {
     const memberAction = action || 'list';
     await runDataCommand(globalArgs, async (dataDir) => {
-      await withContext(dataDir, async (ctx) => {
+      await withReadOnlyContext(dataDir, async (ctx) => {
         if (memberAction === 'list') {
           await listMembers(ctx);
           return;
@@ -273,7 +274,7 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
 
   if (section === 'admin') {
     await runDataCommand(globalArgs, async (dataDir) => {
-      await withContext(dataDir, async (ctx) => {
+      await withWritableContext(dataDir, async (ctx) => {
         if (action === 'add') {
           await changeAdminRole(ctx, rest.join(' '), true);
           return;
@@ -290,11 +291,11 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
   if (section === 'roles') {
     const roleAction = action || 'list';
     await runDataCommand(globalArgs, async (dataDir) => {
-      await withContext(dataDir, async (ctx) => {
-        if (roleAction === 'list') {
-          await listRoles(ctx);
-          return;
-        }
+      if (roleAction === 'list') {
+        await withReadOnlyContext(dataDir, listRoles);
+        return;
+      }
+      await withWritableContext(dataDir, async (ctx) => {
         if (roleAction === 'create') {
           await createRoleInteractive(ctx, rest);
           return;
@@ -325,19 +326,11 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
       await cliSettingsMenu(globalArgs);
       return;
     }
-    const configAction = action || 'show';
-    await runDataCommand(globalArgs, async (dataDir) => {
-      await withContext(dataDir, async (ctx) => {
-        if (configAction === 'show') {
-          await showConfig(ctx);
-          return;
-        }
-        if (configAction === 'set') {
-          await setConfig(ctx, rest[0] || '', rest.length > 1 ? rest.slice(1).join(' ') : undefined);
-          return;
-        }
-      });
-    });
+    if (action === 'set') {
+      await setConfigCommand(globalArgs, rest[0] || '', rest.length > 1 ? rest.slice(1).join(' ') : undefined);
+      return;
+    }
+    await runDataCommand(globalArgs, (dataDir) => withReadOnlyContext(dataDir, showConfig));
     return;
   }
 

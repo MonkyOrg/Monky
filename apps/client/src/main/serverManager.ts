@@ -102,14 +102,15 @@ export class ServerManager {
     if (!serverId || !isSafeServerId(serverId)) {
       return { success: false, error: mt('error.deleteServerDataFailed') };
     }
-    return this.lifecycle.runExclusive(() => {
+    return this.lifecycle.runExclusive(async () => {
       // Wait for pending starts and stops before deciding whether data is free.
       if (this.getStatus().servers.some((server) => server.serverId === serverId)) {
         return { success: false, error: mt('error.deleteServerDataRunning') };
       }
 
       try {
-        fs.rmSync(serverDataDirFor(ServerManager.baseDataDir(), serverId), { recursive: true, force: true });
+        // Months of attachments can be thousands of files; a synchronous delete froze the window and IPC.
+        await fs.promises.rm(serverDataDirFor(ServerManager.baseDataDir(), serverId), { recursive: true, force: true });
         return { success: true };
       } catch (error) {
         console.error('[ServerManager] Error deleting server data:', error);

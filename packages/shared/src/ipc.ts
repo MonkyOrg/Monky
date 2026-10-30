@@ -599,13 +599,44 @@ export interface AppIdentityResult {
 }
 
 /**
+ * Why the identity file on this computer could not be opened (#490):
+ * - `locked`: the system keychain (macOS Keychain, Windows DPAPI) did not
+ *   unlock it, e.g. access denied or a file copied from another user;
+ * - `corrupt`: the file is damaged or incomplete;
+ * - `io`: the file could not be read right now, e.g. held by another program.
+ */
+export type IdentityUnreadableReason = 'locked' | 'corrupt' | 'io';
+
+/**
+ * The identity on this computer. When it is `unreadable` the file is kept as
+ * it is: the app only replaces it when the user explicitly imports or creates
+ * another identity, and even then the old file is set aside, not deleted.
+ */
+export type AppIdentityStatus =
+  | { state: 'ready' }
+  | { state: 'missing' }
+  | { state: 'unreadable'; reason: IdentityUnreadableReason };
+
+/**
  * Import result. `extras` carries the opaque servers/settings backup that may
  * have been exported alongside the identity (#472); only the renderer knows how
  * to read it.
  */
 export interface AppIdentityImportResult extends AppIdentityResult {
+  status: 'imported';
   extras?: string;
 }
+
+/**
+ * The code belongs to another identity than the one this computer uses, and
+ * nothing was written (#490). Importing again with `replace` set to this
+ * `publicKey` switches to it; the identity in use is kept aside, not deleted.
+ */
+export interface AppIdentityReplaceRequest extends AppIdentityResult {
+  status: 'confirm-replace';
+}
+
+export type AppIdentityImportOutcome = AppIdentityImportResult | AppIdentityReplaceRequest;
 
 export interface BackupSaveResult {
   success: boolean;
@@ -941,12 +972,17 @@ export interface IpcInvokeChannels {
   'app:leave-complete': { args: [request: AppShutdownRequest]; returnType: void };
 
   // Identidade
-  'identity:has': { args: []; returnType: boolean };
+  'identity:status': { args: []; returnType: AppIdentityStatus };
+  // Cria uma identidade quando não há uma legível; um arquivo ilegível é guardado à parte antes
+  'identity:create': { args: []; returnType: AppIdentityResult };
   'identity:get': { args: []; returnType: AppIdentityResult };
   'identity:get-client-id': { args: []; returnType: string };
   'identity:sign-challenge': { args: [nonceHex: string]; returnType: string };
   'identity:export': { args: [password: string, extras?: string]; returnType: string };
-  'identity:import': { args: [exportedIdentity: string, password: string]; returnType: AppIdentityImportResult };
+  'identity:import': {
+    args: [exportedIdentity: string, password: string, replace?: string];
+    returnType: AppIdentityImportOutcome;
+  };
   // Sair: apaga a identidade, amigos e DMs deste computador e reinicia o app
   'identity:logout': { args: []; returnType: { success: boolean; error?: string } };
 

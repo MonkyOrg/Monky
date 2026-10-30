@@ -34,11 +34,17 @@ function currentService(): DmService | null {
   if (!keyring) return null;
   const identity = keyring.identityPublicKey;
   const folder = createHash('sha256').update(identity).digest('hex').slice(0, 16);
-  service = new DmService({
-    keyring,
-    dir: path.join(dmRoot(), folder),
-    onEvent: (event) => eventSink?.(event),
-  });
+  try {
+    service = new DmService({
+      keyring,
+      dir: path.join(dmRoot(), folder),
+      onEvent: (event) => eventSink?.(event),
+    });
+  } catch (error) {
+    // The store could not be read right now; it stays on disk and the next call tries again.
+    console.error('[DM] Could not open the encrypted store.', error);
+    return null;
+  }
   return service;
 }
 

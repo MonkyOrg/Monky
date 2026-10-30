@@ -18,7 +18,6 @@ import { cliLanguageCommand } from './cli/commands/cliSettings';
 import { listMembers, showMemberInfo } from './cli/commands/members';
 import { listRoles } from './cli/commands/roles';
 import { printServerTable, restartServerCommand, startServerCommand, statusServerCommand } from './cli/commands/serverLifecycle';
-import * as update from './cli/commands/update';
 import {
   configKeyLabel,
   describeSfuPortProblem,
@@ -37,6 +36,7 @@ import {
   printVoiceModeComparisonTable,
   sfuPreflightSummary,
 } from './cli/formatters';
+import * as autoUpdate from './cli/autoUpdate';
 import * as health from './cli/health';
 import {
   detectCliLanguage,
@@ -593,17 +593,21 @@ test('TURN port failures expose structured diagnostics without changing legacy c
 
 test('confirmation hints use Y/N or S/N while accepting the same boolean answers', async (context) => {
   fixture(context);
-  const createInterface = readline.createInterface;
+  const written: string[] = [];
+  context.mock.method(process.stdout, 'write', (chunk: string | Uint8Array) => {
+    written.push(String(chunk));
+    return true;
+  });
+  const originalInput = Object.getOwnPropertyDescriptor(process, 'stdin');
+  assert.ok(originalInput);
+  context.after(() => Object.defineProperty(process, 'stdin', originalInput));
   for (const language of ['en', 'pt-BR'] as const) {
     setCliLanguage(language);
     for (const defaultYes of [true, false]) {
-      const output = new PassThrough();
-      const mocked = context.mock.method(readline, 'createInterface', () =>
-        createInterface({ input: Readable.from(['y\n']), output, terminal: false })
-      );
+      written.length = 0;
+      Object.defineProperty(process, 'stdin', { configurable: true, value: Readable.from(['y\n']) });
       assert.equal(await prompts.confirm(t('create.confirm'), defaultYes), true);
-      assert.ok(String(output.read()).includes(t(defaultYes ? 'prompt.confirmDefaultYes' : 'prompt.confirmDefaultNo')));
-      mocked.mock.restore();
+      assert.ok(written.join('').includes(t(defaultYes ? 'prompt.confirmDefaultYes' : 'prompt.confirmDefaultNo')));
     }
   }
 });
@@ -649,7 +653,7 @@ test('create prompts, default server name, summary and existing-server errors ar
 test('members, roles and config display translated labels while retaining canonical keys and data', async (context) => {
   const { root } = fixture(context);
   const output = captureConsole(context);
-  context.mock.method(update, 'isAutoUpdateEnabled', () => false);
+  context.mock.method(autoUpdate, 'isAutoUpdateEnabled', () => false);
   context.mock.method(CoturnManager, 'describeAvailability', () => ({ supported: true }));
   await withContext(path.join(root, 'server-data'), async (ctx) => {
     await ctx.userRepo.create({
@@ -762,6 +766,7 @@ test('start, restart and post-update restart retry while the server preview is s
         if (++attempts === 1) return null;
         return readPreview(port);
       });
+      if (command === 'after-update') f.state.entry = { pid: 24680, pm2_env: { status: 'online' } };
       if (command === 'start') await startServerCommand(commandArgs(['start'], f.dataDir), ['--port', '4100']);
       else await restartServerCommand(commandArgs(['restart'], f.dataDir), command === 'after-update' ? ['--after-update'] : []);
       const expectedPort = command === 'start' ? 4100 : 3200;

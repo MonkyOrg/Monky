@@ -1,11 +1,12 @@
 import jsQR from 'jsqr';
 import QRCode from 'qrcode';
-import { IDENTITY_EXPORT_PREFIX, isSecretEnvelope, type DmExportMode } from '@monky/shared';
+import { IDENTITY_EXPORT_PREFIX, isSecretEnvelope, type AppIdentityImportResult, type DmExportMode } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBackup, scopesInBackup } from '../utils/backup';
 import { isButtonLoading, setButtonLoading, withButtonLoading } from '../utils/buttonLoading';
+import { showConfirm } from './Dialog';
 import { acceptExportPassword, exportPasswordHint } from './exportPassword';
 
 export interface IdentityInfo {
@@ -303,7 +304,10 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
       exitModal(backdrop);
     };
 
+    // Set once the dialog is gone, so an import still on its way cannot ask anything afterwards.
+    let closed = false;
     const settle = (identity: IdentityInfo | null) => {
+      closed = true;
       cleanup();
       resolve(identity);
     };
@@ -365,12 +369,37 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
       }
     };
 
+    /**
+     * Imports the code. A code of another identity than the one this computer
+     * uses only goes in after the user confirms switching (#490); the main
+     * process keeps the current identity aside when it does.
+     */
+    const importCode = async (): Promise<AppIdentityImportResult | null> => {
+      const code = codeInput.value;
+      const password = passwordInput.value;
+      const outcome = await window.api.importIdentity(code, password);
+      if (outcome.status === 'imported') return outcome;
+      if (closed) return null;
+      const confirmed = await showConfirm({
+        title: t('identity.importReplaceTitle'),
+        message: t('identity.importReplaceMessage'),
+        confirmLabel: t('identity.importAction'),
+        variant: 'danger',
+        focusCancel: true,
+      });
+      if (!confirmed || closed) return null;
+      const replaced = await window.api.importIdentity(code, password, outcome.publicKey);
+      if (replaced.status !== 'imported') throw new Error(t('identity.importError'));
+      return replaced;
+    };
+
     importButton.addEventListener('click', async () => {
       clearError();
       importButton.disabled = true;
       importButton.textContent = t('identity.importing');
       try {
-        const identity = await window.api.importIdentity(codeInput.value, passwordInput.value);
+        const identity = await importCode();
+        if (!identity) return;
         let restoredScopes: BackupScope[] | undefined;
         let extrasFailed = false;
         if (identity.extras) {
@@ -383,9 +412,9 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
             extrasFailed = true;
           }
         }
-        settle({ ...identity, restoredScopes, extrasFailed });
-      } catch (error: any) {
-        showError(error?.message || t('identity.importError'));
+        settle({ publicKey: identity.publicKey, clientId: identity.clientId, restoredScopes, extrasFailed });
+      } catch (error: unknown) {
+        showError(error instanceof Error && error.message ? error.message : t('identity.importError'));
       } finally {
         importButton.disabled = false;
         importButton.textContent = t('identity.importAction');

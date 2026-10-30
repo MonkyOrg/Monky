@@ -21,6 +21,7 @@ import {
   type NativeScreenEndpointState,
 } from '@monky/screen-share';
 import * as screenAudio from '@monky/screen-audio';
+import { canonicalDirectory, samePath } from './canonicalDirectory';
 import type { ClientLogger } from './clientLogger';
 import { browserOcclusionEngine } from './browserOcclusion';
 import { mt } from './i18n';
@@ -236,6 +237,29 @@ function sharesApplicationAudio(processId: number, shared: readonly number[]): b
   }
 }
 
+/** Capture runs share one canonical folder: the native helper refuses any redirected component of their path. */
+function captureRoot(): Promise<string> {
+  return canonicalDirectory(path.join(app.getPath('userData'), 'native-screen-capture'), true);
+}
+
+/**
+ * Deletes a capture run folder only while it is still the real folder created under `root`, and any
+ * ownership marker the helper wrote names exactly the processes in `owner`.
+ */
+async function removeOwnedCaptureDirectory(root: string, directory: string, owner: Record<string, unknown>,
+  label: string): Promise<void> {
+  const stat = await lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !samePath(await realpath(directory), directory)
+    || path.dirname(directory) !== root)
+    throw new Error(`The ${label} directory changed identity before retirement.`);
+  if ((await readdir(directory)).length) {
+    const marker: unknown = JSON.parse(await readFile(path.join(directory, '.monky-screen-capture-owner'), 'utf8'));
+    if (!record(marker) || Object.entries(owner).some(([key, value]) => marker[key] !== value))
+      throw new Error(`The ${label} directory has a different process owner.`);
+  }
+  await rm(directory, { recursive: true });
+}
+
 class SelectedCaptureProbe {
   private readonly runId = randomBytes(16).toString('hex');
   private readonly directory: string;
@@ -331,18 +355,8 @@ class SelectedCaptureProbe {
       }
     }
     if (this.directoryCreated) {
-      const directory = await lstat(this.directory);
-      if (!directory.isDirectory() || directory.isSymbolicLink()
-        || (await realpath(this.directory)).toLowerCase() !== this.directory.toLowerCase()
-        || path.dirname(this.directory) !== this.root)
-        throw new Error('The owned probe directory changed identity before retirement.');
-      if ((await readdir(this.directory)).length) {
-        const marker: unknown = JSON.parse(await readFile(path.join(this.directory, '.monky-screen-capture-owner'), 'utf8'));
-        if (!record(marker) || marker.runId !== this.runId || marker.parentProcessId !== process.pid
-          || marker.helperProcessId !== this.child?.pid)
-          throw new Error('The selected-source probe directory has a different process owner.');
-      }
-      await rm(this.directory, { recursive: true });
+      await removeOwnedCaptureDirectory(this.root, this.directory,
+        { runId: this.runId, parentProcessId: process.pid, helperProcessId: this.child?.pid }, 'selected-source probe');
       this.directoryCreated = false;
     }
     this.retired = true;
@@ -599,9 +613,8 @@ class NativeScreenSharingService {
         abort.throwIfAborted();
         const profile = getScreenShareProfile(video, 'source', selection.codec);
         const runId = randomBytes(16).toString('hex');
-        const root = path.join(app.getPath('userData'), 'native-screen-capture');
+        const root = await captureRoot();
         const directory = path.join(root, `monky-screen-capture-${runId}`);
-        await mkdir(root, { recursive: true });
         await mkdir(directory);
         let retirementConfirmed = true;
         let capability: NativeScreenCaptureCapability | undefined;
@@ -621,17 +634,9 @@ class NativeScreenSharingService {
           if (!retirementConfirmed) this.encodingRetirementFailure = error;
           throw error;
         } finally {
+          // probeCaptureCapabilities spawns and retires its own helper, so Main can bind only the run and itself.
           if (retirementConfirmed) {
-            const stat = await lstat(directory);
-            if (!stat.isDirectory() || stat.isSymbolicLink()
-              || (await realpath(directory)).toLowerCase() !== directory.toLowerCase())
-              throw new Error('The encoder-probe directory changed identity.');
-            if ((await readdir(directory)).length) {
-              const marker: unknown = JSON.parse(await readFile(path.join(directory, '.monky-screen-capture-owner'), 'utf8'));
-              if (!record(marker) || marker.runId !== runId || marker.parentProcessId !== process.pid)
-                throw new Error('The encoder-probe directory changed ownership.');
-            }
-            await rm(directory, { recursive: true });
+            await removeOwnedCaptureDirectory(root, directory, { runId, parentProcessId: process.pid }, 'encoder-probe');
           }
         }
         abort.throwIfAborted();
@@ -989,8 +994,7 @@ class NativeScreenSharingService {
         paused = nextPaused;
       };
       sourceState();
-      const captureDirectory = path.join(app.getPath('userData'), 'native-screen-capture');
-      await mkdir(captureDirectory, { recursive: true });
+      const captureDirectory = await captureRoot();
       assertCurrent();
       sourceState();
       stage = 'preflight';

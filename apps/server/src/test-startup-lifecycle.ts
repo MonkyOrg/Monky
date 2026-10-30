@@ -222,7 +222,7 @@ test('server-level listener errors never disconnect or evict existing voice sess
   socket.send = () => {};
   let closes = 0;
   const session: Parameters<WebSocketServer['handleServerUpdateSettings']>[0] = {
-    ws: socket, sessionId: 'retained-session', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    ws: socket, sessionId: 'retained-session', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     user: { id: 'retained-user', clientId: 'test-key', sessionId: 'retained-session', nickname: 'Peer', status: 'ONLINE', joinedAt: 1 },
   };
   socket.close = () => {
@@ -669,4 +669,145 @@ test('a failed close of a late SFU worker remains owned for retry without damagi
   assert.equal(stale.closes(), 1);
   assert.equal(current.closes(), 1);
   assert.equal(sfu['retiringWorkers'].size, 0);
+});
+
+/** A synthetic worker that creates routers, each held until `gate` settles. */
+function routingWorker(gate?: Promise<void>) {
+  const synthetic = syntheticWorker();
+  const routers: mediasoup.types.Router[] = [];
+  Object.defineProperty(synthetic.worker, 'createRouter', {
+    value: async () => {
+      await gate;
+      let closed = false;
+      const router: Partial<mediasoup.types.Router> = { get closed() { return closed; }, close: () => { closed = true; } };
+      routers.push(router as mediasoup.types.Router);
+      return router;
+    },
+  });
+  return { ...synthetic, routers };
+}
+
+/** Monotonic clock the SFU backoff reads, advanced by hand. */
+function monotonicClock(t: TestContext) {
+  const clock = { now: 1_000_000 };
+  t.mock.method(performance, 'now', () => clock.now);
+  return clock;
+}
+
+test('an SFU worker that dies is forgotten with everything it carried and replaced on the next request', async (t) => {
+  const clock = monotonicClock(t);
+  const deaths = t.mock.method(Logger, 'error', () => {});
+  t.mock.method(Logger, 'info', () => {});
+  const first = routingWorker();
+  const second = routingWorker();
+  let attempts = 0;
+  t.mock.method(mediasoup, 'createWorker', () => Promise.resolve(++attempts === 1 ? first.worker : second.worker));
+  const sfu = new SfuManager({ announcedIp: '127.0.0.1' });
+  t.after(() => sfu.close());
+  let losses = 0;
+  sfu.setWorkerLostListener(() => { losses++; });
+
+  const before = await sfu.getOrCreateRouter('room');
+  assert.equal(attempts, 1, 'the first call request starts the worker');
+  const transport: Partial<mediasoup.types.WebRtcTransport> = { id: 'dead', closed: true, close() {} };
+  sfu['transports'].set('dead', {
+    transport: transport as mediasoup.types.WebRtcTransport, sessionId: 'peer', channelId: 'room', direction: 'send', purpose: 'call',
+  });
+
+  clock.now += 60_000;
+  first.worker.emit('died', new Error('Synthetic worker crash'));
+  assert.equal(losses, 1, 'the server is told, so clients can rebuild');
+  assert.equal(deaths.mock.callCount(), 1);
+  assert.equal(sfu.isReady(), false);
+  assert.equal(sfu['routers'].size, 0);
+  assert.equal(sfu['transports'].size, 0, 'transports of a dead worker are not kept');
+  assert.match(sfu.getLastError() ?? '', /Synthetic worker crash/);
+
+  const after = await sfu.getOrCreateRouter('room');
+  assert.equal(attempts, 2, 'the next request starts a new worker, without restarting the server');
+  assert.notEqual(after, before);
+  assert.equal(sfu.isReady(), true);
+  assert.equal(sfu.getLastError(), null);
+  first.worker.emit('died', new Error('Late duplicate death'));
+  assert.equal(losses, 1, 'the dead worker cannot reach the new generation');
+  assert.equal(sfu.isReady(), true);
+});
+
+test('an SFU worker that will not start, or keeps dying young, is retried on demand with a growing wait', async (t) => {
+  const clock = monotonicClock(t);
+  t.mock.method(Logger, 'warn', () => {});
+  t.mock.method(Logger, 'error', () => {});
+  t.mock.method(Logger, 'info', () => {});
+  const workers: Array<ReturnType<typeof routingWorker>> = [];
+  let failing = true;
+  let attempts = 0;
+  t.mock.method(mediasoup, 'createWorker', () => {
+    attempts++;
+    if (failing) return Promise.reject(new Error('Synthetic port in use'));
+    const next = routingWorker();
+    workers.push(next);
+    return Promise.resolve(next.worker);
+  });
+  const sfu = new SfuManager({ announcedIp: '127.0.0.1' });
+  t.after(() => sfu.close());
+
+  assert.equal(await sfu.init(), false, 'the boot attempt fails');
+  assert.equal(await sfu.init(), false, 'the first failure is retried at once');
+  assert.equal(attempts, 2);
+  await assert.rejects(sfu.getOrCreateRouter('room'), /SFU worker is not available: Synthetic port in use/);
+  assert.equal(attempts, 2, 'repeated failures wait before spawning again, however many requests arrive');
+
+  clock.now += 2_000;
+  failing = false;
+  await sfu.getOrCreateRouter('room');
+  assert.equal(attempts, 3, 'a request after the wait brings the SFU up');
+
+  clock.now += 1_000;
+  workers[0].worker.emit('died', new Error('Synthetic crash loop'));
+  assert.equal(await sfu.init(), false, 'a worker that died young waits like a failed start');
+  clock.now += 3_999;
+  assert.equal(await sfu.init(), false);
+  clock.now += 1;
+  assert.equal(await sfu.init(), true);
+  assert.equal(attempts, 4);
+
+  clock.now += 1_000;
+  workers[1].worker.emit('died', new Error('Synthetic crash loop'));
+  assert.equal(await sfu.init(), false);
+  assert.equal(await sfu.init({ retryNow: true }), true, "an operator's explicit action does not wait");
+  assert.equal(attempts, 5);
+});
+
+test('concurrent first requests for a channel share one router, and a creation outlived by its worker is discarded', async (t) => {
+  t.mock.method(Logger, 'error', () => {});
+  t.mock.method(Logger, 'info', () => {});
+  const released = deferred();
+  const held = deferred();
+  const shared = routingWorker(released.promise);
+  const dying = routingWorker(held.promise);
+  const queue = [shared.worker, dying.worker];
+  t.mock.method(mediasoup, 'createWorker', () => Promise.resolve(queue.shift()));
+  const sfu = new SfuManager({ announcedIp: '127.0.0.1' });
+  t.after(() => sfu.close());
+  assert.equal(await sfu.init(), true);
+
+  const first = sfu.getOrCreateRouter('room');
+  const second = sfu.getOrCreateRouter('room');
+  const other = sfu.getOrCreateRouter('other-room');
+  released.resolve();
+  const [one, two, elsewhere] = await Promise.all([first, second, other]);
+  assert.equal(one, two, 'two participants arriving together land on the same router');
+  assert.notEqual(one, elsewhere);
+  assert.equal(shared.routers.length, 2, 'one router per channel, none orphaned in the worker');
+  assert.equal(await sfu.getOrCreateRouter('room'), one);
+  assert.equal(shared.routers.length, 2);
+
+  sfu.close();
+  assert.equal(await sfu.init(), true);
+  const creating = sfu.getOrCreateRouter('room');
+  dying.worker.emit('died', new Error('Synthetic crash during creation'));
+  held.resolve();
+  await assert.rejects(creating, /changed while the router was being created/);
+  assert.equal(dying.routers[0].closed, true, 'a router of a dead worker is closed, never registered');
+  assert.equal(sfu['routers'].size, 0);
 });

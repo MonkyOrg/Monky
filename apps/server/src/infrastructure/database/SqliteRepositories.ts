@@ -253,10 +253,10 @@ export class SqliteUserRepository implements IUserRepository {
   }
 
   async delete(id: string): Promise<void> {
-    // Related rows are removed explicitly rather than relying on the cascade, so
-    // the deletion holds even on a database opened without `foreign_keys = ON`.
-    // Chat messages are intentionally preserved (they gracefully render as an
-    // unknown author) to keep channel history intact.
+    // user_roles names the user without an ON DELETE action, so it is cleared
+    // first. The foreign keys take care of the rest: what the member posted
+    // stays and shows an unknown author (D2), the bots they added keep
+    // working, and their votes, answers and individual channel rules go.
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM user_roles WHERE user_id = ?').run(id);
       this.db.prepare('DELETE FROM mentions WHERE user_id = ?').run(id);
@@ -664,17 +664,17 @@ export class SqliteMessageRepository implements IMessageRepository {
   }
 
   async listByChannel(channelId: string, limit: number, beforeTimestamp?: number): Promise<MessageRecord[]> {
-    if (beforeTimestamp) {
-      const rows = this.db.prepare(
-        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`
-      ).all(channelId, beforeTimestamp, limit) as SqliteMessageRow[];
-
-      return rows.reverse().map(toMessageRecord);
-    }
-
+    // The oldest timestamp of a page is the client's next `beforeTimestamp`, so
+    // a page takes every message of its oldest millisecond: stopping inside it
+    // would skip the rest (S-APP-11). Ties keep the order they were sent in.
+    const before = beforeTimestamp ? 'AND created_at < ?' : '';
+    const scope = beforeTimestamp ? [channelId, beforeTimestamp] : [channelId];
     const rows = this.db.prepare(
-      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?`
-    ).all(channelId, limit) as SqliteMessageRow[];
+      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel_id = ? ${before} AND created_at >= (
+        SELECT MIN(created_at) FROM (
+          SELECT created_at FROM messages WHERE channel_id = ? ${before} ORDER BY created_at DESC LIMIT ?))
+       ORDER BY created_at DESC, rowid DESC`
+    ).all(...scope, ...scope, limit) as SqliteMessageRow[];
 
     return rows.reverse().map(toMessageRecord);
   }

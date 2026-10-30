@@ -242,6 +242,23 @@ test('clients a restarting server drops together come back spread around each st
   assert.deepEqual(delays, [500, 2998]);
 });
 
+test('after an identity import, reconnecting claims the new key the challenge is signed with', async context => {
+  const f = fixture(context);
+  await f.connected();
+  const claimed = () => f.lastSocket().sent.find(message => message.type === MessageType.AUTH_CONNECT)?.payload.publicKey;
+  assert.equal(claimed(), identity.publicKey);
+  f.client.adoptIdentity({ clientId: 'imported-client', publicKey: 'imported-public-key' });
+  assert.equal(f.client.getStatus(), 'CONNECTED', 'The open session is left as it is');
+  assert.equal(f.sockets.length, 1);
+  f.lastSocket().drop();
+  context.mock.timers.tick(1000);
+  f.lastSocket().open();
+  assert.equal(claimed(), 'imported-public-key', 'The old key would fail the challenge on every attempt');
+  f.lastSocket().auth();
+  await setImmediate();
+  assert.equal(f.client.getStatus(), 'CONNECTED');
+});
+
 test('dial and authentication timeouts both advance the reconnect ladder', async context => {
   const f = fixture(context);
   await f.connected();

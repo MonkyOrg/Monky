@@ -1241,6 +1241,96 @@ test('a linked root is rejected before creating storage in the external target',
   await fs.unlink(linked);
 });
 
+test('a junction above the managed root is the user layout: tools install and publish canonical paths', async (t) => {
+  const { base } = await fixture(t);
+  const physical = path.join(base, 'physical-profile');
+  const linked = path.join(base, 'linked-profile');
+  await fs.mkdir(physical);
+  await fs.symlink(physical, linked, process.platform === 'win32' ? 'junction' : 'dir');
+  const root = path.join(physical, 'local-execution');
+  const tools = new LocalTools({ root: path.join(linked, 'local-execution'), probe: async (tool) => versions[tool] });
+  try {
+    await tools.initialize();
+    const paths = await tools.prepare(signal());
+    for (const filename of Object.values(paths)) {
+      assert.equal(path.relative(path.join(root, 'tools'), filename).startsWith('..'), false, filename);
+    }
+    const cache = await tools.allocateTaskCache();
+    assert.equal(path.dirname(cache), path.join(root, 'cache'));
+    await tools.removeTaskCache(cache);
+    assert.ok((await tools.snapshot()).tools.every((tool) => tool.status === 'ready'));
+    await tools.clearCache();
+  } finally {
+    await tools.dispose();
+    await fs.unlink(linked);
+  }
+});
+
+test('an abandoned task cache stays on disk for this run but no longer holds maintenance or disposal', async (t) => {
+  const { tools, root } = await fixture(t);
+  const abandoned = await tools.allocateTaskCache();
+  await fs.writeFile(path.join(abandoned, 'worker-output'), 'a descendant may still use this');
+  let closes = 0;
+  const owner = tools.registerTaskCacheOwner(abandoned, async () => { closes++; });
+  owner.abandon();
+  assert.throws(() => owner.abandon(), reason('invalid_request'));
+  assert.throws(() => owner.confirmNativeClosed(), reason('invalid_request'));
+  await assert.rejects(tools.removeTaskCache(abandoned), reason('invalid_request'));
+  const count = LOCAL_TOOLS_CACHE_MAX_BYTES / LOCAL_TASK_CACHE_MAX_BYTES;
+  for (let index = 2; index < count; index++) await fs.mkdir(path.join(root, 'cache', `task-${randomUUID()}`));
+  const last = await tools.allocateTaskCache();
+  await assert.rejects(tools.allocateTaskCache(), reason('storage_failed'), 'Kept files still count against the quota');
+  await tools.removeTaskCache(last);
+  await tools.clearCache();
+  await tools.remove('node');
+  await tools.dispose();
+  assert.equal(closes, 0, 'An abandoned owner is never asked to close again');
+  assert.equal(await fs.readFile(path.join(abandoned, 'worker-output'), 'utf8'), 'a descendant may still use this');
+  assert.deepEqual(await fs.readdir(path.join(root, 'cache')), [path.basename(abandoned)]);
+  const restarted = new LocalTools({ root, probe: async () => assert.fail('Startup must not probe') });
+  await restarted.initialize();
+  await restarted.clearCache();
+  assert.ok((await fs.stat(abandoned)).isDirectory(), 'This process never deletes a cache it abandoned');
+  await restarted.dispose();
+});
+
+test('startup removes task caches left by an earlier run, keeping other cache entries', async (t) => {
+  const { tools, root } = await fixture(t);
+  const leftover = path.join(root, 'cache', `task-${randomUUID()}`);
+  await fs.mkdir(path.join(leftover, 'nested'), { recursive: true });
+  await fs.writeFile(path.join(leftover, 'nested', 'stream'), Buffer.alloc(321));
+  const unknown = path.join(root, 'cache', 'unrecognized');
+  await fs.writeFile(unknown, 'kept');
+  await tools.initialize();
+  await assert.rejects(fs.stat(leftover), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(unknown, 'utf8'), 'kept');
+  assert.equal((await tools.snapshot()).cacheBytes, Buffer.byteLength('kept'));
+});
+
+test('a cache an earlier run cannot release yet does not stop startup', async (t) => {
+  const { tools, root } = await fixture(t);
+  const leftover = path.join(root, 'cache', `task-${randomUUID()}`);
+  const filename = path.join(leftover, 'held-by-a-descendant');
+  await fs.mkdir(leftover, { recursive: true });
+  await fs.writeFile(filename, 'locked');
+  const original = fs.unlink.bind(fs);
+  let attempts = 0;
+  const unlink = t.mock.method(fs, 'unlink', async (...args: Parameters<typeof fs.unlink>): Promise<void> => {
+    if (String(args[0]) === filename) {
+      attempts++;
+      throw Object.assign(new Error('Controlled sharing violation'), { code: 'EBUSY' });
+    }
+    await original(...args);
+  });
+  await tools.initialize();
+  assert.ok(attempts >= 1);
+  assert.equal(await fs.readFile(filename, 'utf8'), 'locked');
+  assert.equal((await tools.snapshot()).supported, true);
+  unlink.mock.restore();
+  await tools.clearCache();
+  await assert.rejects(fs.stat(leftover), { code: 'ENOENT' });
+});
+
 test('task cache allocation, real inventory, isolated removal and clearing preserve other parent-owned data', async (t) => {
   const { tools, root, base } = await fixture(t);
   const first = await tools.allocateTaskCache();

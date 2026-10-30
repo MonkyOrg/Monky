@@ -45,6 +45,7 @@ function sides(t) {
   };
   const app = load(mainSource('identityService.ts'), {
     crypto, electron, fs, path, '@monky/shared': shared, './secretEnvelope': envelope, './dm/dmCrypto': { DmKeyring: class {} },
+    './atomicFile': load(mainSource('atomicFile.ts'), { crypto, fs, path }),
   });
   const cli = load(path.join(repository, 'apps', 'server', 'src', 'cli', 'identity.ts'), {
     crypto, '@monky/shared': shared, './i18n/index': { t: (key) => key },
@@ -68,11 +69,17 @@ test('identity codes exported by the app open in monky create, and earlier codes
   await assert.rejects(cli.decryptIdentityExport(code, 'another long password'), { message: 'identity.wrongPassword' });
 
   const imported = await app.importIdentity(code, PASSWORD);
+  assert.equal(imported.status, 'imported', 'The identity in use imports again without asking');
   assert.equal(imported.publicKey, identity.publicKey);
   assert.equal(imported.extras, '{"version":1,"servers":[]}');
   assert.deepEqual(imported.dm, dm);
 
-  const legacy = await app.importIdentity(LEGACY_IDENTITY_CODE, LEGACY_PASSWORD);
+  const asked = await app.importIdentity(LEGACY_IDENTITY_CODE, LEGACY_PASSWORD);
+  assert.equal(asked.status, 'confirm-replace', 'Another identity waits for the user to confirm');
+  assert.equal(asked.publicKey, LEGACY_PUBLIC_KEY);
+  assert.equal(app.getIdentity(false).publicKey, identity.publicKey, 'Nothing changes before that');
+  const legacy = await app.importIdentity(LEGACY_IDENTITY_CODE, LEGACY_PASSWORD, asked.publicKey);
+  assert.equal(legacy.status, 'imported');
   assert.equal(legacy.publicKey, LEGACY_PUBLIC_KEY);
   assert.equal(app.getIdentity(false).publicKey, LEGACY_PUBLIC_KEY, 'An imported identity replaces the stored one');
   assert.equal((await cli.decryptIdentityExport(LEGACY_IDENTITY_CODE, LEGACY_PASSWORD)).publicKey, LEGACY_PUBLIC_KEY);

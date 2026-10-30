@@ -228,6 +228,7 @@ class WorkerHost {
   private resultReceived = false;
   private closedReceived = false;
   private childClosed = false;
+  private abandoned = false;
   private stopping = false;
   private eof = false;
   private reading = false;
@@ -475,14 +476,17 @@ class WorkerHost {
       try { await this.lease.pool.release(this.lease); }
       catch (error) { this.fail(workerError(error, 'storage_failed')); }
       if (this.child?.pid !== undefined && !this.closedReceived) {
+        // Killed, crashed or unresponsive: nothing can confirm this worker's descendants anymore. Its
+        // files stay until the next start, but its task, cache slot and shutdown are released.
         cleanupError = new LocalExecutionError('worker_failed', {
-          cause: new Error('Worker did not confirm native cleanup; its private cache has been retained.'),
+          cause: new Error('Worker did not confirm native cleanup; its private cache is retained until the next start.'),
         });
-        this.nativeCleanup.reject(cleanupError);
+        this.cacheOwner.abandon();
+        this.abandoned = true;
       } else {
         this.cacheOwner.confirmNativeClosed();
-        this.nativeCleanup.resolve(undefined);
       }
+      this.nativeCleanup.resolve(undefined);
     } catch (error) {
       cleanupError = workerError(error, 'storage_failed');
       this.nativeCleanup.reject(cleanupError);
@@ -514,6 +518,7 @@ class WorkerHost {
     if (this.cleanupAttempt) return this.cleanupAttempt;
     const attempt = (async () => {
       await this.nativeCleanup.promise;
+      if (this.abandoned) return;
       try { await this.tools.removeTaskCache(this.start.directory); }
       catch (error) { throw workerError(error, 'storage_failed'); }
     })();

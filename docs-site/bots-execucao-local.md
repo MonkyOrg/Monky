@@ -82,7 +82,7 @@ Em **Configurações → Ferramentas de bots**, a pessoa pode consultar ferramen
 - **Ferramentas:** Node.js, yt-dlp e FFmpeg portáteis são obtidos de receitas conhecidas pelo Monky, com verificação de integridade. Não é uma instalação global nem uma alteração do `PATH` da pessoa.
 - **Compartilhamento:** bots podem reutilizar os mesmos arquivos instalados; suas autorizações continuam separadas.
 - **Revogação e remoção:** interrompem o trabalho afetado. Remover uma ferramenta revoga as capacidades que dependem dela; o bot não pode reinstalá-la silenciosamente.
-- **Limpar cache:** interrompe as tarefas locais, mas mantém ferramentas e permissões. O espaço exibido é o armazenamento efetivamente retido, não o total de áudio já transmitido.
+- **Limpar cache:** interrompe as tarefas locais, mas mantém ferramentas e permissões. O espaço exibido é o armazenamento efetivamente retido, não o total de áudio já transmitido. Se o processo de uma tarefa for encerrado por fora (pelo Gerenciador de Tarefas, por exemplo), a tarefa termina com falha sem impedir novas tarefas nem o fechamento do Monky; seus arquivos temporários ficam guardados até a próxima abertura do Monky, que os remove.
 
 ::: warning Limites de confiança e conectividade
 O processo separado melhora o isolamento de ciclo de vida, mas **não é uma sandbox do sistema operacional**. O SDK solicita operações fixas; não recebe uma API de shell, caminhos executáveis ou scripts enviados pelo bot. O consentimento é validado no Main do Electron, não concedido por uma preferência do renderer.

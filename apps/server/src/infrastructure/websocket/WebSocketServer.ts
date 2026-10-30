@@ -270,7 +270,8 @@ interface ClientSession {
   sessionId?: string;
   knownProducerIds?: Set<string>;
   retiredProducerIds?: Set<string>;
-  isAlive: boolean;
+  /** Monotonic time of the last frame or pong received on this connection. */
+  lastSeenAt: number;
   ip: string;
   /** Closes the connection if it is still anonymous when it fires. */
   authDeadline?: NodeJS.Timeout;
@@ -338,6 +339,8 @@ export class WebSocketServer {
   /** Process-wide, like the constants it holds: a test lowers it for one case. */
   private static flowLimits: WsFlowLimits = WS_FLOW_LIMITS;
   private heartbeatTimer?: NodeJS.Timeout;
+  /** Monotonic time of the previous liveness round, to notice when the server itself stalled. */
+  private lastLivenessCheckAt?: number;
   private closing = false;
   private readonly shutdownResources = new ServerResourceScope();
   private sfuStartup: Promise<void> = Promise.resolve();
@@ -536,6 +539,7 @@ export class WebSocketServer {
         }, undefined, () => this.signalingService.getVoiceState(sessionId) === voiceState);
       }
     });
+    this.sfuManager.setWorkerLostListener(() => this.sfuWorkerLost());
     if (selectorService) {
       this.botSelectors = new BotSelectorHandler(selectorService, this.channelService, this.userService, {
         sessions: () => this.sessions.values(),
@@ -718,11 +722,10 @@ export class WebSocketServer {
 
     const targets = this.getSessionsOfUser(userId);
     for (const target of targets) {
-      this.botLocalExecution.disconnect(target);
-      this.botInteractions.disconnect(target);
-      this.disconnectBotScreens(target);
-      this.dmRelay.unregister(target);
-      if (target.sessionId) this.sessionSockets.delete(target.sessionId);
+      // Out at once: nothing of theirs lingers, nor shows them online, while
+      // their sockets finish closing.
+      target.replaced = true;
+      this.releaseConnection(target);
       try {
         target.ws.close();
       } catch {
@@ -802,7 +805,7 @@ export class WebSocketServer {
       const session: ClientSession = {
         ws,
         messageQueue: Promise.resolve(),
-        isAlive: true,
+        lastSeenAt: performance.now(),
         ip,
         countedAnonymous: true,
         requestHost: WebSocketServer.parseRequestHostname(req.headers.host),
@@ -816,11 +819,13 @@ export class WebSocketServer {
       session.authDeadline.unref?.();
       this.sessions.set(ws, session);
 
+      // Anything the peer sends proves the connection alive, not only pongs.
       ws.on('pong', () => {
-        session.isAlive = true;
+        session.lastSeenAt = performance.now();
       });
 
       ws.on('message', (data: Buffer) => {
+        session.lastSeenAt = performance.now();
         this.receiveMessage(session, data);
       });
 
@@ -903,7 +908,6 @@ export class WebSocketServer {
 
     // Heartbeat ping
     if (type === MessageType.PING) {
-      session.isAlive = true;
       this.send(session.ws, { type: MessageType.PONG, requestId, payload: { timestamp: Date.now() } });
       return;
     }
@@ -1595,7 +1599,7 @@ export class WebSocketServer {
     }
 
     const result = await this.authService.createChallenge(session.ws, payload);
-    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.isLive(session)) return;
 
     if (!result.success || !result.nonce) {
       // Aqui é onde a senha errada aparece: é esta tentativa que conta para o
@@ -1634,7 +1638,7 @@ export class WebSocketServer {
       return;
     }
     const result = await this.authService.verifyChallengeResponse(session.ws, signature);
-    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.isLive(session)) return;
 
     if (!result.success || !result.user || !result.serverDetails) {
       if (result.authFailed) {
@@ -1676,21 +1680,7 @@ export class WebSocketServer {
     // second session and must be left alone (#309).
     const existingWs = this.sessionSockets.get(sessionId);
     if (existingWs && existingWs !== session.ws) {
-      const staleSession = this.sessions.get(existingWs);
-      if (staleSession) {
-        this.botLocalExecution.disconnect(staleSession);
-        this.botInteractions.disconnect(staleSession);
-        this.disconnectBotScreens(staleSession);
-        this.authService.clearChallenge(existingWs);
-        this.dmRelay.unregister(staleSession);
-        staleSession.replaced = true;
-        this.sessions.delete(existingWs);
-      }
-      try {
-        existingWs.close();
-      } catch {
-        /* ignore */
-      }
+      this.replaceConnection(existingWs);
       Logger.info('NETWORK', `Replaced stale session ${sessionId}`);
     }
 
@@ -1737,7 +1727,7 @@ export class WebSocketServer {
 
     // Send AUTH_SUCCESS to the connecting client
     const iceServers = await this.buildIceServersFor(result.user.id, session);
-    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.isLive(session)) return;
     const successPayload: AuthSuccessPayload = {
       server: {
         ...result.serverDetails,
@@ -1886,7 +1876,7 @@ export class WebSocketServer {
       return;
     }
     const outcome = await this.botDiagnostics.diagnose(payload, session.ip);
-    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.isLive(session)) return;
     if (outcome.kind === 'invalid') {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Diagnóstico de bot inválido.', requestId);
     } else if (outcome.kind === 'rate_limited') {
@@ -1915,7 +1905,7 @@ export class WebSocketServer {
     // can still identify its obsolete protocol for the owner's persistent warning.
     if (!session.protocol) {
       await this.botService.recordRejectedProtocol(payload.botToken, payload.publicKey, payload.protocolVersion);
-      if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+      if (!this.isLive(session)) return;
       this.sendError(
         session.ws,
         ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
@@ -1935,7 +1925,7 @@ export class WebSocketServer {
 
     const publicKey = payload.publicKey;
     let botRecord = await this.botService.validateToken(payload.botToken, publicKey);
-    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.isLive(session)) return;
     if (!botRecord) {
       this.send(session.ws, {
         type: MessageType.AUTH_FAILED,
@@ -1959,14 +1949,14 @@ export class WebSocketServer {
         this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'O vínculo do bot foi revogado.', requestId);
         return;
       }
-      if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+      if (!this.isLive(session)) return;
     }
 
     if (!await this.botService.recordCompatibleConnection(botRecord.id, payload.protocolVersion)) {
       this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'O vínculo do bot foi revogado.', requestId);
       return;
     }
-    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.isLive(session)) return;
 
     // Build a synthetic UserSummary for the bot.
     const sessionId = `bot:${botRecord.id}`;
@@ -1994,20 +1984,9 @@ export class WebSocketServer {
     // Replace existing bot session if any.
     const existingWs = this.sessionSockets.get(sessionId);
     if (existingWs && existingWs !== session.ws) {
-      const stale = this.sessions.get(existingWs);
-      if (stale) {
-        this.botLocalExecution.disconnect(stale);
-        if (stale.user && stale.sessionId) this.announceVoiceLeave(stale.user, stale.sessionId);
-        this.botInteractions.disconnect(stale);
-        this.disconnectBotScreens(stale);
-        this.authService.clearChallenge(existingWs);
-        this.dmRelay.unregister(stale);
-        stale.replaced = true;
-        this.sessions.delete(existingWs);
-      }
+      this.replaceConnection(existingWs);
       this.commandRegistry.clearBot(botRecord.id);
       this.broadcastCommands();
-      try { existingWs.close(); } catch { /* ignore */ }
     }
     this.sessionSockets.set(sessionId, session.ws);
 
@@ -2066,8 +2045,7 @@ export class WebSocketServer {
     };
     session.visibleChannelIds = new Set(serverDetails.channels.map((channel) => channel.id));
 
-    if (this.closing || session.replaced || this.sessions.get(session.ws) !== session ||
-        session.ws.readyState !== WebSocket.OPEN) return;
+    if (session.replaced || !this.isLive(session)) return;
     this.send(session.ws, {
       type: MessageType.AUTH_SUCCESS,
       requestId,
@@ -2321,12 +2299,9 @@ export class WebSocketServer {
         if (reason === 'revoked') {
           this.send(botWs, { type: MessageType.BOT_REVOKED, payload: { botId } satisfies BotRevokedPayload });
         }
-        this.botInteractions.disconnect(botSession);
-        this.disconnectBotScreens(botSession);
-        this.dmRelay.unregister(botSession);
-        if (botSession.user && botSession.sessionId) this.finalizeSessionLeave(botSession.user, botSession.sessionId);
         botSession.replaced = true;
-        this.sessions.delete(botWs);
+        this.releaseConnection(botSession);
+        if (botSession.user && botSession.sessionId) this.finalizeSessionLeave(botSession.user, botSession.sessionId);
       }
       this.sessionSockets.delete(botSessionId);
       try { botWs.close(); } catch { /* ignore */ }
@@ -3870,7 +3845,7 @@ export class WebSocketServer {
           return;
         }
       }
-      const ok = await this.sfuManager.init();
+      const ok = await this.sfuManager.init({ retryNow: true });
       if (!ok) {
         const preflight = checkSfuPreflight();
         const diagnosis = preflight.ok ? '' : ` ${formatSfuPreflightForLog(preflight)}`;
@@ -5616,6 +5591,15 @@ export class WebSocketServer {
     return undefined;
   }
 
+  /**
+   * Whether a connection is still the open, registered one. Rechecked after
+   * every await on the way to authentication: a connection let go meanwhile
+   * must neither be answered nor authenticated.
+   */
+  private isLive(session: ClientSession): boolean {
+    return !this.closing && this.sessions.get(session.ws) === session && session.ws.readyState === WebSocket.OPEN;
+  }
+
   private isCurrentSession(session: BotInteractionSession): boolean {
     const current = this.sessions.get(session.ws);
     return !this.closing && current === session && !current.replaced && !current.intentionalLogout &&
@@ -6340,24 +6324,59 @@ export class WebSocketServer {
     return found;
   }
 
-  private handleDisconnect(session: ClientSession): void {
+  /**
+   * Releases what one connection holds, whatever ended it: its socket closing,
+   * a newer connection of the same device, a kick or a revoked bot. Every path
+   * that lets a connection go runs this same list, so a resource added per
+   * connection is released by all of them. Idempotent: the socket's own close
+   * event still arrives for a connection that was already let go.
+   * Returns whether the connection was still registered.
+   */
+  private releaseConnection(session: ClientSession): boolean {
     this.settleAnonymous(session);
     session.botVoiceJoinAttempt = undefined;
     session.botVoiceGrant = undefined;
     this.voiceReconnectGrants?.delete(session);
-    // Runs after this synchronous teardown, so it sees any return grant below.
+    // Runs after the caller's synchronous teardown, so it sees any return grant set there.
     void this.syncVoicePresenceVisibility();
-    const wasConnected = this.sessions.delete(session.ws);
+    const registered = this.sessions.delete(session.ws);
+    // A newer connection of the same device may already own the mapping.
+    if (session.sessionId && this.sessionSockets.get(session.sessionId) === session.ws) {
+      this.sessionSockets.delete(session.sessionId);
+    }
     this.authService.clearChallenge(session.ws);
     this.botLocalExecution.disconnect(session);
     this.botInteractions.disconnect(session);
     this.disconnectBotScreens(session);
     this.dmRelay.unregister(session);
     this.gameShareRequests.sessionClosed(session);
+    return registered;
+  }
 
-    // If this session was replaced by a newer connection of the same device, it
-    // is a stale/zombie socket. Do not broadcast USER_LEFT nor touch the
-    // sessionSockets mapping (which now points at the newer session).
+  /**
+   * Lets the older connection of a device go once that device connected again.
+   * A person's call stays for the new connection to resume, as their client
+   * rejoins by itself; a bot's call ends with the connection that made it.
+   */
+  private replaceConnection(existingWs: WebSocket): void {
+    const stale = this.sessions.get(existingWs);
+    if (stale) {
+      stale.replaced = true;
+      this.releaseConnection(stale);
+      if (stale.isBot && stale.user && stale.sessionId) this.announceVoiceLeave(stale.user, stale.sessionId);
+    }
+    try {
+      existingWs.close();
+    } catch {
+      /* already closing */
+    }
+  }
+
+  private handleDisconnect(session: ClientSession): void {
+    const wasConnected = this.releaseConnection(session);
+
+    // A connection already let go — replaced by a newer one of the same device,
+    // kicked or revoked — had its departure handled by whoever let it go.
     if (!wasConnected || session.replaced) {
       return;
     }
@@ -6375,11 +6394,6 @@ export class WebSocketServer {
 
     const user = session.user;
     const sessionId = session.sessionId;
-
-    // Only clear the mapping if it still points at this exact socket.
-    if (this.sessionSockets.get(sessionId) === session.ws) {
-      this.sessionSockets.delete(sessionId);
-    }
     if (this.closing) return;
 
     // A call cannot outlive the socket that carries its signalling: once this
@@ -6459,6 +6473,39 @@ export class WebSocketServer {
   }
 
   /**
+   * The SFU worker died and took every transport and producer with it. Each
+   * client is told the producers it knew are gone and every SFU call is marked
+   * failed, which is what makes clients rebuild their transports — against a
+   * worker started again on their first request. Membership stays: nobody
+   * leaves the channel because the media server restarted.
+   */
+  private sfuWorkerLost(): void {
+    if (this.closing) return;
+    for (const session of this.sessions.values()) {
+      session.botVoiceTransports?.clear();
+      const channelId = session.sessionId && this.signalingService.getVoiceState(session.sessionId)?.channelId;
+      if (!channelId) continue;
+      for (const producerId of [...(session.knownProducerIds ?? [])]) {
+        this.send(session.ws, {
+          type: MessageType.SFU_PRODUCER_CLOSED,
+          payload: { channelId, producerId } satisfies SfuProducerClosedPayload,
+        });
+      }
+    }
+    for (const voiceState of Object.values(this.signalingService.getAllVoiceStates())) {
+      // Only SFU calls carry a server-observed health; P2P ones have none to fail.
+      if (voiceState.connectionHealth === undefined || voiceState.connectionHealth === 'failed') continue;
+      const updated = this.signalingService.updateVoiceState(voiceState.sessionId, { connectionHealth: 'failed' });
+      if (!updated) continue;
+      void this.broadcastToChannel(updated.channelId, {
+        type: MessageType.VOICE_STATE_CHANGED,
+        payload: { voiceState: updated } satisfies VoiceStateChangedPayload,
+      }, undefined, () => this.signalingService.getVoiceState(updated.sessionId) === updated)
+        .catch((error: unknown) => Logger.error('SFU', 'Failed to publish the health of a call after losing the SFU worker.', error));
+    }
+  }
+
+  /**
    * Takes one connection out of its voice channel and tells everyone about it.
    *
    * Idempotent: `leaveVoiceChannel` returns null when the session is not in a
@@ -6515,19 +6562,39 @@ export class WebSocketServer {
     const expire = () => { void this.chatService.expireDeletedMessages()
       .catch(error => Logger.error('DATABASE', 'Failed to expire message deletion backups.', error)); };
     expire();
+    this.lastLivenessCheckAt = performance.now();
     this.heartbeatTimer = setInterval(() => {
       expire();
-      for (const [ws, session] of this.sessions.entries()) {
-        if (!session.isAlive) {
-          Logger.warn('NETWORK', `Terminating dead socket for ${session.user?.nickname || session.ip}`);
-          ws.terminate();
-          this.handleDisconnect(session);
-          continue;
-        }
-        session.isAlive = false;
-        ws.ping();
-      }
+      this.checkLiveness();
     }, LIMITS.HEARTBEAT_INTERVAL_MS);
+  }
+
+  /**
+   * Pings every connection and closes the ones that stopped answering.
+   *
+   * A connection goes only after HEARTBEAT_TIMEOUT_MS without a frame or a
+   * pong, on a monotonic clock: long enough to ride out a Wi-Fi roam or a
+   * saturated uplink, which the old "answered since the last tick" flag cut
+   * after 5 to 10 s — taking the person out of the call with it (#458).
+   *
+   * When this round itself ran late, the server is what stalled: answers that
+   * arrived meanwhile are still unread in the sockets, and judging by them
+   * would drop every client at once and start a reconnection storm. Nobody is
+   * closed on that round; the next one, on time, decides.
+   */
+  private checkLiveness(now = performance.now()): void {
+    const previous = this.lastLivenessCheckAt;
+    this.lastLivenessCheckAt = now;
+    const stalled = previous !== undefined && now - previous > LIMITS.HEARTBEAT_INTERVAL_MS * 2;
+    for (const [ws, session] of this.sessions.entries()) {
+      if (!stalled && now - session.lastSeenAt > LIMITS.HEARTBEAT_TIMEOUT_MS) {
+        Logger.warn('NETWORK', `Terminating dead socket for ${session.user?.nickname || session.ip}`);
+        ws.terminate();
+        this.handleDisconnect(session);
+        continue;
+      }
+      ws.ping();
+    }
   }
 
   /** The connection authenticated or is gone: it stops counting as anonymous. */
@@ -7170,7 +7237,7 @@ export class WebSocketServer {
           type: MessageType.SERVER_SHUTDOWN,
           payload: { reasonCode: this.shutdownReason } satisfies ServerShutdownPayload,
         });
-        for (const ws of this.sessions.keys()) ws.close();
+        for (const ws of this.openSockets()) ws.close();
         this.wss.close((error) => {
           clearTimeout(forceClose);
           if (error) reject(error);
@@ -7189,9 +7256,18 @@ export class WebSocketServer {
     });
   }
 
+  /**
+   * Every socket still open: the registered ones, and the ones already let go
+   * — replaced, kicked, revoked — whose close handshake has not finished.
+   * `wss.close()` waits for all of them, so shutdown has to end them all.
+   */
+  private openSockets(): Set<WebSocket> {
+    return new Set([...this.sessions.keys(), ...this.wss.clients]);
+  }
+
   private terminatePeers(): void {
     const errors: unknown[] = [];
-    for (const ws of this.sessions.keys()) {
+    for (const ws of this.openSockets()) {
       try {
         if (ws.readyState !== WebSocket.CLOSED) ws.terminate();
       } catch (error) {

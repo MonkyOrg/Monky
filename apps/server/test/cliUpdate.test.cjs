@@ -18,6 +18,7 @@ const prompts = require('../dist/cli/prompts');
 const lifecycle = require('../dist/cli/commands/serverLifecycle');
 const update = require('../dist/cli/commands/update');
 const downloads = require('../dist/cli/releaseDownload');
+const onlineUsers = require('../dist/cli/onlineUsers');
 const { countVoiceUsers, countOnlineUsers } = require('../dist/cli/onlineUsers');
 
 const version = '18.0.0-beta';
@@ -135,6 +136,12 @@ function fixture(t, options = {}) {
   });
   t.mock.method(lifecycle, 'restartServerCommand', () => assert.fail('Old in-memory restart must never run'));
   t.mock.method(pm2, 'isPm2Available', () => options.pm2 !== false);
+  // The server keeps PID 4242 until the fresh CLI really restarts it.
+  t.mock.method(pm2, 'findPm2Process', (name) => name === pm2.getPm2ProcessName(dataDir) ? {
+    name, pid: fs.existsSync(receipt) && !options.restartFailure ? 4343 : 4242, pm2_env: { status: 'online' },
+  } : null);
+  t.mock.method(pm2, 'findLegacyProcessFor', () => null);
+  t.mock.method(onlineUsers, 'readLocalServerPreview', async () => ({ userCount: 0, voiceUserCount: 0, botCompatibility: null }));
   t.mock.method(prompts, 'confirm', async (question) => {
     questions.push(question);
     return questions.length !== 2 || options.restart !== false;
@@ -175,6 +182,10 @@ function fixture(t, options = {}) {
       name: '@monky/server', version: installedVersion, bin: { monky: 'fresh-cli.cjs' },
     }));
     if (!options.missingEntry) fs.writeFileSync(path.join(packageDir, 'fresh-cli.cjs'), `
+      if (process.argv.includes('--version')) {
+        console.log('monky ' + ${JSON.stringify(installedVersion)});
+        return;
+      }
       require('node:fs').writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({
         version: ${JSON.stringify(installedVersion)}, argv: process.argv.slice(2), home: process.env.MONKY_HOME
       }));

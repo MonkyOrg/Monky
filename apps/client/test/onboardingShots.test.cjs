@@ -32,3 +32,28 @@ test('every picture the guide and tutorials show exists in both languages', () =
     }
   }
 });
+
+test('fixtures that run the real startup answer the identity calls it makes', () => {
+  // Startup reads the identity before anything else; a fixture that misses one of these lands on the identity
+  // onboarding instead of Home, as the screenshot script did after identity:has became identity:status.
+  const main = fs.readFileSync(path.join(renderer, 'main.ts'), 'utf8');
+  const calls = new Set([...main.matchAll(/window\.api\??\.(\w*Identity\w*)/g)].map((match) => match[1]));
+  assert.ok(calls.has('getIdentityStatus'), 'startup asks for the identity status');
+  const clientRoot = path.join(__dirname, '..');
+  const fixtures = ['test', 'scripts']
+    .flatMap((folder) => fs.readdirSync(path.join(clientRoot, folder), { recursive: true })
+      .filter((file) => /\.(c|m)?js$/.test(file))
+      .map((file) => path.join(clientRoot, folder, file)))
+    .filter((file) => file !== __filename)
+    .map((file) => ({ file, source: fs.readFileSync(file, 'utf8') }))
+    // Fixtures that replace App.init skip the startup on purpose.
+    .filter(({ source }) => source.includes("import('/main.ts')") && !/\.prototype\.init\s*=/.test(source));
+  const names = fixtures.map(({ file }) => path.relative(clientRoot, file).replace(/\\/g, '/'));
+  assert.ok(names.includes('scripts/capture-onboarding-screenshots.cjs') && names.includes('test/homeDiscordSmoke.cjs'),
+    `the fixtures that run the startup were not found: ${names.join(', ')}`);
+  for (const { file, source } of fixtures) {
+    for (const call of calls) {
+      assert.match(source, new RegExp(`\\b${call}\\s*:`), `${path.basename(file)} must answer window.api.${call}`);
+    }
+  }
+});

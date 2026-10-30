@@ -1,5 +1,8 @@
+import { formatLogMeta, isError } from '../logger/logFormat';
+
+/** One line naming a failure, for messages; logs keep the whole error. */
 export function describeFailure(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return isError(error) ? error.message : typeof error === 'string' ? error : formatLogMeta(error);
 }
 
 export class ServerResourceScope {

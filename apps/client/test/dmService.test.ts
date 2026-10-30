@@ -35,6 +35,8 @@ interface Device {
   identity: Identity;
   service: DmService;
   events: DmEvent[];
+  /** How many of `events` the relay already looked at for dispatches the device raised on its own. */
+  dispatched: number;
   dir: string;
   online: boolean;
 }
@@ -56,10 +58,14 @@ function createDevice(
     onEvent: (event) => events.push(event),
   });
   service.setSelfNickname(name);
-  return { name, identity, service, events, dir, online: true };
+  return { name, identity, service, events, dispatched: 0, dir, online: true };
 }
 
-/** Relay that behaves like the server: deliver to every other online device of the recipient identity. */
+/**
+ * Relay that behaves like the server: deliver to every other online device of the recipient identity.
+ * Acks leave a device only after it saved what they confirm, so once the queue drains every online device
+ * writes what it has pending and sends what it dispatched on its own, as the renderer does.
+ */
 function relay(devices: Device[], origin: Device, dispatch: DmDispatch, budget = { left: 5000 }): void {
   const queue: Array<{ origin: Device; item: DmRelayItem }> = [];
   const enqueue = (from: Device, result: DmDispatch) => {
@@ -68,18 +74,34 @@ function relay(devices: Device[], origin: Device, dispatch: DmDispatch, budget =
     for (const item of result.reply ?? []) queue.push({ origin: from, item });
   };
   enqueue(origin, dispatch);
-  while (queue.length > 0) {
-    assert.ok(budget.left-- > 0, 'relay loop did not converge');
-    const { origin: sender, item } = queue.shift()!;
-    // The server refuses bigger items, so the test relay does too.
-    const max = item.kind === 'file' ? LIMITS.DM_RELAY_FILE_DATA_MAX_LENGTH : LIMITS.DM_RELAY_DATA_MAX_LENGTH;
-    assert.ok(item.data.length <= max, `${item.kind} item of ${item.data.length} chars exceeds the relay limit`);
-    if (!sender.online) continue;
-    for (const device of devices) {
-      if (device === sender || !device.online || device.identity.publicKey !== item.to) continue;
-      enqueue(device, device.service.ingest({ from: sender.identity.publicKey, kind: item.kind, data: item.data }));
+  for (;;) {
+    while (queue.length > 0) {
+      assert.ok(budget.left-- > 0, 'relay loop did not converge');
+      const { origin: sender, item } = queue.shift()!;
+      // The server refuses bigger items, so the test relay does too.
+      const max = item.kind === 'file' ? LIMITS.DM_RELAY_FILE_DATA_MAX_LENGTH : LIMITS.DM_RELAY_DATA_MAX_LENGTH;
+      assert.ok(item.data.length <= max, `${item.kind} item of ${item.data.length} chars exceeds the relay limit`);
+      if (!sender.online) continue;
+      for (const device of devices) {
+        if (device === sender || !device.online || device.identity.publicKey !== item.to) continue;
+        enqueue(device, device.service.ingest({ from: sender.identity.publicKey, kind: item.kind, data: item.data }));
+      }
     }
+    for (const device of devices) {
+      if (!device.online) continue;
+      if (device.service.hasPendingAcks()) device.service.flush();
+      for (const dispatched of takeDispatches(device)) enqueue(device, dispatched);
+    }
+    if (queue.length === 0) return;
   }
+}
+
+/** Dispatches the device raised on its own since the last look (acks released by a write). */
+function takeDispatches(device: Device): DmDispatch[] {
+  const dispatches = device.events.slice(device.dispatched)
+    .flatMap((event) => (event.type === 'dispatch' ? [event.dispatch] : []));
+  device.dispatched = device.events.length;
+  return dispatches;
 }
 
 function befriend(devices: Device[], a: Device, b: Device): void {
@@ -521,9 +543,9 @@ test('interrupted downloads resume from the received offset', () => {
   // Deliver only the message; Bob's first file request reaches Alice, but the chunks are lost.
   const [messageItem] = dispatch.peers![bob.identity.publicKey];
   const afterMessage = bob.service.ingest({ from: alice.identity.publicKey, kind: messageItem.kind, data: messageItem.data });
-  // Reply = [ack, file request]; the request is the second item.
-  assert.equal(afterMessage.reply?.length, 2);
-  const fileRequest = afterMessage.reply![1];
+  // Reply = [file request]: the ack waits until Bob saved the message.
+  assert.equal(afterMessage.reply?.length, 1);
+  const fileRequest = afterMessage.reply![0];
   const chunks = alice.service.ingest({ from: bob.identity.publicKey, kind: fileRequest.kind, data: fileRequest.data });
   assert.ok((chunks.reply?.length ?? 0) > 1);
   // Only the first chunk arrives.
@@ -737,7 +759,8 @@ test('forward markers persist, survive export/import and older stores load witho
   // A conversation file written by an older version has no `forwarded` on its messages.
   const store = new DmPersistence(alice.dir, new DmKeyring(aliceIdentity.publicKey, aliceIdentity.privateKey).storageKey());
   const file = DmPersistence.peerFileName(bobKey);
-  const legacy = store.readJson<{ messages: Array<Record<string, unknown>> }>(file);
+  const legacy = store.readJson(file, (value): value is { messages: Array<Record<string, unknown>> } =>
+    typeof value === 'object' && value !== null && 'messages' in value && Array.isArray(value.messages));
   assert.ok(legacy);
   for (const message of legacy.messages) delete message.forwarded;
   store.writeJsonNow(file, legacy);
@@ -811,4 +834,335 @@ test('attachments can be written to a file path only when they are on this devic
     bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, path.join(outDir, 'apagado.bin')),
     (error: unknown) => error instanceof DmError && error.code === 'not-found'
   );
+});
+
+/** Bob ingests what Alice dispatched to him, saves it, and the acks he sends back get lost on the way. */
+function deliverLosingAcks(from: Device, to: Device, dispatch: DmDispatch): DmDispatch[] {
+  const replies = (dispatch.peers?.[to.identity.publicKey] ?? []).map((item) =>
+    to.service.ingest({ from: from.identity.publicKey, kind: item.kind, data: item.data }));
+  to.service.flush();
+  takeDispatches(to);
+  return replies;
+}
+
+function storeOf(device: Device): DmPersistence {
+  return new DmPersistence(device.dir, new DmKeyring(device.identity.publicKey, device.identity.privateKey).storageKey());
+}
+
+test('acks leave only after the message is saved, and a save that fails is tried again instead of dropped', () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  const aliceKey = alice.identity.publicKey;
+  const bobKey = bob.identity.publicKey;
+  // The conversation is open on Bob's side when its file stops accepting writes (a folder in the way fails the
+  // rename the way a file held by an antivirus does).
+  bob.service.getConversation(aliceKey);
+  const conversationFile = path.join(bob.dir, DmPersistence.peerFileName(aliceKey));
+  fs.mkdirSync(conversationFile);
+
+  const [item] = alice.service.sendMessage({ peer: bobKey, content: 'precisa chegar ao disco' }).peers![bobKey];
+  const received = bob.service.ingest({ from: aliceKey, kind: item.kind, data: item.data });
+  assert.deepEqual(received.reply, [], 'No ack goes out before the message is saved');
+  bob.service.flush();
+  assert.deepEqual(takeDispatches(bob), [], 'A failed save releases no ack');
+  assert.equal(bob.service.hasPendingAcks(), true);
+  assert.equal(alice.service.getConversation(bobKey).messages[0].delivery, 'pending', 'Alice keeps it in her outbox');
+
+  fs.rmdirSync(conversationFile);
+  bob.service.flush();
+  const acks = takeDispatches(bob);
+  assert.equal(acks.length, 1, 'The write that failed stayed pending and the ack follows it');
+  relay(devices, bob, acks[0]);
+  assert.equal(alice.service.getConversation(bobKey).messages[0].delivery, 'delivered');
+  assert.deepEqual(
+    createDevice('Bob', bob.identity, bob.dir).service.getConversation(aliceKey).messages.map((message) => message.content),
+    ['precisa chegar ao disco'],
+  );
+
+  // What is already on disk is confirmed at once.
+  assert.equal(bob.service.ingest({ from: aliceKey, kind: item.kind, data: item.data }).reply?.length, 1);
+});
+
+test('an unreadable conversation is set aside instead of overwritten, and one that cannot be read now stays put', () => {
+  const aliceIdentity = createIdentity();
+  const alice = createDevice('Alice', aliceIdentity);
+  const bob = createDevice('Bob', createIdentity());
+  const bobKey = bob.identity.publicKey;
+  befriend([alice, bob], alice, bob);
+  relay([alice, bob], alice, alice.service.sendMessage({ peer: bobKey, content: 'guardada' }));
+  alice.service.flush();
+  const name = DmPersistence.peerFileName(bobKey);
+  const file = path.join(alice.dir, name);
+  const saved = fs.readFileSync(file);
+
+  // Held by another program right now: the operation fails, and nothing is moved or replaced.
+  fs.rmSync(file);
+  fs.mkdirSync(file);
+  const busy = createDevice('Alice', aliceIdentity, alice.dir);
+  assert.throws(() => busy.service.getConversation(bobKey));
+  assert.ok(fs.statSync(file).isDirectory());
+  fs.rmdirSync(file);
+  fs.writeFileSync(file, saved);
+  assert.equal(busy.service.getConversation(bobKey).messages[0].content, 'guardada', 'The next try reads it');
+
+  // Damaged: the bytes are kept aside, and only that conversation starts over.
+  const damaged = Buffer.from(saved);
+  damaged[damaged.length - 1] ^= 0xff;
+  fs.writeFileSync(file, damaged);
+  const reloaded = createDevice('Alice', aliceIdentity, alice.dir);
+  assert.equal(peer(reloaded, bob.identity)?.relation, 'friend', 'Friends live in another file and stay');
+  assert.deepEqual(reloaded.service.getConversation(bobKey).messages, []);
+  const aside = fs.readdirSync(alice.dir).filter((entry) => entry.startsWith(`${name}.corrupt-`));
+  assert.equal(aside.length, 1);
+  assert.ok(fs.readFileSync(path.join(alice.dir, aside[0])).equals(damaged));
+
+  // A state file that cannot be read now keeps the whole store closed instead of starting it empty.
+  const state = path.join(alice.dir, 'state.mkdm');
+  const savedState = fs.readFileSync(state);
+  fs.rmSync(state);
+  fs.mkdirSync(state);
+  assert.throws(() => createDevice('Alice', aliceIdentity, alice.dir));
+  fs.rmdirSync(state);
+  fs.writeFileSync(state, savedState);
+  assert.equal(peer(createDevice('Alice', aliceIdentity, alice.dir), bob.identity)?.relation, 'friend');
+});
+
+test('editing or deleting a message whose ack was lost still reaches the friend', () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  const aliceKey = alice.identity.publicKey;
+  const bobKey = bob.identity.publicKey;
+
+  deliverLosingAcks(alice, bob, alice.service.sendMessage({ peer: bobKey, content: 'primeira versão' }));
+  const [sent] = alice.service.getConversation(bobKey).messages;
+  assert.equal(sent.delivery, 'pending', 'Alice never heard back');
+  relay(devices, alice, alice.service.editMessage(bobKey, sent.id, 'versão final'));
+  const edited = bob.service.getConversation(aliceKey).messages[0];
+  assert.equal(edited.content, 'versão final');
+  assert.ok(edited.editedAt, 'Bob saw the first version, so it shows as edited');
+
+  deliverLosingAcks(alice, bob, alice.service.sendMessage({ peer: bobKey, content: 'para apagar' }));
+  const doomed = alice.service.getConversation(bobKey).messages[1];
+  assert.equal(doomed.delivery, 'pending');
+  relay(devices, alice, alice.service.deleteMessage(bobKey, doomed.id));
+  const removed = bob.service.getConversation(aliceKey).messages.find((message) => message.id === doomed.id);
+  assert.equal(removed?.deleted, true);
+  assert.equal(removed?.content, '');
+  assert.deepEqual(alice.service.pendingPeers(), [], 'Everything got confirmed in the end');
+});
+
+test('a message deleted or edited before it was delivered only ever shows up as its final version', () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  const aliceKey = alice.identity.publicKey;
+  const bobKey = bob.identity.publicKey;
+
+  bob.online = false;
+  const lost = alice.service.sendMessage({ peer: bobKey, content: 'apagada antes de chegar' });
+  relay(devices, alice, lost);
+  const [doomed] = alice.service.getConversation(bobKey).messages;
+  relay(devices, alice, alice.service.deleteMessage(bobKey, doomed.id));
+  relay(devices, alice, alice.service.sendMessage({ peer: bobKey, content: 'rascunho' }));
+  const draft = alice.service.getConversation(bobKey).messages.find((message) => message.content === 'rascunho');
+  assert.ok(draft);
+  relay(devices, alice, alice.service.editMessage(bobKey, draft.id, 'texto final'));
+
+  bob.online = true;
+  relay(devices, bob, bob.service.helloTo(aliceKey));
+  const shown = () => bob.service.getConversation(aliceKey).messages.map((message) => message.content);
+  assert.deepEqual(shown(), ['texto final'], 'The deleted message never shows up, not even as deleted');
+  assert.equal(bob.service.getConversation(aliceKey).messages[0].editedAt, null, 'Bob never saw another version');
+  assert.deepEqual(alice.service.pendingPeers(), []);
+
+  // A copy of the deleted message that was still on its way arrives late and stays out, also after a restart.
+  const [late] = lost.peers![bobKey];
+  bob.service.ingest({ from: aliceKey, kind: late.kind, data: late.data });
+  assert.deepEqual(shown(), ['texto final']);
+  bob.service.flush();
+  const restarted = createDevice('Bob', bob.identity, bob.dir);
+  restarted.service.ingest({ from: aliceKey, kind: late.kind, data: late.data });
+  assert.deepEqual(restarted.service.getConversation(aliceKey).messages.map((message) => message.content), ['texto final']);
+});
+
+test('a download whose last step fails can be tried again instead of staying "downloading"', () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  const aliceKey = alice.identity.publicKey;
+  const content = Buffer.alloc(DM_FILE_CHUNK_BYTES * 2 + 5, 3);
+  const dispatch = alice.service.sendMessage({
+    peer: bob.identity.publicKey,
+    content: '',
+    files: [{ name: 'disco-cheio.bin', mime: 'application/octet-stream', data: new Uint8Array(content) }],
+  });
+  const fileId = alice.service.getConversation(bob.identity.publicKey).messages[0].attachments[0].fileId;
+  const [request] = deliverLosingAcks(alice, bob, dispatch)[0].reply ?? [];
+  assert.ok(request, 'Bob asks for the file');
+  // Then the finished file cannot be written (a full disk behaves the same: the write throws).
+  const target = path.join(bob.dir, 'files', `${fileId}.mkdm`);
+  fs.mkdirSync(target);
+  relay(devices, bob, { peers: { [aliceKey]: [request] } });
+  const failed = bob.service.getConversation(aliceKey).messages[0];
+  assert.equal(failed.attachments[0].state, 'failed', 'The failure is visible and offers "try again"');
+  assert.deepEqual(bob.service.pendingPeers(), [], 'Nothing keeps asking for a file that is all here');
+
+  fs.rmdirSync(target);
+  relay(devices, bob, bob.service.retryAttachment(aliceKey, failed.id, fileId));
+  const ready = bob.service.getConversation(aliceKey).messages[0];
+  assert.equal(ready.attachments[0].state, 'ready');
+  assert.ok(bob.service.readAttachment(aliceKey, ready.id, fileId).data.equals(content));
+});
+
+test('a partial download torn by a crash resumes from its last intact chunk, or completes when all of it is there', () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  const aliceKey = alice.identity.publicKey;
+  const content = Buffer.alloc(DM_FILE_CHUNK_BYTES * 4 + 99);
+  for (let index = 0; index < content.length; index += 1) content[index] = (index * 13) % 256;
+  const send = () => {
+    const dispatch = alice.service.sendMessage({
+      peer: bob.identity.publicKey,
+      content: '',
+      files: [{ name: 'parcial.bin', mime: 'application/octet-stream', data: new Uint8Array(content) }],
+    });
+    const [request] = deliverLosingAcks(alice, bob, dispatch)[0].reply ?? [];
+    assert.ok(request, 'Bob asks for the file');
+    const message = alice.service.getConversation(bob.identity.publicKey).messages.at(-1)!;
+    return { request, message, fileId: message.attachments[0].fileId };
+  };
+
+  // Two chunks arrive, then the app dies in the middle of appending the third.
+  const torn = send();
+  const chunks = alice.service.ingest({ from: bob.identity.publicKey, kind: torn.request.kind, data: torn.request.data }).reply!;
+  for (const chunk of chunks.slice(0, 2)) bob.service.ingest({ from: aliceKey, kind: chunk.kind, data: chunk.data });
+  const part = path.join(bob.dir, 'files', `${torn.fileId}.part`);
+  fs.appendFileSync(part, Buffer.from([0, 1, 0x80, 0, 9, 9, 9]));
+  bob.service.flush();
+
+  // Everything arrived, but the app closed before putting the file together.
+  const whole = send();
+  const store = storeOf(bob);
+  for (let index = 0; index * DM_FILE_CHUNK_BYTES < content.length; index += 1) {
+    store.appendPart(whole.fileId, index, content.subarray(index * DM_FILE_CHUNK_BYTES, (index + 1) * DM_FILE_CHUNK_BYTES));
+  }
+  bob.service.flush();
+
+  const restarted = createDevice('Bob', bob.identity, bob.dir);
+  relay([alice, restarted], restarted, restarted.service.outgoing([aliceKey], true));
+  for (const { message, fileId } of [torn, whole]) {
+    const view = restarted.service.getConversation(aliceKey).messages.find((entry) => entry.id === message.id)!;
+    assert.equal(view.attachments[0].state, 'ready');
+    assert.ok(restarted.service.readAttachment(aliceKey, message.id, fileId).data.equals(content));
+  }
+});
+test('edits that arrive out of order still leave both friends with the last text', () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  const aliceKey = alice.identity.publicKey;
+  const bobKey = bob.identity.publicKey;
+  relay(devices, alice, alice.service.sendMessage({ peer: bobKey, content: 'A' }));
+  const [message] = alice.service.getConversation(bobKey).messages;
+  const shown = (device: Device, other: Device) => device.service.getConversation(other.identity.publicKey).messages[0];
+
+  // A → B → A, and the second edit gets there first: each send may go through a different server.
+  const first = alice.service.editMessage(bobKey, message.id, 'B');
+  const second = alice.service.editMessage(bobKey, message.id, 'A');
+  relay(devices, alice, second);
+  relay(devices, alice, first);
+  assert.equal(shown(alice, bob).content, 'A');
+  assert.equal(shown(bob, alice).content, 'A', 'The older edit arriving last does not bring "B" back');
+  assert.equal(shown(bob, alice).editedAt, null, 'Bob never saw another text, so nothing shows as edited');
+  relay(devices, alice, alice.service.outgoing([bobKey], true));
+  relay(devices, bob, bob.service.outgoing([aliceKey], true));
+  assert.equal(shown(bob, alice).content, 'A');
+  assert.deepEqual(alice.service.pendingPeers(), []);
+
+  // The clock survives a restart: the old edit arriving once more still loses.
+  bob.service.flush();
+  const restarted = createDevice('Bob', bob.identity, bob.dir);
+  const [late] = first.peers![bobKey];
+  restarted.service.ingest({ from: aliceKey, kind: late.kind, data: late.data });
+  assert.equal(shown(restarted, alice).content, 'A');
+
+  // And a later edit still wins everywhere.
+  relay([alice, restarted], alice, alice.service.editMessage(bobKey, message.id, 'C'));
+  assert.equal(shown(restarted, alice).content, 'C');
+  assert.equal(shown(alice, bob).content, 'C');
+});
+
+test('a message edited while waiting for delivery arrives with its last text, and older edits on the way lose', () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bob = createDevice('Bob', createIdentity());
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  const aliceKey = alice.identity.publicKey;
+  const bobKey = bob.identity.publicKey;
+  bob.online = false;
+  relay(devices, alice, alice.service.sendMessage({ peer: bobKey, content: 'rascunho' }));
+  const [message] = alice.service.getConversation(bobKey).messages;
+  const [, stale] = alice.service.editMessage(bobKey, message.id, 'quase').peers![bobKey];
+  alice.service.editMessage(bobKey, message.id, 'final');
+  bob.online = true;
+
+  // The copy from the outbox gets there first, then the older edit that was already on its way, then the newest.
+  const [latest, edit] = alice.service.outgoing([bobKey], true).peers![bobKey];
+  const give = (item: DmRelayItem) => bob.service.ingest({ from: aliceKey, kind: item.kind, data: item.data });
+  const shown = () => bob.service.getConversation(aliceKey).messages[0];
+  give(latest);
+  assert.equal(shown().content, 'final');
+  give(stale);
+  assert.equal(shown().content, 'final', 'The older edit cannot replace the text the message arrived with');
+  give(edit);
+  assert.equal(shown().content, 'final');
+  assert.equal(shown().editedAt, null, 'Bob only ever saw the final text');
+  assert.ok(!bob.events.some((event) => event.type === 'messages' && event.messages.some((view) => view.content === 'quase')),
+    'The intermediate text never showed');
+});
+
+test('own devices that got the edits in different orders end with the same text', () => {
+  const alice = createDevice('Alice', createIdentity());
+  const bobIdentity = createIdentity();
+  const bobs = [0, 1, 2].map(() => createDevice('Bob', bobIdentity));
+  const [bob1, bob2, bob3] = bobs;
+  const devices = [alice, ...bobs];
+  befriend(devices, alice, bob1);
+  const aliceKey = alice.identity.publicKey;
+  const bobKey = bobIdentity.publicKey;
+  assert.ok(bobs.every((device) => peer(device, alice.identity)?.relation === 'friend'));
+  relay(devices, alice, alice.service.sendMessage({ peer: bobKey, content: 'A' }));
+  const [message] = alice.service.getConversation(bobKey).messages;
+  const [edit1] = alice.service.editMessage(bobKey, message.id, 'B').peers![bobKey];
+  const [edit2] = alice.service.editMessage(bobKey, message.id, 'A').peers![bobKey];
+  const shown = (device: Device) => device.service.getConversation(aliceKey).messages[0];
+
+  // Each device was online for a different part of it: bob1 and bob3 only got the first edit, bob2 only the second.
+  for (const [device, item] of [[bob1, edit1], [bob3, edit1], [bob2, edit2]] as const) {
+    device.service.ingest({ from: aliceKey, kind: item.kind, data: item.data });
+  }
+  assert.deepEqual(bobs.map((device) => shown(device).content), ['B', 'A', 'B']);
+
+  // bob1 and bob2 compare history while bob3 is away; then bob3 only meets bob1, whose "edited" mark already
+  // matches its own: the text clock is what tells them apart.
+  bob3.online = false;
+  relay(devices, bob2, bob2.service.hello(false));
+  bob2.online = false;
+  bob3.online = true;
+  relay(devices, bob3, bob3.service.hello(false));
+  assert.equal(shown(bob3).content, 'A');
+  bob2.online = true;
+  relay(devices, bob2, bob2.service.hello(false));
+  assert.deepEqual(bobs.map((device) => shown(device).content), ['A', 'A', 'A']);
+  assert.equal(new Set(bobs.map((device) => shown(device).editedAt)).size, 1, 'The edited mark agrees on every device');
+  assert.equal(alice.service.getConversation(bobKey).messages[0].content, 'A');
 });

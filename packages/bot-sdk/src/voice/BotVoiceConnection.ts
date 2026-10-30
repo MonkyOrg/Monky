@@ -8,6 +8,7 @@ import {
 } from '@monky/shared';
 import type { OpusPeer } from './OpusPeer';
 import type { SfuOpusReceiver } from './SfuOpusReceiver';
+import { prepareSfuTransport } from './mediasoupSdp';
 import type { RtpPacket } from 'werift';
 import { VoiceAudioReceiver, type BotVoiceAudioReceiver } from './VoiceAudioReceiver';
 
@@ -225,17 +226,19 @@ export class BotVoiceConnection {
         { channelId: this.channelId, direction: 'recv' }, MessageType.SFU_WEBRTC_TRANSPORT_CREATED);
       if (!current()) return;
       const { transportOptions } = botVoiceTransportSchema.parse(response);
+      const transport = await prepareSfuTransport(transportOptions);
+      if (!current()) return;
       const { SfuOpusReceiver, voiceRtpCapabilities } = await import('./SfuOpusReceiver');
       if (!current()) return;
-      const peer = new SfuOpusReceiver(transportOptions, (sessionId, packet) => {
+      const peer = new SfuOpusReceiver(transport, (sessionId, packet) => {
         if (current() && this.sfuReceive?.peer === peer) this.receivePacket(sessionId, packet);
       }, (error) => { if (current() && this.sfuReceive?.peer === peer) this.fail(error); });
-      const receiving = { transportId: transportOptions.id, peer, epoch, consumed: new Set<string>() };
+      const receiving = { transportId: transport.id, peer, epoch, consumed: new Set<string>() };
       this.sfuReceive = receiving;
       const dtlsParameters = await peer.prepare();
       if (!current()) return;
       await this.request(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
-        channelId: this.channelId, transportId: transportOptions.id, dtlsParameters,
+        channelId: this.channelId, transportId: transport.id, dtlsParameters,
       }, MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED);
       if (!current()) return;
       await peer.ready;
@@ -302,18 +305,20 @@ export class BotVoiceConnection {
       { channelId: this.channelId, direction: 'send' }, MessageType.SFU_WEBRTC_TRANSPORT_CREATED);
     if (this.closed) throw new Error('Voice join cancelled.');
     const { transportOptions } = botVoiceTransportSchema.parse(response);
+    const transport = await prepareSfuTransport(transportOptions);
+    if (this.closed) throw new Error('Voice join cancelled.');
     const Peer = this.Peer;
     if (!Peer) throw new Error('Voice transport has not been loaded.');
     const peer = new Peer(this.auth.iceServers, (error) => this.fail(error));
     this.sfu = peer;
-    const { dtlsParameters, rtpParameters, answer } = await peer.prepareSfu(transportOptions);
+    const { dtlsParameters, rtpParameters, answer } = await peer.prepareSfu(transport);
     await this.request(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
-      channelId: this.channelId, transportId: transportOptions.id, dtlsParameters,
+      channelId: this.channelId, transportId: transport.id, dtlsParameters,
     }, MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED);
     await peer.pc.setRemoteDescription({ type: 'answer', sdp: answer });
     await peer.ready;
     await this.request(MessageType.SFU_PRODUCE, {
-      channelId: this.channelId, transportId: transportOptions.id,
+      channelId: this.channelId, transportId: transport.id,
       kind: 'audio', rtpParameters, appData: { mediaType: 'mic' },
     }, MessageType.SFU_PRODUCED);
   }

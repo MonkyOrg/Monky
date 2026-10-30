@@ -200,6 +200,18 @@ export class NetworkClient {
     return this.status;
   }
 
+  /**
+   * The identity this computer uses was replaced (an import, #490). The open
+   * session stays signed in as before, but reconnecting must claim the new
+   * key: the main process signs the challenge with it, so the old one would
+   * fail every attempt from then on.
+   */
+  public adoptIdentity(identity: ClientIdentity): void {
+    if (!this.lastConnectPayload) return;
+    this.lastConnectPayload.clientId = identity.clientId;
+    this.lastConnectPayload.publicKey = identity.publicKey;
+  }
+
   public getConnectionId(): string { return this.connectionId; }
 
   public getIceServers(): RTCIceServer[] {

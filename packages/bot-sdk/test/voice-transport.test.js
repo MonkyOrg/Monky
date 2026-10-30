@@ -395,7 +395,12 @@ test('real mediasoup WebRtcTransport receives and forwards bot Opus over ICE/DTL
   } finally { await sender.close(); worker.close(); }
 });
 
-test('SFU voice connection validates real wire metadata and completes the existing SFU request flow', { timeout: 30000 }, async () => {
+// A bot used to fail the whole join on the first candidate that was not an IP:
+// the server announces the address each client reached it by, a domain included.
+for (const [announced, listenInfo] of [
+  ['an IP address', { protocol: 'udp', ip: '127.0.0.1' }],
+  ['the domain the bot reached it by', { protocol: 'udp', ip: '127.0.0.1', announcedAddress: 'localhost' }],
+]) test(`SFU voice connection validates real wire metadata and completes the existing SFU request flow, announced as ${announced}`, { timeout: 30000 }, async () => {
   const worker = await mediasoup.createWorker({ logLevel: 'error' });
   const errors = [];
   let transport;
@@ -422,7 +427,8 @@ test('SFU voice connection validates real wire metadata and completes the existi
             });
             break;
           case MessageType.SFU_CREATE_WEBRTC_TRANSPORT:
-            transport = await router.createWebRtcTransport({ listenInfos: [{ protocol: 'udp', ip: '127.0.0.1' }] });
+            transport = await router.createWebRtcTransport({ listenInfos: [listenInfo] });
+            assert.equal(transport.iceCandidates[0].address, listenInfo.announcedAddress ?? listenInfo.ip);
             reply(MessageType.SFU_WEBRTC_TRANSPORT_CREATED, {
               transportOptions: {
                 id: transport.id, iceParameters: transport.iceParameters,
@@ -473,4 +479,41 @@ test('SFU voice connection validates real wire metadata and completes the existi
     assert.deepEqual(activity, [{ isSpeaking: true }, { isSpeaking: false }]);
     assert.deepEqual(errors, []);
   } finally { await voice.disconnect('test_finished'); worker.close(); await signaling; }
+});
+
+test('SFU candidates a bot cannot dial are resolved, unwrapped or dropped, and bounded, instead of failing the join', async () => {
+  const { prepareSfuTransport } = require('../dist/voice/mediasoupSdp');
+  const base = {
+    id: 'transport', iceParameters: { usernameFragment: 'ufrag', password: 'password' },
+    dtlsParameters: { fingerprints: [{ algorithm: 'sha-256', value: Array(32).fill('AB').join(':') }] },
+  };
+  const candidate = (address, priority, extra = {}) => ({
+    foundation: 'udpcandidate', priority, ip: address, address, protocol: 'udp', port: 40000, type: 'host', ...extra,
+  });
+  const names = [];
+  const resolve = async (name) => { names.push(name); return ['203.0.113.7', '2001:db8::7']; };
+  const transport = await prepareSfuTransport({ ...base, iceCandidates: [
+    candidate('monky.example.com', 900),
+    candidate('[2001:db8::1]', 800),
+    candidate('192.0.2.10', 700),
+    candidate('192.0.2.10', 600),
+    candidate('not a host', 500),
+    candidate('192.0.2.11', 400, { type: 'srflx' }),
+    { garbage: true },
+    candidate('192.0.2.12', 300, { protocol: 'tcp', tcpType: 'passive' }),
+  ] }, resolve);
+  assert.deepEqual(names, ['monky.example.com'], 'the domain the bot reached the server by is resolved once');
+  assert.deepEqual(transport.iceCandidates.map((entry) => `${entry.protocol} ${entry.ip} ${entry.priority}`), [
+    'udp 203.0.113.7 900', 'udp 2001:db8::7 900', 'udp 2001:db8::1 800', 'udp 192.0.2.10 700', 'tcp 192.0.2.12 300',
+  ]);
+  assert.equal(transport.iceCandidates.some((entry) => 'address' in entry), false);
+
+  const interfaces = Array.from({ length: 40 }, (_, index) => candidate(`10.0.0.${index + 1}`, 1000 + index));
+  const crowded = await prepareSfuTransport({ ...base, iceCandidates: interfaces }, resolve);
+  assert.equal(crowded.iceCandidates.length, 32, 'a host with many networks no longer passes the limit');
+  assert.equal(crowded.iceCandidates[0].ip, '10.0.0.40', 'the most preferred candidates are the ones kept');
+  assert.equal(crowded.iceCandidates.at(-1).ip, '10.0.0.9');
+
+  await assert.rejects(prepareSfuTransport({ ...base, iceCandidates: [candidate('gone.invalid', 1), candidate('[bad', 2)] },
+    async () => { throw new Error('ENOTFOUND'); }), /no address this bot can reach/);
 });

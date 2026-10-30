@@ -427,7 +427,11 @@ export const LIMITS = {
     DM_RELAY_RATE_BYTES_BURST: 6 * 1024 * 1024,
     DM_RELAY_FILE_BACKPRESSURE_BYTES: 8 * 1024 * 1024,
     HEARTBEAT_INTERVAL_MS: 5000,
-    HEARTBEAT_TIMEOUT_MS: 35000,
+    // Silence after which the server closes a connection, which also takes the
+    // person out of the call (#458). Above the 12 s after which the desktop
+    // client reconnects by itself, so a network hiccup is the client's to
+    // handle, and four missed pings before the server gives up.
+    HEARTBEAT_TIMEOUT_MS: 20000,
     RECONNECT_GRACE_MS: 20000,
     // How long a shutdown waits for peers to answer the close frame before their
     // sockets are forcibly destroyed. Without a bound, a single unresponsive peer

@@ -10,7 +10,6 @@ import { LIMITS } from '@monky/shared';
 export const PM2_PROCESS_PREFIX = 'monky-server';
 export const UPDATER_PROCESS_PREFIX = 'monky-updater';
 export const LEGACY_UPDATER_PROCESS_NAME = 'monky-updater';
-export const AUTO_UPDATE_CRON = '0 4 * * *'; // daily at 4am
 
 export { LEGACY_PM2_PROCESS_NAME };
 

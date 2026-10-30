@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID, sign } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { test, type TestContext } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
 import { LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, type LogEntry, type ProtocolMessage } from '@monky/shared';
 import { Logger } from './infrastructure/logger/Logger';
@@ -305,4 +306,103 @@ test('a recipient that stopped reading skips discardable messages, then is dropp
   server.send(ws, update);
   assert.equal(terminated, 1, 'dropped once, so it reconnects and resynchronizes');
   assert.equal(sent.length, 2);
+});
+
+test('the heartbeat closes a connection only after its timeout, and nobody on a round that ran late', (t) => {
+  t.mock.method(Logger, 'warn', () => {});
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  const pinged: string[] = [];
+  const terminated: string[] = [];
+  type Session = Parameters<WebSocketServer['handleDisconnect']>[0];
+  const connection = (ip: string): Session => {
+    const ws = Object.create(WebSocket.prototype) as WebSocket;
+    ws.ping = () => { pinged.push(ip); };
+    ws.terminate = () => { terminated.push(ip); };
+    return { ws, ip, lastSeenAt: 0, messageQueue: Promise.resolve() };
+  };
+  const roaming = connection('roaming');
+  const gone = connection('gone');
+  server['sessions'] = new Map([roaming, gone].map((session) => [session.ws, session]));
+  server['handleDisconnect'] = (session) => { server['sessions'].delete(session.ws); };
+  let now = 100_000;
+  roaming.lastSeenAt = gone.lastSeenAt = now - 8_000;
+  server['lastLivenessCheckAt'] = now - LIMITS.HEARTBEAT_INTERVAL_MS;
+  server['checkLiveness'](now);
+  assert.deepEqual(terminated, [], 'eight seconds of silence, a Wi-Fi roam, no longer end the call');
+  assert.deepEqual(pinged, ['roaming', 'gone']);
+
+  // The server itself stalls for 30 s: answers that arrived meanwhile are still unread.
+  now += 30_000;
+  server['checkLiveness'](now);
+  assert.deepEqual(terminated, [], 'a round that ran late drops nobody');
+
+  // One of the answers is read, and the next round runs on time.
+  roaming.lastSeenAt = now;
+  now += LIMITS.HEARTBEAT_INTERVAL_MS;
+  server['checkLiveness'](now);
+  assert.deepEqual(terminated, ['gone'], 'only the connection still silent past the timeout goes');
+  assert.deepEqual([...server['sessions'].values()], [roaming]);
+});
+
+test('any frame from a connection, not only a pong, keeps it alive', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const member = await f.human('Chatty member');
+  const session = [...f.wsServer['sessions'].values()].find((entry) => entry.user?.id === member.id);
+  assert.ok(session);
+  session.lastSeenAt = 0;
+  await member.peer.request(MessageType.COMMANDS_LIST);
+  assert.ok(session.lastSeenAt > 0, 'a message refreshes the deadline');
+  session.lastSeenAt = 0;
+  session.ws.ping();
+  await eventually(() => session.lastSeenAt > 0, 'the pong refreshes the deadline');
+});
+
+test('a device that reconnects lets its old connection go at once, and shutdown does not wait for that socket', { timeout: 15_000 }, async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const asker = await f.human('Asker');
+  const player = await f.human('Player');
+  const voiceId = text(records(record(asker.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  await player.peer.request(MessageType.USER_UPDATE_ACTIVITY, {
+    activity: { source: 'steam', appId: 606150, name: 'Moonlighter', startedAt: 1_758_200_000_000 },
+  });
+  for (const member of [asker, player]) await join(member, voiceId);
+  assert.equal((await asker.peer.request(MessageType.GAME_SHARE_REQUEST, { targetUserId: player.id })).type,
+    MessageType.GAME_SHARE_REQUEST_SENT);
+  const prompt = await player.peer.wait((message) => message.type === MessageType.GAME_SHARE_REQUESTED);
+
+  // The old socket never finishes closing, like a laptop that went to sleep.
+  const staleSocket = f.wsServer['sessionSockets'].get(text(record(asker.auth.payload.currentUser).sessionId));
+  assert.ok(staleSocket);
+  staleSocket.close = () => {};
+  const since = player.peer.messages.length;
+  const again = await f.human('Asker', asker.keys, asker.deviceId);
+  const closed = await player.peer.wait((message) => message.type === MessageType.GAME_SHARE_CLOSED, since);
+  assert.equal(closed.payload.shareRequestId, prompt.payload.shareRequestId, 'the ask of the old connection ends with it');
+  assert.equal((await again.peer.request(MessageType.GAME_SHARE_REQUEST, { targetUserId: player.id })).type,
+    MessageType.GAME_SHARE_REQUEST_SENT, 'the reconnected device can ask again right away');
+  assert.equal(f.wsServer['wss'].clients.has(staleSocket), true, 'its socket is still open');
+
+  const shutdown = f.wsServer.close().then(() => 'closed');
+  const outcome = await Promise.race([shutdown, delay(LIMITS.SHUTDOWN_GRACE_MS + 1_000, 'stuck', { ref: false })]);
+  // Let the fixture finish even when the shutdown would wait for that socket forever.
+  if (outcome === 'stuck') staleSocket.terminate();
+  assert.equal(outcome, 'closed', 'shutdown ends the replaced socket too, within its grace period');
+  assert.equal(f.wsServer['wss'].clients.size, 0);
+});
+
+test('a kicked member is out at once, not shown online while its sockets finish closing', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Kick owner');
+  const member = await f.human('Kicked member');
+  const sessionId = text(record(member.auth.payload.currentUser).sessionId);
+  const socket = f.wsServer['sessionSockets'].get(sessionId);
+  assert.ok(socket);
+  socket.close = () => {};
+  assert.equal((await owner.peer.request(MessageType.MEMBER_KICK, { targetUserId: member.id })).type, MessageType.MEMBER_KICKED);
+  assert.equal(f.wsServer.getOnlineUsersMap().has(sessionId), false);
+  assert.equal(f.wsServer['sessions'].has(socket), false);
+  assert.equal(f.wsServer['wss'].clients.has(socket), true, 'its socket is still closing');
 });
