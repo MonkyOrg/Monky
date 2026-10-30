@@ -234,9 +234,11 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
           return !!row?.querySelector('.bot-voice-listening') && !row.querySelector('.audio-state-icon--blocked');
         }, 'visible listening notice without a denial for unrequested publication', owner.signal);
         if (config.smoke) {
+          const botId = report.botId;
+          if (!botId) throw new Error('Listening QA needs the installed bot.');
           for (const listening of [false, true]) {
             await session.client.sendRequest(MessageType.COMMAND_INVOKE, {
-              botId: report.botId, channelId: text.id, commandName: 'qa-listen',
+              botId, channelId: text.id, commandName: 'qa-listen',
             }, undefined, 30_000);
             await until(() => {
               const row = botRow();
@@ -244,12 +246,12 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
                 !!row.querySelector('.bot-voice-listening') === listening;
             }, 'listening toggle through the real SDK command and voice roster', owner.signal);
           }
-          for (const [type, key, blocked] of [
-            [MessageType.ADMIN_MUTE_USER, 'muted', 1],
-            [MessageType.ADMIN_DEAFEN_USER, 'deafened', 2],
-          ] as const) {
+          const restrict = (key: 'muted' | 'deafened', enabled: boolean) => key === 'muted'
+            ? session.client.sendRequest(MessageType.ADMIN_MUTE_USER, { targetUserId: botId, muted: enabled }, undefined, 30_000)
+            : session.client.sendRequest(MessageType.ADMIN_DEAFEN_USER, { targetUserId: botId, deafened: enabled }, undefined, 30_000);
+          for (const [key, blocked] of [['muted', 1], ['deafened', 2]] as const) {
             for (const enabled of [true, false]) {
-              await session.client.sendRequest(type, { targetUserId: report.botId, [key]: enabled }, undefined, 30_000);
+              await restrict(key, enabled);
               await until(() => {
                 const row = botRow();
                 return !!row && row.querySelectorAll('.audio-state-icon--blocked').length === (enabled ? blocked : 0) &&

@@ -4,7 +4,7 @@ import {
   type CommandSoundDownloadCancelPayload, type SlashCommand,
   type SoundDownloadResult, type SoundboardDownloadProgress,
 } from '@monky/shared';
-import type { ElectronApi } from '../../preload/preload';
+import type { ElectronApi } from '../../preload/api';
 import type { ChatStore, BotInvocation } from '../stores/chatStore';
 import type { ServerStore } from '../stores/serverStore';
 import type { NetworkClient } from './NetworkClient';

@@ -1,4 +1,4 @@
-import { LOG_LEVELS, SERVER_MONITOR_LIMITS, type LogEntry, type LogLevel, type ServerMonitorStats } from '@monky/shared';
+import { LOG_LEVELS, SERVER_MONITOR_LIMITS, type LogLevel, type ServerMonitorLogLine, type ServerMonitorStats } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { t, type TranslationKey } from '../i18n';
@@ -31,7 +31,7 @@ const LEVEL_COLORS: Record<LogLevel, string> = {
 /** Explicit sources prevent remote failures from exposing a different local server. */
 export class ServerMonitorModal {
   private modalEl: HTMLElement | null = null;
-  private entries: LogEntry[] = [];
+  private entries: ServerMonitorLogLine[] = [];
   private levelFilter: LogLevel | 'ALL' = 'ALL';
   private searchTerm = '';
   private autoScroll = true;
@@ -255,7 +255,7 @@ export class ServerMonitorModal {
     return `${seconds}s`;
   }
 
-  private getVisibleEntries(): LogEntry[] {
+  private getVisibleEntries(): ServerMonitorLogLine[] {
     const term = this.searchTerm.toLowerCase();
     return this.entries.filter((entry) => {
       if (this.levelFilter !== 'ALL' && entry.level !== this.levelFilter) return false;

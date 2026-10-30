@@ -156,12 +156,40 @@ test('multi-choice restores raw/flow state and releases its listeners on selecti
       }
       assert.deepEqual(rawChanges, [true, wasRaw], outcome);
       assert.equal(input.readableFlowing, wasFlowing, outcome);
-      for (const event of ['data', 'end', 'close', 'error']) assert.equal(input.listenerCount(event), 0, `${outcome}: ${event}`);
+      for (const event of ['keypress', 'end', 'close', 'error']) assert.equal(input.listenerCount(event), 0, `${outcome}: ${event}`);
+      // Node's keypress decoder lets go of the stream on its next chunk once no prompt listens.
+      input.emit('data', 'x');
+      assert.equal(input.listenerCount('data'), 0, `${outcome}: data`);
     } finally {
       Object.defineProperty(process, 'stdin', original);
       input.destroy();
     }
   }
+});
+
+for (const { name, chunks, choices, expected } of [
+  { name: 'arrows held down arrive in one read', chunks: ['\u001b[B\u001b[B\r'], choices: ['A', 'B', 'C'], expected: 'C' },
+  { name: 'an arrow split across two reads moves instead of cancelling', chunks: ['\u001b', '[B', '\r'], choices: ['A', 'B'], expected: 'B' },
+  { name: 'two digits typed together pick the two-digit entry', chunks: ['12'], choices: Array.from({ length: 12 }, (_, i) => `Option ${i + 1}`), expected: 'Option 12' },
+]) {
+  test(`arrow choice decodes keys one by one over SSH: ${name}`, { timeout: 5000 }, async (t) => {
+    useLanguage(t);
+    captureStdout(t);
+    const terminal = fakeTerminal(t);
+    const answer = prompts.askChoiceArrows('Pick', choices);
+    for (const chunk of chunks) terminal.input.emit('data', chunk);
+    assert.equal(await answer, expected);
+    assert.deepEqual(terminal.rawChanges, [true, false]);
+  });
+}
+
+test('multi-choice reads a space, an arrow and Enter that arrive in one read', { timeout: 5000 }, async (t) => {
+  useLanguage(t);
+  captureStdout(t);
+  const terminal = fakeTerminal(t);
+  const answer = prompts.askMultiChoiceArrows('Pick', ['A', 'B', 'C']);
+  terminal.input.emit('data', ' \u001b[B\u001b[B \r');
+  assert.deepEqual(await answer, ['A', 'C']);
 });
 
 test('the built CLI exits with an error, not success, when a redirected confirmation gets no answer', (t) => {

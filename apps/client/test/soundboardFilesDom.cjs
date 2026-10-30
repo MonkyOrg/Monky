@@ -382,6 +382,13 @@ async function runDom(fixture) {
   check(!popup(), 'Closing parent removes dropdown');
   await modal.open();
   check(!root().querySelector('input[type="radio"], input[type="checkbox"]:not([role="switch"])'), 'No standalone native choices');
+  const shortcutDialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) [role="dialog"][aria-labelledby="sb-keybind-title"]');
+  [...root().querySelectorAll('.sb-btn-add-shortcut')].find(button => button.dataset.soundname === 'tone').click();
+  check(shortcutDialog()?.getAttribute('aria-modal') === 'true' && shortcutDialog().querySelector('strong')?.textContent === 'tone',
+    'The soundboard and the settings share one accessible shortcut dialog');
+  shortcutDialog().querySelector('#sb-keybind-btn-cancel').click();
+  await until(() => !shortcutDialog(), 'Cancelling did not close the shortcut dialog');
+  check(!Object.hasOwn(settingsStore.soundboardShortcuts, 'tone'), 'Cancelling the dialog binds nothing');
   const volume = settingsStore.soundboardVolume;
   root().querySelector('#sb-btn-settings').click();
   const quickSettings = document.querySelector('#sb-settings-section');

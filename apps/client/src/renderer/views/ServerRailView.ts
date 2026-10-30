@@ -20,9 +20,10 @@ import { checkServerOnline, fetchServerPreview } from '../utils/serverStatus';
 import {
   confirmStopHostedServer,
 } from '../utils/hostedServer';
-import { toAbsoluteServerIconUrl } from '../utils/avatar';
+import { resolveImageUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
 import { serverAddressKey } from '../utils/serverAddress';
 import { initialImageState } from '../utils/imageFallback';
+import { followPointerReorder, onPrimaryPress } from '../utils/pointerReorder';
 import { t } from '../i18n';
 import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { appEvents } from '../core/EventBus';
@@ -65,14 +66,8 @@ export class ServerRailView {
    * network events and would wipe any attribute set by hand (#332).
    */
   private connectingKey: string | null = null;
+  /** The server or folder being dragged to reorder the rail; null when nothing is. */
   private draggedRailItem: DraggedRailItem | null = null;
-  /**
-   * Rail reordering follows the pointer instead of native drag-and-drop: a
-   * native drag started on a server icon carries the image itself, so the
-   * connected server (the one that always has an icon) could not be moved.
-   */
-  private pointerDrag: { item: DraggedRailItem; startX: number; startY: number; active: boolean } | null = null;
-  private suppressRailClick = false;
   private lastProbeTime = 0;
   private probeTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -229,7 +224,7 @@ export class ServerRailView {
     this.queueNewFolderMotion();
     this.playFolderMotion(railEl);
     // Background events may repaint the rail while something is being dragged.
-    if (this.pointerDrag?.active) this.markDragging(this.pointerDrag.item);
+    if (this.draggedRailItem) this.markDragging(this.draggedRailItem);
 
     this.applyStatuses(railEl);
     this.scheduleStatusRefresh();
@@ -425,11 +420,9 @@ export class ServerRailView {
    */
   private iconOf(srv: SavedServer): { iconUrl: string | null | undefined; initial: string } {
     const live = getServerSessionForAddress(srv.host, srv.port);
-    const liveIcon = live?.serverStore.serverDetails?.iconUrl;
-    const liveBase = live?.client.getHttpBaseUrl();
-    const resolvedLiveIcon = liveIcon?.startsWith('/') ? (liveBase ? `${liveBase}${liveIcon}` : null) : liveIcon;
+    const liveIcon = resolveImageUrl(live?.serverStore.serverDetails?.iconUrl, live?.client.getHttpBaseUrl() ?? '');
     return {
-      iconUrl: resolvedLiveIcon || srv.iconUrl,
+      iconUrl: liveIcon || srv.iconUrl,
       initial: (srv.name || srv.host || '?').trim().charAt(0).toUpperCase(),
     };
   }
@@ -548,7 +541,7 @@ export class ServerRailView {
 
     railEl.querySelectorAll('.server-rail-avatar').forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (this.connectingKey || this.suppressRailClick) return;
+        if (this.connectingKey) return;
         const host = btn.getAttribute('data-host');
         const port = parseInt(btn.getAttribute('data-port') || '0', 10);
         if (!host || !port) return;
@@ -564,7 +557,6 @@ export class ServerRailView {
 
     railEl.querySelectorAll('.server-rail-folder-header').forEach((header) => {
       header.addEventListener('click', () => {
-        if (this.suppressRailClick) return;
         const folderId = header.getAttribute('data-folder-id');
         const folder = folderId ? connectionStore.findFolder(folderId) : undefined;
         if (!folder) return;
@@ -925,23 +917,46 @@ export class ServerRailView {
     }
   }
 
+  /**
+   * Rail reordering follows the pointer instead of native drag-and-drop: a
+   * native drag started on a server icon carries the image itself, so the
+   * connected server (the one that always has an icon) could not be moved.
+   */
   private bindDragAndDrop(): void {
     const railEl = document.getElementById('server-rail');
     if (!railEl) return;
 
-    const draggableNodes = Array.from(
-      railEl.querySelectorAll('.server-rail-item[data-node-type="server"], .server-rail-folder-header[data-node-type="folder"]')
-    ) as HTMLElement[];
+    const draggableNodes = Array.from(railEl.querySelectorAll<HTMLElement>(
+      '.server-rail-item[data-node-type="server"], .server-rail-folder-header[data-node-type="folder"]'));
 
     for (const element of draggableNodes) {
-      element.addEventListener('mousedown', (event) => {
-        if (event.button !== 0 || this.connectingKey || this.pointerDrag) return;
+      onPrimaryPress(element, (event) => {
+        // Touch scrolls the rail, as it always has; the mouse and the pen reorder it.
+        if (event.pointerType === 'touch' || this.connectingKey || this.draggedRailItem) return;
         const item = this.railItemOf(element);
         if (!item) return;
-        this.pointerDrag = { item, startX: event.clientX, startY: event.clientY, active: false };
-        window.addEventListener('mousemove', this.movePointer);
-        window.addEventListener('mouseup', this.releasePointer);
-        window.addEventListener('blur', this.cancelPointer);
+        // The rail outlives the repaints that replace its items mid-drag; it keeps the pointer.
+        followPointerReorder(event, {
+          capture: railEl,
+          onStart: () => {
+            this.draggedRailItem = item;
+            contextMenu.close();
+            this.markDragging(item);
+          },
+          onMove: (x, y) => {
+            const target = this.pointerTarget(x, y);
+            if (target?.zone) this.activateDropZone(target.zone);
+            else if (target?.header) this.activateFolderHeader(target.header);
+            else if (target?.combine) this.activateCombine(target.combine);
+            else this.clearDropIndicators();
+          },
+          onDrop: (x, y) => {
+            const target = this.pointerTarget(x, y);
+            this.clearDragState();
+            if (target) this.dropRailItem(item, target);
+          },
+          onCancel: () => this.clearDragState(),
+        });
       });
     }
   }
@@ -968,61 +983,26 @@ export class ServerRailView {
     element?.classList.add('dragging');
   }
 
-  private readonly movePointer = (event: MouseEvent): void => {
-    const drag = this.pointerDrag;
-    if (!drag) return;
-    if (!drag.active) {
-      if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
-      drag.active = true;
-      this.draggedRailItem = drag.item;
-      contextMenu.close();
-      this.markDragging(drag.item);
-    }
-    event.preventDefault();
-    const target = this.pointerTarget(event.clientX, event.clientY);
-    if (target?.zone) this.activateDropZone(target.zone);
-    else if (target?.header) this.activateFolderHeader(target.header);
-    else if (target?.combine) this.activateCombine(target.combine);
-    else this.clearDropIndicators();
-  };
-
-  private readonly releasePointer = (event: MouseEvent): void => this.finishPointer(event, true);
-
-  private readonly cancelPointer = (): void => this.finishPointer(null, false);
-
-  private finishPointer(event: MouseEvent | null, commit: boolean): void {
-    const drag = this.pointerDrag;
-    if (!drag) return;
-    window.removeEventListener('mousemove', this.movePointer);
-    window.removeEventListener('mouseup', this.releasePointer);
-    window.removeEventListener('blur', this.cancelPointer);
-    const target = commit && drag.active && event ? this.pointerTarget(event.clientX, event.clientY) : null;
-    this.pointerDrag = null;
-    this.clearDragState();
-    if (!drag.active) return;
-    // The release lands on a server or folder, whose click must not connect or toggle.
-    this.suppressRailClick = true;
-    setTimeout(() => { this.suppressRailClick = false; }, 0);
-    if (!target) return;
+  private dropRailItem(item: DraggedRailItem, target: { zone?: HTMLElement; header?: HTMLElement; combine?: HTMLElement }): void {
     if (target.zone) {
       const dropKind = target.zone.dataset.dropKind;
       if (dropKind === 'root') {
         const rootIndex = parseInt(target.zone.dataset.rootIndex || '-1', 10);
-        if (rootIndex >= 0) this.applyRootDrop(drag.item, rootIndex);
-      } else if (dropKind === 'folder-child' && drag.item.type === 'server') {
+        if (rootIndex >= 0) this.applyRootDrop(item, rootIndex);
+      } else if (dropKind === 'folder-child' && item.type === 'server') {
         const folderId = target.zone.dataset.folderId;
         const childIndex = parseInt(target.zone.dataset.childIndex || '-1', 10);
         if (folderId && childIndex >= 0) {
-          connectionStore.moveServerToFolder(drag.item.host, drag.item.port, folderId, childIndex);
+          connectionStore.moveServerToFolder(item.host, item.port, folderId, childIndex);
         }
       }
-    } else if (target.header && drag.item.type === 'server') {
+    } else if (target.header && item.type === 'server') {
       const folderId = target.header.dataset.folderId;
-      if (folderId) connectionStore.moveServerToFolder(drag.item.host, drag.item.port, folderId);
-    } else if (target.combine && drag.item.type === 'server') {
+      if (folderId) connectionStore.moveServerToFolder(item.host, item.port, folderId);
+    } else if (target.combine && item.type === 'server') {
       const host = target.combine.dataset.host;
       const port = parseInt(target.combine.dataset.port || '0', 10);
-      if (host && port) connectionStore.groupServers({ host, port }, drag.item);
+      if (host && port) connectionStore.groupServers({ host, port }, item);
     }
   }
 

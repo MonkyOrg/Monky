@@ -449,7 +449,7 @@ function fixture(language = 'en') {
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
     'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/locales/botStorage', 'i18n/messageSearch',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits', 'utils/avatar', 'utils/colors',
-    'utils/serverAddress',
+    'utils/serverAddress', 'utils/rovingFocus',
   ]);
   function load(name) {
     if (Object.hasOwn(stubs, name)) return stubs[name];

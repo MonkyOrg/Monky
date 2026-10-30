@@ -1,11 +1,11 @@
 import { MessageType, botScreenSchema, botScreenRemovedSchema, botScreenListResultSchema } from '@monky/shared';
-import { appEvents, type EventBus } from './EventBus';
+import { appEvents, type AppEventBus } from './EventBus';
 import { botScreenStore, getActiveBotScreenStore } from '../stores/botScreenStore';
 import type { ConnectionStatus } from './NetworkClient';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 
 /** Capture the call's bundle before any async work; the visible text server may differ. */
-export function bindBotScreenEvents(events: EventBus = appEvents): () => void {
+export function bindBotScreenEvents(events: AppEventBus = appEvents): () => void {
   let context: BotVoiceContext | null = null;
   let connectionId: string | null = null;
   let generation = 0;

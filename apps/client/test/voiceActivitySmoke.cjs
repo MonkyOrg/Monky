@@ -311,7 +311,7 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
   const address = new URL(url);
   await connection.openServerSession(address.hostname, Number(address.port), { clientId: crypto.randomUUID(), publicKey }, `Participant ${label}`);
   const session = sessionManager.getActive();
-  rtc.rtcConfig = { iceServers: [] };
+  rtc.p2p.rtcConfig = { iceServers: [] };
   const receive = session.client.handleIncomingMessage;
   const send = session.client.send;
   let holdLeaveEcho = false;
@@ -404,8 +404,8 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
         rms = Math.sqrt(samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length);
       }
       const receiver = rtc.isSfuMode()
-        ? [...rtc.sfuEngine.consumers.values()].find(c => c.kind === 'audio')?.rtpReceiver
-        : rtc.peers.get(sessionId)?.pc.getReceivers().find(r => r.track.kind === 'audio');
+        ? [...rtc.sfu.engine.consumers.values()].find(c => c.kind === 'audio')?.rtpReceiver
+        : rtc.p2p.peers.get(sessionId)?.pc.getReceivers().find(r => r.track.kind === 'audio');
       const stats = receiver ? [...(await receiver.getStats()).values()].filter(r => r.type === 'inbound-rtp' && r.kind === 'audio') : [];
       const row = document.getElementById(`voice-mini-user-${sessionId}`);
       return {

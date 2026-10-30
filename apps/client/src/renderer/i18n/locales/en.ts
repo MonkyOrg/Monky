@@ -845,6 +845,7 @@ export const en: TranslationMap = {
   'soundboard.shortcutInUseTitle': 'Shortcut already in use',
   'soundboard.shortcutInUseMessage': 'The shortcut "{combo}" is already bound to "{sound}". Replace it?',
   'soundboard.replace': 'Replace',
+  'soundboard.shortcutSaveFailed': 'Could not save the shortcut. The previous one was kept.',
   'soundboard.searchPlaceholder': 'Filter sounds...',
   'soundboard.noSearchResultsTitle': 'No sounds found',
   'soundboard.noSearchResultsDesc': 'No audio files match "{query}".',

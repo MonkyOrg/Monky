@@ -7,12 +7,12 @@
 import { escapeHtml, html, trustedHtml } from '../src/renderer/utils/html';
 import { renderMarkdown } from '../src/renderer/utils/markdown';
 import { serverMentionMatcher } from '../src/renderer/utils/mentions';
-import { MentionMatcher, type UserSummary } from '@monky/shared';
+import { MentionMatcher, compareReleaseVersions as compareVersions, type UserSummary } from '@monky/shared';
 import { formatBytes, fileIconName, resolveAttachmentUrl } from '../src/renderer/utils/attachment';
-import { avatarFileExtension, DEFAULT_AVATAR_URL, resolveAvatarUrl } from '../src/renderer/utils/avatar';
+import { avatarFileExtension, DEFAULT_AVATAR_URL, resolveAvatarUrl, resolveImageUrl, toAbsoluteServerIconUrl } from '../src/renderer/utils/avatar';
 import { EventBus } from '../src/renderer/core/EventBus';
 import { normalizeSearchString, matchesSearch } from '../src/renderer/utils/search';
-import { compareVersions, feedUrlForTag, isNewer, pickBestRelease } from '../src/main/updateVersions';
+import { feedUrlForTag, isNewer, pickBestRelease } from '../src/main/updateVersions';
 import { extractStickerIds, stickerToken, stripStickerTokens } from '../src/renderer/utils/stickers';
 import { buildCodeMessage, indentEdit } from '../src/renderer/views/CodeBlockModal';
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from '../src/main/serverDataDir';
@@ -20,7 +20,7 @@ import { createActiveProxy, silentBus } from '../src/renderer/core/activeProxy';
 import { createChatStore, setActiveChatStore, chatStore } from '../src/renderer/stores/chatStore';
 import { createServerStore as createMentionServerStore } from '../src/renderer/stores/serverStore';
 import { appEvents } from '../src/renderer/core/EventBus';
-import { isPrivateAddress, isPrivateHostname } from '../src/main/privateAddress';
+import { isLocalHostname, isPublicAddress } from '../src/main/net/addressPolicy';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -83,6 +83,21 @@ function runTests() {
   assert(resolveAvatarUrl(DEFAULT_AVATAR_URL, callBase) === DEFAULT_AVATAR_URL, 'O próprio avatar padrão (SVG) passa');
   assert(resolveAvatarUrl(null, callBase) === DEFAULT_AVATAR_URL && resolveAvatarUrl('  ', callBase) === DEFAULT_AVATAR_URL,
     'Avatar ausente vira o padrão');
+
+  console.log('\n--- Testando resolveImageUrl e ícones salvos (#490, R-COMMUNITY-11) ---');
+  assert(resolveImageUrl('/avatars/capa-1.png', callBase) === `${callBase}/avatars/capa-1.png`,
+    'Imagem do servidor resolve contra a base do servidor que a enviou');
+  // Concatenada à base, "@host" virava usuário e senha de uma URL que apontava para outro servidor.
+  for (const hostile of ['@tracker.example/pixel.png', '/attachments/a.png', '/../../segredo.png', 'javascript:alert(1)', null, '']) {
+    assert(resolveImageUrl(hostile, callBase) === null, `Imagem recusa ${String(hostile)}, sem trocar por silhueta`);
+  }
+  assert(toAbsoluteServerIconUrl('a.test', 5101, ' /avatars/icone.png ') === 'http://a.test:5101/avatars/icone.png',
+    'O ícone salvo de um servidor resolve contra o próprio servidor');
+  assert(toAbsoluteServerIconUrl('a.test', 5101, 'https://cdn.example/icone.png') === 'https://cdn.example/icone.png',
+    'Um ícone já absoluto continua igual');
+  for (const hostile of ['@tracker.example/icone.png', '/etc/passwd', 'file:///C:/icone.png', '  ']) {
+    assert(toAbsoluteServerIconUrl('a.test', 5101, hostile) === null, `Ícone salvo recusa ${hostile}`);
+  }
 
   console.log('\n--- Testando resolveAttachmentUrl (#490) ---');
   assert(resolveAttachmentUrl('/attachments/6f1c-9a.png', callBase) === `${callBase}/attachments/6f1c-9a.png`,
@@ -257,18 +272,18 @@ function runTests() {
 
   // 5. EventBus
   console.log('\n--- Testando EventBus ---');
-  const bus = new EventBus();
+  const bus = new EventBus<{ 'test.event': { foo: string }; 'multi.event': null }>();
   let callCount = 0;
-  let receivedData: any = null;
+  const received: Array<{ foo: string }> = [];
 
   const unsubscribe = bus.on('test.event', (data) => {
     callCount++;
-    receivedData = data;
+    received.push(data);
   });
 
   bus.emit('test.event', { foo: 'bar' });
   assert(callCount === 1, 'Listener executado uma vez no emit');
-  assert(receivedData?.foo === 'bar', 'Payload transmitido corretamente');
+  assert(received[0]?.foo === 'bar', 'Payload transmitido corretamente');
 
   // Testando unsubscribe
   unsubscribe();
@@ -888,18 +903,18 @@ function runTests() {
   // Alvos da pré-visualização de link (#372)
   console.log('\n--- Endereços recusados pela pré-visualização de link ---');
   for (const interno of ['127.0.0.1', '10.0.0.5', '192.168.1.1', '172.16.4.2', '169.254.169.254', '100.64.0.1', '0.0.0.0']) {
-    assert(isPrivateAddress(interno), `${interno} é tratado como interno`);
+    assert(!isPublicAddress(interno), `${interno} é tratado como interno`);
   }
   for (const publico of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '192.169.0.1', '99.99.99.99']) {
-    assert(!isPrivateAddress(publico), `${publico} continua alcançável`);
+    assert(isPublicAddress(publico), `${publico} continua alcançável`);
   }
-  assert(isPrivateAddress('::1'), 'Loopback IPv6 é interno');
-  assert(isPrivateAddress('fd00::1'), 'Unique local IPv6 é interno');
-  assert(isPrivateAddress('fe80::1'), 'Link-local IPv6 é interno');
-  assert(isPrivateAddress('::ffff:192.168.0.1'), 'IPv4 mapeado em IPv6 não escapa da checagem');
-  assert(!isPrivateAddress('2606:4700:4700::1111'), 'IPv6 público continua alcançável');
-  assert(isPrivateHostname('localhost') && isPrivateHostname('impressora.local'), 'Nomes locais são recusados');
-  assert(!isPrivateHostname('exemplo.com'), 'Domínio comum não é recusado pelo nome');
+  assert(!isPublicAddress('::1'), 'Loopback IPv6 é interno');
+  assert(!isPublicAddress('fd00::1'), 'Unique local IPv6 é interno');
+  assert(!isPublicAddress('fe80::1'), 'Link-local IPv6 é interno');
+  assert(!isPublicAddress('::ffff:192.168.0.1'), 'IPv4 mapeado em IPv6 não escapa da checagem');
+  assert(isPublicAddress('2606:4700:4700::1111'), 'IPv6 público continua alcançável');
+  assert(isLocalHostname('localhost') && isLocalHostname('impressora.local'), 'Nomes locais são recusados');
+  assert(!isLocalHostname('exemplo.com'), 'Domínio comum não é recusado pelo nome');
 
   console.log(`\n=== Relatório dos Testes ===`);
   console.log(`Total: ${passed + failed} | Passaram: ${passed} | Falharam: ${failed}`);

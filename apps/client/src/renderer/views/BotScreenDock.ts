@@ -41,9 +41,9 @@ export class BotScreenDock {
   constructor() {
     const sync = (): void => this.sync();
     this.unbind = [
-      appEvents.on<VoiceBotScreensUpdated | undefined>('voice.bot_screens_updated', (update) => this.screensUpdated(update)),
+      appEvents.on('voice.bot_screens_updated', (update) => this.screensUpdated(update)),
       // The same signals the room's miniapp list follows, wherever the person is looking.
-      ...['voice.channel_changed', 'session.voice_context_updated', 'participants.updated', 'server.updated', 'server.roles_updated']
+      ...(['voice.channel_changed', 'session.voice_context_updated', 'participants.updated', 'server.updated', 'server.roles_updated'] as const)
         .map((event) => appEvents.on(event, sync)),
     ];
     // The window keeps a "visible" page while minimized or in the tray, so main says when it is away.

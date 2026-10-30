@@ -1,9 +1,8 @@
 import fs from 'node:fs';
-import http from 'node:http';
-import https from 'node:https';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { HttpGetError, httpGet } from './net/httpGet';
 
-const MAX_REDIRECTS = 5;
 const IDLE_TIMEOUT_MS = 30_000;
 
 export function sanitizeDownloadFileName(fileName: string): string {
@@ -27,112 +26,57 @@ export function suggestedDownloadName(url: URL, fileName: unknown): string {
   }
 }
 
+/** The messages the download toast has always shown. */
+function downloadError(error: unknown): unknown {
+  if (error instanceof HttpGetError) {
+    switch (error.failure) {
+      case 'refused': return new Error(`Refused to download from a ${error.url.protocol} URL`);
+      case 'redirects': return new Error('Too many redirects');
+      case 'invalid-redirect': return new Error('The download redirected to an invalid address');
+      case 'timeout': return new Error('Download timeout');
+    }
+  }
+  // Node's error for a body whose connection closed before all of it arrived.
+  if (error instanceof Error && error.message === 'aborted' && 'code' in error && error.code === 'ECONNRESET') {
+    return new Error('Download aborted');
+  }
+  return error;
+}
+
 /**
  * Downloads a web URL (an attachment of a connected server, possibly on the
- * LAN) into `destPath` through a temporary file.
- *
- * Every hop, redirects included, must stay on http(s). The server picks where
- * a redirect points: a `Location` with another scheme, or one that is not a
- * URL at all, used to throw inside the response callback, which crashed the
- * main process and left the download waiting forever (E-MAIN-5).
+ * LAN) into `destPath` through a temporary file. Any http(s) host is allowed,
+ * because the attachment comes from the server the user chose to join, but
+ * every hop must stay on http(s) (see `httpGet`). The download fails once the
+ * connection stays silent for `idleTimeoutMs`, before or during the body.
  */
-export async function downloadToFile(url: string, destPath: string): Promise<void> {
+export async function downloadToFile(url: string, destPath: string, idleTimeoutMs = IDLE_TIMEOUT_MS): Promise<void> {
+  let address: URL;
+  try {
+    address = new URL(url);
+  } catch {
+    throw new Error('Invalid download URL');
+  }
   const tempPath = `${destPath}.downloading`;
-  return await new Promise((resolve, reject) => {
-    const requestDownload = (currentUrl: URL, redirects: number): void => {
-      if (redirects > MAX_REDIRECTS) {
-        reject(new Error('Too many redirects'));
-        return;
-      }
-      if (currentUrl.protocol !== 'http:' && currentUrl.protocol !== 'https:') {
-        reject(new Error(`Refused to download from a ${currentUrl.protocol} URL`));
-        return;
-      }
-
-      const transport = currentUrl.protocol === 'https:' ? https : http;
-      let request: http.ClientRequest;
-      try {
-        request = transport.get(currentUrl, { headers: { 'User-Agent': 'Monky-App' } }, (response) => {
-          const status = response.statusCode ?? 0;
-          if (status >= 300 && status < 400) {
-            const locationHeader = response.headers.location;
-            const location = Array.isArray(locationHeader) ? locationHeader[0] : locationHeader;
-            response.resume();
-            if (!location) {
-              reject(new Error(`HTTP ${status}`));
-              return;
-            }
-            let next: URL;
-            try {
-              next = new URL(location, currentUrl);
-            } catch {
-              reject(new Error('The download redirected to an invalid address'));
-              return;
-            }
-            requestDownload(next, redirects + 1);
-            return;
-          }
-
-          if (status !== 200) {
-            response.resume();
-            reject(new Error(`HTTP ${status}`));
-            return;
-          }
-
-          const file = fs.createWriteStream(tempPath);
-          let settled = false;
-          const fail = (err: Error) => {
-            if (settled) return;
-            settled = true;
-            file.destroy();
-            fs.unlink(tempPath, () => reject(err));
-          };
-
-          response.on('aborted', () => fail(new Error('Download aborted')));
-          response.on('error', fail);
-          file.on('error', fail);
-          file.on('finish', () => {
-            if (settled) return;
-            file.close(async (closeErr) => {
-              if (closeErr) {
-                fail(closeErr);
-                return;
-              }
-              try {
-                try {
-                  await fs.promises.rm(destPath, { force: true });
-                  await fs.promises.rename(tempPath, destPath);
-                } catch {
-                  // Fallback para cross-device ou locks temporários do Windows
-                  await fs.promises.copyFile(tempPath, destPath);
-                  await fs.promises.unlink(tempPath).catch(() => {});
-                }
-                settled = true;
-                resolve();
-              } catch (err: unknown) {
-                fail(err instanceof Error ? err : new Error(String(err)));
-              }
-            });
-          });
-          response.pipe(file);
-        });
-      } catch (error: unknown) {
-        reject(error instanceof Error ? error : new Error(String(error)));
-        return;
-      }
-      request.setTimeout(IDLE_TIMEOUT_MS, () => {
-        request.destroy(new Error('Download timeout'));
-      });
-      request.on('error', reject);
-    };
-
-    let initial: URL;
-    try {
-      initial = new URL(url);
-    } catch {
-      reject(new Error('Invalid download URL'));
-      return;
+  try {
+    const response = await httpGet(address, {
+      allows: () => true, headers: { 'User-Agent': 'Monky-App' }, idleTimeoutMs,
+    });
+    if (response.status !== 200) {
+      response.body.resume();
+      throw new Error(`HTTP ${response.status}`);
     }
-    requestDownload(initial, 0);
-  });
+    await pipeline(response.body, fs.createWriteStream(tempPath));
+    try {
+      await fs.promises.rm(destPath, { force: true });
+      await fs.promises.rename(tempPath, destPath);
+    } catch {
+      // Fallback para cross-device ou locks temporários do Windows
+      await fs.promises.copyFile(tempPath, destPath);
+    }
+  } catch (error) {
+    throw downloadError(error);
+  } finally {
+    await fs.promises.rm(tempPath, { force: true }).catch(() => undefined);
+  }
 }

@@ -920,14 +920,15 @@ export class ChatView {
   private async undoDeletion(messageId: string, button: HTMLButtonElement): Promise<void> {
     if (!this.isCurrentComposer() || !this.currentChannelId) return;
     const message = this.store.getMessages(this.currentChannelId).find(entry => entry.id === messageId);
-    if (!message || !this.canUndoDeletion(message) || button.disabled) return;
+    const deletedAt = message?.deletedAt, revision = message?.revision;
+    if (!message || !deletedAt || revision === undefined || !this.canUndoDeletion(message) || button.disabled) return;
     button.disabled = true;
     button.setAttribute('aria-busy', 'true');
     const error = button.closest('.chat-message-body')?.querySelector<HTMLElement>('.chat-restore-error');
     if (error) error.hidden = true;
     try {
       const result = await this.client.sendRequest<ChatMessageUpdatedPayload>(MessageType.CHAT_RESTORE, {
-        messageId, channelId: message.channelId, deletedAt: message.deletedAt, revision: message.revision,
+        messageId, channelId: message.channelId, deletedAt, revision,
       });
       if (this.server.hasPermission(Permission.READ_MESSAGES, message.channelId)) this.store.updateMessage(result.message);
     } catch {

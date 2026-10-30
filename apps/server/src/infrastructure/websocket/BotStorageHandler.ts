@@ -1,16 +1,16 @@
-import {
+import { serverMessage,
   BOT_STORAGE_LIMITS, MessageType, ProtocolErrorCode, botStorageClearSchema, botStorageInfoGetSchema, botStorageKeyRequestSchema,
   botStorageLimitUpdateSchema, botStorageUsageRequestSchema,
-  type BotPermissions, type BotStorageCapability, type BotStorageInfo, type ProtocolMessage, type ServerAuditChange,
+  type BotPermissions, type BotStorageCapability, type BotStorageInfo, type ServerMessage, type ServerAuditChange, type ServerMessageArgs,
 } from '@monky/shared';
 import type { BotInteractionSession } from './BotInteractionHandler';
 import { BotStorageError, type BotStorageService } from '../../application/services/BotStorageService';
-import { Logger } from '../logger/Logger';
+import { toProtocolError } from './protocolErrors';
 
 export interface BotStorageTransport<S extends BotInteractionSession> {
   /** For a bot this also requires its current `server_storage` grant. */
   isCurrent(session: S): boolean;
-  send(session: S, message: ProtocolMessage): void;
+  send(session: S, message: ServerMessage): void;
   permissions(botId: string): BotPermissions | undefined;
   /** Sends its own error when refused; the returned check must still pass before acting. */
   authorizeManagement(session: S, requestId?: string): Promise<(() => boolean) | undefined>;
@@ -79,9 +79,9 @@ export class BotStorageHandler<S extends BotInteractionSession> {
   private async handleBot(session: S, type: MessageType, payload: unknown, requestId?: string): Promise<void> {
     const botId = session.botId;
     if (!botId) throw new BotStorageError(ProtocolErrorCode.UNAUTHORIZED, 'Unknown bot.');
-    const reply = (replyType: MessageType, result: unknown): void => {
+    const reply = (...message: ServerMessageArgs): void => {
       // A grant revoked while the bytes were moving still ends the operation without an answer.
-      if (!this.closed && this.transport.isCurrent(session)) this.transport.send(session, { type: replyType, requestId, payload: result });
+      if (!this.closed && this.transport.isCurrent(session)) this.transport.send(session, serverMessage(...message, requestId));
     };
     switch (type) {
       case MessageType.BOT_STORAGE_PUT:
@@ -161,9 +161,7 @@ export class BotStorageHandler<S extends BotInteractionSession> {
 
   private fail(session: S, error: unknown, requestId?: string): void {
     if (this.closed || !this.transport.isCurrent(session)) return;
-    if (!(error instanceof BotStorageError)) Logger.error('BOT', 'Bot storage operation failed.', error);
-    const code = error instanceof BotStorageError ? error.code : ProtocolErrorCode.INTERNAL_ERROR;
-    const message = error instanceof BotStorageError ? error.message : 'Bot storage operation failed.';
-    this.transport.send(session, { type: MessageType.SERVER_ERROR, requestId, payload: { code, message } });
+    const payload = toProtocolError(error, { message: 'Bot storage operation failed.', category: 'BOT' });
+    this.transport.send(session, { type: MessageType.SERVER_ERROR, requestId, payload });
   }
 }

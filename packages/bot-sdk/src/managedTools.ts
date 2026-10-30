@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
+import {
+  TrustedFetchError, fetchTrusted, isTrustedDownloadUrl, parseSha256Manifest, readLimitedText, type TrustedFetchFailure,
+} from '@monky/shared';
 
 export type ManagedToolRepository = 'yt-dlp/yt-dlp' | 'yt-dlp/FFmpeg-Builds' | 'eugeneware/ffmpeg-static';
 
@@ -44,6 +47,18 @@ const REPOSITORIES = new Set<string>(['yt-dlp/yt-dlp', 'yt-dlp/FFmpeg-Builds', '
 const HOSTS = new Set([
   'api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com', 'nodejs.org',
 ]);
+const FAILURES: Record<TrustedFetchFailure, ManagedToolDownloadFailure> = {
+  untrusted: 'downloadOrigin',
+  'redirect-missing': 'downloadRedirectMissing',
+  redirects: 'downloadRedirects',
+  http: 'downloadHttp',
+  'too-large': 'responseTooLarge',
+};
+
+function managedFailure(error: unknown): unknown {
+  if (!(error instanceof TrustedFetchError)) return error;
+  return new ManagedToolDownloadError(FAILURES[error.failure], error.status === undefined ? {} : { status: error.status });
+}
 
 function approvedUrl(value: string): URL {
   let url: URL;
@@ -53,54 +68,27 @@ function approvedUrl(value: string): URL {
     if (!(error instanceof TypeError)) throw error;
     throw new ManagedToolDownloadError('downloadOrigin');
   }
-  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash || !HOSTS.has(url.hostname)) {
-    throw new ManagedToolDownloadError('downloadOrigin');
-  }
+  if (!isTrustedDownloadUrl(url, HOSTS)) throw new ManagedToolDownloadError('downloadOrigin');
   return url;
 }
 
-async function openResponse(
-  value: string, signal: AbortSignal, method: 'GET' | 'HEAD' = 'GET', redirects = 0,
-): Promise<Response> {
-  if (redirects > 5) throw new ManagedToolDownloadError('downloadRedirects');
-  signal.throwIfAborted();
-  const url = approvedUrl(value);
-  const response = await fetch(url, {
-    signal, method, redirect: 'manual',
-    headers: { 'User-Agent': 'monky-managed-tools', Accept: 'application/vnd.github+json' },
-  });
-  if ([301, 302, 303, 307, 308].includes(response.status)) {
-    await response.body?.cancel();
-    const location = response.headers.get('location');
-    if (!location) throw new ManagedToolDownloadError('downloadRedirectMissing');
-    return openResponse(new URL(location, url).href, signal, method, redirects + 1);
+async function openResponse(value: string, signal: AbortSignal, method: 'GET' | 'HEAD' = 'GET'): Promise<Response> {
+  try {
+    return await fetchTrusted(value, {
+      hosts: HOSTS, signal, method,
+      headers: { 'User-Agent': 'monky-managed-tools', Accept: 'application/vnd.github+json' },
+    });
+  } catch (error) {
+    throw managedFailure(error);
   }
-  if (response.status !== 200 || method === 'GET' && !response.body) {
-    await response.body?.cancel();
-    throw new ManagedToolDownloadError('downloadHttp', { status: response.status });
-  }
-  return response;
 }
 
 async function readText(url: string, signal: AbortSignal, limit = 2 * 1024 * 1024): Promise<string> {
   const response = await openResponse(url, signal);
-  if (!response.body) throw new ManagedToolDownloadError('responseEmpty');
-  const reader = response.body.getReader();
-  const chunks: Buffer[] = [];
-  let bytes = 0;
   try {
-    while (true) {
-      signal.throwIfAborted();
-      const next = await reader.read();
-      signal.throwIfAborted();
-      if (next.done) break;
-      bytes += next.value.byteLength;
-      if (bytes > limit) throw new ManagedToolDownloadError('responseTooLarge');
-      chunks.push(Buffer.from(next.value));
-    }
-    return Buffer.concat(chunks).toString('utf8');
-  } finally {
-    try { await reader.cancel(); } finally { reader.releaseLock(); }
+    return await readLimitedText(response, limit, signal);
+  } catch (error) {
+    throw managedFailure(error);
   }
 }
 
@@ -109,10 +97,9 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function checksumFromManifest(manifest: string, name: string): string {
-  const matches = manifest.split(/\r?\n/).map((line) => /^([a-f0-9]{64})\s+\*?(.+)$/.exec(line))
-    .filter((entry) => entry?.[2] === name);
-  if (matches.length !== 1 || !matches[0]) throw new ManagedToolDownloadError('checksumAmbiguous', { name });
-  return matches[0][1];
+  const digest = parseSha256Manifest(manifest, name);
+  if (!digest) throw new ManagedToolDownloadError('checksumAmbiguous', { name });
+  return digest;
 }
 
 export async function findManagedToolAsset(

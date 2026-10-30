@@ -135,7 +135,18 @@ export async function askCliValue<T>(
     const answer = await askCliText(locale, question, options);
     try { return await validate(answer); } catch (error: unknown) {
       if (!(error instanceof Error) || error instanceof CliPromptCancelled) throw error;
-      console.error(error instanceof CliError ? cliText(locale, error.portuguese, error.english) : error.message);
+      console.error(color(error instanceof CliError ? cliText(locale, error.portuguese, error.english) : error.message, ANSI.red));
     }
   }
+}
+
+/** A yes/no question, answered in the same arrow menu as every other choice of this CLI. */
+export async function askCliConfirm(
+  locale: BotLocale, question: string, defaultYes = false,
+  io: CliPromptIO = { input: process.stdin, output: process.stdout },
+): Promise<boolean> {
+  return await askCliChoice(locale, question, [
+    { value: 'no', label: cliText(locale, 'Não', 'No') },
+    { value: 'yes', label: cliText(locale, 'Sim', 'Yes') },
+  ], defaultYes ? 'yes' : 'no', io) === 'yes';
 }

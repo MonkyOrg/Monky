@@ -1,8 +1,6 @@
-import { randomUUID } from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeBotLocale, type BotLocale } from '@monky/shared';
-import { ensurePrivateDirectory, writePrivateJson } from './fs';
+import { LeftoverFileError, PrivateJsonError, readOptionalPrivateJson, writePrivateJsonAtomic } from './fs';
 
 export function cliText(locale: BotLocale, portuguese: string, english: string): string {
   return locale === 'en' ? english : portuguese;
@@ -20,29 +18,22 @@ export function cliErrorMessage(error: unknown, locale: BotLocale): string {
 }
 
 export function readSavedCliLocale(homeDir: string): BotLocale | undefined {
-  let contents: string;
+  let input: unknown;
   try {
-    const file = path.join(homeDir, 'preferences.json');
-    const stat = fs.statSync(file);
-    if (!stat.isFile() || stat.size > 1024) {
+    input = readOptionalPrivateJson(path.join(homeDir, 'preferences.json'), 'The CLI language preference', 1024);
+  } catch (error) {
+    if (error instanceof PrivateJsonError && error.problem === 'invalid-json') {
+      throw new CliError('A preferência de idioma do CLI contém JSON inválido.',
+        'The CLI language preference contains invalid JSON.');
+    }
+    if (error instanceof PrivateJsonError) {
       throw new CliError('O arquivo de idioma do CLI deve ser um arquivo JSON de até 1024 bytes.',
         'The CLI language preference must be a JSON file of at most 1024 bytes.');
     }
-    contents = fs.readFileSync(file, 'utf8');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
-    if (error instanceof CliError) throw error;
     throw new CliError('Não foi possível ler a preferência de idioma do CLI.',
       'Could not read the CLI language preference.');
   }
-  let input: unknown;
-  try {
-    input = JSON.parse(contents);
-  } catch (error) {
-    if (!(error instanceof SyntaxError)) throw error;
-    throw new CliError('A preferência de idioma do CLI contém JSON inválido.',
-      'The CLI language preference contains invalid JSON.');
-  }
+  if (input === undefined) return undefined;
   if (typeof input !== 'object' || input === null || Array.isArray(input)) {
     throw new CliError('A preferência de idioma do CLI deve conter um objeto.',
       'The CLI language preference must contain an object.');
@@ -75,15 +66,10 @@ export function defaultCliLocale(
 }
 
 export function saveCliLocale(homeDir: string, locale: BotLocale): void {
-  const pending = path.join(homeDir, `.preferences-${randomUUID()}.pending`);
   try {
-    ensurePrivateDirectory(homeDir);
-    writePrivateJson(pending, { locale });
-    fs.renameSync(pending, path.join(homeDir, 'preferences.json'));
-  } catch {
-    try {
-      fs.rmSync(pending, { force: true });
-    } catch {
+    writePrivateJsonAtomic(path.join(homeDir, 'preferences.json'), { locale });
+  } catch (error) {
+    if (error instanceof LeftoverFileError) {
       throw new CliError('Não foi possível salvar o idioma nem remover o arquivo temporário da preferência.',
         'Could not save the language or remove the temporary preference file.');
     }

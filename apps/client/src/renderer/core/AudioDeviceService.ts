@@ -1,21 +1,22 @@
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { t } from '../i18n';
-import { applyAudioDevice, applyAudioOutputPreferences } from './applyAudioDevice';
+import { applyAudioDevice } from './applyAudioDevice';
 import { audioProcessor } from './AudioProcessor';
-import { finishChatMediaOutputSelection } from './ChatMediaOutput';
+import { routeAudioOutputs } from './audioOutputRouting';
 import {
   AUDIO_OUTPUT_CATEGORIES, copyAudioOutputPreferences, resolveAudioOutput,
   type AudioOutputPreferences, type NoiseSuppressionMode,
 } from '../utils/audioPreferences';
 
 export type AudioDeviceKind = 'input' | 'output';
-export type AudioDeviceApplier = (kind: AudioDeviceKind, deviceId: string, signal?: AbortSignal) => Promise<void>;
+/** Moves the call to another microphone (applyAudioDevice in production). */
+export type AudioDeviceApplier = (kind: 'input', deviceId: string, signal?: AbortSignal) => Promise<void>;
 
 let applyLiveDevice: AudioDeviceApplier | null = null;
 let selecting = false;
 
-/** Override the production switch path for isolated renderer fixtures. */
+/** Override the production microphone switch for isolated renderer fixtures. */
 export function registerAudioDeviceApplier(apply: AudioDeviceApplier): () => void {
   applyLiveDevice = apply;
   return () => { if (applyLiveDevice === apply) applyLiveDevice = null; };
@@ -61,78 +62,83 @@ export function audioDeviceError(error: unknown): string {
 }
 
 export async function selectAudioDevice(kind: AudioDeviceKind, deviceId: string, signal?: AbortSignal): Promise<void> {
+  if (kind === 'output') {
+    const next = copyAudioOutputPreferences(settingsStore);
+    next.selectedSpeakerId = deviceId;
+    await selectOutputs(next, [deviceId], signal);
+    return;
+  }
   if (selecting) throw new Error('Audio device selection already in progress');
   if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
   selecting = true;
-  const previous = selectedAudioDevice(kind);
+  const previous = settingsStore.selectedMicrophoneId;
   let applied = false;
   try {
-    if (kind === 'input' && !voiceStore.currentVoiceChannelId) {
+    if (!voiceStore.currentVoiceChannelId) {
       // Validate before persisting; never attach this local permission probe to a call.
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: deviceId ? { deviceId: { exact: deviceId } } : true, video: false,
       });
       stream.getTracks().forEach((track) => track.stop());
-    } else if (kind === 'output') {
-      const probe = new Audio();
-      if (typeof probe.setSinkId !== 'function') throw new Error('Output selection unavailable');
-      await probe.setSinkId(deviceId);
     }
     if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
-    await (applyLiveDevice ?? applyAudioDevice)(kind, deviceId, signal);
+    await (applyLiveDevice ?? applyAudioDevice)('input', deviceId, signal);
     applied = true;
     if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
-    if (kind === 'input') settingsStore.selectedMicrophoneId = deviceId;
-    else settingsStore.selectedSpeakerId = deviceId;
+    settingsStore.selectedMicrophoneId = deviceId;
     settingsStore.save();
   } catch (error) {
-    if (kind === 'input') settingsStore.selectedMicrophoneId = previous;
-    else settingsStore.selectedSpeakerId = previous;
+    settingsStore.selectedMicrophoneId = previous;
     if (applied) {
       try {
-        await (applyLiveDevice ?? applyAudioDevice)(kind, previous);
+        await (applyLiveDevice ?? applyAudioDevice)('input', previous);
       } catch (rollbackError) {
         console.error('[AudioDevices] Could not restore the previous device:', rollbackError);
       }
     }
     throw error;
   } finally {
-    if (kind === 'output') finishChatMediaOutputSelection();
     selecting = false;
   }
 }
 
 export async function selectAudioOutputPreferences(next: AudioOutputPreferences, signal?: AbortSignal): Promise<void> {
+  const devices = new Set(AUDIO_OUTPUT_CATEGORIES.map((category) => resolveAudioOutput(next, category)));
+  devices.add(next.selectedSpeakerId);
+  await selectOutputs(next, devices, signal);
+}
+
+/** Checks that each device opens, moves every player to them and saves; any failure leaves everything as it was. */
+async function selectOutputs(next: AudioOutputPreferences, devices: Iterable<string>, signal?: AbortSignal): Promise<void> {
   if (selecting) throw new Error('Audio device selection already in progress');
   if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
   selecting = true;
-  const previous = copyAudioOutputPreferences(settingsStore);
-  let applied = false;
   try {
-    const ids = new Set(AUDIO_OUTPUT_CATEGORIES.map((category) => resolveAudioOutput(next, category)));
-    ids.add(next.selectedSpeakerId);
     const probe = new Audio();
     if (typeof probe.setSinkId !== 'function') throw new Error('Output selection unavailable');
-    for (const deviceId of ids) {
+    for (const deviceId of devices) {
       await probe.setSinkId(deviceId);
       if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
     }
-    await applyAudioOutputPreferences(next, signal);
-    applied = true;
-    if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
-    settingsStore.selectedSpeakerId = next.selectedSpeakerId;
-    settingsStore.advancedAudioOutputs = next.advancedAudioOutputs;
-    settingsStore.audioOutputDevices = { ...next.audioOutputDevices };
+    await routeAudioOutputs(next, { signal, commit: () => saveOutputPreferences(next) });
+  } finally {
+    selecting = false;
+  }
+}
+
+function saveOutputPreferences(next: AudioOutputPreferences): void {
+  const previous = copyAudioOutputPreferences(settingsStore);
+  const assign = (preferences: AudioOutputPreferences) => {
+    settingsStore.selectedSpeakerId = preferences.selectedSpeakerId;
+    settingsStore.advancedAudioOutputs = preferences.advancedAudioOutputs;
+    settingsStore.audioOutputDevices = { ...preferences.audioOutputDevices };
+  };
+  assign(next);
+  try {
     settingsStore.save();
   } catch (error) {
-    settingsStore.selectedSpeakerId = previous.selectedSpeakerId;
-    settingsStore.advancedAudioOutputs = previous.advancedAudioOutputs;
-    settingsStore.audioOutputDevices = previous.audioOutputDevices;
-    if (applied) await applyAudioOutputPreferences(previous);
+    assign(previous);
     throw error;
-  } finally {
-    finishChatMediaOutputSelection();
-    selecting = false;
   }
 }
 

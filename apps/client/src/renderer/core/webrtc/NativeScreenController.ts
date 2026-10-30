@@ -7,7 +7,7 @@ import {
   type NativeScreenEndpointDiagnostics, type NativeScreenPreviewState, type NativeScreenCaptureMode,
   type NativeScreenAudioPreferences,
 } from '@monky/shared';
-import type { ElectronApi } from '../../../preload/preload';
+import type { ElectronApi } from '../../../preload/api';
 import type { NetworkClient } from '../NetworkClient';
 import type { ParticipantManager } from '../ParticipantManager';
 import { appEvents } from '../EventBus';
@@ -441,7 +441,7 @@ export class NativeScreenController {
           if (event.type === 'signal') {
             await this.sendSignal(call, event.signal);
           } else {
-            value = await call.context.client.sendRequest<unknown>(event.method, event.payload);
+            value = await call.context.client.relayRequest(event.method, event.payload);
             if (value === undefined) throw new Error('Native SFU RPC returned no acknowledgement.');
           }
         }
@@ -936,7 +936,7 @@ export class NativeScreenController {
       send: signal => this.sendSignal(call, signal),
       rpc: async <T>(method: NativeScreenRpcMethod, payload: Record<string, unknown>): Promise<T> => {
         if (!this.networkCurrent(call)) throw new Error('The original screen SFU connection is unavailable.');
-        const response = await call.context.client.sendRequest<T>(method, payload);
+        const response = await call.context.client.relayRequest<T>(method, payload);
         if (response === undefined) throw new Error('The screen SFU returned no acknowledgement.');
         return response;
       },

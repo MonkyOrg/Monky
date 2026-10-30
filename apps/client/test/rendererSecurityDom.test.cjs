@@ -271,8 +271,11 @@ async function runRendererSecurity() {
   });
   const forumPosts = [
     forumPost('hostile-post', { title: 'Hostile <b>post</b>', preview: 'Hostile <i>preview</i>', authorId: HOSTILE,
-      pinned: true, locked: true, closed: true, replyCount: '<img src="https://tracker.example/pixel.png">', reactionCount: HOSTILE }),
-    forumPost('honest-post', { title: 'Honest post', preview: 'Hello', replyCount: 3, reactionCount: 2 }),
+      pinned: true, locked: true, closed: true, replyCount: '<img src="https://tracker.example/pixel.png">', reactionCount: HOSTILE,
+      // Glued to the base, "@host" turned the server's address into credentials for another host.
+      thumbnailUrl: '@tracker.example/forum.png' }),
+    forumPost('honest-post', { title: 'Honest post', preview: 'Hello', replyCount: 3, reactionCount: 2,
+      thumbnailUrl: '/attachments/forum-1.png' }),
   ];
   const baseRequest = session.client.sendRequest;
   session.client.sendRequest = async (type, payload) => type === 'FORUM_LIST'
@@ -292,6 +295,9 @@ async function runRendererSecurity() {
     check(!!row('hostile-post') && !!row('honest-post'), 'Both forum posts render');
     inert(forumRoot, 'Forum list');
     check(!forumRoot.querySelector('img[src*="tracker.example"]'), 'A forum counter carrying markup adds no tracking image');
+    check(row('honest-post').querySelector('.forum-post-thumbnail')?.getAttribute('src') === `${location.origin}/attachments/forum-1.png`
+      && !row('hostile-post').querySelector('.forum-post-thumbnail'),
+    'Forum thumbnails resolve against their server, and an address it never stores draws nothing (R-COMMUNITY-11)');
     check(counters('hostile-post').join() === '0,0' && counters('honest-post').join() === '3,2',
       'Forum counters render only whole numbers, and real counts are kept');
     check(row('hostile-post').querySelector('h3').textContent.includes('Hostile <b>post</b>')

@@ -290,7 +290,7 @@ async function downloadMacDmg(mainWindow: BrowserWindow, task: UpdateOperation):
  * the GitHub call off the renderer.
  */
 async function fetchReleaseNotes(tag?: string): Promise<ReleaseNotesResult> {
-  const result = await fetchVersionReleaseNotes(app.getVersion(), tag);
+  const result = await fetchVersionReleaseNotes(app.getVersion(), tag, net.fetch);
   if (!result.ok) {
     updateLog('fetchReleaseNotes FAILED', { tag: result.version ?? tag, error: result.error });
   }
@@ -598,7 +598,7 @@ export function setupUpdater(
     if (typeof page !== 'number' || (before !== undefined && typeof before !== 'string')) {
       return { ok: false, error: 'Invalid release history request' };
     }
-    const result = await fetchReleaseHistory(app.getVersion(), page, before);
+    const result = await fetchReleaseHistory(app.getVersion(), page, before, net.fetch);
     if (!result.ok) updateLog('fetchReleaseHistory FAILED', { page, error: result.error });
     return result;
   });

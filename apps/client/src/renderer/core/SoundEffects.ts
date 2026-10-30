@@ -7,6 +7,7 @@ import leaveVoiceUrl from '../assets/sounds/Saindo_Da_Call.wav';
 import { settingsStore } from '../stores/settingsStore';
 import { t, type TranslationKey } from '../i18n';
 import { setAudioOutputSink } from './AudioOutputSink';
+import { effectiveAudioOutput, registerAudioOutputConsumer } from './audioOutputRouting';
 
 export const SOUND_EFFECT_TYPES = [
   'mic_mute', 'mic_unmute', 'deafen', 'undeafen', 'join_voice', 'leave_voice',
@@ -55,12 +56,15 @@ export function getSoundLabels(): Record<SoundEffectType, string> {
 export class SoundEffectManager {
   private audioMap: Partial<Record<SoundEffectType, HTMLAudioElement>> = {};
   private toneCtx: AudioContext | null = null;
-  private speakerDeviceId: string | null = null;
   private playRequests: Partial<Record<SoundEffectType, number>> = {};
   // Handle for the repeating reconnection cue (#553): a window.setInterval id
   // while a voice call is reconnecting, or null when it is not.
   private reconnectLoopTimer: number | null = null;
   private loaded = false;
+
+  constructor() {
+    registerAudioOutputConsumer(() => this.followOutput());
+  }
 
   /**
    * Preloads every cue so the first one plays at once. Importing the module
@@ -111,26 +115,19 @@ export class SoundEffectManager {
   }
 
   /**
-   * Routes an audio element to the speaker device selected in the app so that
+   * Routes an audio element to the general output selected in the app so that
    * sound effects respect the user's choice instead of the OS default.
    */
   private applySink(audio: HTMLAudioElement): Promise<void> {
-    const deviceId = this.speakerDeviceId ?? settingsStore.selectedSpeakerId;
-    return setAudioOutputSink(audio, deviceId);
+    return setAudioOutputSink(audio, effectiveAudioOutput('general'));
   }
 
-  /** Reapplies the currently selected speaker to all preloaded sound effects. */
-  public async setSinkId(deviceId: string): Promise<void> {
-    this.speakerDeviceId = deviceId;
+  /** Moves every preloaded cue and the tone context to the general output. */
+  private async followOutput(): Promise<void> {
     for (const audio of Object.values(this.audioMap)) {
-      if (audio) {
-        if (typeof audio.setSinkId !== 'function') throw new Error('Output selection unavailable');
-        await setAudioOutputSink(audio, deviceId);
-      }
+      if (audio) await this.applySink(audio);
     }
-    if (this.toneCtx && 'setSinkId' in this.toneCtx && typeof this.toneCtx.setSinkId === 'function') {
-      await setAudioOutputSink(this.toneCtx, deviceId);
-    }
+    if (this.toneCtx) await setAudioOutputSink(this.toneCtx, effectiveAudioOutput('general'));
   }
 
   /**
@@ -155,7 +152,7 @@ export class SoundEffectManager {
    */
   private withRunningToneCtx(schedule: (ctx: AudioContext, now: number) => void): void {
     const ctx = this.ensureToneCtx();
-    void setAudioOutputSink(ctx, this.speakerDeviceId ?? settingsStore.selectedSpeakerId)
+    void setAudioOutputSink(ctx, effectiveAudioOutput('general'))
       .then(async () => {
         if (ctx.state === 'suspended') await ctx.resume();
         if (ctx.state !== 'closed') schedule(ctx, ctx.currentTime);

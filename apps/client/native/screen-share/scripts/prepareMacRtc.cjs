@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { root, execute, write, withNetworkRetries } = require('./buildTools.cjs');
+const { root, execute, write, withNetworkRetries, withBuildLock } = require('./buildTools.cjs');
 const { pipInstallArguments } = require('./native-rtc/gclientRuntime.cjs');
 const pins = require('./native-rtc/pins.json');
 
@@ -43,9 +43,7 @@ function prepare({ python = 'python3.11' } = {}) {
   if (fs.existsSync(marker)) assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), owner);
   else fs.writeFileSync(marker, JSON.stringify(owner) + '\n', { flag: 'wx' });
   checkSpace();
-  const lock = path.join(workspace, 'prepare.lock');
-  const handle = fs.openSync(lock, 'wx');
-  try {
+  return withBuildLock(path.join(workspace, 'prepare.lock'), () => {
     const depot = path.join(workspace, 'depot_tools');
     const env = { ...process.env, DEPOT_TOOLS_UPDATE: '0', DEPOT_TOOLS_WIN_TOOLCHAIN: '0',
       GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1',
@@ -96,10 +94,7 @@ target_os = ["mac"]
     console.log(JSON.stringify({ macRtcSources: path.join(solution, 'src'),
       revision: pins.repositories.webrtc.commit, python: interpreter }));
     return { source: path.join(solution, 'src'), python: interpreter, env };
-  } finally {
-    fs.closeSync(handle);
-    fs.unlinkSync(lock);
-  }
+  });
 }
 
 module.exports = { prepare, checkSpace, workspace };

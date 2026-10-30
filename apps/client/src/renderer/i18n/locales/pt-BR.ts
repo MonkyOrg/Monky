@@ -807,6 +807,7 @@ export const ptBR = {
   'soundboard.shortcutInUseTitle': 'Atalho em uso',
   'soundboard.shortcutInUseMessage': 'O atalho "{combo}" já está associado ao som "{sound}". Deseja substituir?',
   'soundboard.replace': 'Substituir',
+  'soundboard.shortcutSaveFailed': 'Não foi possível salvar o atalho. O anterior foi mantido.',
   'soundboard.searchPlaceholder': 'Filtrar áudios...',
   'soundboard.noSearchResultsTitle': 'Nenhum áudio encontrado',
   'soundboard.noSearchResultsDesc': 'Nenhum arquivo corresponde à busca "{query}".',

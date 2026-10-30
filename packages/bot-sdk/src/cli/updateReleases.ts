@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { list } from 'tar';
+import { compareReleaseVersions } from '@monky/shared';
 import type { UpdateProgressHandler } from './updateProgress';
 import { CliError } from './locale';
 import {
@@ -106,28 +107,10 @@ export function parseVersion(value: string): ParsedVersion | null {
 }
 
 export function compareVersions(left: string, right: string): number {
-  const a = parseVersion(left);
-  const b = parseVersion(right);
-  if (!a || !b) throw new Error(`Invalid bot version: ${!a ? left : right}`);
-  for (const key of ['major', 'minor', 'patch'] as const) {
-    if (a[key] !== b[key]) return a[key] - b[key];
+  for (const version of [left, right]) {
+    if (!parseVersion(version)) throw new Error(`Invalid bot version: ${version}`);
   }
-  if (!a.prerelease.length && !b.prerelease.length) return 0;
-  if (!a.prerelease.length) return 1;
-  if (!b.prerelease.length) return -1;
-  const length = Math.max(a.prerelease.length, b.prerelease.length);
-  for (let index = 0; index < length; index++) {
-    const leftId = a.prerelease[index];
-    const rightId = b.prerelease[index];
-    if (leftId === undefined) return -1;
-    if (rightId === undefined) return 1;
-    if (leftId === rightId) continue;
-    if (typeof leftId !== 'string' && typeof rightId !== 'string') return leftId < rightId ? -1 : 1;
-    if (typeof leftId !== 'string') return -1;
-    if (typeof rightId !== 'string') return 1;
-    return leftId < rightId ? -1 : 1;
-  }
-  return 0;
+  return compareReleaseVersions(left, right);
 }
 
 export function validateUpdateToken(value: unknown): string {

@@ -1,6 +1,6 @@
 import {
   LIMITS, MessageType, Permission, ProtocolErrorCode, serverAuditGetSchema,
-  type ProtocolMessage, type ServerAuditPagePayload, type ServerErrorPayload, type UserSummary,
+  type ServerMessage, type UserSummary,
 } from '@monky/shared';
 import type { WebSocket } from 'ws';
 import type { PermissionService } from '../../application/services/PermissionService';
@@ -15,7 +15,7 @@ export interface ServerAuditSession {
 
 interface ServerAuditHooks {
   isCurrent(session: ServerAuditSession): boolean;
-  send(session: ServerAuditSession, message: ProtocolMessage<ServerAuditPagePayload | ServerErrorPayload>): void;
+  send(session: ServerAuditSession, message: ServerMessage<MessageType.SERVER_AUDIT_PAGE | MessageType.SERVER_ERROR>): void;
 }
 
 export class ServerAuditHandler {

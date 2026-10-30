@@ -5,6 +5,10 @@ const test = require('node:test');
 const { setImmediate: nextTurn } = require('node:timers/promises');
 const { NativeSfuTransport } = require('../runtime/nativeSfuTransport.cjs');
 const { NativeRtcCommands } = require('../runtime/nativeRtcCommands.cjs');
+const { NativeSfuBroker } = require('../runtime/nativeSfuBroker.cjs');
+const { NativeAudioOutputOwner } = require('../runtime/nativeAudioOutputOwner.cjs');
+const { NativeAudioReceiveAdapter } = require('../runtime/nativeAudioReceiveAdapter.cjs');
+const contract = require('../runtime/nativeRtc/engine/contract.json');
 
 const deferred = () => {
   let resolve;
@@ -243,4 +247,49 @@ test('a timed-out source retirement keeps its original raw Promise and never rep
   removeGate.resolve();
   await f.facade.removeSource(1);
   assert.equal(f.facade.sources.size, 0);
+});
+
+/** A genuine A/V broker identity whose media methods are replaced by recorded doubles. */
+function audioBroker(media) {
+  const engine = {
+    request: async () => assert.fail('The A/V double never issues native commands.'),
+    respond() {}, cancel() {}, async close() { return { closed: true }; },
+    grantAudioCredits() {}, audioClockProbe() {}, calibrateAudioClock() {}, setAudioOutputFeedback() {},
+  };
+  const commands = new NativeRtcCommands(engine);
+  const owner = new NativeAudioOutputOwner(engine, commands, { async start() {}, async stop() {}, async enqueue() {} }, () => {});
+  const audio = new NativeAudioReceiveAdapter({ engine, output: owner, callId: 'call', channelId: 'channel', isCurrent: () => true });
+  const broker = new NativeSfuBroker({
+    engine, commands, audio, callId: 'call', channelId: 'channel', connectionId: 'connection', generation: 1,
+    publisherSessionId: 'publisher', screenSessionId: '12345678-1234-4234-8234-123456789012',
+    routes: { registerConsumer() {}, removeConsumer() {} }, rpc: () => assert.fail('The A/V double never calls the server.'),
+    isCurrent: () => true, isWatchCurrent: () => false, isAudioWatchCurrent: () => false,
+    isAudioPublicationCurrent: () => false, onError() {},
+    nativeCapabilities: { abiVersion: contract.abiVersion, contractRevision: contract.contractRevision,
+      audioExtensionVersion: contract.audioExtensionVersion, audioAvailable: true, ...contract.requiredCompiledCapabilities },
+  });
+  return Object.assign(broker, media);
+}
+
+test('retiring an A/V screen whose video publication ends only on removal does not wait for its audio opening first', async () => {
+  const removals = [], publications = new Map();
+  const broker = audioBroker({
+    registerSource() {}, registerAudioSource() {},
+    publish: id => new Promise((_resolve, reject) => publications.set(id, reject)),
+    publishAudio: async id => ({ sourceId: id, producerId: 200 + id }),
+    async removeAudioSource(id) { removals.push(id); },
+    async removeSource(id) {
+      removals.push(id);
+      publications.get(id)?.(new DOMException('Removal cancelled the publication.', 'AbortError'));
+    },
+  });
+  const facade = new NativeSfuTransport(broker, () => {}, { audioPublication: true, timeoutMs: 1000 });
+  const openings = [facade.addSource(source()),
+    facade.addAudioSource({ sourceId: 10, screenAudioShareId: 'screen-1', syncGroup: 'group-1', maxBitrateBps: 128000 })];
+  const rejected = Promise.all(openings.map(opening => assert.rejects(opening, { name: 'AbortError' })));
+  await nextTurn();
+  await facade.removeSource(1);
+  assert.deepEqual(removals, [10, 1], 'The audio leaves the broker before its video.');
+  assert.equal(facade.sources.size, 0);
+  await rejected;
 });

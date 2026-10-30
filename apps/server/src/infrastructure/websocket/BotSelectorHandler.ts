@@ -1,46 +1,47 @@
 import { createHash } from 'crypto';
-import {
-  MessageType, Permission, ProtocolErrorCode, canAccessChannel, hasPermission,
+import { serverMessage,
+  MessageType, ProtocolErrorCode,
   botSelectorCreateSchema, botSelectorFinalizeSchema, botSelectorIdSchema,
   botSelectorListSchema, botSelectorRespondSchema, botSelectorUpdateSchema,
   resolveBotSettingsValues,
-  type BotSelector, type BotSelectorPublic, type BotSelectorRespondedPayload, type ChatMessage, type ProtocolMessage,
-  type UserSummary,
+  type BotSelector, type BotSelectorPublic, type BotSelectorRespondedPayload, type ChatMessage, type ServerMessage,
+  type UserSummary, type ServerMessageArgs,
 } from '@monky/shared';
+import { ZodError } from 'zod';
 import type { BotInteractionSession, SelectorInvocationAuthorization } from './BotInteractionHandler';
-import type { BotSelectorService } from '../../application/services/BotSelectorService';
-import type { ChannelAccessScope, ChannelService } from '../../application/services/ChannelService';
+import { BotSelectorError, type BotSelectorService } from '../../application/services/BotSelectorService';
+import type { ChannelService } from '../../application/services/ChannelService';
 import type { UserService } from '../../application/services/UserService';
 import { Logger } from '../logger/Logger';
+import { ServiceError } from '../../application/errors';
 import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
+import {
+  BOT_ACCESS_REFUSALS, BotAccess, BotAccessGate, withStableAccess, type BotAccessReads,
+} from '../../application/services/BotAccessPolicy';
+import { toProtocolError } from './protocolErrors';
 
 interface SelectorTransport {
   allowsBot?(botId: string): boolean;
   sessions(): Iterable<BotInteractionSession>;
   isCurrent(session: BotInteractionSession): boolean;
   accessVersion(): number;
-  send(session: BotInteractionSession, message: ProtocolMessage): void;
+  send(session: BotInteractionSession, message: ServerMessage): void;
   authorizeInvocation(session: BotInteractionSession, invocationId: string, channelId: string): Promise<SelectorInvocationAuthorization | undefined>;
   publish(bot: UserSummary, channelId: string, content: string, messageId: string, canSend: () => boolean, accessUserId: string,
     localizations?: import('@monky/shared').BotMessageLocalizations): Promise<ChatMessage>;
   broadcastMessage(message: ChatMessage): Promise<void>;
 }
 
-class SelectorAccessError extends Error {
-  constructor(message: string, readonly code: ProtocolErrorCode) { super(message); }
-}
-
-/** Reads that the checks of one fan-out share while the access versions hold. */
-interface SharedAccess {
-  key: string | null;
-  scope: ChannelAccessScope;
-  members: Map<string, Promise<boolean>>;
+class SelectorAccessError extends ServiceError {
+  constructor(message: string, code: ProtocolErrorCode) { super(code, message); }
 }
 
 export class BotSelectorHandler {
   private timer: ReturnType<typeof setInterval>;
   private pending: Promise<void> = Promise.resolve();
   private closed = false;
+  /** Who may see or answer a selector: the rule shared with commands and miniapps (BOTS-8). */
+  private readonly gate: BotAccessGate;
 
   constructor(
     private selectors: BotSelectorService,
@@ -49,6 +50,7 @@ export class BotSelectorHandler {
     private transport: SelectorTransport,
     private settings?: BotSettingsService
   ) {
+    this.gate = new BotAccessGate(channels, users);
     this.timer = setInterval(() => {
       void this.enqueue(async () => {
         for (const selector of this.selectors.expire()) await this.notify(selector);
@@ -64,7 +66,7 @@ export class BotSelectorHandler {
         for (const expired of this.selectors.expire()) await this.notify(expired);
         if (type === MessageType.SELECTOR_LIST) {
           const input = botSelectorListSchema.parse(payload);
-          if (!session.isBot && !input.channelId) throw new Error('A channel is required.');
+          if (!session.isBot && !input.channelId) throw new BotSelectorError('A channel is required.');
           if (!session.isBot && input.channelId) await this.requireAccess(session, input.channelId, false);
           const selectors = session.isBot
             ? this.selectors.list(session.botId).filter((selector) => !input.channelId || selector.channelId === input.channelId)
@@ -113,7 +115,7 @@ export class BotSelectorHandler {
             if (!authorization.isCurrent()) throw new SelectorAccessError('The invocation has ended.', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
           } else {
             await this.requireAccess(session, input.channelId, true);
-            if (input.invokerId && !(await this.users.isMember(input.invokerId))) throw new Error('Invoker is not a member.');
+            if (input.invokerId && !(await this.users.isMember(input.invokerId))) throw new BotSelectorError('Invoker is not a member.');
           }
           if (!this.transport.isCurrent(session)) return;
           selector = existing ?? this.selectors.create(session.botId!, input, Date.now(), authorization?.creatorUserId);
@@ -133,30 +135,36 @@ export class BotSelectorHandler {
           }
           const input = parsed.data;
           const existing = this.selectors.get(input.id);
-          if (!existing) throw new Error('Selector not found.');
+          if (!existing) throw new BotSelectorError('Selector not found.');
           if (this.transport.allowsBot?.(existing.botId) === false) {
             throw new SelectorAccessError('Bot selector permission was revoked.', ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
           }
+          // Who answers and the bot that hears the answer are checked against the same access state;
+          // a change meanwhile, roles included, checks again, a bounded number of times (BOTS-8).
           let owner: BotInteractionSession | undefined;
-          while (true) {
-            const accessVersion = this.transport.accessVersion();
-            owner = undefined;
-            await this.requireAccess(session, existing.channelId, true);
-            for (const candidate of this.transport.sessions()) {
-              if (candidate.isBot && candidate.botId === existing.botId && this.transport.isCurrent(candidate)) {
-                try {
-                  await this.requireOwnerAccess(candidate, existing);
-                  owner = candidate;
-                } catch (error) {
-                  if (!(error instanceof SelectorAccessError)) throw error;
+          await withStableAccess({
+            version: () => this.accessKey(),
+            check: async () => {
+              owner = undefined;
+              await this.requireAccess(session, existing.channelId, true);
+              for (const candidate of this.transport.sessions()) {
+                if (candidate.isBot && candidate.botId === existing.botId && this.transport.isCurrent(candidate)) {
+                  try {
+                    await this.requireOwnerAccess(candidate, existing);
+                    owner = candidate;
+                  } catch (error) {
+                    if (!(error instanceof SelectorAccessError)) throw error;
+                  }
+                  break;
                 }
-                break;
               }
-            }
-            if (!this.transport.isCurrent(session)) return;
-            if (accessVersion !== this.transport.accessVersion() || (owner && !this.transport.isCurrent(owner))) continue;
-            break;
-          }
+            },
+            use: () => {},
+            current: () => !this.transport.isCurrent(session) || !owner || this.transport.isCurrent(owner),
+            isRefusal: (error) => error instanceof SelectorAccessError,
+            busy: () => new SelectorAccessError('Permissions are changing. Retry shortly.', ProtocolErrorCode.BOT_COMMAND_BUSY),
+          });
+          if (!this.transport.isCurrent(session)) return;
           if (this.transport.allowsBot?.(existing.botId) === false) {
             throw new SelectorAccessError('Bot selector permission was revoked.', ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
           }
@@ -182,7 +190,7 @@ export class BotSelectorHandler {
               ? this.readId(payload) : payload
           );
           const existing = this.selectors.get(input.id);
-          if (!existing || existing.botId !== session.botId) throw new Error('Selector not found.');
+          if (!existing || existing.botId !== session.botId) throw new BotSelectorError('Selector not found.');
           // Disabling commands stops new selectors/responses, not publication of
           // already-closed results or an owner's explicit close operation.
           await this.requireOwnerAccess(session, existing, type === MessageType.SELECTOR_UPDATE);
@@ -193,7 +201,7 @@ export class BotSelectorHandler {
             selector = this.selectors.close(input.id, session.botId!);
           } else if (type === MessageType.SELECTOR_FINALIZE) {
             const final = botSelectorFinalizeSchema.parse(payload);
-            if (existing.closedAt === null) throw new Error('Close the selector before publishing results.');
+            if (existing.closedAt === null) throw new BotSelectorError('Close the selector before publishing results.');
             if (existing.resultMessageId) selector = existing;
             else {
               const messageId = createHash('sha256').update(`selector-result:${existing.id}`).digest('hex');
@@ -201,18 +209,20 @@ export class BotSelectorHandler {
               selector = this.selectors.markFinalized(existing.id, session.botId!, message.id);
               await this.transport.broadcastMessage(message);
             }
-          } else throw new Error('Unsupported selector operation.');
+          } else throw new BotSelectorError('Unsupported selector operation.');
         }
         if (session.isBot) await this.requireOwnerAccess(session, selector);
         this.send(session, MessageType.SELECTOR_SNAPSHOT,
           session.isBot ? selector : await this.publicSnapshot(selector, session), requestId);
         await this.notify(selector);
       } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : 'Selector operation failed.';
-        Logger.warn('BOT', `Public selector operation ${type} failed: ${message}`);
-        this.send(session, MessageType.SERVER_ERROR,
-          { code: error instanceof SelectorAccessError || error instanceof BotSettingsError
-            ? error.code : ProtocolErrorCode.BOT_INTERACTION_INVALID, message }, requestId);
+        // An invalid payload tells the bot developer what was wrong; any other failure is logged
+        // and answered in general terms, without the words of a database or runtime error (BOTS-8).
+        const reply = error instanceof ZodError
+          ? { code: ProtocolErrorCode.BOT_INTERACTION_INVALID, message: error.message }
+          : toProtocolError(error, { message: 'Selector operation failed.', category: 'BOT', code: ProtocolErrorCode.BOT_INTERACTION_INVALID });
+        Logger.warn('BOT', `Public selector operation ${type} failed: ${reply.message}`);
+        this.send(session, MessageType.SERVER_ERROR, reply, requestId);
       }
     });
   }
@@ -236,32 +246,15 @@ export class BotSelectorHandler {
     return next;
   }
 
-  private newAccess(key: string | null = null): SharedAccess {
-    return { key, scope: this.channels.accessScope(), members: new Map() };
+  /** Access only changes along with these versions; null while a role write is pending. */
+  private accessKey(): string | null {
+    const roles = this.channels.getRoleAccessVersion();
+    return roles === null ? null : `${this.transport.accessVersion()}:${roles}`;
   }
 
-  /**
-   * The reads one fan-out shares, so that notifying every member of a channel
-   * reads the channel and each member once (BOTS-3). Once the access or role
-   * versions move, the next check reads from the database again.
-   */
-  private fanOut(): () => SharedAccess {
-    let shared: SharedAccess | undefined;
-    return () => {
-      const roles = this.channels.getRoleAccessVersion();
-      const key = roles === null ? null : `${this.transport.accessVersion()}:${roles}`;
-      if (!shared || key === null || shared.key !== key) shared = this.newAccess(key);
-      return shared;
-    };
-  }
-
-  private isMember(access: SharedAccess, userId: string): Promise<boolean> {
-    let member = access.members.get(userId);
-    if (!member) {
-      member = this.users.isMember(userId);
-      access.members.set(userId, member);
-    }
-    return member;
+  /** The reads one fan-out shares, so notifying every member of a channel reads the channel and each member once (BOTS-3). */
+  private fanOut(): () => BotAccessReads {
+    return this.gate.fanOut(() => this.accessKey());
   }
 
   private readId(payload: unknown): { id: unknown } {
@@ -273,43 +266,29 @@ export class BotSelectorHandler {
   }
 
   private async requireAccess(
-    session: BotInteractionSession, channelId: string, respond: boolean, access?: SharedAccess,
+    session: BotInteractionSession, channelId: string, respond: boolean, reads?: BotAccessReads,
   ): Promise<void> {
     if (!session.user) throw new SelectorAccessError('Authentication is required.', ProtocolErrorCode.UNAUTHORIZED);
-    await this.requirePrincipal(session.user.id, channelId, !session.isBot, respond, respond, access);
+    await this.requirePrincipal(session.user.id, channelId, !session.isBot, respond, respond, reads);
   }
 
-  /** Without `access`, a single check reads everything afresh. */
+  /** Without `reads`, a single check reads everything afresh. */
   private async requirePrincipal(
-    userId: string, channelId: string, human: boolean, interact: boolean, requireEnabled: boolean, access = this.newAccess(),
+    userId: string, channelId: string, human: boolean, interact: boolean, requireEnabled: boolean, reads?: BotAccessReads,
   ): Promise<void> {
-    const [channel, context] = await Promise.all([
-      access.scope.channel(channelId), access.scope.channelContext(userId, channelId),
-    ]);
-    if (!channel || (channel.type !== 'TEXT' && channel.type !== 'VOICE') ||
-        (human && !hasPermission(context.permissions, Permission.READ_MESSAGES)) ||
-        !canAccessChannel(this.channels.rulesFor(channel, context), context.permissions, context.roleIds, context.isBot, context.userId)) {
-      throw new SelectorAccessError('Channel is unavailable.', ProtocolErrorCode.CHANNEL_NOT_FOUND);
-    }
-    if ((requireEnabled && channel.botCommandsEnabled === false) ||
-        (interact && (!hasPermission(context.permissions, Permission.SEND_MESSAGES) ||
-          (human && !hasPermission(context.permissions, Permission.USE_BOT_COMMANDS))))) {
-      throw new SelectorAccessError('Bot interactions are not permitted in this channel.', ProtocolErrorCode.PERMISSION_DENIED);
-    }
-    if (human && !(await this.isMember(access, userId))) {
-      throw new SelectorAccessError('Membership is required.', ProtocolErrorCode.UNAUTHORIZED);
-    }
+    const denial = await this.gate.check(userId, channelId, BotAccess.selector(human, interact, requireEnabled), reads);
+    if (denial) throw new SelectorAccessError(BOT_ACCESS_REFUSALS[denial].message, BOT_ACCESS_REFUSALS[denial].code);
   }
 
   private async requireOwnerAccess(
-    session: BotInteractionSession, selector: BotSelector, requireEnabled = false, access?: SharedAccess,
+    session: BotInteractionSession, selector: BotSelector, requireEnabled = false, reads?: BotAccessReads,
   ): Promise<string> {
     this.requireBot(session);
     if (!session.user || session.botId !== selector.botId) {
       throw new SelectorAccessError('Selector belongs to another bot.', ProtocolErrorCode.PERMISSION_DENIED);
     }
     const principal = selector.creatorUserId ?? session.user.id;
-    await this.requirePrincipal(principal, selector.channelId, selector.creatorUserId !== undefined, true, requireEnabled, access);
+    await this.requirePrincipal(principal, selector.channelId, selector.creatorUserId !== undefined, true, requireEnabled, reads);
     return principal;
   }
 
@@ -326,7 +305,7 @@ export class BotSelectorHandler {
   }
 
   private async publicSnapshot(
-    selector: BotSelector, session: BotInteractionSession, access?: SharedAccess,
+    selector: BotSelector, session: BotInteractionSession, reads?: BotAccessReads,
   ): Promise<BotSelectorPublic> {
     const { responses, metadata: _metadata, invokerId, creatorUserId: _creator, sourceInvocationId: _invocation, ...publicFields } = selector;
     const counts: Record<string, number> = Object.fromEntries(selector.choices.map((choice) => [choice.value, 0]));
@@ -334,7 +313,7 @@ export class BotSelectorHandler {
     const ownResponse = responses[session.user!.id];
     let permitted = true;
     try {
-      await this.requireAccess(session, selector.channelId, true, access);
+      await this.requireAccess(session, selector.channelId, true, reads);
     } catch (error: unknown) {
       if (!(error instanceof SelectorAccessError)) throw error;
       permitted = false;
@@ -368,7 +347,7 @@ export class BotSelectorHandler {
     }
   }
 
-  private send(session: BotInteractionSession, type: MessageType, payload: unknown, requestId?: string): void {
-    if (this.transport.isCurrent(session)) this.transport.send(session, { type, payload, requestId });
+  private send(session: BotInteractionSession, ...message: [...ServerMessageArgs, requestId?: string]): void {
+    if (this.transport.isCurrent(session)) this.transport.send(session, serverMessage(...message));
   }
 }

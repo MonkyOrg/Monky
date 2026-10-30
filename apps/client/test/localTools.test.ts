@@ -16,6 +16,7 @@ import {
 import { LocalExecutionError } from '../src/main/localExecution/errors';
 import { readLocalToolFile } from '../src/main/localExecution/localToolsStorage';
 import { checkToolExtraction, extractLocalTool, localToolExtractionSupport } from '../src/main/localExecution/toolExtraction';
+import { createZip } from '../src/main/zipWriter';
 
 const versions: Record<LocalToolId, string> = {
   node: `v${MANAGED_NODE_VERSION}`, 'yt-dlp': '2026.09.15', ffmpeg: 'ffmpeg 6.1.1 (controlled libopus fixture)',
@@ -86,38 +87,6 @@ function tarFixture(member: string, contents: Buffer): Buffer {
   return Buffer.concat([header, contents, Buffer.alloc((512 - contents.length % 512) % 512 + 1024)]);
 }
 
-function zipFixture(member: string, contents: Buffer): Buffer {
-  const filename = Buffer.from(member);
-  let crc = 0xffffffff;
-  for (const byte of contents) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit++) crc = crc >>> 1 ^ (crc & 1 ? 0xedb88320 : 0);
-  }
-  crc = (crc ^ 0xffffffff) >>> 0;
-  const local = Buffer.alloc(30);
-  local.writeUInt32LE(0x04034b50);
-  local.writeUInt16LE(20, 4);
-  local.writeUInt32LE(crc, 14);
-  local.writeUInt32LE(contents.length, 18);
-  local.writeUInt32LE(contents.length, 22);
-  local.writeUInt16LE(filename.length, 26);
-  const central = Buffer.alloc(46);
-  central.writeUInt32LE(0x02014b50);
-  central.writeUInt16LE(20, 4);
-  central.writeUInt16LE(20, 6);
-  central.writeUInt32LE(crc, 16);
-  central.writeUInt32LE(contents.length, 20);
-  central.writeUInt32LE(contents.length, 24);
-  central.writeUInt16LE(filename.length, 28);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50);
-  end.writeUInt16LE(1, 8);
-  end.writeUInt16LE(1, 10);
-  end.writeUInt32LE(central.length + filename.length, 12);
-  end.writeUInt32LE(local.length + filename.length + contents.length, 16);
-  return Buffer.concat([local, filename, contents, central, filename, end]);
-}
-
 async function xzFixture(contents: Buffer): Promise<Buffer> {
   const child = spawn('/usr/bin/xz', ['--compress', '--stdout'], { stdio: ['pipe', 'pipe', 'pipe'] });
   const chunks: Buffer[] = [];
@@ -151,7 +120,7 @@ async function fixtureAssets(nodeContents?: Buffer): Promise<FixtureAsset[]> {
     : `ffmpeg-master-latest-${process.platform === 'win32' ? 'win' : 'linux'}${process.arch === 'arm64' ? 'arm64' : '64'}-gpl.${process.platform === 'win32' ? 'zip' : 'tar.xz'}`;
   const ffRepository = process.platform === 'darwin' ? 'eugeneware/ffmpeg-static' : 'yt-dlp/FFmpeg-Builds';
   const ffArchive = process.platform === 'darwin' ? ffBytes : process.platform === 'win32'
-    ? zipFixture(managedFfmpegArchiveEntry(ffName), ffBytes)
+    ? createZip([{ path: managedFfmpegArchiveEntry(ffName), data: ffBytes }])
     : await xzFixture(tarFixture(managedFfmpegArchiveEntry(ffName), ffBytes));
   return [
     {

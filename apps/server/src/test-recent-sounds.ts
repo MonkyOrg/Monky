@@ -6,6 +6,7 @@ import test from 'node:test';
 import { WebSocket } from 'ws';
 import { MessageType, ProtocolErrorCode, type ProtocolMessage } from '@monky/shared';
 import { RecentSoundCacheService } from './application/services/RecentSoundCacheService';
+import { SERVER_SETTING_DEFAULTS } from './domain/serverSettings';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqliteServerRepository } from './infrastructure/database/SqliteRepositories';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
@@ -129,7 +130,7 @@ test('allows human members to list and download but denies bots', async () => {
   };
   server['serverRepo'] = {
     getServer: async () => ({
-      id: 'server', name: 'Server', passwordHash: '', createdAt: 1, maxUsers: 0,
+      ...SERVER_SETTING_DEFAULTS, id: 'server', name: 'Server', passwordHash: '', createdAt: 1, maxUsers: 0,
       recentSoundCacheEnabled: true, recentSoundCacheLimit: 20,
     }),
     createServer: async () => {},

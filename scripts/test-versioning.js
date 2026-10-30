@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bumpVersion, determineBumpType, calculateNextVersion, promoteBetaTag, validatePromotionTag, PUBLISHED_VERSION, BETA_SUFFIX, parseVersionTag, compareVersionTags, getLatestReleaseTag, getLatestSemverTag, splitCommitEntries, bumpTypeForEntry, collectBumps, applyBumps, isReleasableCommit, getGitCommitsSinceTag } from './calculate-version.js';
 import { requiresClientNote } from './check-client-release-notes.js';
-import { isClientNoteFile } from './generate-changelog.js';
+import { isClientNoteFile, extractEntries } from './generate-changelog.js';
 
 console.log('=== Início dos Testes de Versionamento SemVer (#122) ===');
 
@@ -391,6 +391,18 @@ for (const header of ['feat!(chat)', 'feat(chat)!']) {
       `${header}: squash do protocolo deve produzir 30.0.4-beta, nao 29.2.6-beta`
     );
   }
+}
+
+// Versionamento e changelog leem o cabeçalho com a mesma regra
+// (conventional-commits.js): todo item que o squash conta, o changelog esconde
+// das descrições, inclusive com o ! antes do escopo (#715).
+for (const header of ['feat', 'feat(chat)', 'feat!', 'feat(chat)!', 'feat!(chat)', 'fix!(ui)', 'chore(ci)']) {
+  const message = `chore: titulo\n\n* ${header}: item\n- descricao`;
+  console.assert(splitCommitEntries(message).length === 1, `${header}: o squash conta o item`);
+  console.assert(
+    JSON.stringify(extractEntries(message)) === JSON.stringify(['descricao']),
+    `${header}: o changelog nao mostra o item do squash como descricao`
+  );
 }
 
 // Prosa no corpo não pode virar commit. Só listas com um tipo conhecido contam.

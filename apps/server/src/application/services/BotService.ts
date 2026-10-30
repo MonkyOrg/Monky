@@ -575,30 +575,17 @@ export class BotService {
   }
 
   private decodeProfileAvatar(value: string): { success: true; buffer: Buffer; extension: string } | BotFailure {
-    const invalid: BotFailure = {
-      success: false,
-      errorCode: ProtocolErrorCode.AVATAR_INVALID_TYPE,
-      errorMessage: 'Avatar inválido. Utilize uma imagem PNG, JPEG ou WebP em base64.',
-    };
-    let rawBase64 = value;
-    let declaredMime: string | undefined;
-    if (value.startsWith('data:')) {
-      const match = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(value);
-      if (!match) return invalid;
-      declaredMime = match[1];
-      rawBase64 = match[2];
+    const image = this.avatarStorage.decodeImage(value);
+    if (!image.ok) return { success: false, errorCode: image.code, errorMessage: image.message };
+    // A bot names the type of its avatar itself, so a data URL that contradicts the bytes is a mistake to report.
+    if (image.declaredType && image.declaredType !== image.mimeType) {
+      return {
+        success: false,
+        errorCode: ProtocolErrorCode.AVATAR_INVALID_TYPE,
+        errorMessage: 'Avatar inválido. Utilize uma imagem PNG, JPEG ou WebP em base64.',
+      };
     }
-    if (!rawBase64 || rawBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(rawBase64)) return invalid;
-    const buffer = Buffer.from(rawBase64, 'base64');
-    if (buffer.length > LIMITS.MAX_AVATAR_SIZE) {
-      return { success: false, errorCode: ProtocolErrorCode.AVATAR_TOO_LARGE, errorMessage: 'Avatar excede o limite de tamanho.' };
-    }
-    if (buffer.toString('base64') !== rawBase64) return invalid;
-    const validation = this.avatarStorage.validateAvatarBuffer(buffer);
-    if (!validation.isValid || !validation.extension || (declaredMime && declaredMime !== validation.mimeType)) {
-      return { ...invalid, errorMessage: validation.error ?? invalid.errorMessage };
-    }
-    return { success: true, buffer, extension: validation.extension };
+    return { success: true, buffer: image.buffer, extension: image.extension };
   }
 
   private async storeProfileAvatar(buffer: Buffer, extension: string): Promise<{ success: true; filename: string } | BotFailure> {

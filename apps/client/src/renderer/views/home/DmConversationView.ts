@@ -9,7 +9,7 @@ import {
   type MessageReply,
 } from '@monky/shared';
 import { getLanguage, t, tCount } from '../../i18n';
-import { dmStore, type DmAttachmentProgressEvent, type DmComposerDraft, type DmConversationState } from '../../stores/dmStore';
+import { dmStore, type DmComposerDraft, type DmConversationState } from '../../stores/dmStore';
 import { ownAvatarSource } from '../../core/profileSync';
 import { connectionStore } from '../../stores/connectionStore';
 import { formatBytes, fileIconName } from '../../utils/attachment';
@@ -141,16 +141,16 @@ export class DmConversationView {
     this.renderComposerState();
     this.renderMessages(true);
     this.unsubscribers.push(
-      dmStore.bus.on<{ peer: string }>('messages', (event) => {
+      dmStore.bus.on('messages', (event) => {
         if (event?.peer !== this.peer) return;
         // Deliveries, reactions and receipts arrive in bursts: one pass per frame draws all of them.
         this.scheduleMessages();
         if (this.replyTo) this.renderReplyComposer();
       }),
-      dmStore.bus.on<DmAttachmentProgressEvent>('attachment-progress', (event) => {
+      dmStore.bus.on('attachment-progress', (event) => {
         if (event?.peer === this.peer) this.applyProgress(event.messageId, event.fileId);
       }),
-      dmStore.bus.on<{ peer: string }>('typing', (event) => {
+      dmStore.bus.on('typing', (event) => {
         if (event?.peer === this.peer) this.renderTyping();
       }),
       dmStore.bus.on('changed', () => {

@@ -2,7 +2,8 @@ import { audioProcessor } from './AudioProcessor';
 import { appEvents } from './EventBus';
 import { settingsStore } from '../stores/settingsStore';
 import { createNoiseSuppressor, destroyNoiseSuppressor, type NoiseSuppressorNode } from './NoiseSuppression';
-import type { NoiseSuppressionMode } from '../utils/audioPreferences';
+import { microphoneConstraints, type NoiseSuppressionMode } from '../utils/audioPreferences';
+import { isVoiceActive, speechLevel, VAD_SENSITIVITY_MAX, vadSensitivity } from '../audio/voiceActivity';
 
 interface MeterSubscriber {
   meter: HTMLElement;
@@ -11,25 +12,32 @@ interface MeterSubscriber {
   streamChanged?: (stream: MediaStream | null) => void;
 }
 
-/** One local-only preview graph shared by settings, quick input selection and explicit microphone testing. */
+/**
+ * One local-only preview graph shared by settings, quick input selection and explicit
+ * microphone testing. It always owns its input: in a call, a clone of the call's
+ * microphone, whose `enabled` is its own, so mute and push-to-talk neither silence nor
+ * restart it and the device is not opened twice; outside a call, its own capture.
+ */
 class MicrophoneLevelMeter {
   private subscribers = new Set<MeterSubscriber>();
   private context: AudioContext | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private analyser: AnalyserNode | null = null;
+  /** The processed preview, which the explicit loopback test plays. */
   private stream: MediaStream | null = null;
+  /** The preview's own input tracks, stopped on release. */
   private captureStream: MediaStream | null = null;
   private destination: MediaStreamAudioDestinationNode | null = null;
   private suppressor: NoiseSuppressorNode | null = null;
   private mode: NoiseSuppressionMode = settingsStore.noiseSuppressionMode;
-  private owned = false;
   private generation = 0;
   private raf: number | null = null;
   private unbind: Array<() => void> = [];
   private removeEnded: (() => void) | null = null;
   private deviceId = '';
+  /** The call's microphone when the preview started, and whether it was cloned. */
   private borrowed: MediaStream | null = null;
-  private usingRaw = false;
+  private cloned = false;
   private ready = false;
   private starting = false;
 
@@ -78,13 +86,15 @@ class MicrophoneLevelMeter {
     for (const subscriber of this.subscribers) subscriber.error?.(error);
   }
 
-  private canUseRaw(stream: MediaStream | null): boolean {
-    return Boolean(stream?.getAudioTracks().some((track) => track.readyState === 'live' && track.enabled));
+  /** A call microphone with a live track can be cloned; its `enabled` (mute, push-to-talk) does not matter. */
+  private canClone(stream: MediaStream | null): boolean {
+    return Boolean(stream?.getAudioTracks().some((track) => track.readyState === 'live'));
   }
 
+  /** The call's microphone was replaced (another device), or came or went: the preview has to follow. */
   private sourceChanged(): boolean {
     const raw = audioProcessor.getRawMicrophoneStream();
-    return this.borrowed !== raw || this.usingRaw !== this.canUseRaw(raw);
+    return this.borrowed !== raw || this.cloned !== this.canClone(raw);
   }
 
   private release(): void {
@@ -103,12 +113,12 @@ class MicrophoneLevelMeter {
     this.destination?.stream.getTracks().forEach((track) => track.stop());
     this.destination?.disconnect();
     this.destination = null;
-    if (this.owned) this.captureStream?.getTracks().forEach((track) => track.stop());
+    // A clone stops alone: the call's own microphone keeps running.
+    this.captureStream?.getTracks().forEach((track) => track.stop());
     this.captureStream = null;
     this.stream = null;
     this.borrowed = null;
-    this.usingRaw = false;
-    this.owned = false;
+    this.cloned = false;
     this.source = null;
     this.analyser = null;
     if (this.context && this.context.state !== 'closed') {
@@ -128,68 +138,60 @@ class MicrophoneLevelMeter {
     const generation = this.generation;
     this.mode = settingsStore.noiseSuppressionMode;
     this.borrowed = audioProcessor.getRawMicrophoneStream();
-    this.usingRaw = this.canUseRaw(this.borrowed);
+    this.cloned = this.canClone(this.borrowed);
     this.starting = true;
     void this.start(generation);
   }
 
+  /** The preview's input: a clone of the call's microphone, enabled on its own, or a capture of its own. */
+  private async openInput(): Promise<MediaStream> {
+    const track = this.cloned ? this.borrowed?.getAudioTracks().find((candidate) => candidate.readyState === 'live') : undefined;
+    if (track) {
+      const clone = track.clone();
+      clone.enabled = true;
+      return new MediaStream([clone]);
+    }
+    return navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(this.deviceId, this.mode), video: false });
+  }
+
   private async start(generation: number): Promise<void> {
     try {
-      const live = this.borrowed;
-      // Muted call tracks stay untouched. A separate local-only preview still lets
-      // the user inspect their input without unmuting personal/admin/PTT gates.
-      const owned = !(this.usingRaw && live);
-      const stream = !owned && live ? audioProcessor.getLocalAudioStream() ?? live : await navigator.mediaDevices.getUserMedia({
-        audio: {
-          deviceId: this.deviceId ? { exact: this.deviceId } : undefined,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: this.mode === 'browser',
-          autoGainControl: true,
-        },
-        video: false,
-      });
+      const stream = await this.openInput();
       if (generation !== this.generation || !this.subscribers.size) {
-        if (owned) stream.getTracks().forEach((track) => track.stop());
+        stream.getTracks().forEach((track) => track.stop());
         return;
       }
       if (this.sourceChanged()) {
-        if (owned) stream.getTracks().forEach((track) => track.stop());
+        stream.getTracks().forEach((track) => track.stop());
         this.restart();
         return;
       }
-      this.stream = stream;
       this.captureStream = stream;
-      this.owned = owned;
       this.context = new AudioContext({ sampleRate: 48000 });
       this.source = this.context.createMediaStreamSource(stream);
       this.analyser = this.context.createAnalyser();
       this.analyser.fftSize = 256;
-      if (owned) {
-        const suppressor = await createNoiseSuppressor(this.context, this.mode);
-        if (generation !== this.generation) {
-          destroyNoiseSuppressor(suppressor);
-          return;
-        }
-        this.suppressor = suppressor;
-        this.destination = this.context.createMediaStreamDestination();
-        if (suppressor) {
-          suppressor.onprocessorerror = () => {
-            if (generation !== this.generation) return;
-            this.release();
-            this.notify(new Error('Microphone preview noise suppression failed'));
-          };
-          this.source.connect(suppressor);
-          suppressor.connect(this.analyser);
-          suppressor.connect(this.destination);
-        } else {
-          this.source.connect(this.analyser);
-          this.source.connect(this.destination);
-        }
-        this.stream = this.destination.stream;
+      const suppressor = await createNoiseSuppressor(this.context, this.mode);
+      if (generation !== this.generation) {
+        destroyNoiseSuppressor(suppressor);
+        return;
+      }
+      this.suppressor = suppressor;
+      this.destination = this.context.createMediaStreamDestination();
+      if (suppressor) {
+        suppressor.onprocessorerror = () => {
+          if (generation !== this.generation) return;
+          this.release();
+          this.notify(new Error('Microphone preview noise suppression failed'));
+        };
+        this.source.connect(suppressor);
+        suppressor.connect(this.analyser);
+        suppressor.connect(this.destination);
       } else {
         this.source.connect(this.analyser);
+        this.source.connect(this.destination);
       }
+      this.stream = this.destination.stream;
       // No connection to context.destination: only the opt-in loopback can play this stream.
       const ended = () => {
         this.release();
@@ -213,23 +215,15 @@ class MicrophoneLevelMeter {
           return;
         }
         this.analyser.getByteFrequencyData(buffer);
-        const speechBins = Math.min(36, buffer.length);
-        let sum = 0;
-        let peak = 0;
-        for (let i = 0; i < speechBins; i++) {
-          sum += buffer[i];
-          peak = Math.max(peak, buffer[i]);
-        }
-        const average = sum / speechBins;
-        const targetAvg = Math.max(16, settingsStore.vadSensitivity * 0.8);
-        const targetPeak = Math.max(42, settingsStore.vadSensitivity * 1.8);
-        const active = (average > targetAvg && peak > targetPeak) || average > targetAvg * 1.4;
+        const level = speechLevel(buffer);
+        const active = isVoiceActive(level, settingsStore.vadSensitivity);
+        const threshold = `${vadSensitivity(settingsStore.vadSensitivity) / VAD_SENSITIVITY_MAX * 100}%`;
         for (const { fill, meter } of this.subscribers) {
-          fill.style.width = `${Math.min(100, (peak / 255) * 100)}%`;
+          fill.style.width = `${Math.min(100, (level.peak / 255) * 100)}%`;
           fill.classList.toggle('active', active);
-          meter.setAttribute('aria-valuenow', String(Math.round((peak / 255) * 100)));
-          const threshold = meter.querySelector<HTMLElement>('.vad-meter-threshold');
-          if (threshold) threshold.style.left = `${Math.min(100, Math.max(0, settingsStore.vadSensitivity / 160 * 100))}%`;
+          meter.setAttribute('aria-valuenow', String(Math.round((level.peak / 255) * 100)));
+          const line = meter.querySelector<HTMLElement>('.vad-meter-threshold');
+          if (line) line.style.left = threshold;
         }
         this.raf = requestAnimationFrame(loop);
       };

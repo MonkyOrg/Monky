@@ -37,7 +37,7 @@ const loaded = import('../src/renderer/stores/settingsStore');
 
 function recordUpdates(): { updates: SettingsUpdate[]; off: () => void } {
   const updates: SettingsUpdate[] = [];
-  const off = appEvents.on<SettingsUpdate>('settings.updated', (update) => updates.push(update));
+  const off = appEvents.on('settings.updated', (update) => updates.push(update));
   return { updates, off };
 }
 
@@ -65,7 +65,7 @@ test('a volume still moving is heard at once and saved once, without concerning 
   const { settingsStore, settingsChanged } = await loaded;
   const { updates, off } = recordUpdates();
   const heard: number[] = [];
-  const offVolume = appEvents.on<{ volume: number }>('user_volume.changed', ({ volume }) => heard.push(volume));
+  const offVolume = appEvents.on('user_volume.changed', ({ volume }) => heard.push(volume));
   try {
     const writes = storage.writes;
     for (let volume = 40; volume < 100; volume++) settingsStore.setUserVolume('peer:device', volume, 'soon');

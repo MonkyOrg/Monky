@@ -1,4 +1,4 @@
-import { MessageType, Permission } from '@monky/shared';
+import { MessageType, Permission, type ClientMessageArgs } from '@monky/shared';
 import { t } from '../i18n';
 import type { ServerStore } from '../stores/serverStore';
 
@@ -6,7 +6,7 @@ type MemberActionStore = Pick<ServerStore,
   'currentUser' | 'ownerId' | 'hasPermission' | 'getAdminRole' | 'getRole' | 'isAdminRole' | 'getAllMembersInDisplayOrder'>;
 
 /** Sends one request to the server that owns the member being changed. */
-export type MemberRequest = (type: MessageType, payload: object) => Promise<unknown>;
+export type MemberRequest = (...message: ClientMessageArgs) => Promise<unknown>;
 
 export type MemberRoleChange = { name: string; role: string };
 
@@ -36,7 +36,7 @@ export async function changeMemberRole(
   const member = store.getAllMembersInDisplayOrder().find(entry => entry.id === userId);
   if (!member) throw new Error(t('roles.memberUnavailable'));
   if (store.isAdminRole(role) && !canManageAdmins(store)) throw new Error(t('protocolError.permissionDenied'));
-  await send(assign ? MessageType.ROLE_ASSIGN : MessageType.ROLE_UNASSIGN, { userId, roleId });
+  await (assign ? send(MessageType.ROLE_ASSIGN, { userId, roleId }) : send(MessageType.ROLE_UNASSIGN, { userId, roleId }));
   return { name: member.nickname, role: role.name };
 }
 

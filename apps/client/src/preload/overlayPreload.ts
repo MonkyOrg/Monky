@@ -1,6 +1,6 @@
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
-import type { OverlayConfig, OverlaySignal, OverlaySyncState } from '@monky/shared';
-import type { ElectronApi } from './preload';
+import { contextBridge } from 'electron';
+import type { ElectronApi } from './api';
+import { invoke, subscribe } from './ipc';
 
 /**
  * Everything the overlay window may do (E-MAIN-1): draw the call it receives,
@@ -13,34 +13,14 @@ export type OverlayWindowApi = Pick<ElectronApi,
   | 'onOverlaySignalReceived' | 'onOverlaySyncStateReceived' | 'onOverlayHoverChanged' | 'onOverlayResizeStateChanged'>;
 
 const api: OverlayWindowApi = {
-  closeOverlay: () => ipcRenderer.invoke('overlay:close'),
-  layoutOverlayCards: (layout) => ipcRenderer.invoke('overlay:layout-cards', layout),
-  sendOverlaySignal: (payload) => ipcRenderer.invoke('overlay:send-signal', payload),
-  onOverlayConfigUpdated: (cb) => {
-    const listener = (_e: IpcRendererEvent, config: OverlayConfig) => cb(config);
-    ipcRenderer.on('overlay:config-updated', listener);
-    return () => { ipcRenderer.removeListener('overlay:config-updated', listener); };
-  },
-  onOverlaySignalReceived: (cb) => {
-    const listener = (_e: IpcRendererEvent, signal: OverlaySignal) => cb(signal);
-    ipcRenderer.on('overlay:signal-received', listener);
-    return () => { ipcRenderer.removeListener('overlay:signal-received', listener); };
-  },
-  onOverlaySyncStateReceived: (cb) => {
-    const listener = (_e: IpcRendererEvent, state: OverlaySyncState) => cb(state);
-    ipcRenderer.on('overlay:sync-state-received', listener);
-    return () => { ipcRenderer.removeListener('overlay:sync-state-received', listener); };
-  },
-  onOverlayHoverChanged: (cb) => {
-    const listener = (_e: IpcRendererEvent, hovered: boolean, point?: { x: number; y: number }) => cb(hovered, point);
-    ipcRenderer.on('overlay:hover-changed', listener);
-    return () => { ipcRenderer.removeListener('overlay:hover-changed', listener); };
-  },
-  onOverlayResizeStateChanged: (cb) => {
-    const listener = (_e: IpcRendererEvent, resizing: boolean) => cb(resizing);
-    ipcRenderer.on('overlay:resize-state-changed', listener);
-    return () => { ipcRenderer.removeListener('overlay:resize-state-changed', listener); };
-  },
+  closeOverlay: () => invoke('overlay:close'),
+  layoutOverlayCards: layout => invoke('overlay:layout-cards', layout),
+  sendOverlaySignal: payload => invoke('overlay:send-signal', payload),
+  onOverlayConfigUpdated: callback => subscribe('overlay:config-updated', callback),
+  onOverlaySignalReceived: callback => subscribe('overlay:signal-received', callback),
+  onOverlaySyncStateReceived: callback => subscribe('overlay:sync-state-received', callback),
+  onOverlayHoverChanged: callback => subscribe('overlay:hover-changed', callback),
+  onOverlayResizeStateChanged: callback => subscribe('overlay:resize-state-changed', callback),
 };
 
 contextBridge.exposeInMainWorld('api', api);

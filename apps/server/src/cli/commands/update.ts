@@ -2,7 +2,10 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync, spawnSync, type SpawnSyncReturns } from 'child_process';
-import { fetchReleaseCompatibility, isReleaseVersion, PROTOCOL_VERSION, releaseRequiresProtocolUpdate, type ReleaseCompatibilityResult } from '@monky/shared';
+import {
+  compareReleaseVersions, fetchReleaseCompatibility, isReleaseVersion, pickNewestRelease, PROTOCOL_VERSION,
+  releaseRequiresProtocolUpdate, type ReleaseCompatibilityResult,
+} from '@monky/shared';
 import { ANSI, color } from '../constants';
 import { GlobalArgs } from '../context';
 import { getCliLanguage, t } from '../i18n/index';
@@ -197,42 +200,6 @@ async function fetchRelease(endpoint: string): Promise<PublishedRelease | null> 
   }
 }
 
-export function parseSemver(v: string): {
-  major: number;
-  minor: number;
-  patch: number;
-  isBeta: boolean;
-  betaNumber: number;
-} {
-  const clean = String(v || '').replace(/^v/, '').trim();
-  const [main, prerelease] = clean.split('-');
-  const [major = 0, minor = 0, patch = 0] = main.split('.').map((n) => Number.parseInt(n, 10) || 0);
-  let betaNumber = 0;
-  if (prerelease) {
-    const match = /beta\.?(\d+)/i.exec(prerelease);
-    betaNumber = match ? Number.parseInt(match[1], 10) : 0;
-  }
-  return { major, minor, patch, isBeta: prerelease != null, betaNumber };
-}
-
-export function compareVersions(local: string, remote: string): number {
-  const a = parseSemver(local);
-  const b = parseSemver(remote);
-
-  if (a.major !== b.major) return b.major - a.major;
-  if (a.minor !== b.minor) return b.minor - a.minor;
-  if (a.patch !== b.patch) return b.patch - a.patch;
-
-  // Same base major.minor.patch:
-  // If one is beta and the other is stable, the stable release is strictly newer
-  if (a.isBeta && !b.isBeta) return 1;
-  if (!a.isBeta && b.isBeta) return -1;
-  if (a.isBeta && b.isBeta) {
-    return b.betaNumber - a.betaNumber;
-  }
-  return 0;
-}
-
 export interface GitHubReleaseSummary {
   tag_name?: string;
   html_url?: string;
@@ -267,29 +234,6 @@ function parseGitHubRelease(value: unknown): GitHubReleaseSummary | null {
   };
 }
 
-/**
- * Picks the newest release from the GitHub listing.
- *
- * The `/releases` endpoint does not return the list in chronological order — it
- * orders by tag name, so `v2.4.0-beta.9` came back ahead of `v2.4.0-beta.15`.
- * Reading `parsed[0]` therefore offered an old build as if it were the latest,
- * while the desktop client, which compares every entry, resolved correctly. The
- * two now use the same strategy: compare, never trust the order.
- *
- * Drafts are skipped because they are visible to maintainers only and have no
- * downloadable assets.
- */
-export function pickNewestRelease<T extends GitHubReleaseSummary>(releases: T[]): T | null {
-  let newest: T | null = null;
-  for (const release of releases || []) {
-    if (!release || release.draft || !release.tag_name) continue;
-    if (!newest || compareVersions(newest.tag_name as string, release.tag_name) > 0) {
-      newest = release;
-    }
-  }
-  return newest;
-}
-
 export async function checkForUpdate(
   includeBeta = false
 ): Promise<{
@@ -305,7 +249,7 @@ export async function checkForUpdate(
     throw new Error(t('update.checkFailed'));
   }
 
-  const hasUpdate = compareVersions(local, latest.version) > 0;
+  const hasUpdate = compareReleaseVersions(latest.version, local) > 0;
   if (hasUpdate) {
     const tagDesc = latest.isPrerelease ? ' (Beta)' : '';
     console.log(color(t('update.newVersion', { version: latest.version + tagDesc }), ANSI.green));
@@ -421,7 +365,6 @@ async function installRelease(version: string, artifact?: CliReleaseArtifact): P
       },
     });
     console.log(color(t('update.installStage'), ANSI.cyan));
-    // A fixed relative filename never interpolates a home/temp path into cmd.exe.
     const installArgs = buildInstallArgs('./package.tgz', detectNpmVersion());
     const installResult = runSync('npm', installArgs, { stdio: 'inherit', cwd: directory });
     if (installResult.error || installResult.status !== 0) throw new Error(t('update.installFailed'));
@@ -577,7 +520,7 @@ async function restartOutdatedServers(globalArgs: GlobalArgs, version: string, a
 
 async function runUpdate(globalArgs: GlobalArgs, includeBeta: boolean, assumeYes: boolean): Promise<void> {
   const { local, remote, artifact, isPrerelease } = await checkForUpdate(includeBeta);
-  const order = compareVersions(local, remote);
+  const order = compareReleaseVersions(remote, local);
   if (order <= 0) {
     // Only the installed version can be reinstalled: an older release over a
     // database the newer one already migrated is a downgrade.

@@ -390,7 +390,8 @@ export enum MessageType {
   PONG = 'PONG',
 }
 
-export interface ProtocolMessage<T = any> {
+/** A message as it travels. The maps in protocolPayloads.ts name the payload of each type. */
+export interface ProtocolMessage<T = unknown> {
   type: MessageType;
   requestId?: string;
   payload: T;

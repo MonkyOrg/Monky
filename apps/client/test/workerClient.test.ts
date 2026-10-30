@@ -13,7 +13,9 @@ import {
 } from '../src/main/localExecution/LocalTools';
 import { LocalPermissions } from '../src/main/localExecution/LocalPermissions';
 import { LocalExecutionService } from '../src/main/localExecution/service';
-import { createLocalRuntimeTask, localWorkerEnvironment, probeLocalTool } from '../src/main/localExecution/workerClient';
+import { createLocalRuntimeTask, probeLocalTool } from '../src/main/localExecution/workerClient';
+import { localWorkerEnvironment } from '../src/main/localExecution/workerEnvironment';
+import { TASK_CACHE_SCAN } from '../src/main/localExecution/taskCacheLease';
 import { workerDeferred, WORKER_LIMITS } from '../src/main/localExecution/workerProtocol';
 import { LocalExecutionError } from '../src/main/localExecution/errors';
 import { missingLocalToolFile } from '../src/main/localExecution/localToolsStorage';
@@ -1035,7 +1037,7 @@ test('bounded scans do not overlap and cache removal joins an in-flight scan', {
     return original(filename);
   });
   await until(() => scanning);
-  await wait(WORKER_LIMITS.cachePollMs * 2 + 20);
+  await wait(TASK_CACHE_SCAN.pollMs * 2 + 20);
   assert.equal(rootReads, 1);
   const closing = task.close();
   await until(() => f.rows[0].closed);

@@ -1,6 +1,6 @@
 import { MessageType, ProtocolErrorCode, getNicknameIssue, normalizeNickname } from '@monky/shared';
 import { connectionStore, type SavedServer } from '../stores/connectionStore';
-import { settingsChanged, settingsStore, type SettingsUpdate } from '../stores/settingsStore';
+import { settingsChanged, settingsStore } from '../stores/settingsStore';
 import { autoEntryServerKey } from '../utils/autoEntry';
 import { t } from '../i18n';
 import { appEvents } from './EventBus';
@@ -237,7 +237,7 @@ export class AutoEntryService {
       // Turning the switch on brings the saved servers in at once. Any other
       // setting, a volume slider or a mute among them, is no reason to probe them:
       // the rail's probe already offers each server that comes online.
-      appEvents.on<SettingsUpdate | undefined>('settings.updated', (update) => {
+      appEvents.on('settings.updated', (update) => {
         if (!settingsChanged(update, 'autoConnectServers') || !settingsStore.autoConnectServers) return;
         const identity = { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey };
         const nickname = connectionStore.savedNickname.trim();

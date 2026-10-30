@@ -4,10 +4,11 @@ import { WebSocket } from 'ws';
 import { MessageType, Permission, ProtocolErrorCode, type ProtocolMessage, type ServerSettingsUpdatedPayload, type VoiceUserJoinedPayload, type VoiceUserLeftPayload } from '@monky/shared';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 import { SignalingService } from './application/services/SignalingService';
-import { AuthService } from './application/services/AuthService';
+import { AuthService, serverSettingsPayload } from './application/services/AuthService';
 import { BotLocalExecutionService } from './application/services/BotLocalExecutionService';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { ChannelRecord, ServerRecord, VoiceRestrictions } from './domain/entities';
+import { SERVER_SETTING_DEFAULTS } from './domain/serverSettings';
 
 test('SFU advertises AV1 forwarding limits and preserves legacy/native H264 profiles, RTX and codec order', async (t) => {
   const sfu = new SfuManager({ listenIp: '127.0.0.1', announcedIp: '127.0.0.1' });
@@ -49,26 +50,28 @@ function fixture(restricted = true) {
   });
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   type Session = Parameters<WebSocketServer['handleServerUpdateSettings']>[0];
-  const session = (id: string): Session => {
+  // Each connection knows the rooms it was told about: departures reach only those (#384).
+  const session = (id: string, rooms: string[]): Session => {
     const ws = Object.create(WebSocket.prototype) as WebSocket;
     Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
     return {
-      ws, sessionId: id, lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+      ws, sessionId: id, lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(), visibleChannelIds: new Set(rooms),
       user: { id, sessionId: id, clientId: id, nickname: id, status: 'ONLINE', joinedAt: 1 },
     };
   };
-  const admin = session('admin'), alice = session('alice'), bob = session('bob');
+  const admin = session('admin', ['room', 'other-room']), alice = session('alice', ['room']), bob = session('bob', ['other-room']);
   const sessions = [admin, alice, bob];
   server['sessions'] = new Map(sessions.map((entry) => [entry.ws, entry]));
   server['sessionSockets'] = new Map(sessions.map((entry) => [entry.sessionId!, entry.ws]));
-  server['voiceReconnectGrants'] = new Map();
   server['settingsUpdateQueue'] = Promise.resolve();
   server['localAccessVersion'] = 0;
   server['pendingLocalAccessMutations'] = 0;
   server['botLocalExecution'] = Object.create(BotLocalExecutionService.prototype) as typeof server['botLocalExecution'];
   server['botLocalExecution'].voiceModeChanged = () => { localModeChanges++; };
   server['signalingService'] = signaling;
-  const record = (): ServerRecord => ({ id: 'server', name: 'Test', createdAt: 1, passwordHash: '', maxUsers: 10, voiceMode: mode });
+  const record = (): ServerRecord => ({
+    ...SERVER_SETTING_DEFAULTS, id: 'server', name: 'Test', createdAt: 1, passwordHash: '', maxUsers: 10, voiceMode: mode,
+  });
   server['serverRepo'] = { getServer: async () => record(), createServer: async () => {}, updateServer: async () => {} };
   server['channelService'] = {
     canUserAccessChannel: async (_userId: string, _channelId: string, permission = Permission.VIEW_CHANNEL) =>
@@ -78,7 +81,7 @@ function fixture(restricted = true) {
   const auth = Object.create(AuthService.prototype) as AuthService;
   auth.updateServerSettings = async (payload) => {
     mode = payload.voiceMode ?? mode;
-    return { success: true, name: 'Test', hasPassword: false, voiceMode: mode };
+    return { success: true, settings: serverSettingsPayload(record(), { usedBytes: 0, maxTotalBytes: 1, maxFileBytes: 1 }) };
   };
   server['authService'] = auth;
   const sfu = new SfuManager();
@@ -87,11 +90,18 @@ function fixture(restricted = true) {
   sfu.checkPortAvailability = async () => null;
   server['sfuManager'] = sfu;
   server['applyTurnState'] = async () => {};
+  // What each connection was told is fixed here: the rooms listed for it do not follow its presence.
+  server['syncVoicePresenceVisibility'] = async () => {};
   const broadcasts: ProtocolMessage[] = [];
   const sent: Array<{ session: Session | undefined; message: ProtocolMessage }> = [];
-  server['broadcast'] = (message) => { broadcasts.push(message); };
-  server['broadcastToChannel'] = async (_id, message) => { broadcasts.push(message); };
-  server['send'] = (ws, message) => { sent.push({ session: sessions.find((entry) => entry.ws === ws), message }); };
+  /** Everything sent, broadcast or not, in the order it went out. */
+  const timeline: ProtocolMessage[] = [];
+  server['broadcast'] = (message) => { broadcasts.push(message); timeline.push(message); };
+  server['broadcastToChannel'] = async (_id, message) => { broadcasts.push(message); timeline.push(message); };
+  server['send'] = (ws, message) => {
+    sent.push({ session: sessions.find((entry) => entry.ws === ws), message });
+    timeline.push(message);
+  };
   server['requirePermission'] = async (entry, permission, id) => {
     if (permission !== Permission.SPEAK || speakAllowed) return true;
     server['sendError'](entry.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Denied', id);
@@ -102,8 +112,12 @@ function fixture(restricted = true) {
     server['sendError'](entry.ws, ProtocolErrorCode.CHANNEL_NOT_FOUND, 'Gone', id);
     return false;
   };
+  /** The departures one connection was told about, as [session, room, reconnect transition]. */
+  const departures = (to: Session) => sent.filter((entry) => entry.session === to && entry.message.type === MessageType.VOICE_USER_LEFT)
+    .map(({ message }) => message.payload as VoiceUserLeftPayload)
+    .map((left) => [left.sessionId, left.channelId, left.reconnect?.id]);
   return {
-    server, signaling, admin, alice, bob, broadcasts, sent,
+    server, signaling, admin, alice, bob, broadcasts, sent, timeline, departures,
     closes: () => closes, localModeChanges: () => localModeChanges, setMode: (next: 'p2p' | 'sfu') => { mode = next; },
     revoke: () => { viewAllowed = false; }, revokeSpeak: () => { speakAllowed = false; }, removeChannel: () => { exists = false; },
   };
@@ -124,12 +138,16 @@ test('only a real SFU to P2P change fully closes media and grants one reconnect 
   assert.equal(f.closes(), 1);
   assert.equal(f.localModeChanges(), 1);
   assert.equal(Object.keys(f.signaling.getAllVoiceStates()).length, 0);
-  const left = f.broadcasts.filter((message) => message.type === MessageType.VOICE_USER_LEFT).map((message) => message.payload as VoiceUserLeftPayload);
-  assert.deepEqual(left.map((entry) => [entry.sessionId, entry.channelId, entry.reconnect?.id]),
-    [['alice', 'room', id], ['bob', 'other-room', id]]);
+  assert.deepEqual(f.departures(f.admin), [['alice', 'room', id], ['bob', 'other-room', id]],
+    'whoever sees both rooms hears both departures');
+  assert.deepEqual(f.departures(f.alice), [['alice', 'room', id]], 'each person hears their own, never a room they cannot see');
+  assert.deepEqual(f.departures(f.bob), [['bob', 'other-room', id]]);
+  const lastDeparture = f.timeline.map((message) => message.type).lastIndexOf(MessageType.VOICE_USER_LEFT);
+  assert.ok(lastDeparture < f.timeline.findIndex((message) => message.type === MessageType.SERVER_SETTINGS_UPDATED),
+    'the departures go out before the new mode');
   assert.equal(f.broadcasts.at(-1)?.type, MessageType.SERVER_SETTINGS_UPDATED);
   for (const [session, channelId] of [[f.alice, 'room'], [f.bob, 'other-room']] as const) {
-    await f.server['handleVoiceReconnect'](session, { channelId, transitionId: id }, `rejoin-${session.sessionId}`);
+    await f.server['voiceSessions']['handleVoiceReconnect'](session, { channelId, transitionId: id }, `rejoin-${session.sessionId}`);
     const joined = f.sent.at(-1)?.message;
     assert.equal(joined?.type, MessageType.VOICE_RECONNECTED);
     assert.equal(f.signaling.getVoiceState(session.sessionId!)?.channelId, channelId);
@@ -140,7 +158,7 @@ test('only a real SFU to P2P change fully closes media and grants one reconnect 
   assert.equal(f.closes(), 1, 'unchanged full-form save never evicts the reconnected users');
   assert.equal(f.localModeChanges(), 1, 'unchanged saves must not terminate delegated streams');
   assert.equal(Object.keys(f.signaling.getAllVoiceStates()).length, 2);
-  await f.server['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'repeat');
+  await f.server['voiceSessions']['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'repeat');
   assert.equal(f.sent.at(-1)?.message.type, MessageType.SERVER_ERROR);
   assert.equal(f.signaling.getVoiceState('alice')?.channelId, 'room');
 });
@@ -149,7 +167,7 @@ test('P2P reconnect keeps visible members admitted and permission-mutes missing 
   const f = fixture(false);
   const id = await switchMode(f);
   f.revokeSpeak();
-  await f.server['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'speak-muted');
+  await f.server['voiceSessions']['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'speak-muted');
   const joined = f.sent.at(-1)?.message;
   assert.equal(joined?.type, MessageType.VOICE_RECONNECTED);
   const payload = joined?.payload as VoiceUserJoinedPayload;
@@ -165,7 +183,8 @@ test('concurrent settings saves observe the committed mode and tear down only on
     f.server['handleServerUpdateSettings'](f.bob, { voiceMode: 'p2p' }),
   ]);
   assert.equal(f.closes(), 1);
-  assert.equal(f.broadcasts.filter((message) => message.type === MessageType.VOICE_USER_LEFT).length, 1);
+  assert.equal(f.departures(f.admin).length, 1);
+  assert.equal(f.departures(f.alice).length, 1);
 });
 
 test('P2P to SFU keeps membership and does not request a leave/rejoin', async () => {
@@ -175,8 +194,8 @@ test('P2P to SFU keeps membership and does not request a leave/rejoin', async ()
   await f.server['handleServerUpdateSettings'](f.admin, { voiceMode: 'sfu' });
   assert.equal(f.signaling.getVoiceState('alice')?.channelId, 'room');
   assert.equal(f.closes(), 0);
-  assert.equal(f.server['voiceReconnectGrants'].size, 0);
-  assert.equal(f.broadcasts.filter((message) => message.type === MessageType.VOICE_USER_LEFT).length, 0);
+  assert.equal(f.server['voiceSessions']['voiceReconnectGrants'].size, 0);
+  assert.equal(f.timeline.filter((message) => message.type === MessageType.VOICE_USER_LEFT).length, 0);
 });
 
 test('grants reject wrong channel, stale token, another physical connection, manual leave and kick', async () => {
@@ -185,16 +204,17 @@ test('grants reject wrong channel, stale token, another physical connection, man
   for (const [session, channelId, token] of [
     [f.alice, 'other-room', id], [f.alice, 'room', 'stale'], [{ ...f.alice }, 'room', id],
   ] as const) {
-    await f.server['handleVoiceReconnect'](session, { channelId, transitionId: token }, 'bad');
+    await f.server['voiceSessions']['handleVoiceReconnect'](session, { channelId, transitionId: token }, 'bad');
     assert.equal(f.sent.at(-1)?.message.type, MessageType.SERVER_ERROR);
     assert.equal(f.signaling.getVoiceState('alice'), undefined);
   }
   await f.server['handleMessage'](f.alice, { type: MessageType.VOICE_LEAVE, payload: { channelId: 'room' } });
-  await f.server['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'after-leave');
+  await f.server['voiceSessions']['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'after-leave');
   assert.equal(f.signaling.getVoiceState('alice'), undefined);
   await f.server['handleMessage'](f.admin, { type: MessageType.ADMIN_KICK_VOICE, payload: { targetSessionId: 'bob' } });
-  assert.ok(f.broadcasts.some((message) => message.type === MessageType.ADMIN_KICK_VOICE));
-  await f.server['handleVoiceReconnect'](f.bob, { channelId: 'other-room', transitionId: id }, 'after-kick');
+  const kicks = f.sent.filter((entry) => entry.message.type === MessageType.ADMIN_KICK_VOICE).map((entry) => entry.session);
+  assert.deepEqual(kicks, [f.bob, f.admin], 'the kick reaches who was waiting to reconnect and who asked, nobody else');
+  await f.server['voiceSessions']['handleVoiceReconnect'](f.bob, { channelId: 'other-room', transitionId: id }, 'after-kick');
   assert.equal(f.signaling.getVoiceState('bob'), undefined);
 });
 
@@ -205,7 +225,7 @@ test('removed channels and revoked permission fail admission, and a later mode c
     if (mutate === 'permission') f.revoke();
     if (mutate === 'channel') f.removeChannel();
     if (mutate === 'mode') await f.server['handleServerUpdateSettings'](f.admin, { voiceMode: 'sfu' });
-    await f.server['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'denied');
+    await f.server['voiceSessions']['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'denied');
     assert.equal(f.sent.at(-1)?.message.type, MessageType.SERVER_ERROR);
     assert.equal(f.signaling.getVoiceState('alice'), undefined);
   }
@@ -221,7 +241,7 @@ test('kick during an awaited rejoin cancels its exact grant and cleans a late ad
     await blocked;
     return join(...args);
   });
-  const rejoining = f.server['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'racing');
+  const rejoining = f.server['voiceSessions']['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'racing');
   for (let i = 0; i < 8; i++) await Promise.resolve();
   await f.server['handleMessage'](f.admin, { type: MessageType.ADMIN_KICK_VOICE, payload: { targetSessionId: 'alice' } });
   release();
@@ -237,7 +257,7 @@ test('ordinary admission correlates only the final own roster, including moderat
     f.broadcasts.push(message);
     f.signaling.setServerMuted('alice', true);
   };
-  await f.server['handleVoiceJoin'](f.alice, { channelId: 'room', isMuted: false, isDeafened: false }, 'own-admission');
+  await f.server['voiceSessions']['handleVoiceJoin'](f.alice, { channelId: 'room', isMuted: false, isDeafened: false }, 'own-admission');
   const announcement = f.broadcasts.find((message) => message.type === MessageType.VOICE_USER_JOINED);
   assert.ok(announcement);
   assert.equal((announcement.payload as VoiceUserJoinedPayload).voiceState.serverMuted, false);
@@ -256,7 +276,7 @@ test('ordinary admission revoked during the scoped broadcast fails instead of ac
     f.broadcasts.push(message);
     f.signaling.leaveVoiceChannel('alice');
   };
-  await f.server['handleVoiceJoin'](f.alice, { channelId: 'room' }, 'revoked-admission');
+  await f.server['voiceSessions']['handleVoiceJoin'](f.alice, { channelId: 'room' }, 'revoked-admission');
   const acknowledgement = f.sent.find((entry) => entry.message.requestId === 'revoked-admission')?.message;
   assert.equal(acknowledgement?.type, MessageType.SERVER_ERROR);
   assert.equal(f.signaling.getVoiceState('alice'), undefined);
@@ -270,7 +290,7 @@ test('mode reconnection reloads saved user moderation after full teardown withou
   const id = await switchMode(f);
   assert.equal(Object.keys(f.signaling.getAllVoiceStates()).length, 0);
   for (const [session, channelId, restricted] of [[f.alice, 'room', true], [f.bob, 'other-room', false]] as const) {
-    await f.server['handleVoiceReconnect'](session, { channelId, transitionId: id }, `moderated-${session.sessionId}`);
+    await f.server['voiceSessions']['handleVoiceReconnect'](session, { channelId, transitionId: id }, `moderated-${session.sessionId}`);
     const acknowledgement = f.sent.at(-1)?.message;
     assert.equal(acknowledgement?.type, MessageType.VOICE_RECONNECTED);
     const joined = acknowledgement?.payload as VoiceUserJoinedPayload;

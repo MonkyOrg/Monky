@@ -951,7 +951,10 @@ test('arrow choice restores raw/flow state and releases its timer/listeners on s
     context.mock.timers.tick(1000);
     assert.deepEqual(rawChanges, [true, wasRaw]);
     assert.equal(input.readableFlowing, wasFlowing);
-    for (const event of ['data', 'end', 'close', 'error']) assert.equal(input.listenerCount(event), 0, `${outcome}: ${event}`);
+    for (const event of ['keypress', 'end', 'close', 'error']) assert.equal(input.listenerCount(event), 0, `${outcome}: ${event}`);
+    // Node's keypress decoder lets go of the stream on its next chunk once no prompt listens.
+    input.emit('data', 'x');
+    assert.equal(input.listenerCount('data'), 0, `${outcome}: data`);
     input.destroy();
   }
 });

@@ -1,5 +1,4 @@
 import { settingsStore } from '../../../stores/settingsStore';
-import { audioProcessor } from '../../../core/AudioProcessor';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
@@ -436,7 +435,6 @@ export class VoiceVideoTab {
       sliderVad.style.setProperty('--slider-progress', `${(Math.min(160, Math.max(0, val)) / 160) * 100}%`);
       settingsStore.vadSensitivity = val;
       settingsStore.saveSoon();
-      audioProcessor.setVadThreshold(val);
       this.updateVadThresholdLine(container, val);
     });
     sliderVad?.addEventListener('change', () => settingsStore.save());

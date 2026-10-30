@@ -35,7 +35,8 @@ import {
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
 import { networkClient, type ConnectionStatus } from './core/NetworkClient';
-import { callClient, leaveCurrentCall, rejoinCallOnSession, showHome, suspendCallForNetworkLoss } from './core/serverConnection';
+import { leaveCurrentCall, rejoinCallOnSession, showHome, suspendCallForNetworkLoss } from './core/serverConnection';
+import { callClient } from './core/callScope';
 import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
@@ -47,7 +48,6 @@ import type { LocalExecutionTaskNotice } from './core/LocalExecutionController';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
 import { presentServerShutdownNotice } from './core/serverShutdownNotice';
 import { soundEffects } from './core/SoundEffects';
-import type { CommunityStartNotice } from './core/CommunityFeed';
 import { soundboardService } from './core/SoundboardService';
 import { keybindService } from './core/KeybindService';
 import { isCallInAfkChannel, leaveCall, toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute, updateLocalSpeaking } from './core/voiceControls';
@@ -185,7 +185,7 @@ class App {
     // applied to whatever store happens to be active (#400).
     sessionManager.install();
     const stopResponsivenessMonitor = startResponsivenessMonitor();
-    appEvents.on<CommunityStartNotice>('community.event_started', notice => {
+    appEvents.on('community.event_started', notice => {
       soundEffects.play('chat_message');
       showInfoToast(t('community.started', { event: notice.title, server: notice.serverName }), 7000);
     });
@@ -196,7 +196,7 @@ class App {
     afkMonitor.start();
     this.homeView = new HomeView();
     this.mainView = new MainView(this.appContainer, this.homeView);
-    appEvents.on<string>('dm.open', (peer) => {
+    appEvents.on('dm.open', (peer) => {
       this.homeView.openConversation(peer);
       if (!sessionManager.isHome()) showHome();
     });
@@ -531,7 +531,7 @@ class App {
       });
     });
     window.addEventListener('pagehide', unbindLocalExecution, { once: true });
-    appEvents.on<unknown>('camera.error_notice', (error) => {
+    appEvents.on('camera.error_notice', (error) => {
       void showAlert({
         title: t('stage.cameraErrorTitle'),
         message: cameraEffectErrorMessage(error),
@@ -562,7 +562,7 @@ class App {
     });
     appEvents.on('voice.channel_changed', () => this.voiceModeReconnect.validate());
     for (const event of ['network.status', `message.${MessageType.ROLES_LIST}`,
-      `message.${MessageType.CHANNEL_DELETED}`, `message.${MessageType.CHANNEL_UPDATED}`]) {
+      `message.${MessageType.CHANNEL_DELETED}`, `message.${MessageType.CHANNEL_UPDATED}`] as const) {
       appEvents.on(event, () => {
         // Validation runs after all synchronous handlers have updated the
         // scoped stores; it reads the captured call, never foreground globals.

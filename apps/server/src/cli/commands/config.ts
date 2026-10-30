@@ -1,6 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { LIMITS } from '@monky/shared';
+import type { ServerRecord } from '../../domain/entities';
+import {
+  normalizeServerName,
+  planServerSettingsUpdate,
+  type ServerSettingsPatch,
+  type ServerSettingsProblem,
+} from '../../domain/serverSettings';
 import { PasswordService } from '../../infrastructure/security/PasswordService';
 import {
   ANSI,
@@ -10,7 +17,7 @@ import {
 } from '../constants';
 import { CliContext, GlobalArgs, readLocalConfig, withWritableContext, writeLocalConfig } from '../context';
 import { estimateHostCapacity, printCapacityEstimate } from '../capacity';
-import { configKeyLabel, describeSfuPortProblem, describeTurnPortProblem, describeTurnUnavailability, formatBool, formatDate, parseBoolean, parseMemberLimit, parsePositiveInt, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
+import { configKeyLabel, describeSfuPortProblem, describeTurnPortProblem, describeTurnUnavailability, formatBool, formatDate, parseBoolean, parseMemberLimit, parsePort, parsePositiveInt, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
 import { t } from '../i18n/index';
 import { RegisteredServer, registerServer } from '../registry';
 import { ask, askChoice, confirm, promptPassword } from '../prompts';
@@ -32,6 +39,28 @@ function parseConfigKey(value: string): ConfigKey {
   const key = CONFIG_KEYS.find((candidate) => candidate === value);
   if (!key) throw new Error(t('config.unsupportedKey', { key: value }));
   return key;
+}
+
+/** The CLI's words for a change the server rules refuse (`planServerSettingsUpdate`). */
+function describeSettingsProblem(problem: ServerSettingsProblem, key: DatabaseConfigKey, value: string): string {
+  switch (problem.code) {
+    case 'delete-undo-seconds':
+      return t('config.invalidDeleteUndo');
+    case 'max-message-length':
+      return t('config.invalidMessageLimit');
+    case 'attachment-file-over-total':
+      return t('config.attachmentFileOverTotal', { file: problem.fileBytes, total: problem.totalBytes });
+    case 'max-users':
+      return t('validation.memberLimit', { key, value });
+    case 'members-over-limit':
+      return t('config.tooManyMembers', { count: problem.memberCount });
+    case 'turn-in-sfu':
+      return t('config.turnBlockedBySfu');
+    case 'afk-timeout':
+    case 'attachment-limits':
+    case 'recent-sound-cache-limit':
+      return t('validation.positiveInt', { key, value });
+  }
 }
 
 /**
@@ -70,15 +99,15 @@ export async function showConfig(ctx: CliContext): Promise<void> {
   console.log(`${configKeyLabel('port')}: ${localConfig.port || LIMITS.DEFAULT_PORT}`);
   console.log(`${t('label.hasPassword')}: ${formatBool(Boolean(server.passwordHash))}`);
   console.log(`${configKeyLabel('maxUsers')}: ${server.maxUsers > LIMITS.MAX_USERS_UNLIMITED ? server.maxUsers : t('config.noLimit')}`);
-  console.log(`${configKeyLabel('maxMessageLength')}: ${server.maxMessageLength === 0 ? t('config.noLimit') : server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH}`);
-  console.log(`${configKeyLabel('messageDeleteUndoSeconds')}: ${server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS}`);
+  console.log(`${configKeyLabel('maxMessageLength')}: ${server.maxMessageLength === 0 ? t('config.noLimit') : server.maxMessageLength}`);
+  console.log(`${configKeyLabel('messageDeleteUndoSeconds')}: ${server.messageDeleteUndoSeconds}`);
   console.log(`${t('label.ownerUserId')}: ${server.ownerUserId ?? '-'}`);
   console.log(`${t('label.ownerNickname')}: ${owner?.nickname ?? '-'}`);
-  console.log(`${configKeyLabel('allowSoundboard')}: ${formatBool(server.allowSoundboard !== false)}`);
-  console.log(`${configKeyLabel('allowEveryoneMention')}: ${formatBool(server.allowEveryoneMention !== false)}`);
-  console.log(`${configKeyLabel('showRoleBadgesToEveryone')}: ${formatBool(server.showRoleBadgesToEveryone !== false)}`);
-  console.log(`${configKeyLabel('voiceMode')}: ${server.voiceMode || 'p2p'}${voiceModeStatusSuffix(server.voiceMode || 'p2p')}`);
-  console.log(`${configKeyLabel('turn')}: ${formatBool(Boolean(server.turnEnabled))}${turnStatusSuffix()}`);
+  console.log(`${configKeyLabel('allowSoundboard')}: ${formatBool(server.allowSoundboard)}`);
+  console.log(`${configKeyLabel('allowEveryoneMention')}: ${formatBool(server.allowEveryoneMention)}`);
+  console.log(`${configKeyLabel('showRoleBadgesToEveryone')}: ${formatBool(server.showRoleBadgesToEveryone)}`);
+  console.log(`${configKeyLabel('voiceMode')}: ${server.voiceMode}${voiceModeStatusSuffix(server.voiceMode)}`);
+  console.log(`${configKeyLabel('turn')}: ${formatBool(server.turnEnabled)}${turnStatusSuffix()}`);
   console.log(`${t('label.iconPath')}: ${server.iconPath ?? '-'}`);
   console.log(`${configKeyLabel('maxAttachmentFileBytes')}: ${server.maxAttachmentFileBytes ?? '-'}`);
   console.log(`${configKeyLabel('maxAttachmentStorageBytes')}: ${server.maxAttachmentStorageBytes ?? '-'}`);
@@ -128,7 +157,7 @@ export async function setConfigCommand(globalArgs: GlobalArgs, rawKey: string, v
 async function setPortCommand(target: RegisteredServer, value?: string): Promise<void> {
   const config = readLocalConfig(target.dataDir);
   const runningPort = target.port ?? config.port ?? LIMITS.DEFAULT_PORT;
-  const port = parsePositiveInt('port', value ?? (await ask(t('config.askPort'), String(config.port || LIMITS.DEFAULT_PORT))));
+  const port = parsePort(value ?? (await ask(t('config.askPort'), String(config.port || LIMITS.DEFAULT_PORT))));
   writeLocalConfig(target.dataDir, { ...config, port });
   console.log(color(t('config.updated', { key: 'port' }), ANSI.green));
 
@@ -188,15 +217,15 @@ export async function setConfig(
     password: '',
     icon: server.iconPath ?? '',
     maxUsers: String(server.maxUsers),
-    maxMessageLength: String(server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH),
-    messageDeleteUndoSeconds: String(server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS),
-    allowSoundboard: String(server.allowSoundboard !== false),
-    allowEveryoneMention: String(server.allowEveryoneMention !== false),
-    showRoleBadgesToEveryone: String(server.showRoleBadgesToEveryone !== false),
-    voiceMode: server.voiceMode || 'p2p',
+    maxMessageLength: String(server.maxMessageLength),
+    messageDeleteUndoSeconds: String(server.messageDeleteUndoSeconds),
+    allowSoundboard: String(server.allowSoundboard),
+    allowEveryoneMention: String(server.allowEveryoneMention),
+    showRoleBadgesToEveryone: String(server.showRoleBadgesToEveryone),
+    voiceMode: server.voiceMode,
     maxAttachmentFileBytes: String(server.maxAttachmentFileBytes ?? ''),
     maxAttachmentStorageBytes: String(server.maxAttachmentStorageBytes ?? ''),
-    turn: String(Boolean(server.turnEnabled)),
+    turn: String(server.turnEnabled),
   };
 
   let nextValue = value;
@@ -233,13 +262,23 @@ export async function setConfig(
     }
   }
 
+  // Validated by the server's own rules before anything is written; see
+  // `planServerSettingsUpdate`.
+  const answer = nextValue;
+  const apply = async (patch: ServerSettingsPatch): Promise<Partial<ServerRecord>> => {
+    const plan = planServerSettingsUpdate(server, patch, await ctx.userRepo.count());
+    if (!plan.ok) throw new Error(describeSettingsProblem(plan.problem, normalizedKey, answer));
+    await ctx.serverRepo.updateServer(plan.updates);
+    return plan.updates;
+  };
+
   switch (normalizedKey) {
     case 'name': {
-      const nextName = nextValue.trim();
-      if (nextName.length < 2) {
+      const nextName = normalizeServerName(nextValue);
+      if (!nextName) {
         throw new Error(t('config.nameTooShort'));
       }
-      await ctx.serverRepo.updateServer({ name: nextName });
+      await apply({ name: nextName });
       registerServer(ctx.dataDir, { name: nextName });
       break;
     }
@@ -270,42 +309,31 @@ export async function setConfig(
       }
       break;
     }
-    case 'maxUsers': {
-      const nextMax = parseMemberLimit(normalizedKey, nextValue);
-      // Mirrors the rule enforced over the wire (#403): never leave the server
-      // above its own cap, since the only way out would be kicking members.
-      if (nextMax > LIMITS.MAX_USERS_UNLIMITED) {
-        const memberCount = await ctx.userRepo.count();
-        if (nextMax < memberCount) {
-          throw new Error(t('config.tooManyMembers', { count: memberCount }));
-        }
-      }
-      await ctx.serverRepo.updateServer({ maxUsers: nextMax });
+    case 'maxUsers':
+      await apply({ maxUsers: parseMemberLimit(normalizedKey, nextValue) });
       break;
-    }
     case 'maxMessageLength': {
-      if (!/^\d+$/.test(nextValue.trim()) || !Number.isSafeInteger(Number(nextValue))) {
+      if (!/^\d+$/.test(nextValue.trim())) {
         throw new Error(t('config.invalidMessageLimit'));
       }
-      await ctx.serverRepo.updateServer({ maxMessageLength: Number(nextValue) });
+      await apply({ maxMessageLength: Number(nextValue) });
       break;
     }
     case 'messageDeleteUndoSeconds': {
-      const seconds = Number(nextValue);
-      if (!/^\d+$/.test(nextValue.trim()) || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS) {
+      if (!/^\d+$/.test(nextValue.trim())) {
         throw new Error(t('config.invalidDeleteUndo'));
       }
-      await ctx.serverRepo.updateServer({ messageDeleteUndoSeconds: seconds });
+      await apply({ messageDeleteUndoSeconds: Number(nextValue) });
       break;
     }
     case 'allowSoundboard':
-      await ctx.serverRepo.updateServer({ allowSoundboard: parseBoolean(nextValue) });
+      await apply({ allowSoundboard: parseBoolean(nextValue) });
       break;
     case 'allowEveryoneMention':
-      await ctx.serverRepo.updateServer({ allowEveryoneMention: parseBoolean(nextValue) });
+      await apply({ allowEveryoneMention: parseBoolean(nextValue) });
       break;
     case 'showRoleBadgesToEveryone':
-      await ctx.serverRepo.updateServer({ showRoleBadgesToEveryone: parseBoolean(nextValue) });
+      await apply({ showRoleBadgesToEveryone: parseBoolean(nextValue) });
       break;
     case 'voiceMode': {
       const mode = parseVoiceMode(nextValue);
@@ -322,12 +350,10 @@ export async function setConfig(
         console.log(color(t('config.sfuPortOk'), ANSI.green));
       }
 
-      await ctx.serverRepo.updateServer({ voiceMode: mode });
-
       // The SFU is the relay in this mode, so coturn is turned off rather than
       // left running and unused (#515).
-      if (mode === 'sfu' && server.turnEnabled) {
-        await ctx.serverRepo.updateServer({ turnEnabled: false });
+      const updates = await apply({ voiceMode: mode });
+      if (updates.turnEnabled === false && server.turnEnabled) {
         console.log(color(t('config.turnDisabledBySfu'), ANSI.yellow));
       }
 
@@ -341,10 +367,11 @@ export async function setConfig(
     case 'turn': {
       const enabled = parseBoolean(nextValue);
       // The SFU already relays every stream, so a second relay would only add
-      // cost and fight it for UDP ports. Refused here as well as on the server
-      // so neither entry point can produce the combination (#515).
-      if (enabled && (server.voiceMode || 'p2p') === 'sfu') {
-        throw new Error(t('config.turnBlockedBySfu'));
+      // cost and fight it for UDP ports. Refused before coturn is installed,
+      // by the same rule as the server (#515).
+      const plan = planServerSettingsUpdate(server, { turnEnabled: enabled }, await ctx.userRepo.count());
+      if (!plan.ok) {
+        throw new Error(describeSettingsProblem(plan.problem, normalizedKey, answer));
       }
       if (enabled && !CoturnManager.isInstalled()) {
         // Same intent as the desktop toggle: asking is enough, the server does
@@ -368,7 +395,7 @@ export async function setConfig(
           console.log(color(t('config.coturnInstalled'), ANSI.green));
         }
       }
-      const updates: { turnEnabled: boolean; turnSecret?: string } = { turnEnabled: enabled };
+      const updates = plan.updates;
       // Minted once and kept: rotating the secret would invalidate every
       // credential already issued and drop the calls being relayed (#425).
       if (enabled && !server.turnSecret) {
@@ -388,10 +415,10 @@ export async function setConfig(
       break;
     }
     case 'maxAttachmentFileBytes':
-      await ctx.serverRepo.updateServer({ maxAttachmentFileBytes: parsePositiveInt(normalizedKey, nextValue) });
+      await apply({ maxAttachmentFileBytes: parsePositiveInt(normalizedKey, nextValue) });
       break;
     case 'maxAttachmentStorageBytes':
-      await ctx.serverRepo.updateServer({ maxAttachmentStorageBytes: parsePositiveInt(normalizedKey, nextValue) });
+      await apply({ maxAttachmentStorageBytes: parsePositiveInt(normalizedKey, nextValue) });
       break;
   }
 

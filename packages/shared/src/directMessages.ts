@@ -8,6 +8,7 @@
 
 import { MESSAGE_FORWARD_SOURCE_MAX_LENGTH, type MessageForward } from './models.js';
 import type { DmRelayItem, DmRelayKind } from './protocol.js';
+import type { IpcEvents, IpcInvoker } from './ipc.js';
 export type { DmRelayItem, DmRelayKind } from './protocol.js';
 
 export const DM_DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024;
@@ -47,12 +48,12 @@ export const DM_IPC = {
   setSelfNickname: 'dm:set-self-nickname',
   setSelfProfile: 'dm:set-self-profile',
   pendingPeers: 'dm:pending-peers',
-} as const;
+} as const satisfies Record<string, keyof DmInvokeChannels>;
 
 /** Largest avatar (data URL) that travels with the identity and to friends. */
 export const DM_PROFILE_AVATAR_MAX_LENGTH = 120_000;
 
-export const DM_EVENT = 'dm:event';
+export const DM_EVENT = 'dm:event' satisfies keyof IpcEvents;
 
 export interface DmIncomingRelayItem {
   /** Sender identity, stamped by the server. */
@@ -280,37 +281,72 @@ export interface DmAttachmentData {
 /** What the identity export carries about friends/DMs. */
 export type DmExportMode = 'none' | 'friends' | 'history';
 
-/** Renderer-facing bridge exposed as `window.api.dm`. */
+/** Renderer -> Main channels of friends and DMs; `IpcInvokeChannels` (ipc.ts) includes them. */
+export interface DmInvokeChannels {
+  'dm:snapshot': { args: []; returnType: DmResult<DmSnapshot> };
+  'dm:conversation': { args: [peer: string, before: string | null, limit?: number]; returnType: DmResult<DmConversationPage> };
+  'dm:open-conversation': { args: [peer: string]; returnType: DmResult<void> };
+  'dm:close-conversation': { args: [peer: string]; returnType: DmResult<void> };
+  'dm:friend-request': { args: [peer: string, nickname?: string]; returnType: DmResult<DmDispatch> };
+  'dm:friend-accept': { args: [peer: string]; returnType: DmResult<DmDispatch> };
+  'dm:friend-decline': { args: [peer: string]; returnType: DmResult<DmDispatch> };
+  'dm:friend-cancel': { args: [peer: string]; returnType: DmResult<DmDispatch> };
+  'dm:friend-remove': { args: [peer: string]; returnType: DmResult<DmDispatch> };
+  'dm:block': { args: [peer: string, nickname?: string]; returnType: DmResult<DmDispatch> };
+  'dm:unblock': { args: [peer: string]; returnType: DmResult<DmDispatch> };
+  'dm:send': { args: [input: DmSendMessageInput]; returnType: DmResult<DmDispatch> };
+  'dm:edit': { args: [peer: string, messageId: string, content: string]; returnType: DmResult<DmDispatch> };
+  'dm:delete': { args: [peer: string, messageId: string]; returnType: DmResult<DmDispatch> };
+  'dm:react': { args: [peer: string, messageId: string, emoji: string, add: boolean]; returnType: DmResult<DmDispatch> };
+  'dm:mark-read': { args: [peer: string]; returnType: DmResult<DmDispatch> };
+  'dm:typing': { args: [peer: string]; returnType: DmResult<DmDispatch> };
+  'dm:ingest': { args: [item: DmIncomingRelayItem]; returnType: DmResult<DmDispatch> };
+  'dm:outgoing': { args: [peers: string[], force: boolean]; returnType: DmResult<DmDispatch> };
+  /** `announce` also starts the own-device history/profile exchange. */
+  'dm:hello': { args: [toFriends: boolean, announce: boolean]; returnType: DmResult<DmDispatch> };
+  'dm:hello-to': { args: [peer: string]; returnType: DmResult<DmDispatch> };
+  'dm:pending-peers': { args: []; returnType: DmResult<string[]> };
+  'dm:observe-peer': { args: [peer: DmObservedPeer]; returnType: DmResult<void> };
+  'dm:set-self-nickname': { args: [nickname: string]; returnType: DmResult<void> };
+  'dm:set-self-profile': { args: [input: DmSelfProfileInput]; returnType: DmResult<DmSelfProfileResult> };
+  'dm:update-settings': { args: [settings: Partial<DmSettings>]; returnType: DmResult<DmDispatch> };
+  'dm:read-attachment': { args: [peer: string, messageId: string, fileId: string]; returnType: DmResult<DmAttachmentData> };
+  'dm:save-attachment': { args: [peer: string, messageId: string, fileId: string]; returnType: DmResult<boolean> };
+  'dm:retry-attachment': { args: [peer: string, messageId: string, fileId: string]; returnType: DmResult<DmDispatch> };
+}
+
+/** Renderer-facing bridge exposed as `window.api.dm`: one channel per call. */
 export interface DmApi {
-  snapshot(): Promise<DmResult<DmSnapshot>>;
+  snapshot: IpcInvoker<'dm:snapshot'>;
+  /** `before` may be left out; the channel always carries it, as null. */
   conversation(peer: string, before?: string | null, limit?: number): Promise<DmResult<DmConversationPage>>;
-  openConversation(peer: string): Promise<DmResult<void>>;
-  closeConversation(peer: string): Promise<DmResult<void>>;
-  sendFriendRequest(peer: string, nickname?: string): Promise<DmResult<DmDispatch>>;
-  acceptFriend(peer: string): Promise<DmResult<DmDispatch>>;
-  declineFriend(peer: string): Promise<DmResult<DmDispatch>>;
-  cancelFriendRequest(peer: string): Promise<DmResult<DmDispatch>>;
-  removeFriend(peer: string): Promise<DmResult<DmDispatch>>;
-  block(peer: string, nickname?: string): Promise<DmResult<DmDispatch>>;
-  unblock(peer: string): Promise<DmResult<DmDispatch>>;
-  sendMessage(input: DmSendMessageInput): Promise<DmResult<DmDispatch>>;
-  editMessage(peer: string, messageId: string, content: string): Promise<DmResult<DmDispatch>>;
-  deleteMessage(peer: string, messageId: string): Promise<DmResult<DmDispatch>>;
-  react(peer: string, messageId: string, emoji: string, add: boolean): Promise<DmResult<DmDispatch>>;
-  markRead(peer: string): Promise<DmResult<DmDispatch>>;
-  typing(peer: string): Promise<DmResult<DmDispatch>>;
-  ingest(item: DmIncomingRelayItem): Promise<DmResult<DmDispatch>>;
+  openConversation: IpcInvoker<'dm:open-conversation'>;
+  closeConversation: IpcInvoker<'dm:close-conversation'>;
+  sendFriendRequest: IpcInvoker<'dm:friend-request'>;
+  acceptFriend: IpcInvoker<'dm:friend-accept'>;
+  declineFriend: IpcInvoker<'dm:friend-decline'>;
+  cancelFriendRequest: IpcInvoker<'dm:friend-cancel'>;
+  removeFriend: IpcInvoker<'dm:friend-remove'>;
+  block: IpcInvoker<'dm:block'>;
+  unblock: IpcInvoker<'dm:unblock'>;
+  sendMessage: IpcInvoker<'dm:send'>;
+  editMessage: IpcInvoker<'dm:edit'>;
+  deleteMessage: IpcInvoker<'dm:delete'>;
+  react: IpcInvoker<'dm:react'>;
+  markRead: IpcInvoker<'dm:mark-read'>;
+  typing: IpcInvoker<'dm:typing'>;
+  ingest: IpcInvoker<'dm:ingest'>;
   outgoing(peers: string[], force?: boolean): Promise<DmResult<DmDispatch>>;
   /** `announce` (default true) also starts the own-device history/profile exchange. */
   hello(toFriends: boolean, announce?: boolean): Promise<DmResult<DmDispatch>>;
-  helloTo(peer: string): Promise<DmResult<DmDispatch>>;
-  pendingPeers(): Promise<DmResult<string[]>>;
-  observePeer(peer: DmObservedPeer): Promise<DmResult<void>>;
-  setSelfNickname(nickname: string): Promise<DmResult<void>>;
-  setSelfProfile(input: DmSelfProfileInput): Promise<DmResult<DmSelfProfileResult>>;
-  updateSettings(settings: Partial<DmSettings>): Promise<DmResult<DmDispatch>>;
-  readAttachment(peer: string, messageId: string, fileId: string): Promise<DmResult<DmAttachmentData>>;
-  saveAttachment(peer: string, messageId: string, fileId: string): Promise<DmResult<boolean>>;
-  retryAttachment(peer: string, messageId: string, fileId: string): Promise<DmResult<DmDispatch>>;
+  helloTo: IpcInvoker<'dm:hello-to'>;
+  pendingPeers: IpcInvoker<'dm:pending-peers'>;
+  observePeer: IpcInvoker<'dm:observe-peer'>;
+  setSelfNickname: IpcInvoker<'dm:set-self-nickname'>;
+  setSelfProfile: IpcInvoker<'dm:set-self-profile'>;
+  updateSettings: IpcInvoker<'dm:update-settings'>;
+  readAttachment: IpcInvoker<'dm:read-attachment'>;
+  saveAttachment: IpcInvoker<'dm:save-attachment'>;
+  retryAttachment: IpcInvoker<'dm:retry-attachment'>;
   onEvent(callback: (event: DmEvent) => void): () => void;
 }

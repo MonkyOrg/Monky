@@ -9,6 +9,7 @@ import { CameraEffectsControl } from './settings/CameraEffectsControl';
 import { NoiseSuppressionControl } from './settings/NoiseSuppressionControl';
 import { cameraDeviceSelectionError, populateCameraDeviceSelect } from './settings/CameraDeviceSelection';
 import { smoothScrollIntoView } from '../utils/scroll';
+import { createTypeahead, focusItem, nextIndex } from '../utils/rovingFocus';
 import '../styles/mediaPopovers.css';
 
 let nextId = 0;
@@ -154,8 +155,7 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       let previewStatus = '';
       let selectionStatus = '';
       let submenuTimer: ReturnType<typeof setTimeout> | null = null;
-      let search = '';
-      let lastSearch = 0;
+      const typeahead = createTypeahead();
       const abort = new AbortController();
       const showStatus = () => { status.textContent = selectionStatus || previewStatus || deviceStatus; };
       const optionButtons = () => Array.from(options.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
@@ -314,21 +314,11 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
           return;
         }
         const buttons = optionButtons();
-        const index = buttons.findIndex((button) => button === document.activeElement);
-        let next: HTMLButtonElement | undefined;
-        if (event.key === 'ArrowDown') next = buttons[(index + 1) % buttons.length];
-        else if (event.key === 'ArrowUp') next = buttons[(index + buttons.length - 1) % buttons.length];
-        else if (event.key === 'Home') next = buttons[0];
-        else if (event.key === 'End') next = buttons[buttons.length - 1];
-        else if (event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) {
-          search = performance.now() - lastSearch < 600 ? search + event.key : event.key;
-          lastSearch = performance.now();
-          next = buttons.find((button) => button.textContent?.trim().toLocaleLowerCase().startsWith(search.toLocaleLowerCase()));
-        }
+        const index = nextIndex(event.key, buttons.findIndex((button) => button === document.activeElement), buttons.length);
+        const next = index === null ? typeahead(event, buttons) : buttons[index];
         if (next) {
           event.preventDefault();
-          next.focus({ preventScroll: true });
-          smoothScrollIntoView(next, { block: 'nearest' });
+          focusItem(next);
         }
       };
       const offSettings = appEvents.on('settings.updated', () => {

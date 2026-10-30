@@ -935,7 +935,7 @@ test('invocation completion releases only its matching request and cancellation 
 test('early native failure is correlated to the late native UUID and reported once without ACCEPT', async (context) => {
   const f = fixture(context);
   const notices: LocalExecutionTaskNotice[] = [];
-  context.after(appEvents.on<LocalExecutionTaskNotice>('localExecution.task_failed', (notice) => { notices.push(notice); }));
+  context.after(appEvents.on('localExecution.task_failed', (notice) => { notices.push(notice); }));
   register(f, await prepare(f));
   const task = streamOffer(f);
   f.native.fail('native-no-start-yet');
@@ -967,7 +967,7 @@ test('early native failure is correlated to the late native UUID and reported on
 test('late native failure ignores wire IDs and closes only its matching live stream once', async (context) => {
   const f = fixture(context);
   const notices: LocalExecutionTaskNotice[] = [];
-  context.after(appEvents.on<LocalExecutionTaskNotice>('localExecution.task_failed', (notice) => { notices.push(notice); }));
+  context.after(appEvents.on('localExecution.task_failed', (notice) => { notices.push(notice); }));
   const firstTask = sourceOffer(f);
   const first = await startStream(f, firstTask, 'native-first');
   const secondTask = sourceOffer(f, 'wire-source-second');
@@ -1360,7 +1360,7 @@ test('side-server native subjects and output stay physical, and failure notices 
   const previousForeground = isForegroundEvent();
   const previousOrigin = currentEventOrigin();
   const notices: Array<{ notice: LocalExecutionTaskNotice; visibleServerId?: string; foreground: boolean; origin: string | null }> = [];
-  const off = appEvents.on<LocalExecutionTaskNotice>('localExecution.task_failed', (notice) => {
+  const off = appEvents.on('localExecution.task_failed', (notice) => {
     notices.push({ notice, visibleServerId: serverStore.serverDetails?.id, foreground: isForegroundEvent(), origin: currentEventOrigin() });
   });
   context.after(() => {

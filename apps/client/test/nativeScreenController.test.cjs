@@ -153,6 +153,8 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
       return method === shared.MessageType.NATIVE_SCREEN_SIGNAL
         ? { accepted: true, subscriptionId: value.subscriptionId } : { acknowledged: true };
     },
+    // The native runtime's SFU requests go out as they came.
+    relayRequest(method, value) { return this.sendRequest(method, value); },
   };
   const context = {
     client, sessionId: 'self', channelId: 'room', mode: 'p2p', isCurrent: () => current,

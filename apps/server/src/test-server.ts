@@ -12,11 +12,12 @@ import {
   ProtocolErrorCode,
   ProtocolMessage,
   PROTOCOL_VERSION,
+  compareReleaseVersions,
   hasPermission,
+  pickNewestRelease,
 } from '@monky/shared';
 import { MonkyServer } from './server';
 import { Logger } from './infrastructure/logger/Logger';
-import { compareVersions, pickNewestRelease } from './cli/commands/update';
 import { generateEcosystem, getPm2ProcessName } from './cli/pm2';
 import { parseOption } from './cli/formatters';
 import { listServers, registerServer, serverIdFor, unregisterServer } from './cli/registry';
@@ -28,7 +29,7 @@ import { PermissionService } from './application/services/PermissionService';
 import { RoleService } from './application/services/RoleService';
 import { CapacityEstimator } from './domain/services/CapacityEstimator';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
-import { resolveTurnSfuExclusion } from './application/services/AuthService';
+import { resolveTurnSfuExclusion } from './domain/serverSettings';
 import {
   evaluateServerHealth,
   majorOf,
@@ -392,7 +393,10 @@ async function runTests() {
     if (naVirada?.tag_name !== 'v3.0.0-beta001') {
       throw new Error(`Teste 10: esperava v3.0.0-beta001, recebi ${naVirada?.tag_name}`);
     }
-    if (compareVersions('2.4.0-beta.15', '2.4.0-beta016') <= 0) {
+    // O CLI segue a mesma ordem do app: positivo quando o primeiro argumento e o
+    // mais novo. A copia antiga do CLI tinha o sinal invertido (local, remoto).
+    if (compareReleaseVersions('2.4.0-beta016', '2.4.0-beta.15') <= 0 ||
+        compareReleaseVersions('2.4.0-beta.15', '2.4.0-beta016') >= 0) {
       throw new Error('Teste 10: beta016 deveria ser considerada mais nova que beta.15');
     }
 
@@ -1404,44 +1408,78 @@ async function runTests() {
     // que aparece mudo para sempre. A limpeza vive em closeSfuSession(), e o
     // risco real é um caminho de saída novo (ou existente) esquecer de chamá-la
     // — por isso a asserção é sobre os caminhos, não sobre um deles.
-    const wsServerSource = fs.readFileSync(
-      path.join(__dirname, '..', 'src', 'infrastructure', 'websocket', 'WebSocketServer.ts'),
-      'utf8'
-    );
-    const readMethodBody = (methodName: string): string => {
+    // A voz mora em módulos próprios (S-VOICE-12): cada método é lido no arquivo dele.
+    const webSocketDir = path.join(__dirname, '..', 'src', 'infrastructure', 'websocket');
+    const sources = {
+      server: fs.readFileSync(path.join(webSocketDir, 'WebSocketServer.ts'), 'utf8'),
+      voice: fs.readFileSync(path.join(webSocketDir, 'voice', 'VoiceSessionHandler.ts'), 'utf8'),
+      sfu: fs.readFileSync(path.join(webSocketDir, 'voice', 'SfuSignalingHandler.ts'), 'utf8'),
+      screens: fs.readFileSync(path.join(webSocketDir, 'voice', 'ScreenAccessCoordinator.ts'), 'utf8'),
+      rtc: fs.readFileSync(path.join(webSocketDir, 'voice', 'RtcSignalRelay.ts'), 'utf8'),
+    };
+    const readMethodBody = (file: keyof typeof sources, methodName: string): string => {
+      const source = sources[file];
       const signature = new RegExp(`\\n  (?:private|public|protected)?\\s*(?:async\\s+)?${methodName}\\s*\\(`);
-      const start = signature.exec(wsServerSource);
+      const start = signature.exec(source);
       if (!start) {
-        throw new Error(`Teste 21: método ${methodName} não encontrado em WebSocketServer.ts`);
+        throw new Error(`Teste 21: método ${methodName} não encontrado em ${file}`);
       }
-      const openBrace = wsServerSource.indexOf('{', start.index + start[0].length);
+      // O corpo começa depois da lista de parâmetros, que pode ter chaves próprias (`exit = {}`).
+      let parameters = 1;
+      let end = start.index + start[0].length;
+      for (; end < source.length && parameters > 0; end++) {
+        if (source[end] === '(') parameters++;
+        else if (source[end] === ')') parameters--;
+      }
+      const openBrace = source.indexOf('{', end);
       let depth = 0;
-      for (let i = openBrace; i < wsServerSource.length; i++) {
-        if (wsServerSource[i] === '{') depth++;
-        else if (wsServerSource[i] === '}') {
+      for (let i = openBrace; i < source.length; i++) {
+        if (source[i] === '{') depth++;
+        else if (source[i] === '}') {
           depth--;
-          if (depth === 0) return wsServerSource.slice(openBrace, i + 1);
+          if (depth === 0) return source.slice(openBrace, i + 1);
         }
       }
       throw new Error(`Teste 21: não foi possível delimitar o corpo de ${methodName}`);
     };
 
-    // handleVoiceLeave e announceVoiceLeave (desconexão) já cobriam a saída
-    // normal; os kicks é que passavam batido, porque o cliente expulso apenas
-    // se desmonta localmente e nunca manda VOICE_LEAVE.
-    for (const exitPath of ['handleVoiceLeave', 'announceVoiceLeave', 'handleAdminKickVoice', 'handleMemberKick']) {
-      if (!readMethodBody(exitPath).includes('this.closeSfuSession(')) {
-        throw new Error(`Teste 21: ${exitPath} sai da voz sem fechar a sessão no SFU (producers fantasma)`);
+    // handleVoiceLeave e a desconexão já cobriam a saída normal; os kicks é que
+    // passavam batido, porque o cliente expulso apenas se desmonta localmente e
+    // nunca manda VOICE_LEAVE. Hoje toda saída passa por endVoiceSession (S-VOICE-5):
+    // o caminho de saída que esquecer de usá-la é o defeito a pegar aqui.
+    const exitPaths: Array<[keyof typeof sources, string, string]> = [
+      ['voice', 'handleVoiceLeave', 'this.endVoiceSession('],
+      ['voice', 'handleAdminKickVoice', 'this.endVoiceSession('],
+      ['voice', 'evictFromVoiceChannel', 'this.endVoiceSession('],
+      ['server', 'handleDisconnect', 'this.voiceSessions.endVoiceSession('],
+      ['server', 'handleMemberKick', 'this.voiceSessions.endVoiceSession('],
+      ['server', 'releaseDeletedChannel', 'this.voiceSessions.endVoiceSession('],
+      ['server', 'finalizeSessionLeave', 'this.voiceSessions.endVoiceSession('],
+    ];
+    for (const [file, exitPath, call] of exitPaths) {
+      if (!readMethodBody(file, exitPath).includes(call)) {
+        throw new Error(`Teste 21: ${exitPath} sai da voz sem passar por endVoiceSession (producers fantasma)`);
       }
+    }
+    const endVoiceSessionBody = readMethodBody('voice', 'endVoiceSession');
+    if (!endVoiceSessionBody.includes('sfuSignaling.closeSfuSession(')) {
+      throw new Error('Teste 21: endVoiceSession deveria fechar a sessão no SFU');
+    }
+    // Só a saída única (e o desligamento do servidor) tira alguém da voz.
+    const leaves = (source: string) => source.split('.leaveVoiceChannel(').length - 1;
+    const everywhere = Object.values(sources).reduce((total, source) => total + leaves(source), 0);
+    if (everywhere !== leaves(endVoiceSessionBody) + leaves(readMethodBody('server', 'close'))) {
+      throw new Error('Teste 21: alguém sai da voz por fora de endVoiceSession');
     }
 
     // E a limpeza só serve se avisar o canal: sem SFU_PRODUCER_CLOSED, quem
     // ficou continua com o consumer aberto do lado dele.
-    const closeSfuSessionBody = readMethodBody('closeSfuSession');
-    if (!closeSfuSessionBody.includes('sfuManager.closeSession(')) {
+    const closeSfuSessionBody = readMethodBody('sfu', 'closeSfuSession');
+    if (!closeSfuSessionBody.includes('sfu.closeSession(')) {
       throw new Error('Teste 21: closeSfuSession deveria fechar a sessão no SfuManager');
     }
-    if (!closeSfuSessionBody.includes('MessageType.SFU_PRODUCER_CLOSED')) {
+    if (!closeSfuSessionBody.includes('this.notifyProducersClosed(')
+      || !readMethodBody('sfu', 'notifyProducersClosed').includes('MessageType.SFU_PRODUCER_CLOSED')) {
       throw new Error('Teste 21: closeSfuSession deveria anunciar SFU_PRODUCER_CLOSED para o canal');
     }
     console.log('✔ Teste 21 passou: Todas as saídas da voz fecham a sessão no SFU e anunciam os producers');

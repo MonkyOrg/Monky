@@ -9,7 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 const test = require('node:test');
-const { MessageType, PROTOCOL_VERSION } = require('@monky/shared');
+const { MessageType, PROTOCOL_VERSION, parseSha256Manifest } = require('@monky/shared');
 const { identity, Peer, record, text } = require('../dist/testFixtures/bots');
 const { prepareUpdateRestart } = require('../dist/infrastructure/lifecycle/updateRestart');
 const processHelpers = require('../dist/cli/process');
@@ -268,7 +268,7 @@ test('legacy release checksums, trusted redirects and exclusive output remain en
     request: async (url) => String(url).endsWith('checksums-sha256.txt')
       ? new Response(`${digest}  ./${artifact.name}\n`) : new Response(bytes),
   });
-  assert.equal(downloads.checksumForArtifact(`${digest}  ${artifact.name}\n${digest}  ${artifact.name}\n`, artifact.name), null);
+  assert.equal(parseSha256Manifest(`${digest}  ${artifact.name}\n${digest}  ${artifact.name}\n`, artifact.name), null);
   const output = path.join(root, 'keep.tgz');
   fs.writeFileSync(output, 'keep me');
   await assert.rejects(downloads.downloadCliArtifact(artifact, output, { request: async () => new Response(bytes) }));

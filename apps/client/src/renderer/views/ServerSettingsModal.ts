@@ -1,7 +1,7 @@
 import {
   LIMITS, MessageType, Permission,
   type ServerUpdateSettingsPayload, type ServerSettingsUpdatedPayload,
-  type TurnInstallProgressPayload, type TurnInstallStage,
+  type TurnInstallProgressPayload, type TurnInstallStage, type ClientMessageArgs,
 } from '@monky/shared';
 import { getActiveNetworkClient, RequestTimeoutError } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
@@ -88,9 +88,9 @@ export class ServerSettingsModal {
     });
     this.context = {
       client, store, operations, isCurrent, assertAllowed,
-      request: <T>(type: MessageType, payload: object, permission: Permission, timeoutMs?: number) => {
+      request: <T>(message: ClientMessageArgs, permission: Permission, timeoutMs?: number) => {
         assertAllowed(permission);
-        return client.sendRequest<T>(type, payload, undefined, timeoutMs);
+        return client.sendRequest<T>(...message, undefined, timeoutMs);
       },
     };
 
@@ -299,7 +299,7 @@ export class ServerSettingsModal {
         ) : null;
         if (action === 'change' && !image) return;
         await context.request<ServerSettingsUpdatedPayload>(
-          MessageType.SERVER_UPDATE_SETTINGS, { iconBase64: image }, Permission.MANAGE_SERVER, 11 * 60 * 1000,
+          [MessageType.SERVER_UPDATE_SETTINGS, { iconBase64: image }], Permission.MANAGE_SERVER, 11 * 60 * 1000,
         );
       });
     }, options);
@@ -325,7 +325,7 @@ export class ServerSettingsModal {
       }
       this.refreshState();
     };
-    for (const event of ['server.updated', 'server.roles_updated', 'server.members_updated', 'session.changed', 'network.status', 'network.connected', 'settings.updated']) {
+    for (const event of ['server.updated', 'server.roles_updated', 'server.members_updated', 'session.changed', 'network.status', 'network.connected', 'settings.updated'] as const) {
       this.unbind.push(appEvents.on(event, refresh));
     }
     window.addEventListener('storage', refresh);
@@ -404,7 +404,7 @@ export class ServerSettingsModal {
         // Another administrator can already be installing TURN in the server's
         // shared settings queue, even when this particular patch is a rename.
         await context.request<ServerSettingsUpdatedPayload>(
-          MessageType.SERVER_UPDATE_SETTINGS, patch, Permission.MANAGE_SERVER, 11 * 60 * 1000,
+          [MessageType.SERVER_UPDATE_SETTINGS, patch], Permission.MANAGE_SERVER, 11 * 60 * 1000,
         );
       } finally {
         stopProgress?.();

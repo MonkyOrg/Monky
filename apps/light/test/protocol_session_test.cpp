@@ -487,6 +487,28 @@ void adversarialLifecycleEdges() {
   restricted.receive(message::VOICE_USER_LEFT, departure());
   check(restricted.session.phase() == SessionPhase::joining, "Old-room departure cancelled administrative move");
 
+  // A move takes along a call, or the admission on its way to one. Arriving
+  // after a leave it crossed, or with no call at all, it must start none.
+  Fixture admitting;
+  admitting.auth();
+  admitting.session.join("room", admitting.now);
+  admitting.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+  check(admitting.session.phase() == SessionPhase::joining && admitting.session.desiredChannel() == "other" &&
+        admitting.sent.back()["payload"]["channelId"] == "other", "Administrative move during admission not followed");
+  Fixture left;
+  left.auth();
+  left.join();
+  left.session.leave();
+  const auto leaveSent = left.sent.size();
+  left.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+  check(left.sent.size() == leaveSent && left.session.phase() == SessionPhase::ready &&
+        !left.session.desiredChannel(), "Administrative move rejoined a call that was left");
+  Fixture idle;
+  idle.auth();
+  const auto idleSent = idle.sent.size();
+  idle.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
+  check(idle.sent.size() == idleSent && !idle.session.desiredChannel(), "Administrative move started a call");
+
   Fixture peer;
   peer.auth();
   peer.join(false);

@@ -56,6 +56,21 @@ export interface DmAttachmentProgressEvent {
   fileId: string;
 }
 
+/** What the DM store announces on its own bus (`dmStore.bus`). */
+export interface DmEvents {
+  /** A new snapshot of friends, conversations and settings, or the own profile shown with it. */
+  changed: void;
+  /** The messages of one conversation changed. */
+  messages: { peer: string };
+  incoming: { peer: string; message: DmMessageView };
+  'friend-request': { peer: string; nickname: string };
+  'friend-accepted': { peer: string; nickname: string };
+  'self-profile': { profile: DmSelfProfile };
+  'attachment-progress': DmAttachmentProgressEvent;
+  typing: { peer: string };
+  presence: void;
+}
+
 /**
  * Friends and direct messages in the renderer (#743).
  *
@@ -63,7 +78,7 @@ export interface DmAttachmentProgressEvent {
  * the UI needs and hands every resulting dispatch to the transport.
  */
 export class DmStore {
-  readonly bus = new EventBus();
+  readonly bus = new EventBus<DmEvents>();
   private api: DmApi | null = null;
   private transport: DmTransport | null = null;
   private snapshotValue: DmSnapshot = EMPTY;
@@ -96,7 +111,8 @@ export class DmStore {
   }
 
   async init(): Promise<void> {
-    const api = (window as unknown as { api?: { dm?: DmApi } }).api?.dm;
+    // Outside Electron (tests, a page opened without the preload) there is no bridge.
+    const api = window.api?.dm;
     if (!api || this.api) return;
     this.api = api;
     this.firstSnapshotPending = true;

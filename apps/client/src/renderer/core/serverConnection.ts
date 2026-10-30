@@ -1,6 +1,6 @@
-import type { AuthSuccessPayload, VoiceReconnectPayload, VoiceUserJoinedPayload } from '@monky/shared';
+import type { AuthSuccessPayload, VoiceUserJoinedPayload } from '@monky/shared';
 import { MessageType } from '@monky/shared';
-import { networkClient, ProtocolRequestError, RequestTimeoutError, type NetworkClient } from './NetworkClient';
+import { ProtocolRequestError, RequestTimeoutError, type NetworkClient } from './NetworkClient';
 import { sessionManager, sessionKeyFor, type ServerSession } from './SessionManager';
 import { webRtcManager } from './WebRtcManager';
 import { voiceStore } from '../stores/voiceStore';
@@ -187,19 +187,6 @@ export async function openServerSession(
   }
 }
 
-/**
- * Connection of the server hosting the current call.
- *
- * Leaving a call has to talk to the server the call is on, which is not
- * necessarily the one on screen (#400) — the user may have walked over to
- * another server while still talking.
- */
-export function callClient(): NetworkClient {
-  const key = voiceStore.voiceSessionKey;
-  const session = key ? sessionManager.get(key) : undefined;
-  return session ? session.client : networkClient;
-}
-
 /** An explicit leave is local intent, not something that waits for a server echo. */
 export function leaveCurrentCall(notifyServer = true): void {
   const sessionKey = voiceStore.voiceSessionKey;
@@ -329,10 +316,9 @@ export async function joinCallOnSession(
       assertCurrent();
       const payload = { channelId, isMuted: voiceStore.isMuted || leavingAfk, isDeafened: voiceStore.isDeafened };
       try {
-        const joined = await session.client.sendRequest<VoiceUserJoinedPayload>(
-          reconnect ? MessageType.VOICE_RECONNECT : MessageType.VOICE_JOIN,
-          reconnect ? { ...payload, transitionId: reconnect.transitionId } satisfies VoiceReconnectPayload : payload
-        );
+        const joined = await (reconnect
+          ? session.client.sendRequest<VoiceUserJoinedPayload>(MessageType.VOICE_RECONNECT, { ...payload, transitionId: reconnect.transitionId })
+          : session.client.sendRequest<VoiceUserJoinedPayload>(MessageType.VOICE_JOIN, payload));
         assertCurrent();
         if (joined.sessionId !== mySessionId || joined.userId !== myUserId || joined.channelId !== channelId
           || joined.voiceState?.sessionId !== mySessionId || joined.voiceState.userId !== myUserId

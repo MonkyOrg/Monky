@@ -536,7 +536,9 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
   if (type == msg::ADMIN_MOVE_USER) {
     const auto target = text(payload, "targetSessionId");
     const auto room = text(payload, "channelId");
-    if (target == auth_->sessionId) join(room, now);
+    // A move takes along a call, or the admission on its way to one. One that
+    // crossed a leave reaches a client that hung up, and must start no call.
+    if (target == auth_->sessionId && desired_) join(room, now);
     return;
   }
   if (type == msg::SERVER_SETTINGS_UPDATED) {

@@ -1,5 +1,5 @@
 import { BOT_SCREEN_LIMITS, type BotScreen, type BotScreenRemoved } from '@monky/shared';
-import { appEvents, type EventBus } from '../core/EventBus';
+import { appEvents, type AppEventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { emitOutsideRouting } from '../core/sessionRouting';
 import { voiceStore } from './voiceStore';
@@ -11,7 +11,7 @@ export interface VoiceBotScreensUpdated {
 }
 
 export class BotScreenStore {
-  public bus: EventBus = appEvents;
+  public bus: AppEventBus = appEvents;
   public version = 0;
   public loadFailed = false;
   private screens = new Map<string, BotScreen>();

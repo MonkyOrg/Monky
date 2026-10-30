@@ -39,9 +39,9 @@ test('role-gated screens are republished once when their roles change, never on 
   const republished = () => viewer.peer.messages.filter(message => message.type === MessageType.VOICE_STATE_CHANGED &&
     record(message.payload.voiceState).sessionId === pub).length;
   const before = republished();
-  await f.wsServer['refreshScreenRoles']();
+  await f.wsServer['screens'].refreshScreenRoles();
   await f.human('Republish late member');
-  await f.wsServer['refreshScreenRoles']();
+  await f.wsServer['screens'].refreshScreenRoles();
   await viewer.peer.barrier();
   assert.equal(republished(), before, 'nothing changed, so nothing is resent to the whole room');
   await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: viewer.id, roleId });
@@ -136,7 +136,7 @@ test('role grants refresh visibility; removal/deletion and withdrawal revoke exa
   assertHidden(screenState(viewer.peer.messages, pub)!);
   const grant = async () => {
     await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: viewer.id, roleId });
-    await f.wsServer['refreshScreenRoles']();
+    await f.wsServer['screens'].refreshScreenRoles();
     await viewer.peer.barrier();
     assert.equal(screenState(viewer.peer.messages, pub)?.isScreenSharing, true);
   };

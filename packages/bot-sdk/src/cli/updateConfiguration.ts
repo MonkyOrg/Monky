@@ -1,11 +1,10 @@
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
   isRecord, releaseSource, updateSource, type BotPackageDefinition, type BotProject,
 } from '../tooling/config';
 import type { CliContext } from './config';
-import { readJsonFile, writePrivateJson } from './fs';
+import { readOptionalPrivateJson, writePrivateJsonAtomic } from './fs';
 import { CliError, cliText } from './locale';
 
 type UpdateConfiguration = Pick<BotPackageDefinition, 'releases' | 'updateSource'>;
@@ -46,9 +45,9 @@ function serializedConfiguration(configuration: UpdateConfiguration): Record<str
 
 function readPreference(context: CliContext): UpdateConfiguration | undefined {
   try {
-    return validateConfiguration(readJsonFile(preferenceFile(context), 'Update source', 8192), context.cliName);
-  } catch (error: unknown) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
+    const stored = readOptionalPrivateJson(preferenceFile(context), 'Update source', 8192);
+    return stored === undefined ? undefined : validateConfiguration(stored, context.cliName);
+  } catch {
     throw new CliError(
       `Não foi possível ler a origem de atualização salva. Nenhuma origem alternativa será usada. Corrija-a com ${context.cliName} config update-source ou use reset para voltar ao padrão do pacote.`,
       `Could not read the saved update source. No fallback source will be used. Correct it with ${context.cliName} config update-source or use reset to restore the package default.`,
@@ -111,15 +110,11 @@ export function updateSourceConfigCommand(context: CliContext, args: string[]): 
     return;
   }
   const configuration = parseSource(context, args);
-  const pending = path.join(context.homeDir, `.update-source-${randomUUID()}.pending`);
   try {
-    writePrivateJson(pending, serializedConfiguration(configuration));
-    fs.renameSync(pending, preferenceFile(context));
+    writePrivateJsonAtomic(preferenceFile(context), serializedConfiguration(configuration));
   } catch {
     throw new CliError('Não foi possível salvar a origem; a configuração anterior foi preservada.',
       'Could not save the update source; the previous configuration was preserved.');
-  } finally {
-    fs.rmSync(pending, { force: true });
   }
   console.log(cliText(context.locale,
     'Origem salva para update e autoupdate, sem alterar o pacote, o perfil do bot ou o canal. Use update --check para verificar.',

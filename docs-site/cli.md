@@ -58,6 +58,11 @@ instala automaticamente. Os demais comandos apenas avisam:
 npm install -g pm2
 ```
 
+O CLI procura o PM2 como o terminal procuraria, pelo `PATH`, então também acha
+o que foi instalado pelo pnpm, pelo Yarn ou pelo Volta. Um PM2 encontrado em que
+`pm2 --version` falha não é instalado de novo por cima: o CLI avisa, e ele deve
+ser corrigido pela ferramenta que o instalou.
+
 ## Início rápido
 
 ```bash
@@ -244,7 +249,7 @@ Ao final, exibe um resumo, pede confirmação e oferece iniciar o servidor.
 |---|---|---|
 | `--identity <código>` | Código de identidade do dono | perguntado |
 | `--name <nome>` | Nome do servidor | `Servidor dos Amigos` |
-| `--port <n>` | Porta do servidor | `3000` |
+| `--port <n>` | Porta do servidor, de 1024 a 65535 | `3000` |
 | `--password <senha>` | Senha do servidor (vazio = sem senha) | perguntado |
 | `--max-users <n>` | Limite de membros cadastrados (`0` = sem limite) | perguntado |
 | `--voice-mode <p2p\|sfu>` | Modo de voz e mídia (`p2p` ou `sfu`) | `p2p` |
@@ -581,6 +586,10 @@ por nome, separadas por vírgula. A cor usa o formato `#RRGGBB`. O cargo padrão
 do servidor não pode ser removido de um membro. Criar, atribuir, remover e
 apagar cargos exige o servidor parado; listar, não.
 
+Um cargo novo segue as mesmas regras do app: o nome tem de 1 a 32 caracteres e
+não pode ser `Admin`, reservado ao cargo de administrador. Cargo não concede a
+permissão de administrador; para isso, use `monky admin add`.
+
 ---
 
 ## `monky config`
@@ -602,13 +611,13 @@ monky config set <chave> [valor]    # altera direto
 |---|---|---|
 | `name` | Nome do servidor (mínimo 2 caracteres) | `Servidor dos Amigos` |
 | `password` | Senha de entrada. Vazio, `none` ou `clear` remove a senha | sem senha |
-| `port` | Porta TCP | `3000` |
+| `port` | Porta TCP, de 1024 a 65535 | `3000` |
 | `icon` | Caminho de uma imagem, copiada para a pasta de dados. Vazio ou `clear` remove | sem ícone |
 | `maxUsers` | Máximo de membros cadastrados. `0` remove o limite | `20` |
 | `maxMessageLength` | Caracteres por mensagem. `0` remove o limite de caracteres; o teto técnico de 8 MiB por pacote permanece | `16000` |
-| `allowSoundboard` | Permite o soundboard (`true`/`false`) | `true` |
+| `allowSoundboard` | Permite o soundboard (`true`/`false`). Desligar também desliga o cache de áudios recentes | `true` |
 | `allowEveryoneMention` | Permite `@todos`/`@everyone` no chat (`true`/`false`) | `true` |
-| `maxAttachmentFileBytes` | Tamanho máximo por anexo, em bytes | sem limite |
+| `maxAttachmentFileBytes` | Tamanho máximo por anexo, em bytes. Não pode passar do espaço total | sem limite |
 | `maxAttachmentStorageBytes` | Espaço total para anexos, em bytes | sem limite |
 | `voiceMode` | Modo de voz: `p2p` (mesh direto) ou `sfu` (Selective Forwarding Unit) | `p2p` |
 | `autoUpdate` | Liga a atualização automática da máquina (`true`/`false`). Veja [Atualização automática](#atualizacao-automatica) | `false` |
@@ -814,6 +823,11 @@ monky destroy [--data <pasta>]
 Remove o banco, anexos, avatares e configurações, encerra o processo PM2 e tira
 o servidor do registro. Pede duas confirmações: digitar `DESTROY` e um "sim"
 final. Só aceita pastas que realmente contenham um servidor Monky.
+
+Sem um PM2 que o CLI consiga usar, os processos PM2 do servidor não podem ser
+removidos e continuariam reiniciando o servidor apagado. Nesse caso, o aviso
+mostra os nomes deles e uma terceira confirmação pergunta se os dados devem ser
+apagados mesmo assim; recusar mantém tudo como está.
 
 Se houver gente conectada, o aviso aparece antes das confirmações, informando
 quantas pessoas serão desconectadas.

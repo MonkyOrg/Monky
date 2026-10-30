@@ -1,6 +1,8 @@
 'use strict';
 
 const { NativeRtcCommands, isNativeRtcCommandsForEngine, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
+const { NativeCommandLedger } = require('./nativeCommandLedger.cjs');
+const { within } = require('./asyncTools.cjs');
 
 const PROTOCOL = 'monky-native-screen-p2p';
 const VERSION = 1;
@@ -79,8 +81,8 @@ const kindOf = value => value.kind ?? 'video';
  * uses demanded/sourceDemand(), never enabled, to avoid a circular enable gate.
  * Revoked demand is not retirement proof. No source, engine, capture,
  * presentation or browser-call method is used.
- * The injected NativeRtcCommands must belong to this engine; nextId plus
- * getPendingRequest() identify only this broker's cancellable control requests.
+ * The injected NativeRtcCommands must belong to this engine; the requestId of each
+ * request identifies only this broker's cancellable control requests.
  *
  * A/V is explicit: controlVersion:2 plus audio:{prepareReceive,assertReceiveReady,
  * bindReceiver,revokeReceiver,onReceiverVolume,onPublicationState?}.
@@ -319,9 +321,8 @@ class NativeP2pBroker {
     maximumPeers = 32, maximumQueue = 64, maximumIce = 128, maximumReceivers = 64, maximumHistory = 64,
     controlVersion = VERSION, audio = null,
   }) {
-    check(isNativeRtcCommandsForEngine(commands, engine) && typeof engine?.cancel === 'function' && typeof commands?.request === 'function'
-      && typeof commands?.getPendingRequest === 'function' && positive(commands.nextId),
-    'A ready engine and NativeRtcCommands with monotonic request IDs are required.');
+    check(isNativeRtcCommandsForEngine(commands, engine) && typeof engine?.cancel === 'function',
+      'A ready engine and its own NativeRtcCommands are required.');
     check(['setRoster', 'addPeer', 'removePeer', 'announce', 'setWatching', 'onTrackEvent', 'desiredReceiver', 'confirmReceiver']
       .every(method => typeof routes?.[method] === 'function'), 'NativeScreenRoutes must be injected.');
     check([localSessionId, syncGroup, callId, channelId].every(reference)
@@ -343,6 +344,7 @@ class NativeP2pBroker {
     }
     Object.assign(this, { engine, commands, routes, send, isCurrent, onError, onPublicationState, onPeerState, audio,
       timers, operationTimeoutMs, turnTimeoutMs, maximumPeers, maximumQueue, maximumIce, maximumReceivers, maximumHistory });
+    this.ledger = new NativeCommandLedger(engine, commands);
     for (const [key, value] of Object.entries({ localSessionId, syncGroup, callId, channelId, controlVersion })) {
       Object.defineProperty(this, key, { value, enumerable: true });
     }
@@ -358,9 +360,11 @@ class NativeP2pBroker {
     this.nextWatchRevision = 1;
     this.closed = false;
     this.engineClosing = false;
-    this.engineRetired = false;
     this.nextAudioWatchVersion = 1;
   }
+
+  /** Whether the complete close of the engine was proven: no native command result remains owned. */
+  get engineRetired() { return this.ledger.retired; }
 
   _next(key) {
     check(positive(this[key]), 'Native screen generations are exhausted.');
@@ -431,52 +435,32 @@ class NativeP2pBroker {
     });
   }
 
-  _deadline(peer, promise, message, onTimeout = () => {}) {
-    return new Promise((resolve, reject) => {
-      let settled = false, timer;
-      const settle = (callback, value) => {
-        if (settled) return;
-        settled = true;
-        this.timers.clearTimeout(timer);
-        peer.waiters.delete(retire);
-        callback(value);
-      };
-      const retire = () => settle(reject, fault('P2P_CANCELLED', 'The native engine completed full retirement.'));
-      peer.waiters.add(retire);
-      timer = this.timers.setTimeout(() => {
-        const error = fault('P2P_TIMEOUT', message);
-        onTimeout(error);
-        settle(reject, error);
-      }, this.operationTimeoutMs);
-      Promise.resolve(promise).then(value => settle(resolve, value), error => settle(reject, error));
+  _deadline(promise, message, onTimeout = () => {}) {
+    return within(this.ledger.untilRetired(promise), this.operationTimeoutMs, () => {
+      const error = fault('P2P_TIMEOUT', message);
+      onTimeout(error);
+      return error;
+    }, { timers: this.timers }).then(settled => {
+      if (settled.retired) throw fault('P2P_CANCELLED', 'The native engine completed full retirement.');
+      return settled.value;
     });
   }
 
   _cancel(peer, request) {
     if (this.engineClosing || request.cancelled || request.operation === 'resource.close') return;
     request.cancelled = true;
-    try {
-      const current = this.commands.getPendingRequest(request.id);
-      if (current && current.operation === request.operation && current.target === request.target) {
-        this.engine.cancel(request.id);
-      }
-    } catch (error) {
-      // Native completion can precede delivery of its JS Promise. Retirement
-      // still waits for that original request; failed cancellation is not proof.
-      if (error.code === 'ERR_RTC_REQUEST_ID' && error.status === 4) return;
-      if (!['NOT_FOUND', 'ERR_RTC_NOT_FOUND', 'ERR_RTC_UNKNOWN_REQUEST'].includes(error.code)) this._report(peer, error);
-    }
+    // Native completion can precede delivery of its JS Promise. Retirement
+    // still waits for that original request; failed cancellation is not proof.
+    try { this.ledger.cancel(request); }
+    catch (error) { this._report(peer, error); }
   }
 
   _request(peer, operation, target, data, commit = () => {}, afterSettled = () => {}) {
     if (this.engineClosing) throw fault('P2P_CANCELLED', 'Native commands are blocked during full engine shutdown.');
-    const id = this.commands.nextId;
-    check(positive(id) && peer.pending.size < 128, 'Native command capacity or identifiers exhausted.');
+    check(peer.pending.size < 128, 'Native command capacity exhausted.');
+    const { id, completion: raw } = this.ledger.issue(operation, target, data);
+    check(id !== null, 'Native command ID correlation failed.');
     const request = { id, operation, target, data, cancelled: false, expired: false };
-    const raw = this.commands.request(operation, target, data);
-    const admitted = this.commands.getPendingRequest(id);
-    check(!admitted || (admitted.id === id && admitted.operation === operation && admitted.target === target),
-      'Native command ID correlation failed.');
     peer.pending.set(id, request);
     const completion = Promise.resolve(raw).then(result => {
       if (!this.engineRetired) commit(result);
@@ -491,7 +475,7 @@ class NativeP2pBroker {
     completion.catch(error => {
       if (request.expired && !this.engineRetired) this._report(peer, error);
     });
-    return this._deadline(peer, completion, `Native ${operation} did not complete; ownership is retained.`, () => {
+    return this._deadline(completion, `Native ${operation} did not complete; ownership is retained.`, () => {
       request.expired = true;
       this._cancel(peer, request);
     });
@@ -506,7 +490,7 @@ class NativeP2pBroker {
       });
       const queued = this.send(peer.remoteSessionId, message);
       check(queued && typeof queued.then === 'function', 'Native signaling send must return an enqueue Promise.');
-      await this._deadline(peer, queued, 'Native signaling enqueue timed out.');
+      await this._deadline(queued, 'Native signaling enqueue timed out.');
       this._assertLive(peer);
     } catch (error) {
       if (error.code !== 'P2P_CANCELLED') this._fail(peer, error);
@@ -567,7 +551,7 @@ class NativeP2pBroker {
     const context = this._audioContext(peer, reason, extra);
     const pending = this.audio.prepareReceive(context);
     check(pending && typeof pending.then === 'function', 'Audio preparation must return a real readiness Promise.');
-    const proof = await this._deadline(peer, pending, 'Native audio output preparation timed out.');
+    const proof = await this._deadline(pending, 'Native audio output preparation timed out.');
     this._assertLive(peer);
     this._assertAudioReady(proof, context);
     return { proof, context };
@@ -671,7 +655,7 @@ class NativeP2pBroker {
       && (previous || this.generations.size < this.maximumHistory), 'Native peer/history limit reached.');
     const peer = {
       remoteSessionId, connectionId, generation, peerId: null, status: 'opening', error: null, nativeState: {},
-      chain: Promise.resolve(), queued: 0, queuedBytes: 0, pending: new Map(), resources: new Map(), waiters: new Set(),
+      chain: Promise.resolve(), queued: 0, queuedBytes: 0, pending: new Map(), resources: new Map(),
       publications: new Map(), currentPublications: new Map(), remotePublications: new Map(),
       pendingMetadata: new Map(), receivers: new Map(), watches: new Map(), ice: [],
       receiving: false, receiverSyncScheduled: false, pumpScheduled: false,
@@ -1018,9 +1002,10 @@ class NativeP2pBroker {
     for (const publication of [...peer.audioRetirements.values()]) this._proveAudioRetirement(peer, publication, proof);
   }
 
-  _waitAudioRetirement(peer, publication) {
-    if (!publication.retirement) return Promise.resolve();
-    return this._deadline(peer, publication.retirement.promise,
+  async _waitAudioRetirement(peer, publication) {
+    // An already proven retirement (by its SDP turn, peer close or engine close) has nothing left to wait for.
+    if (!publication.retirement || publication.retirement.proven) return;
+    await this._deadline(publication.retirement.promise,
       'Dedicated audio transceiver retirement still needs a completed SDP turn or peer/engine close proof.');
   }
 
@@ -1907,10 +1892,10 @@ class NativeP2pBroker {
       throw error;
     }
     if (this.engineRetired) return;
-    this.engineRetired = true;
+    // The proof also ends every wait on this engine's native work.
+    this.ledger.proveRetired();
     for (const peer of this.peers.values()) {
       this._provePeerAudioRetirement(peer, 'engine-close');
-      for (const retire of [...peer.waiters]) retire();
       for (const publication of peer.publications.values()) {
         if (publication.enabled || publication.requestedEnabled || publication.demanded) {
           publication.requestedEnabled = false;

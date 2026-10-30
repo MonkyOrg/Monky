@@ -100,8 +100,9 @@ node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
 ```
 
 Use `--arch=x64` nos dois builds para produzir Intel em Apple Silicon com Rosetta.
-O build executa o autoteste do helper e consulta a biblioteca da arquitetura real;
-não fabrica capacidades a partir do arm64. O CI também compila em runners Intel
+O build executa o autoteste do helper e os contratos do engine sem dispositivos
+(todos, menos os do Media Foundation, que só existe no Windows) e consulta a
+biblioteca da arquitetura real; não fabrica capacidades a partir do arm64. O CI também compila em runners Intel
 e Apple Silicon. `macNativeHostSmoke.cjs` é device-free, não prova mídia.
 Para mídia real, `nativeCaptureSmoke.cjs`, `nativeAvSmoke.cjs` e
 `screen-audio/test/macPacketAudioSmoke.cjs` usam fontes sintéticas próprias e exigem

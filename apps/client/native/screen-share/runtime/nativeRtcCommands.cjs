@@ -1,5 +1,9 @@
 'use strict';
 
+// Every request Promise carries the ID it consumed, so its owner can correlate or cancel exactly
+// that command before any native callback arrives.
+const identified = (promise, requestId) => Object.defineProperty(promise, 'requestId', { value: requestId });
+
 class NativeRtcCommands {
   #engine;
   #closed = false;
@@ -29,13 +33,12 @@ class NativeRtcCommands {
       if (!result || typeof result.then !== 'function') throw new Error('Native RTC request did not return a Promise.');
     } catch (error) {
       this.pending.delete(id);
-      return Promise.reject(error);
+      return identified(Promise.reject(error), id);
     }
-    const pending = Promise.resolve(result).then(
+    return identified(Promise.resolve(result).then(
       value => { this.pending.delete(id); return value; },
       error => { this.pending.delete(id); throw error; },
-    );
-    return pending;
+    ), id);
   }
 
   getPendingRequest(id) {

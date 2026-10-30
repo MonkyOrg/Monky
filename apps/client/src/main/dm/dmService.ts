@@ -1,433 +1,34 @@
-import { createHash } from 'crypto';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import {
-  DM_DEFAULT_MAX_FILE_BYTES,
-  DM_MAX_ATTACHMENTS,
-  DM_MAX_FILE_BYTES_LIMIT,
-  DM_MAX_MESSAGE_LENGTH,
-  DM_PROFILE_AVATAR_MAX_LENGTH,
-  sanitizeDmForward,
-  type DmAttachmentState,
-  type DmAttachmentView,
-  type DmConversationPage,
-  type DmConversationSummary,
-  type DmDeliveryState,
-  type DmDispatch,
-  type DmErrorCode,
-  type DmEvent,
-  type DmIncomingRelayItem,
-  type DmMessageView,
-  type DmObservedPeer,
-  type DmPeerView,
-  type DmRelation,
-  type DmRelayItem,
-  type DmSelfProfile,
-  type DmSelfProfileInput,
-  type DmSelfProfileResult,
-  type DmSendMessageInput,
-  type DmSettings,
-  type DmSnapshot,
-  type MessageForward,
+import type {
+  DmConversationPage,
+  DmDispatch,
+  DmEvent,
+  DmIncomingRelayItem,
+  DmObservedPeer,
+  DmRelayItem,
+  DmSelfProfileInput,
+  DmSelfProfileResult,
+  DmSendMessageInput,
+  DmSettings,
+  DmSnapshot,
 } from '@monky/shared';
-import {
-  DmKeyring,
-  isIdentityPublicKey,
-  newDmId,
-  normalizeIdentityKey,
-  verifyDmCertificate,
-  verifyDmStatement,
-  type DmEnvelopeHeader,
-  type DmKeyCertificate,
-} from './dmCrypto';
+import { DmKeyring, isIdentityPublicKey, normalizeIdentityKey, type DmEnvelopeHeader } from './dmCrypto';
+import { DmConversations } from './dmConversations';
+import { DmDeviceSync } from './dmDeviceSync';
+import { DmFiles } from './dmFiles';
+import { DmFriends } from './dmFriends';
+import { DmLedger } from './dmLedger';
+import { MAX_CLOCK_SKEW_MS, type DmExportData, type PeerRecord } from './dmModel';
+import { DmOutbox, dispatchFor } from './dmOutbox';
 import { DmPersistence } from './dmPersistence';
+import { DmProfile } from './dmProfile';
+import { clampMaxFileBytes, isRecord, toWireMessage } from './dmWire';
 
-/**
- * Friends and direct messages engine (#743), running in the main process.
- *
- * It owns the encrypted local store and all crypto. It never talks to a server
- * directly: every operation returns a {@link DmDispatch} with the sealed relay
- * items the renderer must push through the server sessions where the peer is
- * reachable. Servers only relay, so delivery is store-and-forward on the
- * devices: unacknowledged items stay in a per-peer outbox and are resent when
- * the peer shows up again.
- */
+export { DmError } from './dmModel';
+export type { DmExportData } from './dmModel';
+export { DM_DOWNLOAD_STALL_MS, DM_FILE_CHUNK_BYTES, DM_FILE_TRANSFER_IDLE_MS } from './dmFiles';
 
-const STATE_FILE = 'state.mkdm';
-export const DM_FILE_CHUNK_BYTES = 96 * 1024;
-const FILE_WINDOW_CHUNKS = 6;
-const RESEND_AFTER_MS = 20_000;
-/**
- * A friend that sent no chunk of any of their files for this long is asked
- * again from where each download stopped: the relay may have dropped a window.
- * Counted per friend, so files that wait their turn behind another one of the
- * same friend are not asked twice.
- */
-export const DM_DOWNLOAD_STALL_MS = 5_000;
-/** Quiet rounds asked again right away; after them, only the regular outbox rounds ask. */
-const MAX_STALL_RETRIES = 3;
-/**
- * Request rounds of a download answered only with "not here" (no chunk, no
- * "wait") before it ends as unavailable. Only the device that sent a file
- * keeps it, while each request reaches every device of the friend on every
- * server they share: one device without it says nothing about the others.
- * With the quick retries these rounds are {@link DM_DOWNLOAD_STALL_MS} apart.
- */
-const MAX_ABSENT_ROUNDS = 3;
 /** One sighting of a friend brings several hellos (each side greets and answers); the outbox goes out once for all of them. */
 const HELLO_FLUSH_GAP_MS = 5_000;
-/** Download progress reaches the screen at most this often (or every 1%)... */
-const PROGRESS_EVENT_MS = 250;
-/** ...and the conversation file at most this often: the part file is what holds the bytes. */
-const PROGRESS_SAVE_MS = 5_000;
-const MAX_SEEN_STATEMENTS = 500;
-const MAX_NICKNAME_LENGTH = 64;
-const MAX_AVATAR_URL_LENGTH = 2048;
-const MAX_INLINE_AVATAR_LENGTH = 512 * 1024;
-const MAX_EMOJI_LENGTH = 64;
-const MAX_SYNC_ITEM_CHARS = 40_000;
-const MAX_FILE_NAME_LENGTH = 200;
-const PAGE_SIZE = 80;
-const FILE_CACHE_TTL_MS = 60_000;
-/**
- * A file a friend did not ask for in this long stops counting as being sent,
- * and its memory may go to another file. Longer than the gap between two
- * windows of one download, even with several downloads sharing a connection
- * or a window lost on the way (the friend asks again after
- * {@link DM_DOWNLOAD_STALL_MS}). It also caps how often a file can be
- * decrypted whole again: at most once per this long.
- */
-export const DM_FILE_TRANSFER_IDLE_MS = 20_000;
-/**
- * Decrypted files being sent at once never take more than this: one of the
- * largest allowed, plus room for small ones. A file that does not fit next to
- * those in transfer waits its turn.
- */
-const FILE_CACHE_MAX_BYTES = DM_MAX_FILE_BYTES_LIMIT + 32 * 1024 * 1024;
-const MAX_CLOCK_SKEW_MS = 5 * 60_000;
-const DAY_MS = 86_400_000;
-/**
- * Items sent on every shared server (own-device exchanges, file requests) arrive once per server; identical
- * copies within this window are answered once.
- */
-const SELF_REPEAT_WINDOW_MS = 30_000;
-/** File requests remembered at most, so copies of one request on other servers are answered once. */
-const MAX_REMEMBERED_REQUESTS = 512;
-const MAX_DIGEST_DAYS = 1000;
-/** Plaintext bytes per sealed item, so the relay's 64 KiB item limit holds after encryption. */
-const MAX_SEALED_ITEM_BYTES = 44_000;
-const MAX_HISTORY_RESPONSE_BYTES = 600_000;
-const MAX_HISTORY_ROUNDS = 50;
-const MAX_DIGEST_PARTS = 200;
-const PENDING_DIGEST_TTL_MS = 60_000;
-/** Ids one ack envelope carries; the receiving side reads at most this many. */
-const MAX_ACK_IDS = 200;
-const MAX_TOMBSTONES = 500;
-
-type StatementType = 'request' | 'accept' | 'cancel' | 'remove';
-
-interface FriendStatementPayload {
-  v: 1;
-  type: StatementType;
-  id: string;
-  requestId: string;
-  from: string;
-  to: string;
-  ts: number;
-  cert: DmKeyCertificate;
-  nickname: string;
-  maxFileBytes: number;
-}
-
-interface SignedStatement {
-  p: FriendStatementPayload;
-  s: string;
-}
-
-interface PeerRecord {
-  publicKey: string;
-  nickname: string;
-  avatar: string | null;
-  cert: DmKeyCertificate | null;
-  relation: DmRelation;
-  requestId: string | null;
-  outgoingStatement: SignedStatement | null;
-  relationUpdatedAt: number;
-  blocked: boolean;
-  blockedUpdatedAt: number;
-  friendSince: number | null;
-  requestedAt: number | null;
-  maxFileBytes: number;
-  seenStatements: string[];
-  /** Newest profile (nickname/avatar) the friend sent us; 0/undefined when only servers told us. */
-  profileAt?: number;
-  profileHash?: string;
-  /** The avatar came from the friend's profile, so server observations must not replace it. */
-  profileAvatar?: boolean;
-}
-
-interface OutboxEntry {
-  id: string;
-  kind: 'friend' | 'envelope';
-  type: string;
-  ts: number;
-  body?: unknown;
-  statement?: SignedStatement;
-  lastSentAt: number;
-}
-
-interface ConversationMeta {
-  lastMessageAt: number;
-  lastMessagePreview: string;
-  lastMessageAuthor: string | null;
-  unread: number;
-  lastReadAt: number;
-  peerReadAt: number;
-  hidden: boolean;
-  messageCount: number;
-}
-
-interface DownloadState {
-  peer: string;
-  messageId: string;
-  fileId: string;
-  size: number;
-  sha256: string;
-  requestedUntil: number;
-  lastActivityAt: number;
-}
-
-/** What this run knows about a download beyond its saved state. */
-interface LiveDownload {
-  /** Chunks in the part file: checked against the disk once per run, then counted as they are appended. */
-  chunks: number;
-  savedAt: number;
-  shownAt: number;
-  shownBytes: number;
-  /** A device of the friend said the file is not there since the last request, and none sent a chunk or "wait". */
-  absent: boolean;
-  /** Requests in a row whose round got only that answer (see {@link MAX_ABSENT_ROUNDS}). */
-  absentRounds: number;
-}
-
-interface DmState {
-  version: 1;
-  identity: string;
-  settings: DmSettings;
-  peers: Record<string, PeerRecord>;
-  outbox: Record<string, OutboxEntry[]>;
-  conversations: Record<string, ConversationMeta>;
-  downloads: Record<string, DownloadState>;
-  profile: DmSelfProfile;
-}
-
-interface StoredAttachment {
-  fileId: string;
-  name: string;
-  size: number;
-  mime: string;
-  sha256: string;
-  state: DmAttachmentState;
-  receivedBytes: number;
-}
-
-type StoredReactions = Record<string, Record<string, { on: boolean; ts: number }>>;
-
-interface StoredMessage {
-  id: string;
-  author: string;
-  content: string;
-  createdAt: number;
-  /** When this device last saw the text change: what marks the message as edited. */
-  editedAt: number | null;
-  /**
-   * Last-writer-wins clock of the text (#490). Unlike `editedAt`, it also
-   * moves for an edit that keeps the text, so an older edit arriving later
-   * cannot bring back a text the author already replaced. Absent until the
-   * first edit, and in stores written before it existed: `editedAt` then.
-   */
-  contentAt?: number;
-  deleted: boolean;
-  replyTo: string | null;
-  reactions: StoredReactions;
-  attachments: StoredAttachment[];
-  delivery: DmDeliveryState | null;
-  /** Absent in stores written before forwarding existed. */
-  forwarded?: MessageForward | null;
-}
-
-interface StoredConversation {
-  version: 1;
-  peer: string;
-  messages: StoredMessage[];
-  /**
-   * Messages deleted before this device had them: a copy that arrives late stays
-   * out instead of showing up for good. Absent in stores written before #490.
-   */
-  tombstones?: Array<{ id: string; author: string }>;
-}
-
-interface AttachmentMeta {
-  fileId: string;
-  name: string;
-  size: number;
-  mime: string;
-  sha256: string;
-}
-
-interface SyncEntry {
-  publicKey: string;
-  nickname: string;
-  cert: DmKeyCertificate | null;
-  relation: DmRelation;
-  requestId: string | null;
-  outgoingStatement: SignedStatement | null;
-  relationUpdatedAt: number;
-  blocked: boolean;
-  blockedUpdatedAt: number;
-  friendSince: number | null;
-  requestedAt: number | null;
-}
-
-export interface DmExportData {
-  version: 1;
-  peers: SyncEntry[];
-  settings: DmSettings;
-  conversations?: StoredConversation[];
-}
-
-export class DmError extends Error {
-  constructor(
-    readonly code: DmErrorCode,
-    message: string,
-    readonly details: Record<string, unknown> = {}
-  ) {
-    super(message);
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function sanitizeNickname(value: unknown, fallback: string): string {
-  if (typeof value !== 'string') return fallback;
-  const trimmed = value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, MAX_NICKNAME_LENGTH);
-  return trimmed || fallback;
-}
-
-function sanitizeAvatar(value: unknown): string | null {
-  if (typeof value !== 'string' || !value) return null;
-  if (value.startsWith('data:image/')) {
-    return value.length <= MAX_INLINE_AVATAR_LENGTH ? value : null;
-  }
-  if (/^https?:\/\//i.test(value) && value.length <= MAX_AVATAR_URL_LENGTH) return value;
-  return null;
-}
-
-/** Avatars that travel inside DMs must be small inline images, never remote URLs. */
-function sanitizeProfileAvatar(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length > DM_PROFILE_AVATAR_MAX_LENGTH) return null;
-  return /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value) ? value : null;
-}
-
-function profileHash(nickname: string, avatar: string | null): string {
-  return createHash('sha256').update(`${nickname}\n${avatar ?? ''}`).digest('hex').slice(0, 16);
-}
-
-/** Last-writer-wins with a deterministic tie-break, so every device converges. */
-function profileFieldWins(at: number, value: string, currentAt: number, current: string): boolean {
-  if (at !== currentAt) return at > currentAt;
-  return at > 0 && value !== current && value > current;
-}
-
-function emptyProfile(): DmSelfProfile {
-  return { nickname: '', nicknameAt: 0, avatar: null, avatarAt: 0 };
-}
-
-function sanitizeSelfProfile(value: unknown): DmSelfProfile {
-  if (!isRecord(value)) return emptyProfile();
-  const stamp = (at: unknown) => (typeof at === 'number' && Number.isFinite(at) && at > 0 ? at : 0);
-  const nickname = sanitizeNickname(value.nickname, '');
-  const avatar = sanitizeProfileAvatar(value.avatar);
-  return {
-    nickname,
-    nicknameAt: nickname ? stamp(value.nicknameAt) : 0,
-    avatar,
-    avatarAt: stamp(value.avatarAt),
-  };
-}
-
-function utf8Length(value: string): number {
-  return Buffer.byteLength(value, 'utf8');
-}
-
-/** What decides whether two devices hold the same version of a message. */
-function messageFingerprint(message: StoredMessage): string {
-  const reactions = Object.entries(message.reactions)
-    .flatMap(([emoji, users]) => Object.entries(users).map(([user, value]) => `${emoji}:${user}:${value.on ? 1 : 0}:${value.ts}`))
-    .sort()
-    .join(',');
-  // Only when it tells something `editedAt` does not, so the usual message keeps the fingerprint older versions compute.
-  const clock = !message.deleted && message.contentAt !== undefined && message.contentAt !== message.editedAt
-    ? `~${message.contentAt}` : '';
-  return `${message.id}|${message.deleted ? 1 : 0}|${message.editedAt ?? 0}${clock}|${reactions};`;
-}
-
-/** The clock the text of a message is compared by (see `StoredMessage.contentAt`). */
-function contentClock(message: StoredMessage): number {
-  return message.contentAt ?? message.editedAt ?? 0;
-}
-
-/** Whether a text stamped `at` replaces the current one. Equal stamps keep the same text on every device. */
-function contentWins(at: number, content: string, message: StoredMessage): boolean {
-  const current = contentClock(message);
-  return at > current || (at === current && content > message.content);
-}
-
-interface DigestConversation {
-  p: string;
-  lr: number;
-  pr: number;
-  /** Oldest day listed when the digest was truncated; 0 when complete. */
-  from: number;
-  /** `day:hash` pairs separated by commas. */
-  b: string;
-}
-
-interface PendingDigest {
-  parts: Array<Record<string, unknown> | undefined>;
-  received: number;
-  at: number;
-}
-
-function clampMaxFileBytes(value: unknown, fallback = DM_DEFAULT_MAX_FILE_BYTES): number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return fallback;
-  return Math.min(Math.floor(value), DM_MAX_FILE_BYTES_LIMIT);
-}
-
-function isDmId(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
-}
-
-function previewOf(message: StoredMessage): string {
-  if (message.deleted) return '';
-  const text = message.content.replace(/\s+/g, ' ').trim();
-  if (text) return text.slice(0, 120);
-  if (message.attachments.length > 0) return message.attachments.map((file) => file.name).join(', ').slice(0, 120);
-  return '';
-}
-
-function sanitizeAttachmentMeta(value: unknown): AttachmentMeta | null {
-  if (!isRecord(value)) return null;
-  const { fileId, name, size, mime, sha256 } = value;
-  if (!isDmId(fileId)) return null;
-  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0 || size > DM_MAX_FILE_BYTES_LIMIT) return null;
-  if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) return null;
-  const safeName = typeof name === 'string' ? name.replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim().slice(0, MAX_FILE_NAME_LENGTH) : '';
-  const safeMime = typeof mime === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(mime) && mime.length <= 128 ? mime : 'application/octet-stream';
-  return { fileId, name: safeName || 'arquivo', size, mime: safeMime, sha256 };
-}
 
 export interface DmServiceOptions {
   keyring: DmKeyring;
@@ -438,462 +39,80 @@ export interface DmServiceOptions {
   fileCacheMaxBytes?: number;
 }
 
+/**
+ * Friends and direct messages engine (#743), running in the main process.
+ *
+ * It owns the encrypted local store and all crypto. It never talks to a server
+ * directly: every operation returns a {@link DmDispatch} with the sealed relay
+ * items the renderer must push through the server sessions where the peer is
+ * reachable. Servers only relay, so delivery is store-and-forward on the
+ * devices: unacknowledged items stay in a per-peer outbox and are resent when
+ * the peer shows up again.
+ *
+ * This class is what the IPC layer talks to. It routes what arrives and greets
+ * friends and own devices; the rest of the work lives in modules that share one
+ * {@link DmLedger} (state, conversations, clock and views):
+ * - {@link DmOutbox}: sealing, the outbox and acks;
+ * - {@link DmFriends}: requests and friendships, and their sync between own devices;
+ * - {@link DmConversations}: messages, edits, deletes, reactions and read receipts;
+ * - {@link DmFiles}: attachments, sent and downloaded in chunks;
+ * - {@link DmProfile}: the nickname and picture that travel with the identity;
+ * - {@link DmDeviceSync}: history and read markers between own devices.
+ */
 export class DmService {
   readonly me: string;
   private readonly keyring: DmKeyring;
-  private readonly store: DmPersistence;
-  private readonly now: () => number;
-  private readonly onEvent: (event: DmEvent) => void;
-  private readonly fileCacheMaxBytes: number;
-  private state: DmState;
-  private readonly conversations = new Map<string, StoredConversation>();
-  private readonly fileCache = new Map<string, { data: Buffer; expiresAt: number; activeUntil: number }>();
-  private fileCacheTimer: NodeJS.Timeout | null = null;
-  private readonly liveDownloads = new Map<string, LiveDownload>();
-  /** Per friend with downloads: asks again when they go quiet (see {@link DM_DOWNLOAD_STALL_MS}). */
-  private readonly stallTimers = new Map<string, { timer: NodeJS.Timeout | null; retries: number }>();
+  private readonly ledger: DmLedger;
+  private readonly outbox: DmOutbox;
+  private readonly files: DmFiles;
+  private readonly friends: DmFriends;
+  private readonly conversations: DmConversations;
+  private readonly profile: DmProfile;
+  private readonly sync: DmDeviceSync;
   private readonly helloFlushedAt = new Map<string, number>();
-  /** File requests answered lately, by envelope id, oldest first (see {@link repeatedRequest}). */
-  private readonly answeredRequests = new Map<string, number>();
-  private snapshotTimer: NodeJS.Timeout | null = null;
-  private lastStamp = 0;
-  /** Identifies this running device in own-device exchanges. */
-  readonly device = newDmId();
-  private readonly lastDigest = new Map<string, { hash: string; at: number }>();
-  private readonly profileSentTo = new Map<string, { key: string; at: number }>();
-  private readonly digestRounds = new Map<string, number>();
-  /** `peer:day:hash` already sent to each own device, so copies of a digest do not resend history. */
-  private readonly pushedDays = new Map<string, Set<string>>();
-  private readonly pendingDigests = new Map<string, PendingDigest>();
-  private readonly dayBucketCache = new Map<string, Map<number, string>>();
-  /** Received items confirmed only once what they changed is on disk: the sender drops them from its outbox on the ack. */
-  private pendingAcks: Array<{ peer: string; id: string; needs: Set<string> }> = [];
 
   constructor(options: DmServiceOptions) {
     this.keyring = options.keyring;
-    this.me = keyringIdentity(options.keyring);
-    this.store = new DmPersistence(options.dir, options.keyring.storageKey());
-    this.now = options.now ?? Date.now;
-    this.onEvent = options.onEvent ?? (() => undefined);
-    this.fileCacheMaxBytes = options.fileCacheMaxBytes ?? FILE_CACHE_MAX_BYTES;
-    this.state = this.loadState();
-    this.store.onWritten = (written) => this.releaseStoredAcks(written);
+    this.me = options.keyring.identityPublicKey;
+    const store = new DmPersistence(options.dir, options.keyring.storageKey());
+    this.ledger = new DmLedger(this.me, store, options.now ?? Date.now, options.onEvent ?? (() => undefined));
+    this.outbox = new DmOutbox(this.ledger, this.keyring);
+    this.files = new DmFiles(this.ledger, this.outbox, options.fileCacheMaxBytes);
+    this.friends = new DmFriends(this.ledger, this.outbox);
+    this.conversations = new DmConversations(this.ledger, this.outbox, this.files);
+    this.profile = new DmProfile(this.ledger, this.outbox);
+    this.sync = new DmDeviceSync(this.ledger, this.outbox, this.friends, this.profile, this.conversations);
+    this.ledger.onConversationChanged = (peer) => this.sync.conversationChanged(peer);
+    store.onWritten = (written) => this.outbox.releaseStoredAcks(written);
   }
 
-  // ---------------------------------------------------------------------------
-  // Persistence
-  // ---------------------------------------------------------------------------
-
-  private loadState(): DmState {
-    // A state that cannot be read right now throws instead of starting empty:
-    // the next save would otherwise replace friends and outbox with nothing.
-    const loaded = this.store.readJson(STATE_FILE, (value): value is DmState => isRecord(value) && value.identity === this.me);
-    const empty: DmState = {
-      version: 1,
-      identity: this.me,
-      settings: { maxFileBytes: DM_DEFAULT_MAX_FILE_BYTES },
-      peers: {},
-      outbox: {},
-      conversations: {},
-      downloads: {},
-      profile: emptyProfile(),
-    };
-    if (!loaded) return empty;
-    return {
-      ...empty,
-      ...loaded,
-      settings: { maxFileBytes: clampMaxFileBytes(loaded.settings?.maxFileBytes) },
-      peers: loaded.peers ?? {},
-      outbox: loaded.outbox ?? {},
-      conversations: loaded.conversations ?? {},
-      downloads: loaded.downloads ?? {},
-      profile: sanitizeSelfProfile(loaded.profile),
-    };
-  }
-
-  private saveState(): void {
-    this.store.writeJsonSoon(STATE_FILE, () => this.state);
-  }
-
-  /**
-   * Lamport-style clock for locally created operations. It is strictly
-   * increasing, so operations created in the same millisecond keep their order
-   * and survive last-writer-wins checks, and it never falls behind messages
-   * already seen, so a reply always sorts after the message it answers even
-   * when the peer's clock runs ahead (bounded by MAX_CLOCK_SKEW_MS).
-   */
-  private stamp(): number {
-    this.lastStamp = Math.max(this.now(), this.lastStamp + 1);
-    return this.lastStamp;
-  }
-
-  private observeStamp(ts: number): void {
-    if (ts > this.lastStamp) this.lastStamp = ts;
-  }
-
-  private conversation(peer: string): StoredConversation {
-    const cached = this.conversations.get(peer);
-    if (cached) return cached;
-    // Throws while the file cannot be read (it stays on disk for the next try); a damaged one is set aside.
-    const loaded = this.store.readJson(
-      DmPersistence.peerFileName(peer),
-      (value): value is StoredConversation => isRecord(value) && value.peer === peer && Array.isArray(value.messages),
-    );
-    const conversation: StoredConversation = loaded ?? { version: 1, peer, messages: [] };
-    this.conversations.set(peer, conversation);
-    return conversation;
-  }
-
-  private saveConversation(peer: string): void {
-    this.dayBucketCache.delete(peer);
-    this.store.writeJsonSoon(DmPersistence.peerFileName(peer), () => this.conversation(peer));
+  /** Identifies this running device in own-device exchanges. */
+  get device(): string {
+    return this.sync.device;
   }
 
   flush(): void {
-    this.store.flush();
+    this.ledger.store.flush();
   }
 
-  /** Whether received items wait for a write before their ack can leave (see {@link ackWhenStored}). */
+  /** Whether received items wait for a write before their ack can leave. */
   hasPendingAcks(): boolean {
-    return this.pendingAcks.length > 0;
+    return this.outbox.hasPendingAcks();
   }
 
   /** Stops timers and forgets pending writes; used right before the store is deleted. */
   discard(): void {
-    if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
-    this.snapshotTimer = null;
-    this.store.discardPending();
-    this.pendingAcks = [];
-    this.conversations.clear();
-    this.dropFileCache();
-    this.liveDownloads.clear();
-    for (const { timer } of this.stallTimers.values()) {
-      if (timer) clearTimeout(timer);
-    }
-    this.stallTimers.clear();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Views
-  // ---------------------------------------------------------------------------
-
-  private meta(peer: string): ConversationMeta {
-    let meta = this.state.conversations[peer];
-    if (!meta) {
-      meta = {
-        lastMessageAt: 0,
-        lastMessagePreview: '',
-        lastMessageAuthor: null,
-        unread: 0,
-        lastReadAt: 0,
-        peerReadAt: 0,
-        hidden: true,
-        messageCount: 0,
-      };
-      this.state.conversations[peer] = meta;
-    }
-    return meta;
-  }
-
-  private peerView(record: PeerRecord): DmPeerView {
-    return {
-      publicKey: record.publicKey,
-      nickname: record.nickname,
-      avatar: record.avatar,
-      relation: record.relation,
-      blocked: record.blocked,
-      friendSince: record.relation === 'friend' ? record.friendSince : null,
-      requestedAt: record.relation === 'incoming' || record.relation === 'outgoing' ? record.requestedAt : null,
-      maxFileBytes: record.maxFileBytes,
-    };
+    this.ledger.discard();
+    this.outbox.discard();
+    this.files.discard();
   }
 
   snapshot(): DmSnapshot {
-    const peers = Object.values(this.state.peers)
-      .filter((peer) => peer.relation !== 'none' || peer.blocked || (this.state.conversations[peer.publicKey]?.messageCount ?? 0) > 0)
-      .map((peer) => this.peerView(peer));
-    const conversations: DmConversationSummary[] = Object.entries(this.state.conversations)
-      .filter(([peer, meta]) => !!this.state.peers[peer] && (!meta.hidden || meta.messageCount > 0))
-      .map(([peer, meta]) => ({
-        peer,
-        lastMessageAt: meta.lastMessageAt,
-        lastMessagePreview: meta.lastMessagePreview,
-        lastMessageAuthor: meta.lastMessageAuthor,
-        unread: meta.unread,
-        hidden: meta.hidden,
-        readOnly: this.state.peers[peer]?.relation !== 'friend' || !!this.state.peers[peer]?.blocked,
-      }))
-      .sort((a, b) => b.lastMessageAt - a.lastMessageAt);
-    return {
-      me: { publicKey: this.me },
-      peers,
-      conversations,
-      settings: { ...this.state.settings },
-    };
+    return this.ledger.snapshot();
   }
 
-  private messageView(peer: string, message: StoredMessage): DmMessageView {
-    const meta = this.state.conversations[peer];
-    let delivery = message.delivery;
-    if (message.author === this.me && delivery === 'delivered' && meta && message.createdAt <= meta.peerReadAt) {
-      delivery = 'read';
-    }
-    return {
-      id: message.id,
-      peer,
-      author: message.author,
-      content: message.deleted ? '' : message.content,
-      createdAt: message.createdAt,
-      editedAt: message.editedAt,
-      deleted: message.deleted,
-      replyTo: message.replyTo,
-      reactions: Object.entries(message.reactions)
-        .map(([emoji, users]) => ({
-          emoji,
-          users: Object.entries(users)
-            .filter(([, value]) => value.on)
-            .map(([user]) => user),
-        }))
-        .filter((reaction) => reaction.users.length > 0),
-      attachments: message.deleted
-        ? []
-        : message.attachments.map<DmAttachmentView>((file) => ({
-            fileId: file.fileId,
-            name: file.name,
-            size: file.size,
-            mime: file.mime,
-            state: file.state,
-            receivedBytes: file.receivedBytes,
-          })),
-      delivery: message.author === this.me ? delivery ?? 'delivered' : null,
-      forwarded: message.deleted ? null : message.forwarded ?? null,
-    };
-  }
-
-  getConversation(peerKey: string, before?: string | null, limit = PAGE_SIZE): DmConversationPage {
-    const peer = this.requirePeerKey(peerKey);
-    const messages = this.conversation(peer).messages;
-    let end = messages.length;
-    if (before) {
-      const index = messages.findIndex((message) => message.id === before);
-      if (index >= 0) end = index;
-    }
-    const start = Math.max(0, end - Math.max(1, Math.min(limit, 500)));
-    return {
-      peer,
-      messages: messages.slice(start, end).map((message) => this.messageView(peer, message)),
-      hasMore: start > 0,
-      peerReadAt: this.state.conversations[peer]?.peerReadAt ?? 0,
-    };
-  }
-
-  private scheduleSnapshot(): void {
-    if (this.snapshotTimer) return;
-    this.snapshotTimer = setTimeout(() => {
-      this.snapshotTimer = null;
-      this.onEvent({ type: 'snapshot', snapshot: this.snapshot() });
-    }, 30);
-    this.snapshotTimer.unref?.();
-  }
-
-  private emitMessages(peer: string, messages: StoredMessage[]): void {
-    if (messages.length === 0) return;
-    this.onEvent({
-      type: 'messages',
-      peer,
-      messages: messages.map((message) => this.messageView(peer, message)),
-      peerReadAt: this.state.conversations[peer]?.peerReadAt ?? 0,
-    });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
-
-  private requirePeerKey(value: unknown): string {
-    if (!isIdentityPublicKey(value)) throw new DmError('invalid-peer', 'Identidade inválida.');
-    const peer = normalizeIdentityKey(value);
-    if (peer === this.me) throw new DmError('invalid-peer', 'Não é possível usar a própria identidade.');
-    return peer;
-  }
-
-  private ensurePeer(publicKey: string, nickname?: string): PeerRecord {
-    let record = this.state.peers[publicKey];
-    if (!record) {
-      record = {
-        publicKey,
-        nickname: sanitizeNickname(nickname, publicKey.slice(-8)),
-        avatar: null,
-        cert: null,
-        relation: 'none',
-        requestId: null,
-        outgoingStatement: null,
-        relationUpdatedAt: 0,
-        blocked: false,
-        blockedUpdatedAt: 0,
-        friendSince: null,
-        requestedAt: null,
-        maxFileBytes: DM_DEFAULT_MAX_FILE_BYTES,
-        seenStatements: [],
-      };
-      this.state.peers[publicKey] = record;
-    } else if (nickname) {
-      record.nickname = sanitizeNickname(nickname, record.nickname);
-    }
-    return record;
-  }
-
-  private requireFriend(peerKey: string): PeerRecord {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.state.peers[peer];
-    if (!record || record.relation !== 'friend' || !record.cert) {
-      throw new DmError('not-friend', 'Vocês não são amigos.');
-    }
-    if (record.blocked) throw new DmError('blocked', 'Usuário bloqueado.');
-    return record;
-  }
-
-  private myNickname(): string {
-    return sanitizeNickname(this.state.profile.nickname || this.selfNickname, 'Monky');
-  }
-
-  private selfNickname = '';
-
-  setSelfNickname(nickname: string): void {
-    this.selfNickname = sanitizeNickname(nickname, '');
-  }
-
-  private signStatement(type: StatementType, to: string, requestId: string): SignedStatement {
-    const payload: FriendStatementPayload = {
-      v: 1,
-      type,
-      id: newDmId(),
-      requestId,
-      from: this.me,
-      to,
-      ts: this.stamp(),
-      cert: this.keyring.certificate(),
-      nickname: this.myNickname(),
-      maxFileBytes: this.state.settings.maxFileBytes,
-    };
-    return { p: payload, s: this.keyring.signStatement(payload) };
-  }
-
-  private statementItem(statement: SignedStatement): DmRelayItem {
-    return { to: statement.p.to, kind: 'friend', data: JSON.stringify(statement) };
-  }
-
-  private seal(peer: string, cert: DmKeyCertificate, type: string, body: unknown, id = newDmId(), ts = this.stamp()): string {
-    return this.keyring.seal(peer, cert, { id, type, ts }, body);
-  }
-
-  private envelopeItem(record: PeerRecord, type: string, body: unknown, kind: DmRelayItem['kind'] = 'signal'): DmRelayItem {
-    if (!record.cert) throw new DmError('not-friend', 'Certificado do amigo ausente.');
-    return { to: record.publicKey, kind, data: this.seal(record.publicKey, record.cert, type, body) };
-  }
-
-  private selfItem(type: string, body: unknown, kind: DmRelayItem['kind'] = 'envelope'): DmRelayItem {
-    return { to: this.me, kind, data: this.seal(this.me, this.keyring.certificate(), type, body) };
-  }
-
-  private outbox(peer: string): OutboxEntry[] {
-    let entries = this.state.outbox[peer];
-    if (!entries) {
-      entries = [];
-      this.state.outbox[peer] = entries;
-    }
-    return entries;
-  }
-
-  private outboxItem(record: PeerRecord, entry: OutboxEntry): DmRelayItem | null {
-    if (entry.kind === 'friend' && entry.statement) {
-      return this.statementItem(entry.statement);
-    }
-    if (!record.cert) return null;
-    return {
-      to: record.publicKey,
-      kind: 'envelope',
-      data: this.seal(record.publicKey, record.cert, entry.type, entry.body, entry.id, entry.ts),
-    };
-  }
-
-  private queueStatement(record: PeerRecord, statement: SignedStatement): DmRelayItem {
-    const now = this.now();
-    this.outbox(record.publicKey).push({
-      id: statement.p.id,
-      kind: 'friend',
-      type: statement.p.type,
-      ts: statement.p.ts,
-      statement,
-      lastSentAt: now,
-    });
-    return this.statementItem(statement);
-  }
-
-  private queueEnvelope(record: PeerRecord, type: string, body: unknown, id = newDmId(), ts = this.stamp()): DmRelayItem | null {
-    const entry: OutboxEntry = { id, kind: 'envelope', type, ts, body, lastSentAt: this.now() };
-    this.outbox(record.publicKey).push(entry);
-    return this.outboxItem(record, entry);
-  }
-
-  private selfCopy(peer: string, type: string, id: string, ts: number, body: unknown): DmRelayItem {
-    return this.selfItem('self', { peer, op: { id, type, ts, body } });
-  }
-
-  private syncEntry(record: PeerRecord): SyncEntry {
-    return {
-      publicKey: record.publicKey,
-      nickname: record.nickname,
-      cert: record.cert,
-      relation: record.relation,
-      requestId: record.requestId,
-      outgoingStatement: record.outgoingStatement,
-      relationUpdatedAt: record.relationUpdatedAt,
-      blocked: record.blocked,
-      blockedUpdatedAt: record.blockedUpdatedAt,
-      friendSince: record.friendSince,
-      requestedAt: record.requestedAt,
-    };
-  }
-
-  private syncItems(records?: PeerRecord[]): DmRelayItem[] {
-    const entries = (records ?? Object.values(this.state.peers))
-      .filter((record) => record.relationUpdatedAt > 0 || record.blockedUpdatedAt > 0)
-      .map((record) => this.syncEntry(record));
-    const items: DmRelayItem[] = [];
-    let batch: SyncEntry[] = [];
-    let batchSize = 0;
-    const pushBatch = () => {
-      if (batch.length === 0) return;
-      items.push(this.selfItem('sync', { entries: batch }, 'signal'));
-      batch = [];
-      batchSize = 0;
-    };
-    for (const entry of entries) {
-      const size = JSON.stringify(entry).length;
-      if (batchSize + size > MAX_SYNC_ITEM_CHARS) pushBatch();
-      batch.push(entry);
-      batchSize += size;
-    }
-    pushBatch();
-    if (items.length === 0 && !records) {
-      items.push(this.selfItem('sync', { entries: [] }, 'signal'));
-    }
-    return items;
-  }
-
-  private dispatchFor(peer: string, items: Array<DmRelayItem | null>, broadcast: DmRelayItem[] = []): DmDispatch {
-    const list = items.filter((item): item is DmRelayItem => !!item);
-    const dispatch: DmDispatch = {};
-    if (list.length > 0) dispatch.peers = { [peer]: list };
-    if (broadcast.length > 0) dispatch.broadcast = broadcast;
-    return dispatch;
-  }
-
-  private changed(peer?: string): void {
-    this.saveState();
-    if (peer) this.saveConversation(peer);
-    this.scheduleSnapshot();
+  getConversation(peerKey: string, before?: string | null, limit?: number): DmConversationPage {
+    return this.ledger.getConversation(peerKey, before, limit);
   }
 
   // ---------------------------------------------------------------------------
@@ -901,165 +120,63 @@ export class DmService {
   // ---------------------------------------------------------------------------
 
   sendFriendRequest(peerKey: string, nickname?: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.ensurePeer(peer, nickname);
-    if (record.blocked) throw new DmError('blocked', 'Desbloqueie o usuário antes de enviar o pedido.');
-    if (record.relation === 'friend' || record.relation === 'outgoing') return {};
-    if (record.relation === 'incoming') return this.acceptFriend(peer);
-    const requestId = newDmId();
-    const statement = this.signStatement('request', peer, requestId);
-    record.relation = 'outgoing';
-    record.requestId = requestId;
-    record.outgoingStatement = statement;
-    record.requestedAt = statement.p.ts;
-    record.relationUpdatedAt = statement.p.ts;
-    const item = this.queueStatement(record, statement);
-    this.changed();
-    return this.dispatchFor(peer, [item], this.syncItems([record]));
+    return this.friends.sendRequest(peerKey, nickname);
   }
 
   acceptFriend(peerKey: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.state.peers[peer];
-    if (!record || record.relation !== 'incoming' || !record.cert || !record.requestId) {
-      throw new DmError('not-found', 'Pedido de amizade não encontrado.');
-    }
-    const statement = this.signStatement('accept', peer, record.requestId);
-    record.relation = 'friend';
-    record.friendSince = statement.p.ts;
-    record.relationUpdatedAt = statement.p.ts;
-    record.outgoingStatement = null;
-    const item = this.queueStatement(record, statement);
-    this.meta(peer);
-    this.changed();
-    return this.dispatchFor(peer, [item], this.syncItems([record]));
+    return this.friends.accept(peerKey);
   }
 
   declineFriend(peerKey: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.state.peers[peer];
-    if (!record || record.relation !== 'incoming') return {};
-    record.relation = 'none';
-    record.requestId = null;
-    record.requestedAt = null;
-    record.relationUpdatedAt = this.stamp();
-    this.changed();
-    return { broadcast: this.syncItems([record]) };
+    return this.friends.decline(peerKey);
   }
 
   cancelFriendRequest(peerKey: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.state.peers[peer];
-    if (!record || record.relation !== 'outgoing' || !record.requestId) return {};
-    const statement = this.signStatement('cancel', peer, record.requestId);
-    this.state.outbox[peer] = this.outbox(peer).filter((entry) => !(entry.kind === 'friend' && entry.type === 'request'));
-    record.relation = 'none';
-    record.requestId = null;
-    record.requestedAt = null;
-    record.outgoingStatement = null;
-    record.relationUpdatedAt = statement.p.ts;
-    const item = this.queueStatement(record, statement);
-    this.changed();
-    return this.dispatchFor(peer, [item], this.syncItems([record]));
-  }
-
-  private dropPendingEnvelopes(peer: string): void {
-    const entries = this.state.outbox[peer] ?? [];
-    const failedIds = new Set(entries.filter((entry) => entry.kind === 'envelope' && entry.type === 'msg').map((entry) => entry.id));
-    this.state.outbox[peer] = entries.filter((entry) => entry.kind === 'friend');
-    if (failedIds.size === 0) return;
-    const changed: StoredMessage[] = [];
-    for (const message of this.conversation(peer).messages) {
-      if (failedIds.has(message.id) && message.delivery === 'pending') {
-        message.delivery = 'failed';
-        changed.push(message);
-      }
-    }
-    this.emitMessages(peer, changed);
+    return this.friends.cancel(peerKey);
   }
 
   removeFriend(peerKey: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.state.peers[peer];
-    if (!record || record.relation !== 'friend') return {};
-    const statement = this.signStatement('remove', peer, record.requestId ?? newDmId());
-    this.dropPendingEnvelopes(peer);
-    record.relation = 'none';
-    record.friendSince = null;
-    record.relationUpdatedAt = statement.p.ts;
-    const item = this.queueStatement(record, statement);
-    this.changed(peer);
-    return this.dispatchFor(peer, [item], this.syncItems([record]));
+    return this.friends.remove(peerKey);
   }
 
   block(peerKey: string, nickname?: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.ensurePeer(peer, nickname);
-    if (record.blocked) return {};
-    const items: DmRelayItem[] = [];
-    const now = this.stamp();
-    if (record.relation === 'friend') {
-      const statement = this.signStatement('remove', peer, record.requestId ?? newDmId());
-      this.dropPendingEnvelopes(peer);
-      items.push(this.queueStatement(record, statement));
-    } else if (record.relation === 'outgoing' && record.requestId) {
-      this.state.outbox[peer] = this.outbox(peer).filter((entry) => entry.type !== 'request');
-      items.push(this.queueStatement(record, this.signStatement('cancel', peer, record.requestId)));
-    }
-    if (record.relation !== 'none') {
-      record.relation = 'none';
-      record.requestId = null;
-      record.requestedAt = null;
-      record.friendSince = null;
-      record.outgoingStatement = null;
-      record.relationUpdatedAt = now;
-    }
-    record.blocked = true;
-    record.blockedUpdatedAt = now;
-    this.changed(peer);
-    return this.dispatchFor(peer, items, this.syncItems([record]));
+    return this.friends.block(peerKey, nickname);
   }
 
   unblock(peerKey: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.state.peers[peer];
-    if (!record || !record.blocked) return {};
-    record.blocked = false;
-    record.blockedUpdatedAt = this.stamp();
-    this.changed();
-    return { broadcast: this.syncItems([record]) };
+    return this.friends.unblock(peerKey);
   }
 
-  observePeer(observed: DmObservedPeer): void {
-    if (!isIdentityPublicKey(observed?.publicKey)) return;
-    const peer = normalizeIdentityKey(observed.publicKey);
-    const record = this.state.peers[peer];
-    if (!record) return;
-    let dirty = false;
-    // What the friend sent us beats what servers show.
-    if (observed.nickname !== undefined && !(record.profileAt && record.profileAt > 0)) {
-      const nickname = sanitizeNickname(observed.nickname, record.nickname);
-      if (nickname !== record.nickname) {
-        record.nickname = nickname;
-        dirty = true;
-      }
-    }
-    if (observed.avatar !== undefined && !record.profileAvatar) {
-      const avatar = sanitizeAvatar(observed.avatar);
-      if (avatar !== record.avatar) {
-        record.avatar = avatar;
-        dirty = true;
-      }
-    }
-    if (dirty) this.changed();
-  }
-
+  /** Settings of this device; friends learn the largest file it accepts from the hello that goes out now. */
   updateSettings(settings: Partial<DmSettings>): DmDispatch {
     if (settings.maxFileBytes !== undefined) {
-      this.state.settings.maxFileBytes = clampMaxFileBytes(settings.maxFileBytes, this.state.settings.maxFileBytes);
+      this.ledger.state.settings.maxFileBytes = clampMaxFileBytes(settings.maxFileBytes, this.ledger.state.settings.maxFileBytes);
     }
-    this.changed();
+    this.ledger.changed();
     return { broadcast: this.friendHellos() };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Profile
+  // ---------------------------------------------------------------------------
+
+  setSelfNickname(nickname: string): void {
+    this.ledger.setSelfNickname(nickname);
+  }
+
+  /**
+   * Merges what the renderer has locally. Fields win by their timestamp, so a
+   * value chosen on another device later is kept and handed back for the
+   * renderer to apply. Values without a timestamp (profiles saved before the
+   * sync existed) only fill an empty profile.
+   */
+  setSelfProfile(input: DmSelfProfileInput): DmSelfProfileResult {
+    return this.profile.setSelfProfile(input);
+  }
+
+  /** What a server shows of a peer: kept only where the friend did not send their own. */
+  observePeer(observed: DmObservedPeer): void {
+    this.profile.observePeer(observed);
   }
 
   // ---------------------------------------------------------------------------
@@ -1067,269 +184,53 @@ export class DmService {
   // ---------------------------------------------------------------------------
 
   openConversation(peerKey: string): void {
-    const peer = this.requirePeerKey(peerKey);
-    if (!this.state.peers[peer]) throw new DmError('not-found', 'Conversa não encontrada.');
-    this.meta(peer).hidden = false;
-    this.changed();
+    this.conversations.openConversation(peerKey);
   }
 
   closeConversation(peerKey: string): void {
-    const peer = this.requirePeerKey(peerKey);
-    const meta = this.state.conversations[peer];
-    if (!meta) return;
-    meta.hidden = true;
-    this.changed();
-  }
-
-  private insertMessage(peer: string, message: StoredMessage): boolean {
-    const conversation = this.conversation(peer);
-    if (conversation.messages.some((existing) => existing.id === message.id)) return false;
-    let index = conversation.messages.length;
-    // Equal timestamps only happen across authors; the id keeps every device in the same order.
-    while (
-      index > 0 &&
-      (conversation.messages[index - 1].createdAt > message.createdAt ||
-        (conversation.messages[index - 1].createdAt === message.createdAt && conversation.messages[index - 1].id > message.id))
-    ) {
-      index -= 1;
-    }
-    conversation.messages.splice(index, 0, message);
-    this.refreshMeta(peer);
-    return true;
-  }
-
-  private refreshMeta(peer: string): void {
-    const meta = this.meta(peer);
-    const messages = this.conversation(peer).messages;
-    const visible = messages.filter((message) => !message.deleted);
-    const last = visible[visible.length - 1];
-    meta.messageCount = visible.length;
-    meta.lastMessageAt = Math.max(meta.lastMessageAt, last?.createdAt ?? 0);
-    meta.lastMessagePreview = last ? previewOf(last) : '';
-    meta.lastMessageAuthor = last?.author ?? null;
-    meta.unread = visible.filter((message) => message.author !== this.me && message.createdAt > meta.lastReadAt).length;
-  }
-
-  private findMessage(peer: string, id: unknown): StoredMessage | null {
-    if (typeof id !== 'string') return null;
-    return this.conversation(peer).messages.find((message) => message.id === id) ?? null;
-  }
-
-  private isTombstoned(peer: string, id: string, author: string): boolean {
-    const tombstones = this.conversation(peer).tombstones;
-    return Array.isArray(tombstones) && tombstones.some((entry) => entry.id === id && entry.author === author);
-  }
-
-  private addTombstone(peer: string, id: string, author: string): void {
-    const conversation = this.conversation(peer);
-    if (!Array.isArray(conversation.tombstones)) conversation.tombstones = [];
-    if (this.isTombstoned(peer, id, author)) return;
-    conversation.tombstones.push({ id, author });
-    if (conversation.tombstones.length > MAX_TOMBSTONES) {
-      conversation.tombstones.splice(0, conversation.tombstones.length - MAX_TOMBSTONES);
-    }
-  }
-
-  /** Drops queued operations of `types` that target `messageId`; a queued `msg` is matched by its own id. */
-  private dropQueued(peer: string, messageId: string, types: readonly string[]): void {
-    this.state.outbox[peer] = this.outbox(peer).filter((entry) => {
-      if (!types.includes(entry.type)) return true;
-      const target = entry.type === 'msg' ? entry.id : isRecord(entry.body) ? entry.body.messageId : undefined;
-      return target !== messageId;
-    });
+    this.conversations.closeConversation(peerKey);
   }
 
   sendMessage(input: DmSendMessageInput): DmDispatch {
-    const record = this.requireFriend(input.peer);
-    const peer = record.publicKey;
-    const content = typeof input.content === 'string' ? input.content.replace(/\r\n/g, '\n').trim() : '';
-    const files = Array.isArray(input.files) ? input.files : [];
-    if (!content && files.length === 0) throw new DmError('empty-message', 'Mensagem vazia.');
-    if (content.length > DM_MAX_MESSAGE_LENGTH) {
-      throw new DmError('message-too-long', 'Mensagem muito longa.', { limit: DM_MAX_MESSAGE_LENGTH });
-    }
-    if (files.length > DM_MAX_ATTACHMENTS) {
-      throw new DmError('too-many-files', 'Arquivos demais.', { limit: DM_MAX_ATTACHMENTS });
-    }
-    for (const file of files) {
-      const size = file?.data?.byteLength ?? 0;
-      if (size > record.maxFileBytes) {
-        throw new DmError('file-too-large', 'Arquivo acima do limite do amigo.', {
-          limit: record.maxFileBytes,
-          nickname: record.nickname,
-          name: file?.name ?? '',
-        });
-      }
-    }
-    const replyTo = input.replyTo && this.findMessage(peer, input.replyTo) ? input.replyTo : null;
-    const forwarded = sanitizeDmForward(input.forwarded);
-    const attachments: StoredAttachment[] = files.map((file) => {
-      const data = Buffer.from(file.data);
-      const meta = sanitizeAttachmentMeta({
-        fileId: newDmId(),
-        name: file.name,
-        size: data.length,
-        mime: file.mime,
-        sha256: createHash('sha256').update(data).digest('hex'),
-      })!;
-      this.store.writeAttachment(meta.fileId, data);
-      return { ...meta, state: 'local', receivedBytes: meta.size };
-    });
-    const id = newDmId();
-    const ts = this.stamp();
-    const message: StoredMessage = {
-      id,
-      author: this.me,
-      content,
-      createdAt: ts,
-      editedAt: null,
-      deleted: false,
-      replyTo,
-      reactions: {},
-      attachments,
-      delivery: 'pending',
-      forwarded,
-    };
-    const meta = this.meta(peer);
-    meta.hidden = false;
-    this.insertMessage(peer, message);
-    meta.lastReadAt = Math.max(meta.lastReadAt, ts);
-    this.refreshMeta(peer);
-    const body = {
-      content,
-      replyTo,
-      attachments: attachments.map(({ fileId, name, size, mime, sha256 }) => ({ fileId, name, size, mime, sha256 })),
-      // Optional so the body of a plain message stays as older clients expect; they ignore the field.
-      ...(forwarded ? { forwarded } : {}),
-    };
-    const item = this.queueEnvelope(record, 'msg', body, id, ts);
-    this.changed(peer);
-    this.emitMessages(peer, [message]);
-    return this.dispatchFor(peer, [item], [this.selfCopy(peer, 'msg', id, ts, body)]);
+    return this.conversations.sendMessage(input);
   }
 
-  editMessage(peerKey: string, messageId: string, contentInput: string): DmDispatch {
-    const record = this.requireFriend(peerKey);
-    const peer = record.publicKey;
-    const message = this.findMessage(peer, messageId);
-    if (!message || message.author !== this.me || message.deleted) throw new DmError('not-found', 'Mensagem não encontrada.');
-    const content = typeof contentInput === 'string' ? contentInput.replace(/\r\n/g, '\n').trim() : '';
-    if (!content && message.attachments.length === 0) throw new DmError('empty-message', 'Mensagem vazia.');
-    if (content.length > DM_MAX_MESSAGE_LENGTH) {
-      throw new DmError('message-too-long', 'Mensagem muito longa.', { limit: DM_MAX_MESSAGE_LENGTH });
-    }
-    if (content === message.content) return {};
-    // Newer than every edit of it this device has seen, so it wins on every device even when clocks disagree.
-    const editedAt = Math.max(this.stamp(), contentClock(message) + 1);
-    this.observeStamp(editedAt);
-    message.content = content;
-    message.editedAt = editedAt;
-    message.contentAt = editedAt;
-    this.refreshMeta(peer);
-    const body = { messageId, content, editedAt };
-    const items: Array<DmRelayItem | null> = [];
-    const pendingMessage = this.outbox(peer).find((entry) => entry.id === messageId && entry.type === 'msg');
-    if (pendingMessage && isRecord(pendingMessage.body)) {
-      // A copy not confirmed yet carries the new text and its clock, so whoever gets it from now on sees the
-      // final version, and an older edit still on its way cannot replace it. Older versions ignore the clock.
-      pendingMessage.body = { ...pendingMessage.body, content, contentAt: editedAt };
-      items.push(this.outboxItem(record, pendingMessage));
-    }
-    // "Pending" only means no ack came back: the friend may already have the old text, so the edit always
-    // goes out too. Only the newest edit matters (last writer wins), so older queued ones are dropped.
-    this.dropQueued(peer, messageId, ['edit']);
-    items.push(this.queueEnvelope(record, 'edit', body));
-    this.changed(peer);
-    this.emitMessages(peer, [message]);
-    return this.dispatchFor(peer, items, [this.selfCopy(peer, 'edit', newDmId(), editedAt, body)]);
-  }
-
-  private markDeleted(message: StoredMessage): void {
-    message.deleted = true;
-    message.content = '';
-    for (const file of message.attachments) {
-      this.store.deleteAttachment(file.fileId);
-      this.fileCache.delete(file.fileId);
-      this.forgetDownload(file.fileId);
-    }
-    message.attachments = [];
-    message.reactions = {};
-    message.forwarded = null;
+  editMessage(peerKey: string, messageId: string, content: string): DmDispatch {
+    return this.conversations.editMessage(peerKey, messageId, content);
   }
 
   deleteMessage(peerKey: string, messageId: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.state.peers[peer];
-    const message = this.findMessage(peer, messageId);
-    if (!record || !message || message.deleted) throw new DmError('not-found', 'Mensagem não encontrada.');
-    if (message.author !== this.me) throw new DmError('forbidden', 'Só é possível apagar as próprias mensagens.');
-    this.markDeleted(message);
-    this.refreshMeta(peer);
-    const body = { messageId };
-    const items: Array<DmRelayItem | null> = [];
-    // A copy still queued never reaches anyone new, and neither do edits of it. But "pending" only means no
-    // ack came back: the friend may have the message already, so the delete always goes out.
-    this.dropQueued(peer, messageId, ['msg', 'edit', 'react', 'delete']);
-    if (record.relation === 'friend' && !record.blocked && record.cert) {
-      items.push(this.queueEnvelope(record, 'delete', body));
-    }
-    this.changed(peer);
-    this.emitMessages(peer, [message]);
-    return this.dispatchFor(peer, items, [this.selfCopy(peer, 'delete', newDmId(), this.stamp(), body)]);
+    return this.conversations.deleteMessage(peerKey, messageId);
   }
 
-  private applyReaction(message: StoredMessage, user: string, emoji: string, on: boolean, ts: number): boolean {
-    const users = (message.reactions[emoji] ??= {});
-    const current = users[user];
-    if (current && current.ts >= ts) return false;
-    users[user] = { on, ts };
-    return true;
-  }
-
-  react(peerKey: string, messageId: string, emojiInput: string, add: boolean): DmDispatch {
-    const record = this.requireFriend(peerKey);
-    const peer = record.publicKey;
-    const message = this.findMessage(peer, messageId);
-    if (!message || message.deleted) throw new DmError('not-found', 'Mensagem não encontrada.');
-    const emoji = typeof emojiInput === 'string' ? emojiInput.trim().slice(0, MAX_EMOJI_LENGTH) : '';
-    if (!emoji) throw new DmError('empty-message', 'Reação inválida.');
-    const ts = this.stamp();
-    this.applyReaction(message, this.me, emoji, add !== false, ts);
-    const body = { messageId, emoji, add: add !== false, at: ts };
-    const item = this.queueEnvelope(record, 'react', body);
-    this.changed(peer);
-    this.emitMessages(peer, [message]);
-    return this.dispatchFor(peer, [item], [this.selfCopy(peer, 'react', newDmId(), ts, body)]);
+  react(peerKey: string, messageId: string, emoji: string, add: boolean): DmDispatch {
+    return this.conversations.react(peerKey, messageId, emoji, add);
   }
 
   markRead(peerKey: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const meta = this.state.conversations[peer];
-    if (!meta) return {};
-    const lastIncoming = [...this.conversation(peer).messages]
-      .reverse()
-      .find((message) => message.author !== this.me && !message.deleted);
-    const readAt = Math.max(meta.lastReadAt, lastIncoming?.createdAt ?? 0);
-    if (meta.unread === 0 && readAt === meta.lastReadAt) return {};
-    const advanced = readAt > meta.lastReadAt;
-    meta.lastReadAt = readAt;
-    meta.unread = 0;
-    this.changed();
-    if (!advanced) return {};
-    const body = { readAt };
-    const broadcast = [this.selfCopy(peer, 'read', newDmId(), this.stamp(), body)];
-    const record = this.state.peers[peer];
-    if (!record || record.relation !== 'friend' || record.blocked || !record.cert) {
-      return { broadcast };
-    }
-    this.state.outbox[peer] = this.outbox(peer).filter((entry) => entry.type !== 'read');
-    const item = this.queueEnvelope(record, 'read', body);
-    return this.dispatchFor(peer, [item], broadcast);
+    return this.conversations.markRead(peerKey);
   }
 
   typing(peerKey: string): DmDispatch {
-    const record = this.requireFriend(peerKey);
-    return this.dispatchFor(record.publicKey, [this.envelopeItem(record, 'typing', {})]);
+    return this.conversations.typing(peerKey);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Files
+  // ---------------------------------------------------------------------------
+
+  retryAttachment(peerKey: string, messageId: string, fileId: string): DmDispatch {
+    const peer = this.ledger.requirePeerKey(peerKey);
+    return this.files.retry(peer, messageId, fileId) ? this.outgoing([peer], true) : {};
+  }
+
+  readAttachment(peerKey: string, messageId: string, fileId: string): { name: string; mime: string; data: Buffer } {
+    return this.files.readAttachment(peerKey, messageId, fileId);
+  }
+
+  /** Decrypts a ready/local attachment into `destination` (absolute path), creating or overwriting it. */
+  writeAttachmentTo(peerKey: string, messageId: string, fileId: string, destination: string): Promise<void> {
+    return this.files.writeAttachmentTo(peerKey, messageId, fileId, destination);
   }
 
   // ---------------------------------------------------------------------------
@@ -1343,654 +244,88 @@ export class DmService {
    * that only need the sync.
    */
   hello(toFriends: boolean, announce = true): DmDispatch {
-    const broadcast = this.syncItems();
-    if (announce) {
-      // Other devices of this identity answer with what they have that this one lacks.
-      broadcast.push(this.selfItem('hello-self', { device: this.device, reply: false, prof: this.profileSummary() }, 'signal'));
-      broadcast.push(...this.digestItems(false, null));
-    }
+    const broadcast = this.friends.syncItems();
+    // Other devices of this identity answer with what they have that this one lacks.
+    if (announce) broadcast.push(...this.sync.helloItems());
     if (toFriends) broadcast.push(...this.friendHellos());
     return { broadcast };
   }
 
+  /** Hello for one friend that just became reachable. */
+  helloTo(peerKey: string): DmDispatch {
+    const peer = this.ledger.requirePeerKey(peerKey);
+    const record = this.ledger.state.peers[peer];
+    if (!record || record.relation !== 'friend' || record.blocked || !record.cert) return {};
+    return dispatchFor(peer, [this.outbox.envelopeItem(record, 'hello', this.friendHelloBody(false))]);
+  }
+
   private friendHellos(): DmRelayItem[] {
     const items: DmRelayItem[] = [];
-    for (const record of Object.values(this.state.peers)) {
+    for (const record of Object.values(this.ledger.state.peers)) {
       if (record.relation !== 'friend' || record.blocked || !record.cert) continue;
-      items.push(this.envelopeItem(record, 'hello', this.friendHelloBody(false)));
+      items.push(this.outbox.envelopeItem(record, 'hello', this.friendHelloBody(false)));
     }
     return items;
   }
 
   private friendHelloBody(reply: boolean): Record<string, unknown> {
-    const body: Record<string, unknown> = { reply, maxFileBytes: this.state.settings.maxFileBytes };
-    const profile = this.friendProfileBody();
-    if (profile.at > 0) body.prof = { at: profile.at, h: profileHash(profile.nickname, profile.avatar) };
+    const body: Record<string, unknown> = { reply, maxFileBytes: this.ledger.state.settings.maxFileBytes };
+    const prof = this.profile.helloSummary();
+    if (prof) body.prof = prof;
     return body;
-  }
-
-  /** Hello for one friend that just became reachable. */
-  helloTo(peerKey: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const record = this.state.peers[peer];
-    if (!record || record.relation !== 'friend' || record.blocked || !record.cert) return {};
-    return this.dispatchFor(peer, [this.envelopeItem(record, 'hello', this.friendHelloBody(false))]);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Profile (nickname + avatar that travel with the identity)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Merges what the renderer has locally. Fields win by their timestamp, so a
-   * value chosen on another device later is kept and handed back for the
-   * renderer to apply. Values without a timestamp (profiles saved before the
-   * sync existed) only fill an empty profile.
-   */
-  setSelfProfile(input: DmSelfProfileInput): DmSelfProfileResult {
-    const changed = this.mergeOwnProfile(input, 1);
-    if (changed) this.saveState();
-    return { profile: { ...this.state.profile }, dispatch: changed ? this.profileDispatch() : {} };
-  }
-
-  private mergeOwnProfile(input: DmSelfProfileInput, minimumAt: number): boolean {
-    const profile = this.state.profile;
-    const limit = this.now() + MAX_CLOCK_SKEW_MS;
-    const stamp = (at: unknown): number =>
-      typeof at === 'number' && Number.isFinite(at) && at > 0 ? Math.min(at, limit) : 0;
-    let changed = false;
-    if (input.nickname !== undefined) {
-      const nickname = sanitizeNickname(input.nickname, '');
-      const at = nickname ? Math.max(stamp(input.nicknameAt), minimumAt) : 0;
-      if (nickname && profileFieldWins(at, nickname, profile.nicknameAt, profile.nickname)) {
-        profile.nickname = nickname;
-        profile.nicknameAt = at;
-        changed = true;
-      }
-    }
-    if (input.avatar !== undefined) {
-      const avatar = input.avatar === null ? null : sanitizeProfileAvatar(input.avatar);
-      // A picture that does not fit is ignored rather than read as "no picture".
-      if (input.avatar === null || avatar !== null) {
-        const at = avatar ? Math.max(stamp(input.avatarAt), minimumAt) : stamp(input.avatarAt);
-        if (profileFieldWins(at, avatar ?? '', profile.avatarAt, profile.avatar ?? '')) {
-          profile.avatar = avatar;
-          profile.avatarAt = at;
-          changed = true;
-        }
-      }
-    }
-    if (changed) this.observeStamp(Math.max(profile.nicknameAt, profile.avatarAt));
-    return changed;
-  }
-
-  private profileSummary(): Record<string, unknown> {
-    const profile = this.state.profile;
-    return {
-      n: profile.nickname,
-      na: profile.nicknameAt,
-      aa: profile.avatarAt,
-      ah: profileHash('', profile.avatar),
-    };
-  }
-
-  private selfProfileItem(): DmRelayItem {
-    return this.selfItem('profile', { ...this.state.profile }, 'file');
-  }
-
-  private friendProfileBody(): { nickname: string; avatar: string | null; at: number } {
-    const profile = this.state.profile;
-    return {
-      nickname: this.myNickname(),
-      avatar: profile.avatar,
-      at: Math.max(profile.nicknameAt, profile.avatarAt),
-    };
-  }
-
-  /** New profile: own devices get it now; friends now if reachable, otherwise on their next hello. */
-  private profileDispatch(): DmDispatch {
-    const peers: Record<string, DmRelayItem[]> = {};
-    const body = this.friendProfileBody();
-    if (body.at > 0) {
-      for (const record of Object.values(this.state.peers)) {
-        if (record.relation !== 'friend' || record.blocked || !record.cert) continue;
-        peers[record.publicKey] = [this.envelopeItem(record, 'profile', body, 'file')];
-      }
-    }
-    const dispatch: DmDispatch = { broadcast: [this.selfProfileItem()] };
-    if (Object.keys(peers).length > 0) dispatch.peers = peers;
-    return dispatch;
-  }
-
-  private applyFriendProfile(record: PeerRecord, data: Record<string, unknown>): void {
-    const at = typeof data.at === 'number' && Number.isFinite(data.at) ? Math.min(data.at, this.now() + MAX_CLOCK_SKEW_MS) : 0;
-    if (at <= 0 || at <= (record.profileAt ?? 0)) return;
-    const rawNickname = typeof data.nickname === 'string' ? data.nickname : '';
-    const rawAvatar = typeof data.avatar === 'string' ? data.avatar : null;
-    record.nickname = sanitizeNickname(rawNickname, record.nickname);
-    const avatar = sanitizeProfileAvatar(rawAvatar);
-    if (avatar) {
-      record.avatar = avatar;
-      record.profileAvatar = true;
-    } else if (record.profileAvatar) {
-      // They removed the picture: let what servers show fill it again.
-      record.avatar = null;
-      record.profileAvatar = false;
-    }
-    record.profileAt = at;
-    record.profileHash = profileHash(rawNickname, rawAvatar);
-    this.changed();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Own-device sync (friends, history, read markers)
-  // ---------------------------------------------------------------------------
-
-  /** Per-day fingerprints of a conversation, cached until it changes. */
-  private dayBuckets(peer: string): Map<number, string> {
-    const cached = this.dayBucketCache.get(peer);
-    if (cached) return cached;
-    const hashes = new Map<number, ReturnType<typeof createHash>>();
-    for (const message of this.conversation(peer).messages) {
-      const day = Math.floor(message.createdAt / DAY_MS);
-      let hash = hashes.get(day);
-      if (!hash) {
-        hash = createHash('sha256');
-        hashes.set(day, hash);
-      }
-      hash.update(messageFingerprint(message));
-    }
-    const buckets = new Map<number, string>();
-    for (const [day, hash] of hashes) buckets.set(day, hash.digest('hex').slice(0, 12));
-    this.dayBucketCache.set(peer, buckets);
-    return buckets;
-  }
-
-  /**
-   * Summary of friends and history, split in sealed parts. Another own device
-   * answers with the friends and days of history this one is missing.
-   */
-  private digestItems(cont: boolean, forDevice: string | null): DmRelayItem[] {
-    const seq = newDmId();
-    const peers = Object.values(this.state.peers)
-      .filter((record) => record.relationUpdatedAt > 0 || record.blockedUpdatedAt > 0)
-      .map((record) => [record.publicKey, record.relationUpdatedAt, record.blockedUpdatedAt]);
-    const convs: DigestConversation[] = [];
-    for (const [peer, meta] of Object.entries(this.state.conversations)) {
-      if (!this.state.peers[peer]) continue;
-      const days = [...this.dayBuckets(peer)].sort((a, b) => b[0] - a[0]);
-      if (days.length === 0 && meta.lastReadAt === 0 && meta.peerReadAt === 0) continue;
-      const kept = days.slice(0, MAX_DIGEST_DAYS);
-      convs.push({
-        p: peer,
-        lr: meta.lastReadAt,
-        pr: meta.peerReadAt,
-        from: kept.length < days.length ? kept[kept.length - 1][0] : 0,
-        b: kept.map(([day, hash]) => `${day}:${hash}`).join(','),
-      });
-    }
-    const parts: Array<{ peers: unknown[]; convs: DigestConversation[] }> = [];
-    let current = { peers: [] as unknown[], convs: [] as DigestConversation[] };
-    let size = 0;
-    const add = (kind: 'peers' | 'convs', entry: unknown) => {
-      const length = utf8Length(JSON.stringify(entry)) + 1;
-      if (size + length > MAX_SEALED_ITEM_BYTES - 400 && size > 0) {
-        parts.push(current);
-        current = { peers: [], convs: [] };
-        size = 0;
-      }
-      (current[kind] as unknown[]).push(entry);
-      size += length;
-    };
-    for (const entry of peers) add('peers', entry);
-    for (const entry of convs) add('convs', entry);
-    parts.push(current);
-    const total = Math.min(parts.length, MAX_DIGEST_PARTS);
-    return parts.slice(0, total).map((part, index) =>
-      this.selfItem('digest', {
-        device: this.device,
-        seq,
-        part: index,
-        parts: total,
-        cont,
-        for: forDevice,
-        peers: part.peers,
-        convs: part.convs,
-      }, 'signal'));
-  }
-
-  private receiveSelfHello(data: Record<string, unknown>): DmDispatch {
-    const device = typeof data.device === 'string' && isDmId(data.device) ? data.device : null;
-    if (!device || device === this.device) return {};
-    const reply: DmRelayItem[] = [];
-    if (data.reply !== true) {
-      reply.push(this.selfItem('hello-self', { device: this.device, reply: true, prof: this.profileSummary() }, 'signal'));
-      reply.push(...this.digestItems(false, null));
-    }
-    const prof = isRecord(data.prof) ? data.prof : {};
-    const theirNicknameAt = typeof prof.na === 'number' ? prof.na : 0;
-    const theirAvatarAt = typeof prof.aa === 'number' ? prof.aa : 0;
-    if (typeof prof.n === 'string' && this.mergeOwnProfile({ nickname: prof.n, nicknameAt: theirNicknameAt }, 0)) {
-      this.saveState();
-      this.onEvent({ type: 'self-profile', profile: { ...this.state.profile } });
-    }
-    const mine = this.state.profile;
-    const theirAvatarHash = typeof prof.ah === 'string' ? prof.ah : '';
-    const avatarBehind = mine.avatarAt > theirAvatarAt
-      || (mine.avatarAt === theirAvatarAt && mine.avatarAt > 0 && theirAvatarHash !== profileHash('', mine.avatar));
-    if (avatarBehind || mine.nicknameAt > theirNicknameAt) {
-      const key = `${mine.nicknameAt}:${mine.avatarAt}`;
-      const now = this.now();
-      const last = this.profileSentTo.get(device);
-      if (!last || last.key !== key || now - last.at >= SELF_REPEAT_WINDOW_MS) {
-        this.profileSentTo.set(device, { key, at: now });
-        reply.push(this.selfProfileItem());
-      }
-    }
-    return reply.length > 0 ? { reply } : {};
-  }
-
-  private receiveSelfProfile(data: Record<string, unknown>): DmDispatch {
-    const changed = this.mergeOwnProfile({
-      nickname: typeof data.nickname === 'string' ? data.nickname : undefined,
-      nicknameAt: typeof data.nicknameAt === 'number' ? data.nicknameAt : 0,
-      avatar: typeof data.avatar === 'string' || data.avatar === null ? data.avatar : undefined,
-      avatarAt: typeof data.avatarAt === 'number' ? data.avatarAt : 0,
-    }, 0);
-    if (changed) {
-      this.saveState();
-      this.scheduleSnapshot();
-      this.onEvent({ type: 'self-profile', profile: { ...this.state.profile } });
-    }
-    return {};
-  }
-
-  private receiveDigest(data: Record<string, unknown>): DmDispatch {
-    const device = typeof data.device === 'string' && isDmId(data.device) ? data.device : null;
-    if (!device || device === this.device || !isDmId(data.seq)) return {};
-    if (typeof data.for === 'string' && data.for !== this.device) return {};
-    const parts = typeof data.parts === 'number' && Number.isSafeInteger(data.parts) ? data.parts : 0;
-    const part = typeof data.part === 'number' && Number.isSafeInteger(data.part) ? data.part : -1;
-    if (parts < 1 || parts > MAX_DIGEST_PARTS || part < 0 || part >= parts) return {};
-    const now = this.now();
-    for (const [key, pending] of this.pendingDigests) {
-      if (now - pending.at > PENDING_DIGEST_TTL_MS) this.pendingDigests.delete(key);
-    }
-    const key = `${device}:${data.seq}`;
-    let pending = this.pendingDigests.get(key);
-    if (!pending) {
-      pending = { parts: new Array(parts).fill(undefined), received: 0, at: now };
-      this.pendingDigests.set(key, pending);
-    }
-    // A digest arrives once per shared server; the copies after the first are ignored.
-    if (pending.received < 0 || pending.parts.length !== parts || pending.parts[part]) return {};
-    pending.parts[part] = data;
-    pending.received += 1;
-    if (pending.received < parts) return {};
-    const complete = pending.parts;
-    pending.parts = [];
-    pending.received = -1;
-
-    const cont = data.cont === true;
-    let repeat = false;
-    if (cont) {
-      const rounds = (this.digestRounds.get(device) ?? 0) + 1;
-      if (rounds > MAX_HISTORY_ROUNDS) return {};
-      this.digestRounds.set(device, rounds);
-    } else {
-      // The same state seen again shortly after (another shared server) only gets what changed since.
-      const hash = createHash('sha256')
-        .update(JSON.stringify(complete.map((body) => [body?.peers, body?.convs])))
-        .digest('hex');
-      const last = this.lastDigest.get(device);
-      repeat = !!last && last.hash === hash && now - last.at < SELF_REPEAT_WINDOW_MS;
-      if (!repeat) {
-        this.lastDigest.set(device, { hash, at: now });
-        this.digestRounds.set(device, 0);
-        this.pushedDays.set(device, new Set());
-      }
-    }
-
-    const theirPeers = new Map<string, { relationAt: number; blockedAt: number }>();
-    const convs: DigestConversation[] = [];
-    for (const body of complete) {
-      for (const entry of Array.isArray(body?.peers) ? body.peers : []) {
-        if (!Array.isArray(entry) || !isIdentityPublicKey(entry[0])) continue;
-        theirPeers.set(normalizeIdentityKey(entry[0]), {
-          relationAt: typeof entry[1] === 'number' ? entry[1] : 0,
-          blockedAt: typeof entry[2] === 'number' ? entry[2] : 0,
-        });
-      }
-      for (const entry of Array.isArray(body?.convs) ? body.convs : []) {
-        if (!isRecord(entry) || !isIdentityPublicKey(entry.p)) continue;
-        const peer = normalizeIdentityKey(entry.p);
-        if (peer === this.me) continue;
-        convs.push({
-          p: peer,
-          lr: typeof entry.lr === 'number' ? entry.lr : 0,
-          pr: typeof entry.pr === 'number' ? entry.pr : 0,
-          from: typeof entry.from === 'number' ? entry.from : 0,
-          b: typeof entry.b === 'string' ? entry.b : '',
-        });
-      }
-    }
-
-    const reply: DmRelayItem[] = [];
-    if (!cont && !repeat) {
-      // The friend sync in their hello only says what they have; here we learn what they lack.
-      const behind = Object.values(this.state.peers).some((record) => {
-        if (record.relationUpdatedAt <= 0 && record.blockedUpdatedAt <= 0) return false;
-        const theirs = theirPeers.get(record.publicKey);
-        return !theirs || theirs.relationAt < record.relationUpdatedAt || theirs.blockedAt < record.blockedUpdatedAt;
-      });
-      if (behind) reply.push(...this.syncItems());
-    }
-    if (!cont) this.applyReadMarkers(convs);
-    reply.push(...this.historyFor(device, convs));
-    return reply.length > 0 ? { reply } : {};
-  }
-
-  private applyReadMarkers(convs: DigestConversation[]): void {
-    const limit = this.now() + MAX_CLOCK_SKEW_MS;
-    let dirty = false;
-    for (const conv of convs) {
-      if (!this.state.peers[conv.p]) continue;
-      const meta = this.meta(conv.p);
-      const lastReadAt = Math.min(conv.lr, limit);
-      const peerReadAt = Math.min(conv.pr, limit);
-      if (lastReadAt > meta.lastReadAt) {
-        meta.lastReadAt = lastReadAt;
-        this.refreshMeta(conv.p);
-        dirty = true;
-      }
-      if (peerReadAt > meta.peerReadAt) {
-        meta.peerReadAt = peerReadAt;
-        dirty = true;
-      }
-    }
-    if (dirty) this.changed();
-  }
-
-  /** Days of history the other device lacks or holds differently, newest first, within one response budget. */
-  private historyFor(device: string, convs: DigestConversation[]): DmRelayItem[] {
-    const pushed = this.pushedDays.get(device) ?? new Set<string>();
-    this.pushedDays.set(device, pushed);
-    const remote = new Map(convs.map((conv) => [conv.p, conv]));
-    const peers = Object.keys(this.state.conversations)
-      .filter((peer) => !!this.state.peers[peer])
-      .sort((a, b) => (this.state.conversations[b]?.lastMessageAt ?? 0) - (this.state.conversations[a]?.lastMessageAt ?? 0));
-    const bodies: Array<Record<string, unknown>> = [];
-    let total = 0;
-    let more = false;
-    outer: for (const peer of peers) {
-      const local = this.dayBuckets(peer);
-      if (local.size === 0) continue;
-      const theirs = remote.get(peer);
-      const theirBuckets = new Map<number, string>();
-      for (const pair of (theirs?.b ?? '').split(',')) {
-        const [day, hash] = pair.split(':');
-        if (day && hash) theirBuckets.set(Number(day), hash);
-      }
-      const from = theirs?.from ?? 0;
-      const days = [...local.keys()]
-        .filter((day) => day >= from && theirBuckets.get(day) !== local.get(day) && !pushed.has(`${peer}:${day}:${local.get(day)}`))
-        .sort((a, b) => b - a);
-      if (days.length === 0) continue;
-      const byDay = new Map<number, StoredMessage[]>();
-      for (const message of this.conversation(peer).messages) {
-        const day = Math.floor(message.createdAt / DAY_MS);
-        const list = byDay.get(day);
-        if (list) list.push(message);
-        else byDay.set(day, [message]);
-      }
-      const nickname = this.state.peers[peer]?.nickname ?? '';
-      let batch: unknown[] = [];
-      let batchSize = 0;
-      const flush = () => {
-        if (batch.length === 0) return;
-        bodies.push({ peer, nickname, from: this.device, for: device, msgs: batch });
-        total += batchSize;
-        batch = [];
-        batchSize = 0;
-      };
-      for (const day of days) {
-        if (total + batchSize >= MAX_HISTORY_RESPONSE_BYTES) {
-          more = true;
-          flush();
-          break outer;
-        }
-        pushed.add(`${peer}:${day}:${local.get(day)}`);
-        for (const message of byDay.get(day) ?? []) {
-          const wire = {
-            id: message.id,
-            author: message.author,
-            content: message.content,
-            createdAt: message.createdAt,
-            editedAt: message.editedAt,
-            // Only when it differs from editedAt, which is what the receiver assumes otherwise.
-            ...(message.contentAt !== undefined && message.contentAt !== message.editedAt ? { contentAt: message.contentAt } : {}),
-            deleted: message.deleted,
-            replyTo: message.replyTo,
-            reactions: message.reactions,
-            attachments: message.attachments.map(({ fileId, name, size, mime, sha256 }) => ({ fileId, name, size, mime, sha256 })),
-            ...(message.forwarded ? { forwarded: message.forwarded } : {}),
-          };
-          const length = utf8Length(JSON.stringify(wire)) + 1;
-          if (length > MAX_SEALED_ITEM_BYTES - 2_000) continue;
-          if (batchSize + length > MAX_SEALED_ITEM_BYTES - 2_000) flush();
-          batch.push(wire);
-          batchSize += length;
-        }
-      }
-      flush();
-    }
-    // The last part asks for another digest so the rest follows in the next round.
-    if (more && bodies.length > 0) bodies[bodies.length - 1].more = true;
-    return bodies.map((body) => this.selfItem('hist', body, 'signal'));
-  }
-
-  /** Merges history another own device sent: union of messages, deletes win, edits and reactions by timestamp. */
-  private receiveHistory(data: Record<string, unknown>): DmDispatch {
-    if (!isIdentityPublicKey(data.peer) || !Array.isArray(data.msgs)) return {};
-    const peer = normalizeIdentityKey(data.peer);
-    if (peer === this.me) return {};
-    if (!this.state.peers[peer]) this.ensurePeer(peer, typeof data.nickname === 'string' ? data.nickname : undefined);
-    const limit = this.now() + MAX_CLOCK_SKEW_MS;
-    const meta = this.meta(peer);
-    const changedMessages: StoredMessage[] = [];
-    let inserted = false;
-    for (const raw of data.msgs.slice(0, 2000)) {
-      if (!isRecord(raw) || !isDmId(raw.id) || !isIdentityPublicKey(raw.author)) continue;
-      const author = normalizeIdentityKey(raw.author);
-      if (author !== this.me && author !== peer) continue;
-      const createdAt = typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt) ? Math.min(raw.createdAt, limit) : 0;
-      const editedAt = typeof raw.editedAt === 'number' && Number.isFinite(raw.editedAt) ? Math.min(raw.editedAt, limit) : null;
-      // Devices before #490 send no text clock; for them it is the edit time.
-      const contentAt = typeof raw.contentAt === 'number' && Number.isFinite(raw.contentAt) ? Math.min(raw.contentAt, limit) : editedAt;
-      // A delete that reached this device before the message itself also holds for copies from other devices.
-      const deleted = raw.deleted === true || this.isTombstoned(peer, raw.id, author);
-      const content = typeof raw.content === 'string' ? raw.content.slice(0, DM_MAX_MESSAGE_LENGTH) : '';
-      const reactions: StoredReactions = {};
-      if (isRecord(raw.reactions)) {
-        for (const [emojiRaw, users] of Object.entries(raw.reactions).slice(0, 200)) {
-          const emoji = emojiRaw.trim().slice(0, MAX_EMOJI_LENGTH);
-          if (!emoji || !isRecord(users)) continue;
-          for (const [userRaw, value] of Object.entries(users)) {
-            if (!isIdentityPublicKey(userRaw) || !isRecord(value) || typeof value.ts !== 'number') continue;
-            const user = normalizeIdentityKey(userRaw);
-            if (user !== this.me && user !== peer) continue;
-            (reactions[emoji] ??= {})[user] = { on: value.on === true, ts: Math.min(value.ts, limit) };
-          }
-        }
-      }
-      const existing = this.findMessage(peer, raw.id);
-      if (!existing) {
-        const attachments = deleted
-          ? []
-          : (Array.isArray(raw.attachments) ? raw.attachments.slice(0, DM_MAX_ATTACHMENTS) : [])
-              .map((entry) => sanitizeAttachmentMeta(entry))
-              .filter((entry): entry is AttachmentMeta => !!entry)
-              .map<StoredAttachment>((file) => {
-                const local = this.store.hasAttachment(file.fileId);
-                const state: DmAttachmentState = local ? (author === this.me ? 'local' : 'ready') : 'unavailable';
-                return { ...file, state, receivedBytes: local ? file.size : 0 };
-              });
-        if (!deleted && !content && attachments.length === 0) continue;
-        const message: StoredMessage = {
-          id: raw.id,
-          author,
-          content: deleted ? '' : content,
-          createdAt,
-          editedAt: deleted ? null : editedAt,
-          contentAt: deleted || contentAt === null ? undefined : contentAt,
-          deleted,
-          replyTo: isDmId(raw.replyTo) ? raw.replyTo : null,
-          reactions: deleted ? {} : reactions,
-          attachments,
-          delivery: author === this.me ? 'delivered' : null,
-          forwarded: deleted ? null : sanitizeDmForward(raw.forwarded),
-        };
-        if (!this.insertMessage(peer, message)) continue;
-        this.observeStamp(Math.max(createdAt, message.contentAt ?? 0));
-        if (author === this.me) meta.lastReadAt = Math.max(meta.lastReadAt, createdAt);
-        changedMessages.push(message);
-        inserted = true;
-        continue;
-      }
-      if (existing.author !== author) continue;
-      let dirty = false;
-      if (deleted && !existing.deleted) {
-        this.markDeleted(existing);
-        dirty = true;
-      } else if (!existing.deleted && !deleted) {
-        // The text follows its own clock and the "edited" mark keeps the newest either device has, so every
-        // device ends with the same of both whatever order the edits reached them in.
-        if (contentAt !== null && contentWins(contentAt, content, existing)) {
-          existing.content = content;
-          existing.contentAt = contentAt;
-          this.observeStamp(contentAt);
-          dirty = true;
-        }
-        if (editedAt !== null && (existing.editedAt === null || editedAt > existing.editedAt)) {
-          existing.editedAt = editedAt;
-          dirty = true;
-        }
-      }
-      if (!existing.deleted) {
-        for (const [emoji, users] of Object.entries(reactions)) {
-          for (const [user, value] of Object.entries(users)) {
-            if (this.applyReaction(existing, user, emoji, value.on, value.ts)) dirty = true;
-          }
-        }
-      }
-      if (dirty) changedMessages.push(existing);
-    }
-    if (changedMessages.length > 0) {
-      if (inserted) meta.hidden = false;
-      this.refreshMeta(peer);
-      this.changed(peer);
-      this.emitMessages(peer, changedMessages);
-    }
-    if (data.more === true && typeof data.from === 'string' && isDmId(data.from) && data.for === this.device) {
-      return { reply: this.digestItems(true, data.from) };
-    }
-    return {};
   }
 
   /**
    * Outbox items (and stalled download requests) for peers that are reachable
-   * right now. Without `force`, items sent less than {@link RESEND_AFTER_MS}
-   * ago are skipped. The outbox goes through one server; download requests
+   * right now. Without `force`, items sent in the last 20 s are skipped (see
+   * {@link DmOutbox.due}). The outbox goes through one server; download requests
    * go through every server where the peer is, because only the device that
    * sent a file has it and a server only reaches the devices connected to it.
    */
   outgoing(peerKeys: string[], force = false): DmDispatch {
-    const now = this.now();
+    const now = this.ledger.now();
     const peers: Record<string, DmRelayItem[]> = {};
     const everywhere: Record<string, DmRelayItem[]> = {};
     let dirty = false;
     for (const value of peerKeys) {
       if (!isIdentityPublicKey(value)) continue;
       const peer = normalizeIdentityKey(value);
-      const record = this.state.peers[peer];
+      const record = this.ledger.state.peers[peer];
       if (!record || record.blocked) continue;
-      const items: DmRelayItem[] = [];
-      for (const entry of this.state.outbox[peer] ?? []) {
-        if (!force && now - entry.lastSentAt < RESEND_AFTER_MS) continue;
-        const item = this.outboxItem(record, entry);
-        if (!item) continue;
-        entry.lastSentAt = now;
-        items.push(item);
+      const items = this.outbox.due(record, now, force);
+      if (items.length > 0) {
+        peers[peer] = items;
         dirty = true;
       }
-      if (items.length > 0) peers[peer] = items;
-      const requests = record.relation === 'friend' && record.cert ? this.downloadRequests(peer, now, force) : [];
+      const requests = record.relation === 'friend' && record.cert ? this.files.requests(peer, now, force) : [];
       if (requests.length > 0) everywhere[peer] = requests;
     }
-    if (dirty) this.saveState();
+    if (dirty) this.ledger.saveState();
     const dispatch: DmDispatch = {};
     if (Object.keys(peers).length > 0) dispatch.peers = peers;
     if (Object.keys(everywhere).length > 0) dispatch.everywhere = everywhere;
     return dispatch;
   }
 
-  /**
-   * Requests for a friend's files, from where each download stopped: every
-   * one when forced, otherwise those never asked for and, once the friend went
-   * quiet, the rest. A friend still sending one of their files is busy, not
-   * stalled, and asking again would only bring the same chunks twice.
-   */
-  private downloadRequests(peer: string, now: number, force: boolean): DmRelayItem[] {
-    const downloads = Object.values(this.state.downloads).filter((download) => download.peer === peer);
-    const quiet = downloads.every((download) => now - download.lastActivityAt >= DM_DOWNLOAD_STALL_MS);
-    const items: DmRelayItem[] = [];
-    for (const download of downloads) {
-      if (!force && !quiet && download.lastActivityAt > 0) continue;
-      if (this.nobodyHas(download)) {
-        this.finishDownload(download.fileId, 'unavailable');
-        continue;
-      }
-      const request = this.requestFile(download, true);
-      if (request) items.push(request);
-    }
-    return items;
-  }
-
-  /**
-   * Checked before asking for a file again: whether the friend's devices only
-   * said they do not have it, round after round, with no chunk and no "wait"
-   * from any of them ({@link MAX_ABSENT_ROUNDS}). A round without any answer
-   * (the friend away) does not count: the file is only late.
-   */
-  private nobodyHas(download: DownloadState): boolean {
-    const live = this.liveDownloads.get(download.fileId);
-    if (!live?.absent) return false;
-    live.absent = false;
-    live.absentRounds += 1;
-    return live.absentRounds >= MAX_ABSENT_ROUNDS;
-  }
-
-  /** A device of the friend has the file (it sent a chunk or "wait"): "not here" from the others settles nothing. */
-  private fileHeld(live: LiveDownload): void {
-    live.absent = false;
-    live.absentRounds = 0;
-  }
-
   /** Peers that currently have something to deliver (outbox or downloads). */
   pendingPeers(): string[] {
     const peers = new Set<string>();
-    for (const [peer, entries] of Object.entries(this.state.outbox)) {
+    for (const [peer, entries] of Object.entries(this.ledger.state.outbox)) {
       if (entries.length > 0) peers.add(peer);
     }
-    for (const download of Object.values(this.state.downloads)) peers.add(download.peer);
+    for (const download of Object.values(this.ledger.state.downloads)) peers.add(download.peer);
     return [...peers];
   }
+
+  // ---------------------------------------------------------------------------
+  // What arrives
+  // ---------------------------------------------------------------------------
 
   ingest(item: DmIncomingRelayItem): DmDispatch {
     if (!item || !isIdentityPublicKey(item.from) || typeof item.data !== 'string') return {};
     const from = normalizeIdentityKey(item.from);
     try {
-      if (item.kind === 'friend') return this.ingestStatement(from, item.data);
+      if (item.kind === 'friend') return this.friends.ingestStatement(from, item.data);
       try {
         DmKeyring.peekRoute(item.data);
       } catch {
@@ -2000,7 +335,7 @@ export class DmService {
         const opened = this.keyring.open<unknown>(item.data, from, this.keyring.certificate());
         return this.ingestSelf(opened.header, opened.body);
       }
-      const record = this.state.peers[from];
+      const record = this.ledger.state.peers[from];
       if (!record || record.blocked || !record.cert) return {};
       const opened = this.keyring.open<unknown>(item.data, from, record.cert);
       if (opened.header.type !== 'ack' && record.relation !== 'friend') return {};
@@ -2011,878 +346,103 @@ export class DmService {
     }
   }
 
-  private ack(record: PeerRecord, ids: string[]): DmRelayItem | null {
-    if (!record.cert || ids.length === 0) return null;
-    return this.envelopeItem(record, 'ack', { ids });
-  }
-
-  /**
-   * The ack for items whose effects are in memory now. It leaves at once when
-   * nothing waits for the disk; otherwise it waits for the write pass that
-   * saves them, so a crash right after acking can no longer lose a message the
-   * sender already dropped from its outbox. Acks released together travel in
-   * one envelope per peer.
-   */
-  private ackWhenStored(record: PeerRecord, ids: string[]): DmRelayItem | null {
-    const needs = this.store.pendingNames();
-    if (needs.size === 0) return this.ack(record, ids);
-    for (const id of ids) this.pendingAcks.push({ peer: record.publicKey, id, needs: new Set(needs) });
-    return null;
-  }
-
-  private releaseStoredAcks(written: ReadonlySet<string>): void {
-    if (this.pendingAcks.length === 0) return;
-    const ready = new Map<string, string[]>();
-    this.pendingAcks = this.pendingAcks.filter((pending) => {
-      for (const name of written) pending.needs.delete(name);
-      if (pending.needs.size > 0) return true;
-      const ids = ready.get(pending.peer) ?? [];
-      ids.push(pending.id);
-      ready.set(pending.peer, ids);
-      return false;
-    });
-    const peers: Record<string, DmRelayItem[]> = {};
-    for (const [peer, ids] of ready) {
-      const record = this.state.peers[peer];
-      if (!record || record.blocked) continue;
-      for (let start = 0; start < ids.length; start += MAX_ACK_IDS) {
-        const item = this.ack(record, ids.slice(start, start + MAX_ACK_IDS));
-        if (item) (peers[peer] ??= []).push(item);
-      }
-    }
-    if (Object.keys(peers).length > 0) this.onEvent({ type: 'dispatch', dispatch: { peers } });
-  }
-
-  private ingestStatement(from: string, data: string): DmDispatch {
-    let parsed: SignedStatement;
-    try {
-      parsed = JSON.parse(data) as SignedStatement;
-    } catch {
-      return {};
-    }
-    const payload = parsed?.p;
-    if (
-      !payload ||
-      payload.v !== 1 ||
-      !['request', 'accept', 'cancel', 'remove'].includes(payload.type) ||
-      !isDmId(payload.id) ||
-      !isDmId(payload.requestId) ||
-      normalizeIdentityKey(String(payload.from)) !== from ||
-      normalizeIdentityKey(String(payload.to)) !== this.me ||
-      typeof payload.ts !== 'number' ||
-      !verifyDmCertificate(from, payload.cert) ||
-      !verifyDmStatement(from, payload, parsed.s)
-    ) {
-      return {};
-    }
-    const existing = this.state.peers[from];
-    if (existing?.blocked) return {};
-    const record = this.ensurePeer(from, payload.nickname);
-    record.cert = payload.cert;
-    record.maxFileBytes = clampMaxFileBytes(payload.maxFileBytes, record.maxFileBytes);
-    const reply: Array<DmRelayItem | null> = [];
-    if (record.seenStatements.includes(payload.id)) {
-      this.saveState();
-      return { reply: [this.ackWhenStored(record, [payload.id])].filter((item): item is DmRelayItem => !!item) };
-    }
-    record.seenStatements.push(payload.id);
-    if (record.seenStatements.length > MAX_SEEN_STATEMENTS) {
-      record.seenStatements.splice(0, record.seenStatements.length - MAX_SEEN_STATEMENTS);
-    }
-    const now = this.now();
-    const ts = Math.min(payload.ts, now);
-    let broadcast: DmRelayItem[] = [];
-    switch (payload.type) {
-      case 'request': {
-        if (record.relation === 'friend') {
-          // They lost their state (new device, reinstall): confirm again.
-          reply.push(this.queueStatement(record, this.signStatement('accept', from, payload.requestId)));
-          record.requestId = payload.requestId;
-        } else if (record.relation === 'outgoing') {
-          // Both sides asked: treat as mutual acceptance.
-          this.state.outbox[from] = this.outbox(from).filter((entry) => entry.type !== 'request');
-          record.relation = 'friend';
-          record.friendSince = now;
-          record.outgoingStatement = null;
-          record.relationUpdatedAt = now;
-          reply.push(this.queueStatement(record, this.signStatement('accept', from, payload.requestId)));
-          this.meta(from);
-          this.onEvent({ type: 'friend-accepted', peer: from, nickname: record.nickname });
-          broadcast = this.syncItems([record]);
-        } else if (record.relation === 'none' && ts > record.relationUpdatedAt - MAX_CLOCK_SKEW_MS) {
-          record.relation = 'incoming';
-          record.requestId = payload.requestId;
-          record.requestedAt = ts;
-          record.relationUpdatedAt = now;
-          this.onEvent({ type: 'friend-request', peer: from, nickname: record.nickname });
-          broadcast = this.syncItems([record]);
-        }
-        break;
-      }
-      case 'accept': {
-        if (record.relation === 'outgoing' && record.requestId === payload.requestId) {
-          this.state.outbox[from] = this.outbox(from).filter((entry) => entry.type !== 'request');
-          record.relation = 'friend';
-          record.friendSince = now;
-          record.outgoingStatement = null;
-          record.relationUpdatedAt = now;
-          this.meta(from);
-          this.onEvent({ type: 'friend-accepted', peer: from, nickname: record.nickname });
-          broadcast = this.syncItems([record]);
-        }
-        break;
-      }
-      case 'cancel': {
-        if (record.relation === 'incoming' && record.requestId === payload.requestId) {
-          record.relation = 'none';
-          record.requestId = null;
-          record.requestedAt = null;
-          record.relationUpdatedAt = now;
-          broadcast = this.syncItems([record]);
-        }
-        break;
-      }
-      case 'remove': {
-        if (record.relation === 'friend' && ts >= (record.friendSince ?? 0) - MAX_CLOCK_SKEW_MS) {
-          this.dropPendingEnvelopes(from);
-          record.relation = 'none';
-          record.friendSince = null;
-          record.relationUpdatedAt = now;
-          broadcast = this.syncItems([record]);
-        }
-        break;
-      }
-    }
-    this.changed();
-    reply.unshift(this.ackWhenStored(record, [payload.id]));
-    const dispatch: DmDispatch = { reply: reply.filter((item): item is DmRelayItem => !!item) };
-    if (broadcast.length > 0) dispatch.broadcast = broadcast;
-    return dispatch;
-  }
-
+  /** Routes an envelope from a friend to the part of the engine that handles its type. */
   private ingestPeer(record: PeerRecord, header: DmEnvelopeHeader, body: unknown): DmDispatch {
     const peer = record.publicKey;
     const data = isRecord(body) ? body : {};
     switch (header.type) {
-      case 'ack': {
-        const ids = Array.isArray(data.ids) ? data.ids.filter((id): id is string => typeof id === 'string').slice(0, MAX_ACK_IDS) : [];
-        if (ids.length === 0) return {};
-        const acked = new Set(ids);
-        const entries = this.state.outbox[peer] ?? [];
-        const ackedMessages = entries.filter((entry) => acked.has(entry.id) && entry.type === 'msg').map((entry) => entry.id);
-        this.state.outbox[peer] = entries.filter((entry) => !acked.has(entry.id));
-        const changedMessages: StoredMessage[] = [];
-        for (const id of ackedMessages) {
-          const message = this.findMessage(peer, id);
-          if (message && message.delivery !== 'delivered') {
-            message.delivery = 'delivered';
-            changedMessages.push(message);
-          }
-        }
-        this.saveState();
-        if (changedMessages.length > 0) {
-          this.saveConversation(peer);
-          this.emitMessages(peer, changedMessages);
-        }
+      case 'ack':
+        this.outbox.acknowledged(record, data);
         return {};
-      }
       case 'typing':
-        this.onEvent({ type: 'typing', peer });
+        this.ledger.emit({ type: 'typing', peer });
         return {};
-      case 'hello': {
-        record.maxFileBytes = clampMaxFileBytes(data.maxFileBytes, record.maxFileBytes);
-        this.saveState();
-        // A device of theirs just came: it may hold files the others said they do not have, so it gets asked first.
-        for (const download of Object.values(this.state.downloads)) {
-          const live = download.peer === peer ? this.liveDownloads.get(download.fileId) : undefined;
-          if (live) live.absentRounds = 0;
-        }
-        // They are listening now. Their greeting and their answer to ours arrive moments apart: the outbox
-        // goes out once for both instead of once per hello.
-        const now = this.now();
-        const reply: DmRelayItem[] = [];
-        let requests: DmRelayItem[] = [];
-        if (now - (this.helloFlushedAt.get(peer) ?? Number.NEGATIVE_INFINITY) >= HELLO_FLUSH_GAP_MS) {
-          this.helloFlushedAt.set(peer, now);
-          const flush = this.outgoing([peer], true);
-          reply.push(...(flush.peers?.[peer] ?? []));
-          requests = flush.everywhere?.[peer] ?? [];
-        }
-        if (data.reply !== true) {
-          reply.push(this.envelopeItem(record, 'hello', this.friendHelloBody(true)));
-        }
-        // Their nickname/avatar changed since we last saw it: ask for the new one.
-        const prof = isRecord(data.prof) ? data.prof : null;
-        if (
-          prof && typeof prof.h === 'string' && typeof prof.at === 'number'
-          && prof.h !== record.profileHash && prof.at > (record.profileAt ?? 0)
-        ) {
-          reply.push(this.envelopeItem(record, 'profile-req', {}));
-        }
-        this.scheduleSnapshot();
-        return requests.length > 0 ? { reply, everywhere: { [peer]: requests } } : { reply };
-      }
-      case 'profile-req': {
-        const body = this.friendProfileBody();
-        return body.at > 0 ? { reply: [this.envelopeItem(record, 'profile', body, 'file')] } : {};
-      }
+      case 'hello':
+        return this.receiveFriendHello(record, data);
+      case 'profile-req':
+        return this.profile.answerRequest(record);
       case 'profile':
-        this.applyFriendProfile(record, data);
+        this.profile.applyFriendProfile(record, data);
         return {};
       case 'file-req':
-        // Sent on every server this identity shares with the friend: a device on several of them answers one copy.
-        if (this.repeatedRequest(header.id)) return {};
-        return { reply: this.serveFile(record, data) };
+        return this.files.answerRequest(record, header.id, data);
       case 'file-chunk':
-        return { reply: this.receiveChunk(record, data) };
+        return { reply: this.files.receiveChunk(record, data) };
       case 'file-missing':
-      case 'file-absent': {
-        const fileId = data.fileId;
-        const download = isDmId(fileId) ? this.state.downloads[fileId] : undefined;
-        if (!download || download.peer !== peer) return {};
-        // Only the device that sent the file can tell it is gone (see serveFile); any other device of the friend
-        // just does not have it. Versions before #490 say "missing" for both, so only the flag makes it final.
-        if (header.type === 'file-missing' && data.final === true) this.finishDownload(download.fileId, 'unavailable');
-        else this.live(download).absent = true;
+      case 'file-absent':
+        // Versions before #490 say "missing" whether the file is gone or only not on that device: only the flag
+        // makes it final.
+        this.files.receiveAbsent(record, data, header.type === 'file-missing' && data.final === true);
         return {};
-      }
-      case 'file-wait': {
-        const fileId = data.fileId;
-        const download = isDmId(fileId) ? this.state.downloads[fileId] : undefined;
-        if (!download || download.peer !== peer) return {};
-        // The device that sent it has it and sends it once the files ahead of it are through: keep asking, quickly.
-        this.fileHeld(this.live(download));
-        this.armStall(peer, true);
+      case 'file-wait':
+        this.files.receiveWait(record, data);
         return {};
-      }
       case 'msg':
       case 'edit':
       case 'delete':
       case 'react':
       case 'read': {
-        const replies = this.applyOp(peer, peer, header, data, true);
-        return { reply: [this.ackWhenStored(record, [header.id]), ...replies].filter((item): item is DmRelayItem => !!item) };
+        const replies = this.conversations.applyOp(peer, peer, header, data, true);
+        return { reply: [this.outbox.ackWhenStored(record, [header.id]), ...replies].filter((item): item is DmRelayItem => !!item) };
       }
       default:
         return {};
     }
   }
 
-  /**
-   * Applies a conversation operation. `author` is who performed it: the peer,
-   * or this identity for copies coming from another own device.
-   */
-  private applyOp(
-    peer: string,
-    author: string,
-    header: Pick<DmEnvelopeHeader, 'id' | 'type' | 'ts'>,
-    data: Record<string, unknown>,
-    fromPeer: boolean
-  ): DmRelayItem[] {
-    const now = this.now();
-    const ts = Math.min(header.ts, now + MAX_CLOCK_SKEW_MS);
-    const meta = this.meta(peer);
-    switch (header.type) {
-      case 'msg': {
-        if (!isDmId(header.id)) return [];
-        // Deleted before it got here: the delete that came first is final.
-        if (this.isTombstoned(peer, header.id, author)) return [];
-        const content = typeof data.content === 'string' ? data.content.slice(0, DM_MAX_MESSAGE_LENGTH) : '';
-        const attachmentsInput = Array.isArray(data.attachments) ? data.attachments.slice(0, DM_MAX_ATTACHMENTS) : [];
-        const metas = attachmentsInput
-          .map((entry) => sanitizeAttachmentMeta(entry))
-          .filter((entry): entry is AttachmentMeta => !!entry);
-        if (!content && metas.length === 0) return [];
-        const replyTo = typeof data.replyTo === 'string' && isDmId(data.replyTo) ? data.replyTo : null;
-        const attachments: StoredAttachment[] = metas.map((file) => {
-          let state: DmAttachmentState = 'unavailable';
-          if (this.store.hasAttachment(file.fileId)) state = author === this.me ? 'local' : 'ready';
-          else if (fromPeer) state = file.size > this.state.settings.maxFileBytes ? 'too-large' : 'pending';
-          return { ...file, state, receivedBytes: state === 'ready' || state === 'local' ? file.size : 0 };
-        });
-        const message: StoredMessage = {
-          id: header.id,
-          author,
-          content,
-          // The author's timestamp is kept as-is so every device shares one time base for order and read receipts.
-          createdAt: ts,
-          editedAt: null,
-          // Set when the author edited it while it waited for delivery: older edits on their way stay behind it.
-          contentAt: typeof data.contentAt === 'number' && Number.isFinite(data.contentAt)
-            ? Math.min(data.contentAt, now + MAX_CLOCK_SKEW_MS) : undefined,
-          deleted: false,
-          replyTo,
-          reactions: {},
-          attachments,
-          delivery: author === this.me ? 'delivered' : null,
-          forwarded: sanitizeDmForward(data.forwarded),
-        };
-        if (!this.insertMessage(peer, message)) return [];
-        this.observeStamp(Math.max(message.createdAt, message.contentAt ?? 0));
-        meta.hidden = false;
-        if (author === this.me) {
-          meta.lastReadAt = Math.max(meta.lastReadAt, message.createdAt);
-        }
-        this.refreshMeta(peer);
-        const replies: DmRelayItem[] = [];
-        for (const file of attachments) {
-          if (file.state !== 'pending') continue;
-          const download = this.beginDownload({
-            peer,
-            messageId: message.id,
-            fileId: file.fileId,
-            size: file.size,
-            sha256: file.sha256,
-            requestedUntil: 0,
-            lastActivityAt: now,
-          });
-          const request = this.requestFile(download, false);
-          if (request) replies.push(request);
-        }
-        this.changed(peer);
-        this.emitMessages(peer, [message]);
-        if (author !== this.me) {
-          this.onEvent({ type: 'incoming-message', peer, message: this.messageView(peer, message) });
-        }
-        return replies;
-      }
-      case 'edit': {
-        const message = this.findMessage(peer, data.messageId);
-        if (!message || message.author !== author || message.deleted) return [];
-        const content = typeof data.content === 'string' ? data.content.slice(0, DM_MAX_MESSAGE_LENGTH) : '';
-        const editedAt = typeof data.editedAt === 'number' ? Math.min(data.editedAt, now + MAX_CLOCK_SKEW_MS) : ts;
-        // Last writer wins by the text's own clock, which also moves when the text stays: otherwise an older edit
-        // arriving later (A → B → A, delivered out of order) would leave each side with a different text.
-        if (!contentWins(editedAt, content, message)) return [];
-        message.contentAt = editedAt;
-        this.observeStamp(editedAt);
-        // Same text as shown (it arrived already edited, or went back to it): nothing to mark as edited.
-        if (content !== message.content) {
-          message.content = content;
-          message.editedAt = editedAt;
-          this.refreshMeta(peer);
-          this.emitMessages(peer, [message]);
-        }
-        this.changed(peer);
-        return [];
-      }
-      case 'delete': {
-        const message = this.findMessage(peer, data.messageId);
-        if (!message) {
-          // Deleted before it got here (or its ack was lost and it is still on the way): keep it out for good.
-          if (isDmId(data.messageId)) {
-            this.addTombstone(peer, data.messageId, author);
-            this.saveConversation(peer);
-          }
-          return [];
-        }
-        if (message.author !== author || message.deleted) return [];
-        this.markDeleted(message);
-        this.refreshMeta(peer);
-        this.changed(peer);
-        this.emitMessages(peer, [message]);
-        return [];
-      }
-      case 'react': {
-        const message = this.findMessage(peer, data.messageId);
-        const emoji = typeof data.emoji === 'string' ? data.emoji.trim().slice(0, MAX_EMOJI_LENGTH) : '';
-        if (!message || message.deleted || !emoji) return [];
-        const at = typeof data.at === 'number' ? Math.min(data.at, now + MAX_CLOCK_SKEW_MS) : ts;
-        if (this.applyReaction(message, author, emoji, data.add !== false, at)) {
-          this.changed(peer);
-          this.emitMessages(peer, [message]);
-        }
-        return [];
-      }
-      case 'read': {
-        const readAt = typeof data.readAt === 'number' ? Math.min(data.readAt, now + MAX_CLOCK_SKEW_MS) : 0;
-        if (author === this.me) {
-          if (readAt > meta.lastReadAt) {
-            meta.lastReadAt = readAt;
-            this.refreshMeta(peer);
-            this.changed();
-          }
-          return [];
-        }
-        if (readAt > meta.peerReadAt) {
-          meta.peerReadAt = readAt;
-          this.changed();
-          const own = this.conversation(peer).messages.filter(
-            (message) => message.author === this.me && message.createdAt <= readAt && message.createdAt > readAt - 60 * 60_000
-          );
-          this.emitMessages(peer, own);
-        }
-        return [];
-      }
-      default:
-        return [];
+  /** A device of the friend is listening now: what waited for them goes, and their hello is answered. */
+  private receiveFriendHello(record: PeerRecord, data: Record<string, unknown>): DmDispatch {
+    const peer = record.publicKey;
+    record.maxFileBytes = clampMaxFileBytes(data.maxFileBytes, record.maxFileBytes);
+    this.ledger.saveState();
+    this.files.peerAppeared(peer);
+    // Their greeting and their answer to ours arrive moments apart: the outbox goes out once for both instead of
+    // once per hello.
+    const now = this.ledger.now();
+    const reply: DmRelayItem[] = [];
+    let requests: DmRelayItem[] = [];
+    if (now - (this.helloFlushedAt.get(peer) ?? Number.NEGATIVE_INFINITY) >= HELLO_FLUSH_GAP_MS) {
+      this.helloFlushedAt.set(peer, now);
+      const flush = this.outgoing([peer], true);
+      reply.push(...(flush.peers?.[peer] ?? []));
+      requests = flush.everywhere?.[peer] ?? [];
     }
+    if (data.reply !== true) {
+      reply.push(this.outbox.envelopeItem(record, 'hello', this.friendHelloBody(true)));
+    }
+    // Their nickname/avatar changed since we last saw it: ask for the new one.
+    if (this.profile.outdated(record, data.prof)) reply.push(this.outbox.envelopeItem(record, 'profile-req', {}));
+    this.ledger.scheduleSnapshot();
+    return requests.length > 0 ? { reply, everywhere: { [peer]: requests } } : { reply };
   }
 
+  /** Routes an envelope from another device of this identity. */
   private ingestSelf(header: DmEnvelopeHeader, body: unknown): DmDispatch {
     const data = isRecord(body) ? body : {};
-    if (header.type === 'sync') {
-      return this.mergeSync(Array.isArray(data.entries) ? data.entries : []);
-    }
-    if (header.type === 'hello-self') return this.receiveSelfHello(data);
-    if (header.type === 'digest') return this.receiveDigest(data);
-    if (header.type === 'hist') return this.receiveHistory(data);
-    if (header.type === 'profile') return this.receiveSelfProfile(data);
-    if (header.type === 'self') {
-      const op = isRecord(data.op) ? data.op : null;
-      if (!op || !isIdentityPublicKey(data.peer)) return {};
-      const peer = normalizeIdentityKey(data.peer);
-      if (peer === this.me || !this.state.peers[peer]) return {};
-      if (typeof op.id !== 'string' || typeof op.type !== 'string' || typeof op.ts !== 'number') return {};
-      this.applyOp(peer, this.me, { id: op.id, type: op.type, ts: op.ts }, isRecord(op.body) ? op.body : {}, false);
-      return {};
-    }
-    return {};
-  }
-
-  private mergeSync(entries: unknown[]): DmDispatch {
-    let dirty = false;
-    let theyAreBehind = false;
-    const seen = new Set<string>();
-    for (const value of entries.slice(0, 2000)) {
-      if (!isRecord(value) || !isIdentityPublicKey(value.publicKey)) continue;
-      const peer = normalizeIdentityKey(value.publicKey);
-      if (peer === this.me) continue;
-      seen.add(peer);
-      const relation = value.relation;
-      if (relation !== 'none' && relation !== 'friend' && relation !== 'outgoing' && relation !== 'incoming') continue;
-      const relationUpdatedAt = typeof value.relationUpdatedAt === 'number' ? value.relationUpdatedAt : 0;
-      const blockedUpdatedAt = typeof value.blockedUpdatedAt === 'number' ? value.blockedUpdatedAt : 0;
-      const cert = verifyDmCertificate(peer, value.cert) ? (value.cert as DmKeyCertificate) : null;
-      const local = this.state.peers[peer];
-      if (relationUpdatedAt > (local?.relationUpdatedAt ?? 0)) {
-        if ((relation === 'friend' || relation === 'incoming') && !cert && !local?.cert) continue;
-        const record = this.ensurePeer(peer, typeof value.nickname === 'string' ? value.nickname : undefined);
-        const previous = record.relation;
-        record.relation = relation;
-        record.relationUpdatedAt = relationUpdatedAt;
-        record.requestId = isDmId(value.requestId) ? value.requestId : null;
-        record.friendSince = typeof value.friendSince === 'number' ? value.friendSince : null;
-        record.requestedAt = typeof value.requestedAt === 'number' ? value.requestedAt : null;
-        if (cert) record.cert = cert;
-        const statement = this.validOwnStatement(value.outgoingStatement, peer);
-        record.outgoingStatement = relation === 'outgoing' ? statement : null;
-        if (relation === 'outgoing' && statement && !this.outbox(peer).some((entry) => entry.id === statement.p.id)) {
-          this.outbox(peer).push({ id: statement.p.id, kind: 'friend', type: 'request', ts: statement.p.ts, statement, lastSentAt: 0 });
-        }
-        if (relation !== 'outgoing') {
-          this.state.outbox[peer] = this.outbox(peer).filter((entry) => entry.type !== 'request');
-        }
-        if (previous === 'friend' && relation !== 'friend') this.dropPendingEnvelopes(peer);
-        if (relation === 'friend') this.meta(peer);
-        dirty = true;
-      } else if (local && local.relationUpdatedAt > relationUpdatedAt) {
-        theyAreBehind = true;
+    switch (header.type) {
+      case 'sync':
+        return this.friends.mergeSync(Array.isArray(data.entries) ? data.entries : []);
+      case 'hello-self':
+        return this.sync.receiveSelfHello(data);
+      case 'digest':
+        return this.sync.receiveDigest(data);
+      case 'hist':
+        return this.sync.receiveHistory(data);
+      case 'profile':
+        return this.profile.receiveSelfProfile(data);
+      case 'self': {
+        // The copy of an operation this identity did on another device.
+        const op = isRecord(data.op) ? data.op : null;
+        if (!op || !isIdentityPublicKey(data.peer)) return {};
+        const peer = normalizeIdentityKey(data.peer);
+        if (peer === this.me || !this.ledger.state.peers[peer]) return {};
+        if (typeof op.id !== 'string' || typeof op.type !== 'string' || typeof op.ts !== 'number') return {};
+        this.conversations.applyOp(peer, this.me, { id: op.id, type: op.type, ts: op.ts }, isRecord(op.body) ? op.body : {}, false);
+        return {};
       }
-      if (blockedUpdatedAt > (this.state.peers[peer]?.blockedUpdatedAt ?? 0)) {
-        const record = this.ensurePeer(peer, typeof value.nickname === 'string' ? value.nickname : undefined);
-        record.blocked = value.blocked === true;
-        record.blockedUpdatedAt = blockedUpdatedAt;
-        dirty = true;
-      } else if (local && local.blockedUpdatedAt > blockedUpdatedAt) {
-        theyAreBehind = true;
-      }
+      default:
+        return {};
     }
-    if (entries.length === 0) {
-      // An empty sync is a "full state" hello from a fresh device.
-      theyAreBehind = Object.values(this.state.peers).some((record) => record.relationUpdatedAt > 0 || record.blockedUpdatedAt > 0);
-    }
-    if (dirty) this.changed();
-    return theyAreBehind ? { reply: this.syncItems() } : {};
-  }
-
-  private validOwnStatement(value: unknown, peer: string): SignedStatement | null {
-    if (!isRecord(value) || !isRecord(value.p)) return null;
-    const statement = value as unknown as SignedStatement;
-    if (
-      statement.p.type !== 'request' ||
-      normalizeIdentityKey(String(statement.p.from)) !== this.me ||
-      normalizeIdentityKey(String(statement.p.to)) !== peer ||
-      !isDmId(statement.p.id) ||
-      !verifyDmStatement(this.me, statement.p, statement.s)
-    ) {
-      return null;
-    }
-    return statement;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Files
-  // ---------------------------------------------------------------------------
-
-  /**
-   * The decrypted file a friend is downloading, kept while they ask for its
-   * chunks: one decryption per transfer instead of one per window. Every file
-   * is sealed whole on disk, so a file pushed out while its transfer goes on
-   * has to be decrypted whole again for its next window; with two downloads
-   * taking turns, that meant every window of both.
-   *
-   * So a file in transfer is never dropped to make room for another (see
-   * {@link DM_FILE_TRANSFER_IDLE_MS}), and the memory these files take never
-   * passes `fileCacheMaxBytes` (one of the largest files allowed, plus room
-   * for small ones): a file that does not fit next to the ones being sent
-   * waits its turn ('busy': the friend is told to wait and asks again). Files
-   * no longer in transfer give their room up, least recently used first, and
-   * leave by timer after {@link FILE_CACHE_TTL_MS}. Returns null when the file
-   * is not on this device.
-   */
-  private servedFile(fileId: string, size: number): Buffer | 'busy' | null {
-    const now = this.now();
-    const cached = this.fileCache.get(fileId);
-    if (cached) {
-      cached.expiresAt = now + FILE_CACHE_TTL_MS;
-      cached.activeUntil = now + DM_FILE_TRANSFER_IDLE_MS;
-      this.fileCache.delete(fileId);
-      this.fileCache.set(fileId, cached);
-      return cached.data;
-    }
-    // Checked first: a device without the file must say so, not that it is busy.
-    if (!this.store.hasAttachment(fileId)) return null;
-    let held = 0;
-    let inTransfer = 0;
-    for (const entry of this.fileCache.values()) {
-      held += entry.data.length;
-      if (entry.activeUntil > now) inTransfer += entry.data.length;
-    }
-    if (inTransfer > 0 && inTransfer + size > this.fileCacheMaxBytes) return 'busy';
-    for (const [key, entry] of this.fileCache) {
-      if (held + size <= this.fileCacheMaxBytes) break;
-      if (entry.activeUntil > now) continue;
-      this.fileCache.delete(key);
-      held -= entry.data.length;
-    }
-    const data = this.store.readAttachment(fileId);
-    if (!data) return null;
-    this.fileCache.set(fileId, { data, expiresAt: now + FILE_CACHE_TTL_MS, activeUntil: now + DM_FILE_TRANSFER_IDLE_MS });
-    this.scheduleFileCacheSweep();
-    return data;
-  }
-
-  private scheduleFileCacheSweep(): void {
-    if (this.fileCacheTimer) return;
-    this.fileCacheTimer = setTimeout(() => {
-      this.fileCacheTimer = null;
-      const now = this.now();
-      for (const [key, entry] of this.fileCache) {
-        if (entry.expiresAt <= now) this.fileCache.delete(key);
-      }
-      if (this.fileCache.size > 0) this.scheduleFileCacheSweep();
-    }, FILE_CACHE_TTL_MS);
-    this.fileCacheTimer.unref?.();
-  }
-
-  private dropFileCache(): void {
-    if (this.fileCacheTimer) clearTimeout(this.fileCacheTimer);
-    this.fileCacheTimer = null;
-    this.fileCache.clear();
-  }
-
-  /**
-   * Whether this file request was already answered: the friend sends each
-   * request on every server it shares with this identity (see
-   * `DmDispatch.everywhere`), so a device on several of them gets the same
-   * sealed request once per server, and serving each copy would send the same
-   * window of the file again.
-   */
-  private repeatedRequest(id: string): boolean {
-    const now = this.now();
-    for (const [seen, at] of this.answeredRequests) {
-      if (now - at < SELF_REPEAT_WINDOW_MS && this.answeredRequests.size < MAX_REMEMBERED_REQUESTS) break;
-      this.answeredRequests.delete(seen);
-    }
-    if (this.answeredRequests.has(id)) return true;
-    this.answeredRequests.set(id, now);
-    return false;
-  }
-
-  private serveFile(record: PeerRecord, data: Record<string, unknown>): DmRelayItem[] {
-    const fileId = data.fileId;
-    const offset = data.offset;
-    if (!isDmId(fileId) || typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0) return [];
-    let owned: StoredAttachment | undefined;
-    for (const message of this.conversation(record.publicKey).messages) {
-      if (message.author !== this.me || message.deleted) continue;
-      owned = message.attachments.find((file) => file.fileId === fileId);
-      if (owned) break;
-    }
-    const content = owned ? this.servedFile(fileId, owned.size) : null;
-    if (content === 'busy') return [this.envelopeItem(record, 'file-wait', { fileId })];
-    if (!content) {
-      // Every device of this identity on the server gets the request, and only the one that sent a file ever has
-      // it: another device without it just says so, which does not end a download the sender is serving. Only the
-      // device that sent the file and lost it knows it is gone for good. Versions before #490 read any
-      // "file-missing" as final and ignore "file-absent" and "file-wait".
-      return [owned?.state === 'local'
-        ? this.envelopeItem(record, 'file-missing', { fileId, final: true })
-        : this.envelopeItem(record, 'file-absent', { fileId })];
-    }
-    const count = Math.max(1, Math.min(FILE_WINDOW_CHUNKS, typeof data.count === 'number' ? Math.floor(data.count) : 1));
-    const items: DmRelayItem[] = [];
-    for (let index = 0; index < count; index += 1) {
-      const start = offset + index * DM_FILE_CHUNK_BYTES;
-      if (start >= content.length && !(content.length === 0 && start === 0)) break;
-      const chunk = content.subarray(start, Math.min(content.length, start + DM_FILE_CHUNK_BYTES));
-      items.push(
-        this.envelopeItem(record, 'file-chunk', { fileId, offset: start, data: chunk.toString('base64') }, 'file')
-      );
-      if (content.length === 0) break;
-    }
-    // The last window went out: the room is free for the next file. A lost window asked again still finds it here.
-    const entry = this.fileCache.get(fileId);
-    if (entry && offset + count * DM_FILE_CHUNK_BYTES >= content.length) entry.activeUntil = 0;
-    return items;
-  }
-
-  private nextFileRequest(download: DownloadState, resume: boolean): DmRelayItem | null {
-    const received = this.receivedBytes(download);
-    if (received >= download.size) {
-      // Every byte is here but was never put together (the app closed, or the disk was full at that moment).
-      this.completeDownload(download);
-      return null;
-    }
-    const record = this.state.peers[download.peer];
-    if (!record || record.relation !== 'friend' || !record.cert) return null;
-    if (resume) download.requestedUntil = received;
-    if (download.requestedUntil > received) return null;
-    const count = FILE_WINDOW_CHUNKS;
-    download.requestedUntil = Math.min(download.size, received + count * DM_FILE_CHUNK_BYTES);
-    // Not saved for each request: after a restart every download is asked for again from its part file.
-    download.lastActivityAt = this.now();
-    this.armStall(download.peer, false);
-    return this.envelopeItem(record, 'file-req', { fileId: download.fileId, offset: received, count });
-  }
-
-  /** The next file request, never throwing: a part file that cannot be read fails the download visibly. */
-  private requestFile(download: DownloadState, resume: boolean): DmRelayItem | null {
-    try {
-      return this.nextFileRequest(download, resume);
-    } catch (error) {
-      this.downloadFailed(download.fileId, error);
-      return null;
-    }
-  }
-
-  private live(download: DownloadState): LiveDownload {
-    let live = this.liveDownloads.get(download.fileId);
-    if (!live) {
-      // Checked once per download and run: a crash or a full disk during an append can leave a torn last record.
-      // From then on the count follows the appends, instead of reading the whole part file for every chunk.
-      live = {
-        chunks: this.store.repairPart(download.fileId), savedAt: 0, shownAt: 0, shownBytes: 0, absent: false, absentRounds: 0,
-      };
-      this.liveDownloads.set(download.fileId, live);
-    }
-    return live;
-  }
-
-  private receivedBytes(download: DownloadState): number {
-    return Math.min(download.size, this.live(download).chunks * DM_FILE_CHUNK_BYTES);
-  }
-
-  /** A download that starts from nothing: no part file, nothing to check on disk. */
-  private beginDownload(download: DownloadState): DownloadState {
-    this.store.resetPart(download.fileId);
-    this.liveDownloads.set(download.fileId, { chunks: 0, savedAt: 0, shownAt: 0, shownBytes: 0, absent: false, absentRounds: 0 });
-    this.state.downloads[download.fileId] = download;
-    return download;
-  }
-
-  /** Forgets a download that ended or whose message is gone, with the quiet timer of a friend left without any. */
-  private forgetDownload(fileId: string): DownloadState | undefined {
-    const download = this.state.downloads[fileId];
-    delete this.state.downloads[fileId];
-    this.liveDownloads.delete(fileId);
-    if (download && !Object.values(this.state.downloads).some((other) => other.peer === download.peer)) {
-      const stall = this.stallTimers.get(download.peer);
-      if (stall?.timer) clearTimeout(stall.timer);
-      this.stallTimers.delete(download.peer);
-    }
-    return download;
-  }
-
-  /**
-   * Re-arms the quiet timer of a friend whose files are on their way (see
-   * {@link DM_DOWNLOAD_STALL_MS}). A chunk or a "wait" from them starts the
-   * quick retries over; once those are used up, only the regular outbox
-   * rounds ask again.
-   */
-  private armStall(peer: string, progressed: boolean): void {
-    const current = this.stallTimers.get(peer);
-    if (current?.timer) clearTimeout(current.timer);
-    const retries = progressed ? 0 : current?.retries ?? 0;
-    const timer = retries < MAX_STALL_RETRIES ? setTimeout(() => this.onStall(peer), DM_DOWNLOAD_STALL_MS) : null;
-    timer?.unref?.();
-    this.stallTimers.set(peer, { timer, retries });
-  }
-
-  /** Every request, chunk or "wait" re-arms the timer, so firing means the friend went quiet: ask for each file again. */
-  private onStall(peer: string): void {
-    const stall = this.stallTimers.get(peer);
-    if (!stall) return;
-    stall.timer = null;
-    stall.retries += 1;
-    const record = this.state.peers[peer];
-    if (!record || record.blocked || record.relation !== 'friend' || !record.cert) return;
-    const items = this.downloadRequests(peer, this.now(), true);
-    if (items.length > 0) this.onEvent({ type: 'dispatch', dispatch: { everywhere: { [peer]: items } } });
-  }
-
-  private attachmentRef(peer: string, messageId: string, fileId: string): { message: StoredMessage; file: StoredAttachment } | null {
-    const message = this.findMessage(peer, messageId);
-    const file = message?.attachments.find((entry) => entry.fileId === fileId);
-    return message && file ? { message, file } : null;
-  }
-
-  private receiveChunk(record: PeerRecord, data: Record<string, unknown>): DmRelayItem[] {
-    const fileId = data.fileId;
-    if (!isDmId(fileId)) return [];
-    const download = this.state.downloads[fileId];
-    if (!download || download.peer !== record.publicKey) return [];
-    const live = this.live(download);
-    // Whatever its offset (another device of this identity may be further along), a chunk shows the file is there.
-    this.fileHeld(live);
-    const received = Math.min(download.size, live.chunks * DM_FILE_CHUNK_BYTES);
-    if (data.offset !== received || typeof data.data !== 'string') return [];
-    const chunk = Buffer.from(data.data, 'base64');
-    if (chunk.length !== Math.min(DM_FILE_CHUNK_BYTES, download.size - received)) return [];
-    try {
-      this.store.appendPart(fileId, live.chunks, chunk);
-    } catch (error) {
-      this.downloadFailed(fileId, error);
-      return [];
-    }
-    live.chunks += 1;
-    download.lastActivityAt = this.now();
-    this.armStall(download.peer, true);
-    const total = received + chunk.length;
-    if (total >= download.size) {
-      this.completeDownload(download);
-      return [];
-    }
-    this.showProgress(download, live, total);
-    const next = this.requestFile(download, false);
-    return next ? [next] : [];
-  }
-
-  /**
-   * The progress of a download under way reaches the screen a few times per
-   * second through a light event, and the conversation file now and then: a
-   * whole conversation rewritten, re-encrypted and redrawn for every 96 KiB
-   * chunk made large files slow down everything else.
-   */
-  private showProgress(download: DownloadState, live: LiveDownload, total: number): void {
-    const ref = this.attachmentRef(download.peer, download.messageId, download.fileId);
-    if (!ref) return;
-    ref.file.receivedBytes = total;
-    const now = this.now();
-    if (ref.file.state !== 'downloading') {
-      ref.file.state = 'downloading';
-      live.savedAt = now;
-      live.shownAt = now;
-      live.shownBytes = total;
-      this.saveConversation(download.peer);
-      this.emitMessages(download.peer, [ref.message]);
-      return;
-    }
-    if (now - live.savedAt >= PROGRESS_SAVE_MS) {
-      live.savedAt = now;
-      this.saveConversation(download.peer);
-    }
-    if (now - live.shownAt >= PROGRESS_EVENT_MS || total - live.shownBytes >= download.size / 100) {
-      live.shownAt = now;
-      live.shownBytes = total;
-      this.onEvent({
-        type: 'attachment-progress',
-        peer: download.peer,
-        messageId: download.messageId,
-        fileId: download.fileId,
-        receivedBytes: total,
-      });
-    }
-  }
-
-  /** All bytes arrived: keep the file if they match, or fail visibly so the user can try again. */
-  private completeDownload(download: DownloadState): void {
-    const fileId = download.fileId;
-    let matches: boolean;
-    try {
-      matches = this.store.completePart(fileId, download.size, download.sha256);
-    } catch (error) {
-      this.downloadFailed(fileId, error);
-      return;
-    }
-    this.finishDownload(fileId, matches ? 'ready' : 'failed');
-  }
-
-  /** A full disk or an unreadable part file: "failed" offers "try again", which starts over. */
-  private downloadFailed(fileId: string, error: unknown): void {
-    console.error('[DM] Attachment download failed; it can be tried again.', error);
-    this.finishDownload(fileId, 'failed');
-  }
-
-  private finishDownload(fileId: string, state: DmAttachmentState): void {
-    const download = this.forgetDownload(fileId);
-    if (!download) return;
-    this.store.resetPart(fileId);
-    const ref = this.attachmentRef(download.peer, download.messageId, fileId);
-    if (ref) {
-      ref.file.state = state;
-      ref.file.receivedBytes = state === 'ready' ? ref.file.size : 0;
-      this.saveConversation(download.peer);
-      this.emitMessages(download.peer, [ref.message]);
-    }
-    this.saveState();
-  }
-
-  retryAttachment(peerKey: string, messageId: string, fileId: string): DmDispatch {
-    const peer = this.requirePeerKey(peerKey);
-    const ref = this.attachmentRef(peer, messageId, fileId);
-    if (!ref || ref.message.author === this.me) throw new DmError('not-found', 'Arquivo não encontrado.');
-    if (ref.file.state !== 'failed' && ref.file.state !== 'unavailable' && ref.file.state !== 'too-large') return {};
-    if (ref.file.size > this.state.settings.maxFileBytes) {
-      ref.file.state = 'too-large';
-      this.emitMessages(peer, [ref.message]);
-      return {};
-    }
-    this.beginDownload({
-      peer,
-      messageId,
-      fileId,
-      size: ref.file.size,
-      sha256: ref.file.sha256,
-      requestedUntil: 0,
-      lastActivityAt: 0,
-    });
-    ref.file.state = 'pending';
-    ref.file.receivedBytes = 0;
-    this.changed(peer);
-    this.emitMessages(peer, [ref.message]);
-    return this.outgoing([peer], true);
-  }
-
-  readAttachment(peerKey: string, messageId: string, fileId: string): { name: string; mime: string; data: Buffer } {
-    const peer = this.requirePeerKey(peerKey);
-    const ref = this.attachmentRef(peer, messageId, fileId);
-    if (!ref || (ref.file.state !== 'ready' && ref.file.state !== 'local')) {
-      throw new DmError('not-found', 'Arquivo não disponível.');
-    }
-    const data = this.store.readAttachment(fileId);
-    if (!data) throw new DmError('not-found', 'Arquivo não disponível.');
-    return { name: ref.file.name, mime: ref.file.mime, data };
-  }
-
-  /** Decrypts a ready/local attachment into `destination` (absolute path), creating or overwriting it. */
-  async writeAttachmentTo(peerKey: string, messageId: string, fileId: string, destination: string): Promise<void> {
-    if (typeof destination !== 'string' || !path.isAbsolute(destination) || destination.includes('\0')) {
-      throw new Error('Invalid destination for the DM attachment: an absolute file path is required.');
-    }
-    const file = this.readAttachment(peerKey, messageId, fileId);
-    await fs.writeFile(destination, file.data);
   }
 
   // ---------------------------------------------------------------------------
@@ -2893,74 +453,46 @@ export class DmService {
     this.flush();
     const data: DmExportData = {
       version: 1,
-      peers: Object.values(this.state.peers)
+      peers: Object.values(this.ledger.state.peers)
         .filter((record) => record.relationUpdatedAt > 0 || record.blockedUpdatedAt > 0)
-        .map((record) => this.syncEntry(record)),
-      settings: { ...this.state.settings },
+        .map((record) => this.friends.syncEntry(record)),
+      settings: { ...this.ledger.state.settings },
     };
     if (includeHistory) {
-      data.conversations = Object.keys(this.state.conversations)
-        .map((peer) => this.conversation(peer))
+      data.conversations = Object.keys(this.ledger.state.conversations)
+        .map((peer) => this.ledger.conversation(peer))
         .filter((conversation) => conversation.messages.length > 0)
         .map((conversation) => ({
           version: 1 as const,
           peer: conversation.peer,
-          messages: conversation.messages.map((message) => ({
-            ...message,
-            attachments: message.attachments.map((file) => ({ ...file, state: 'unavailable' as const, receivedBytes: 0 })),
-          })),
+          messages: conversation.messages.map((message) => toWireMessage(message)),
         }));
     }
     return data;
   }
 
+  /**
+   * Merges friends and history from a backup. Its messages are read like the
+   * history of another own device: the same validation, and files that are
+   * not on this device stay unavailable.
+   */
   importData(data: unknown): void {
     if (!isRecord(data) || data.version !== 1) return;
     if (isRecord(data.settings)) {
-      this.state.settings.maxFileBytes = clampMaxFileBytes(data.settings.maxFileBytes, this.state.settings.maxFileBytes);
+      this.ledger.state.settings.maxFileBytes = clampMaxFileBytes(data.settings.maxFileBytes, this.ledger.state.settings.maxFileBytes);
     }
-    if (Array.isArray(data.peers)) this.mergeSync(data.peers);
+    if (Array.isArray(data.peers)) this.friends.mergeSync(data.peers);
     if (Array.isArray(data.conversations)) {
+      const limit = this.ledger.now() + MAX_CLOCK_SKEW_MS;
       for (const value of data.conversations) {
         if (!isRecord(value) || !isIdentityPublicKey(value.peer) || !Array.isArray(value.messages)) continue;
         const peer = normalizeIdentityKey(value.peer);
         if (peer === this.me) continue;
-        this.ensurePeer(peer);
-        const meta = this.meta(peer);
-        for (const raw of value.messages) {
-          if (!isRecord(raw) || !isDmId(raw.id) || !isIdentityPublicKey(raw.author)) continue;
-          const author = normalizeIdentityKey(raw.author);
-          if (author !== this.me && author !== peer) continue;
-          const attachments = (Array.isArray(raw.attachments) ? raw.attachments : [])
-            .map((entry) => sanitizeAttachmentMeta(entry))
-            .filter((entry): entry is AttachmentMeta => !!entry)
-            .map<StoredAttachment>((file) => ({ ...file, state: 'unavailable', receivedBytes: 0 }));
-          this.insertMessage(peer, {
-            id: raw.id,
-            author,
-            content: typeof raw.content === 'string' ? raw.content.slice(0, DM_MAX_MESSAGE_LENGTH) : '',
-            createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : 0,
-            editedAt: typeof raw.editedAt === 'number' ? raw.editedAt : null,
-            contentAt: typeof raw.contentAt === 'number' && Number.isFinite(raw.contentAt) ? raw.contentAt : undefined,
-            deleted: raw.deleted === true,
-            replyTo: isDmId(raw.replyTo) ? raw.replyTo : null,
-            reactions: isRecord(raw.reactions) ? (raw.reactions as StoredReactions) : {},
-            attachments,
-            delivery: author === this.me ? 'delivered' : null,
-            forwarded: raw.deleted === true ? null : sanitizeDmForward(raw.forwarded),
-          });
-        }
-        meta.hidden = false;
-        meta.lastReadAt = Math.max(meta.lastReadAt, meta.lastMessageAt);
-        this.refreshMeta(peer);
-        this.saveConversation(peer);
+        this.ledger.ensurePeer(peer);
+        this.conversations.importHistory(peer, value.messages, limit);
       }
     }
-    this.changed();
+    this.ledger.changed();
     this.flush();
   }
-}
-
-function keyringIdentity(keyring: DmKeyring): string {
-  return keyring.identityPublicKey;
 }

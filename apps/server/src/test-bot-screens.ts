@@ -6,6 +6,7 @@ import {
   botScreenListResultSchema, botScreenSchema, botScreenRemovedSchema, type ChannelSummary, type ProtocolMessage,
 } from '@monky/shared';
 import { BotScreenService } from './application/services/BotScreenService';
+import { Logger } from './infrastructure/logger/Logger';
 import { BotScreenHandler } from './infrastructure/websocket/BotScreenHandler';
 import type { BotInteractionSession } from './infrastructure/websocket/BotInteractionHandler';
 
@@ -283,11 +284,16 @@ test('voice changes during asynchronous creation or action checks never publish 
 test('active screen counts and action rates are bounded', async (t) => {
   const f = fixture(); t.after(() => f.handler.close());
   for (let index = 0; index < BOT_SCREEN_LIMITS.activePerChannel; index++) assert.equal((await f.create(`game-${index}`)).type, MessageType.BOT_SCREEN_SNAPSHOT);
-  assert.equal((await f.create('overflow')).type, MessageType.SERVER_ERROR);
+  // Each limit reaches the bot or person in its own words (BOTS-8).
+  assert.deepEqual((await f.create('overflow')).payload, {
+    code: ProtocolErrorCode.BOT_INTERACTION_INVALID, message: 'Active screen limit reached. Close a screen before creating another.',
+  });
   for (let index = 0; index < BOT_SCREEN_LIMITS.actionsPerSecond; index++) {
     await f.call(f.bob, MessageType.BOT_SCREEN_ACTION, { ...f.ref('game-0'), action: 'move', payload: null, revision: 0, actionId: `action-${index}` });
   }
-  assert.equal((await f.call(f.bob, MessageType.BOT_SCREEN_ACTION, { ...f.ref('game-0'), action: 'move', payload: null, revision: 0, actionId: 'overflow' })).type, MessageType.SERVER_ERROR);
+  assert.deepEqual((await f.call(f.bob, MessageType.BOT_SCREEN_ACTION, {
+    ...f.ref('game-0'), action: 'move', payload: null, revision: 0, actionId: 'overflow',
+  })).payload, { code: ProtocolErrorCode.BOT_COMMAND_BUSY, message: 'Screen operation rate exceeded.' });
   assert.equal(f.messages.filter(({ message }) => message.type === MessageType.BOT_SCREEN_ACTION_EVENT).length, BOT_SCREEN_LIMITS.actionsPerSecond);
 });
 
@@ -469,4 +475,30 @@ test('the owning bot always receives terminal removal even when access vanished 
     return botScreenRemovedSchema.parse(message.payload).reason === 'access_revoked';
   });
   assert.equal(terminal.length, 1);
+});
+
+test('an unexpected miniapp failure is logged and answered in general terms, an invalid request in its own words (BOTS-8)', async (t) => {
+  const f = fixture(); t.after(() => f.handler.close());
+  await f.create();
+  const logged: string[] = [];
+  t.after(Logger.subscribe((entry) => { if (entry.level === 'ERROR') logged.push(entry.message); }));
+  t.mock.method(f.service, 'update', () => { throw new Error('SQLITE_IOERR: disk I/O error'); });
+  const failed = await f.call(f.bot, MessageType.BOT_SCREEN_UPDATE, { ...f.ref(), state: { turn: 'bob' }, expectedRevision: 0 });
+  assert.deepEqual(failed.payload, { code: ProtocolErrorCode.BOT_INTERACTION_INVALID, message: 'Screen operation failed.' });
+  assert.ok(logged.some((message) => message.includes('SQLITE_IOERR')), 'the operator learns what failed');
+
+  const invalid = await f.call(f.bot, MessageType.BOT_SCREEN_UPDATE, { ...f.ref(), state: null, expectedRevision: 'zero' });
+  assert.ok(typeof invalid.payload === 'object' && invalid.payload !== null && 'code' in invalid.payload && 'message' in invalid.payload);
+  assert.equal(invalid.payload.code, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+  assert.match(String(invalid.payload.message), /expectedRevision/, 'the bot developer learns which field was wrong');
+  assert.equal(logged.length, 1, 'an invalid request is not a server failure');
+
+  t.mock.restoreAll();
+  const entry = f.service.get('game');
+  assert.ok(entry);
+  entry.screen = { ...entry.screen, revision: Number.MAX_SAFE_INTEGER };
+  const exhausted = await f.call(f.bot, MessageType.BOT_SCREEN_UPDATE, { ...f.ref(), state: null, expectedRevision: Number.MAX_SAFE_INTEGER });
+  assert.deepEqual(exhausted.payload, { code: ProtocolErrorCode.BOT_INTERACTION_INVALID, message: 'Screen revision limit reached.' },
+    'a limit the service refuses keeps its words');
+  assert.equal(logged.length, 1, 'nor is a refusal');
 });

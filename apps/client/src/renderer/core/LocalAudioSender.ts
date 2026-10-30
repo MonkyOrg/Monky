@@ -9,12 +9,14 @@ import {
   assertLocalMediaChannel,
   createLocalMediaFlowState,
   decodeLocalMediaRecord,
+  deferred,
   encodeLocalMediaRecord,
   isLocalMediaSdp,
   isLocalOpusPacket,
   localFrameReadInputSchema,
   localMediaGenerationSchema,
   localMediaSignalSchema,
+  type Deferred,
   type LocalExecutionFailure,
   type LocalExecutionMutationResult,
   type LocalMediaChannelParameters,
@@ -112,9 +114,7 @@ export class LocalAudioSender implements LocalAudioSenderTransport {
   private peer: LocalAudioPeer | null = null;
   private channel: LocalAudioChannel | null = null;
   private readonly listeners: Array<() => void> = [];
-  private connectPromise: Promise<void> | null = null;
-  private resolveConnect: (() => void) | null = null;
-  private rejectConnect: ((error: Error) => void) | null = null;
+  private connection: Deferred<void> | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private readRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private connected = false;
@@ -157,11 +157,9 @@ export class LocalAudioSender implements LocalAudioSenderTransport {
 
   connect(): Promise<void> {
     if (this.closed) return Promise.reject(new LocalExecutionError('cancelled'));
-    if (this.connectPromise) return this.connectPromise;
-    this.connectPromise = new Promise<void>((resolve, reject) => {
-      this.resolveConnect = resolve;
-      this.rejectConnect = reject;
-    });
+    if (this.connection) return this.connection.promise;
+    const connection = deferred<void>();
+    this.connection = connection;
     try {
       if (!this.media || !localMediaSignalSchema.shape.taskId.safeParse(this.taskId).success) {
         throw new LocalExecutionError('transport_failed');
@@ -170,7 +168,7 @@ export class LocalAudioSender implements LocalAudioSenderTransport {
       const peer = createPeer({ iceServers: this.media.iceServers });
       if (this.closed) {
         this.cleanup(() => peer.close());
-        return this.connectPromise;
+        return connection.promise;
       }
       this.peer = peer;
       this.listenPeer(peer, 'connectionstatechange', () => this.checkConnection());
@@ -188,7 +186,7 @@ export class LocalAudioSender implements LocalAudioSenderTransport {
       const channel = peer.createDataChannel(LOCAL_MEDIA_CHANNEL_LABEL, { ...LOCAL_MEDIA_CHANNEL_OPTIONS });
       if (this.closed) {
         this.cleanup(() => channel.close());
-        return this.connectPromise;
+        return connection.promise;
       }
       this.channel = channel;
       assertLocalMediaChannel(channel);
@@ -224,7 +222,7 @@ export class LocalAudioSender implements LocalAudioSenderTransport {
     } catch (error: unknown) {
       this.failError(error);
     }
-    return this.connectPromise;
+    return connection.promise;
   }
 
   acceptSignal(signal: LocalMediaSignal): Promise<void> {
@@ -388,9 +386,7 @@ export class LocalAudioSender implements LocalAudioSenderTransport {
           peer.connectionState === 'connected' && channel.readyState === 'open') {
         this.connected = true;
         this.clearConnectTimer();
-        this.resolveConnect?.();
-        this.resolveConnect = null;
-        this.rejectConnect = null;
+        this.connection?.resolve();
         this.requestPump();
       }
     } catch (error: unknown) {
@@ -584,9 +580,7 @@ export class LocalAudioSender implements LocalAudioSenderTransport {
     this.closed = true;
     this.clearConnectTimer();
     this.clearReadRetry();
-    this.rejectConnect?.(error);
-    this.resolveConnect = null;
-    this.rejectConnect = null;
+    this.connection?.reject(error);
     this.frames = [];
     this.playedQueue = [];
     this.earlyCandidates = [];

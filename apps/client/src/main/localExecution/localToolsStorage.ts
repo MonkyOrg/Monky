@@ -6,8 +6,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { samePath } from '../canonicalDirectory';
 import { LocalExecutionError } from './errors';
 
-const MAX_TREE_ENTRIES = 10_000;
-const MAX_TREE_DEPTH = 16;
+/** Bounds every walk of a tools or cache tree: a task cache the live scan accepted can always be measured and removed. */
+export const LOCAL_TOOL_TREE_LIMITS = { entries: 10_000, depth: 16 } as const;
 const READ_CHUNK_BYTES = 1024 * 1024;
 const WINDOWS_RETRY_DELAYS = [50, 100, 200, 400, 800];
 
@@ -153,7 +153,7 @@ export async function localToolTreeBytes(root: string, filename: string): Promis
   await localToolDirectory(path.dirname(filename));
   let entries = 0;
   const visit = async (target: string, depth: number): Promise<number> => {
-    if (++entries > MAX_TREE_ENTRIES || depth > MAX_TREE_DEPTH) throw new LocalExecutionError('storage_failed');
+    if (++entries > LOCAL_TOOL_TREE_LIMITS.entries || depth > LOCAL_TOOL_TREE_LIMITS.depth) throw new LocalExecutionError('storage_failed');
     const stat = await localToolStat(target);
     if (!stat) return 0;
     // Inventory counts the link itself, never its potentially external target.
@@ -180,7 +180,7 @@ export async function removeLocalToolTree(root: string, filename: string): Promi
   await localToolDirectory(path.dirname(filename));
   let entries = 0;
   const remove = async (target: string, depth: number): Promise<void> => {
-    if (++entries > MAX_TREE_ENTRIES || depth > MAX_TREE_DEPTH) throw new LocalExecutionError('storage_failed');
+    if (++entries > LOCAL_TOOL_TREE_LIMITS.entries || depth > LOCAL_TOOL_TREE_LIMITS.depth) throw new LocalExecutionError('storage_failed');
     const stat = await localToolStat(target);
     if (!stat) return;
     await localToolDirectory(path.dirname(target));

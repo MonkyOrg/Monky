@@ -1,5 +1,5 @@
 import { UserSummary, VoiceParticipantState, VoiceRosterParticipant } from '@monky/shared';
-import { appEvents, EventBus } from './EventBus';
+import { appEvents, type AppEventBus } from './EventBus';
 import { createActiveProxy } from './activeProxy';
 
 export interface ParticipantViewModel {
@@ -32,7 +32,7 @@ export interface ParticipantViewModel {
 
 export class ParticipantManager {
   /** See ServerStore.bus: background servers get a silent bus (#400). */
-  public bus: EventBus = appEvents;
+  public bus: AppEventBus = appEvents;
 
   /**
    * Keyed by sessionId: the same person may be connected from several devices

@@ -288,10 +288,10 @@ group("all") {
 }
 
 rtc_executable("monky_rtc_engine_contract_probe") {
-  sources = [
-    "inputs/engine/contract_probe.cc",
-    "inputs/abi/adapter_policy_probe.cc",
-  ]
+  sources = [ "inputs/engine/contract_probe.cc" ]
+  if (is_win) {
+    sources += [ "inputs/abi/adapter_policy_probe.cc" ]
+  }
   suppressed_configs = [
     "//build/config/compiler:no_exceptions",
     "//build/config/compiler:no_rtti",
@@ -319,10 +319,15 @@ rtc_executable("monky_rtc_engine_contract_probe") {
     "//video:video",
     "//video:video_stream_buffer_controller",
   ]
-  ldflags = [
-    "/DELAYLOAD:mfplat.dll",
-    "/threads:4",
-  ]
+  if (is_win) {
+    ldflags = [
+      "/DELAYLOAD:mfplat.dll",
+      "/threads:4",
+    ]
+  } else {
+    # libmonky_av1.dylib is loaded through its @rpath install name from beside the probe.
+    ldflags = [ "-Wl,-rpath,@executable_path/." ]
+  }
 }
 
 rtc_executable("monky_msvc_job") {

@@ -1,13 +1,21 @@
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import { MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, ProtocolErrorCode, type ProtocolMessage } from '@monky/shared';
+import {
+  MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, ProtocolErrorCode,
+  type AuthConnectPayload, type ClientMessage, type ProtocolMessage,
+} from '@monky/shared';
 import { NetworkClient, ProtocolRequestError, type ConnectionStatus, type NetworkDisconnectedPayload, type ServerShutdownNotice } from '../src/renderer/core/NetworkClient';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { setForegroundContext, setSessionEventRouter } from '../src/renderer/core/sessionRouting';
 import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 
 const identity = { clientId: 'fixture-client', publicKey: 'fixture-public-key' };
+
+function authPayload(message: ClientMessage | undefined): AuthConnectPayload {
+  if (message?.type !== MessageType.AUTH_CONNECT) throw new Error(`Expected AUTH_CONNECT, got ${message?.type}`);
+  return message.payload;
+}
 
 function fixture(context: TestContext) {
   context.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 100_000 });
@@ -23,7 +31,7 @@ function fixture(context: TestContext) {
     onclose: ((event: Event) => void) | null = null;
     onmessage: ((event: MessageEvent<string>) => void) | null = null;
     onerror: ((event: Event) => void) | null = null;
-    sent: ProtocolMessage[] = [];
+    sent: ClientMessage[] = [];
     respondToPing = true;
     constructor(readonly url: string) {
       if (Socket.failConstruction) throw new Error('Fixture socket constructor failed');
@@ -31,7 +39,7 @@ function fixture(context: TestContext) {
     }
     send(data: string) {
       assert.equal(this.readyState, Socket.OPEN);
-      const message: ProtocolMessage = JSON.parse(data);
+      const message: ClientMessage = JSON.parse(data);
       this.sent.push(message);
       if (message.type === MessageType.PING && this.respondToPing) {
         this.receive({ type: MessageType.PONG, payload: {} });
@@ -67,7 +75,7 @@ function fixture(context: TestContext) {
   Object.defineProperty(globalThis, 'window', { configurable: true, value: browser });
   const client = new NetworkClient();
   const statuses: ConnectionStatus[] = [];
-  const offStatus = appEvents.on<ConnectionStatus>('network.status', status => statuses.push(status));
+  const offStatus = appEvents.on('network.status', status => statuses.push(status));
   const lastSocket = () => {
     const socket = sockets.at(-1);
     assert.ok(socket);
@@ -110,8 +118,8 @@ for (const serverProtocolVersion of [24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
     const socket = f.lastSocket();
     socket.open();
     const request = socket.sent[0];
-    assert.equal(request.payload.protocolVersion, PROTOCOL_VERSION);
-    assert.equal(request.payload.protocolOffer.minimumVersion, 35);
+    assert.equal(authPayload(request).protocolVersion, PROTOCOL_VERSION);
+    assert.equal(authPayload(request).protocolOffer?.minimumVersion, 35);
     socket.receive({ type: MessageType.SERVER_ERROR, requestId: request.requestId,
       payload: { code: 'PROTOCOL_VERSION_UNSUPPORTED', serverProtocolVersion } });
     await pending;
@@ -128,7 +136,7 @@ test('current clients advertise negotiated human-client features to compatible s
   socket.open();
   const initial = socket.sent[0];
   for (const feature of ['server-community', 'forums', 'message-search', 'recent-sounds', 'dm-relay']) {
-    assert.ok(initial.payload.protocolOffer.features.includes(feature));
+    assert.ok(authPayload(initial).protocolOffer?.features.includes(feature));
   }
   socket.receive({ type: MessageType.AUTH_SUCCESS, requestId: initial.requestId, payload: {} });
   await pending;
@@ -223,7 +231,7 @@ test('clients a restarting server drops together come back spread around each st
   const f = fixture(context);
   await f.connected();
   const delays: number[] = [];
-  const off = appEvents.on<{ attempt: number; delay: number }>('network.reconnecting', ({ delay }) => { delays.push(delay); });
+  const off = appEvents.on('network.reconnecting', ({ delay }) => { delays.push(delay); });
   context.after(off);
 
   f.random.mock.mockImplementation(() => 0);
@@ -246,7 +254,7 @@ test('clients a restarting server drops together come back spread around each st
 test('after an identity import, reconnecting claims the new key the challenge is signed with', async context => {
   const f = fixture(context);
   await f.connected();
-  const claimed = () => f.lastSocket().sent.find(message => message.type === MessageType.AUTH_CONNECT)?.payload.publicKey;
+  const claimed = () => authPayload(f.lastSocket().sent.find(message => message.type === MessageType.AUTH_CONNECT)).publicKey;
   assert.equal(claimed(), identity.publicKey);
   f.client.adoptIdentity({ clientId: 'imported-client', publicKey: 'imported-public-key' });
   assert.equal(f.client.getStatus(), 'CONNECTED', 'The open session is left as it is');
@@ -418,14 +426,15 @@ test('a reply that settles a request reaches bus listeners first, as the same pa
   await f.connected();
   const relayed: unknown[] = [];
   context.after(appEvents.on(`message.${MessageType.SOUNDBOARD_PLAYED}`, payload => relayed.push(payload)));
-  const reply = f.client.sendRequest(MessageType.SOUNDBOARD_PLAY, { channelId: 'room' }, undefined, 60_000);
+  const sound = { channelId: 'room', soundName: 'Fixture', audioBase64: '' };
+  const reply = f.client.sendRequest(MessageType.SOUNDBOARD_PLAY, sound, undefined, 60_000);
   const request = f.lastSocket().sent.at(-1);
   assert.ok(request && request.type === MessageType.SOUNDBOARD_PLAY);
   f.lastSocket().receive({ type: MessageType.SOUNDBOARD_PLAYED, requestId: request.requestId, payload: { channelId: 'room', userId: 'self' } });
   assert.equal(relayed.length, 1, 'The relayed clip is dispatched before the requester resumes');
   assert.equal(await reply, relayed[0]);
 
-  const refused = f.client.sendRequest(MessageType.SOUNDBOARD_PLAY, { channelId: 'room' });
+  const refused = f.client.sendRequest(MessageType.SOUNDBOARD_PLAY, sound);
   const second = f.lastSocket().sent.at(-1);
   f.lastSocket().receive({ type: MessageType.SERVER_ERROR, requestId: second?.requestId,
     payload: { code: ProtocolErrorCode.PERMISSION_DENIED, message: 'Sem permissão' } });
@@ -474,7 +483,7 @@ test('a disconnection tells whether the server or this client ended the session'
       const f = fixture(nested);
       await f.connected();
       const departures: NetworkDisconnectedPayload[] = [];
-      const off = appEvents.on<NetworkDisconnectedPayload>('network.disconnected', payload => departures.push(payload));
+      const off = appEvents.on('network.disconnected', payload => departures.push(payload));
       nested.after(off);
       end(f);
       f.client.disconnect();
@@ -548,7 +557,7 @@ test('a client that never signed in can be disposed without announcing a departu
       const departures: NetworkDisconnectedPayload[] = [];
       let disposals = 0;
       const off = [
-        appEvents.on<NetworkDisconnectedPayload>('network.disconnected', payload => departures.push(payload)),
+        appEvents.on('network.disconnected', payload => departures.push(payload)),
         appEvents.on('network.disposed', () => { disposals++; }),
       ];
       nested.after(() => off.forEach(unbind => unbind()));
@@ -578,7 +587,7 @@ test('a background server update notice reaches global UI and keeps reconnecting
   await f.connected();
   f.lastSocket().receive({ type: MessageType.SERVER_SETTINGS_UPDATED, payload: { name: 'Remote fixture server' } });
   const notices: ServerShutdownNotice[] = [];
-  const off = appEvents.on<ServerShutdownNotice>('network.server_shutdown', notice => notices.push(notice));
+  const off = appEvents.on('network.server_shutdown', notice => notices.push(notice));
   setSessionEventRouter(() => {});
   context.after(() => {
     off();

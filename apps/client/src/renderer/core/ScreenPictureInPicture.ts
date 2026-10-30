@@ -131,7 +131,7 @@ class ScreenPictureInPicture {
       if (this.current === entry && !this.isAuthorized(source)) this.close(true);
     };
     for (const event of ['voice.channel_changed', 'voice.screen_watch_changed', 'participants.updated',
-      'session.voice_context_updated', 'server.updated', 'server.roles_updated', 'native_screen.updated']) {
+      'session.voice_context_updated', 'server.updated', 'server.roles_updated', 'native_screen.updated'] as const) {
       entry.dispose.push(appEvents.on(event, invalidate));
     }
     const ended = (): void => { if (this.current === entry) this.close(true); };

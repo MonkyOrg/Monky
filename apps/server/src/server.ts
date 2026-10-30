@@ -457,10 +457,7 @@ export class MonkyServer {
       if (recovery.recoveredCorruptIndex) {
         Logger.warn('SOUNDBOARD', 'Recovered a corrupt recent sound cache index.');
       }
-      const configuration = await cache.configure(
-        Boolean(serverRecord.recentSoundCacheEnabled),
-        serverRecord.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
-      );
+      const configuration = await cache.configure(serverRecord.recentSoundCacheEnabled, serverRecord.recentSoundCacheLimit);
       if (configuration.cleanupError) {
         Logger.warn('SOUNDBOARD', 'Could not remove every unreferenced recent sound during startup.',
           configuration.cleanupError);

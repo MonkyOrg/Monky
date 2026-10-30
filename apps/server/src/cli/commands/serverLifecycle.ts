@@ -5,7 +5,7 @@ import { SqliteServerRepository } from '../../infrastructure/database/SqliteRepo
 import { ANSI, color, DEFAULT_SERVER_NAME, SERVER_DB_NAME } from '../constants';
 import { formatBotCompatibilityWarnings, printBotCompatibility, printBotCompatibilityWarning, waitForLocalServerPreview } from '../botCompatibility';
 import { GlobalArgs, readLocalConfig, withContext } from '../context';
-import { describeTurnPortProblem, describeTurnUnavailability, formatBool, formatProcessStatus, parseOption, parsePositiveInt, pad } from '../formatters';
+import { describeTurnPortProblem, describeTurnUnavailability, formatBool, formatProcessStatus, parseOption, parsePort, parsePositiveInt, pad } from '../formatters';
 import {
   ensurePm2,
   deletePm2Process,
@@ -14,10 +14,10 @@ import {
   getPm2ProcessName,
   getServerEntryPath,
   isMonkyServerRegistered,
-  isPm2Available,
   LEGACY_PM2_PROCESS_NAME,
   listPm2Processes,
   Pm2Process,
+  pm2Availability,
   requirePm2,
   writeEcosystem,
 } from '../pm2';
@@ -95,7 +95,7 @@ export async function buildStartPlan(dataDir: string, args: string[]): Promise<S
   // a message about the typo, not about the database.
   rejectRemovedStartOptions(args);
   const portOption = parseOption(args, '--port');
-  const overriddenPort = portOption ? parsePositiveInt('port', portOption) : null;
+  const overriddenPort = portOption ? parsePort(portOption) : null;
 
   const localConfig = readLocalConfig(dataDir);
   const storedServer = await loadStoredServer(dataDir);
@@ -122,7 +122,7 @@ function retireLegacyProcess(dataDir: string, processes: readonly Pm2Process[]):
 export async function startServerCommand(globalArgs: GlobalArgs, args: string[]): Promise<void> {
   rejectRemovedStartOptions(args);
   const portOption = parseOption(args, '--port');
-  if (portOption) parsePositiveInt('port', portOption);
+  if (portOption) parsePort(portOption);
   const fresh = args.includes('--fresh');
 
   const target = await resolveTargetServer(globalArgs, t('action.start'));
@@ -318,7 +318,13 @@ export async function logsServerCommand(globalArgs: GlobalArgs, args: string[] =
   const lines = linesOption ? parsePositiveInt('lines', linesOption) : 100;
   const minLevel = levelOption ? parseLevelOption(levelOption) : null;
 
-  if (!isPm2Available()) {
+  const availability = pm2Availability();
+  if (availability === 'failing') {
+    console.log(color(t('pm2.failing', { action: t('action.inspect') }), ANSI.yellow));
+    console.log(color(t('pm2.failingHint'), ANSI.dim));
+    return;
+  }
+  if (availability === 'missing') {
     console.log(color(t('lifecycle.pm2NoLogs'), ANSI.yellow));
     console.log(color(t('lifecycle.logsExplain'), ANSI.dim));
     console.log(color(t('pm2.installHint'), ANSI.dim));

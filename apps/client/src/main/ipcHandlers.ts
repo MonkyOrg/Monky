@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, powerMonitor, screen, shell, systemPreferences } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain as electronIpcMain, powerMonitor, screen, shell, systemPreferences } from 'electron';
 import { execFile } from 'child_process';
 import fs from 'fs';
 import net from 'net';
@@ -18,6 +18,7 @@ import { createSoundboardEncoder } from './soundboardEncoder';
 import { MediaFolderAccess, type MediaFolderPurpose } from './mediaFolders';
 import { downloadToFile, sanitizeDownloadFileName, suggestedDownloadName } from './attachmentDownload';
 import { isMainFrameSender, mainFrameHandle } from './ipcSender';
+import type { ContractIpcMain } from './ipcContract';
 import type { LocalTools } from './localExecution/LocalTools';
 import { AudioPreviews } from './audioPreviews';
 import { createLocalExecutionService } from './localExecution/createService';
@@ -28,7 +29,9 @@ import { browserOcclusionEngine } from './browserOcclusion';
 import { ScreenPictureInPictureWindows } from './screenPictureInPictureWindow';
 import { NativeThumbnailCapturer, loadThumbnailRuntime, createMacScreenProvider, type MacScreenProvider } from '@monky/screen-share';
 import { DesktopSourcePreviews } from './desktopSourcePreviews';
-import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
+import * as screenAudio from '@monky/screen-audio';
+import type { NativeWindowInfo, WindowOwner } from '@monky/screen-audio';
+import type { ClientLogger } from './clientLogger';
 import { createIdentity, deleteIdentity, exportIdentity, getClientId, getIdentity, getIdentityStatus, importIdentity, signChallenge } from './identityService';
 import { exportDirectMessages, importDirectMessages, resetDirectMessages, setupDmIpc, wipeDirectMessages, writeDmAttachment } from './dm/dmIpc';
 import { openBackup, sealBackup } from './secretEnvelope';
@@ -55,28 +58,23 @@ import {
 /** Extensões que a soundboard aceita, na listagem e na leitura de um som. */
 const SOUNDBOARD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']);
 
-interface NativeWindowOwner {
-  windowId: number;
-  pid: number;
-  bundlePath: string;
-  appName: string;
-}
+// Every channel registered here is checked against the contract in @monky/shared.
+const ipcMain: ContractIpcMain = electronIpcMain;
 
-// Screen audio native module (compiled only on CI — graceful fallback)
-let screenAudio: {
-  listWindowOwners?: () => NativeWindowOwner[];
-  listWindows?: () => NativeWindowInfo[];
-  getWindowState?: (hwnd: number) => NativeWindowState | null;
-  getProcessAncestry?: (processIds: readonly number[]) => (number[] | null)[];
-  listMonitors?: () => NativeMonitorInfo[];
-  getMonitorState?: (deviceId: string) => NativeMonitorInfo | null;
-  restoreWindow?: (hwnd: number) => boolean;
-} | null = null;
-try {
-  screenAudio = require('@monky/screen-audio');
-} catch (e) {
-  console.warn('[ScreenAudio:Main] Native module not available:', (e as Error).message);
-  screenAudio = null;
+// O addon nativo também enumera janelas e monitores, lê o layout do teclado e limita o redimensionamento
+// do overlay. Se ele não carregar, a causa vai uma vez para o log; as funções que dependem dele falham
+// com ela, em vez de devolver listas vazias.
+let screenAudioLoadFailureLogged = false;
+function logScreenAudioLoadFailure(logger: ClientLogger | undefined): void {
+  const error = screenAudio.getLoadError();
+  if (!error || screenAudioLoadFailureLogged) return;
+  screenAudioLoadFailureLogged = true;
+  console.error('[ScreenAudio:Main] Native module failed to load:', error);
+  const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+  logger?.write({
+    timestamp: new Date().toISOString(), level: 'ERROR', category: 'SCREEN_SHARE',
+    message: 'Native screen-audio module failed to load', data: { code, message: error.message },
+  });
 }
 
 // Icones de app nao mudam enquanto o app roda, e ler o bundle do disco a cada
@@ -90,9 +88,9 @@ const appIconCache = new Map<string, string | null>();
  */
 async function resolveMacAppIcons(sourceIds: string[]): Promise<Map<string, string>> {
   const iconsBySourceId = new Map<string, string>();
-  if (process.platform !== 'darwin' || !screenAudio?.listWindowOwners) return iconsBySourceId;
+  if (process.platform !== 'darwin') return iconsBySourceId;
 
-  let owners: NativeWindowOwner[];
+  let owners: WindowOwner[];
   try {
     owners = screenAudio.listWindowOwners();
   } catch (e) {
@@ -128,7 +126,6 @@ async function resolveMacAppIcons(sourceIds: string[]): Promise<Map<string, stri
 
 function listNativeWindows(): NativeWindowInfo[] {
   if (process.platform !== 'win32') return [];
-  if (!screenAudio?.listWindows) throw new Error('Native window enumeration is unavailable.');
   try {
     return screenAudio.listWindows();
   } catch (e) {
@@ -259,6 +256,7 @@ export function setupIpcHandlers(
   trayManager?: TrayManager,
   options?: SetupIpcOptions
 ): LocalExecutionIpc & { prepareShutdown(): Promise<void> } {
+  logScreenAudioLoadFailure(options?.clientLogger);
   const lanDiscovery = new LanDiscovery(mainWindow);
   globalInputHook.init(mainWindow);
   const overlayManager = options?.overlayManager || new OverlayManager(mainWindow);
@@ -274,22 +272,10 @@ export function setupIpcHandlers(
   const nativeSources = new NativeDesktopSources({
     windows: listNativeWindows,
     isWindowExcluded: hwnd => overlayManager.isScreenShareSource(`window:${hwnd}:0`),
-    windowState(hwnd) {
-      if (!screenAudio?.getWindowState) throw new Error('Native window identity inspection is unavailable.');
-      return screenAudio.getWindowState(hwnd);
-    },
-    monitors() {
-      if (!screenAudio?.listMonitors) throw new Error('Native monitor enumeration is unavailable.');
-      return screenAudio.listMonitors();
-    },
-    monitorState(deviceId) {
-      if (!screenAudio?.getMonitorState) throw new Error('Native monitor identity inspection is unavailable.');
-      return screenAudio.getMonitorState(deviceId);
-    },
-    processAncestry(ids) {
-      if (!screenAudio?.getProcessAncestry) throw new Error('Native process inspection is unavailable.');
-      return screenAudio.getProcessAncestry(ids);
-    },
+    windowState: hwnd => screenAudio.getWindowState(hwnd),
+    monitors: () => screenAudio.listMonitors(),
+    monitorState: deviceId => screenAudio.getMonitorState(deviceId),
+    processAncestry: ids => screenAudio.getProcessAncestry(ids),
   });
   const assertCaptureSourceAllowed = (sourceId: string): void => {
     if (overlayManager.isScreenShareSource(sourceId)) {
@@ -811,7 +797,7 @@ export function setupIpcHandlers(
   // minimizou no alt-tab precisa voltar ao primeiro plano antes do getUserMedia.
   ipcMain.handle('screen-share:prepare-window', (_event, sourceId: string) => {
     assertCaptureSourceAllowed(sourceId);
-    if (process.platform !== 'win32' || !screenAudio?.restoreWindow) return false;
+    if (process.platform !== 'win32') return false;
     if (typeof sourceId !== 'string') return false;
     const hwnd = nativeWindowIdFromSourceId(sourceId);
     if (hwnd === null) return false;

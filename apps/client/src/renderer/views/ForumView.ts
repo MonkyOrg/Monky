@@ -9,7 +9,7 @@ import { uploadAttachment, type UploadHandle } from '../core/AttachmentUploader'
 import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { showConfirm } from './Dialog';
-import { fileIconName, formatBytes } from '../utils/attachment';
+import { fileIconName, formatBytes, resolveAttachmentUrl } from '../utils/attachment';
 import { imageCarouselNavigationButton, moveImageCarousel } from './ImageCarousel';
 import { showErrorToast } from './CopyToast';
 import { openFileInputPicker } from '../utils/buttonLoading';
@@ -464,6 +464,7 @@ export class ForumView {
       const replies = wholeNumber(post.replyCount);
       const reactions = wholeNumber(post.reactionCount);
       const author = this.server.knownMembers.get(post.authorId)?.nickname;
+      const thumbnail = resolveAttachmentUrl(post.thumbnailUrl, this.client.getHttpBaseUrl());
       return html`<article class="forum-post-row" data-forum-id="${post.channelId}">
         <button type="button" class="forum-post-open" data-forum-open>
           <span class="forum-post-summary">
@@ -475,7 +476,7 @@ export class ForumView {
             <time datetime="${new Date(post.updatedAt).toISOString()}">${new Date(post.updatedAt).toLocaleString(getLanguage())}</time>
             ${post.locked ? html`<span class="forum-post-state"><span class="material-symbols-outlined md-14">lock</span>${t('forum.locked')}</span>` : ''}
             ${post.closed ? html`<span class="forum-post-state"><span class="material-symbols-outlined md-14">check_circle</span>${t('forum.closed')}</span>` : ''}</small></span>
-          ${post.thumbnailUrl ? html`<img class="forum-post-thumbnail" src="${this.client.getHttpBaseUrl() + post.thumbnailUrl}" alt="">` : ''}
+          ${thumbnail ? html`<img class="forum-post-thumbnail" src="${thumbnail}" alt="">` : ''}
         </button>
         <button type="button" class="forum-post-menu" data-forum-menu aria-label="${t('common.moreOptions')}"><span class="material-symbols-outlined md-18">more_horiz</span></button>
         </article>`;

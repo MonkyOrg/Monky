@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType, DEFAULT_CUSTOM_PROFILE, ProtocolErrorCode } from '@monky/shared';
+import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType, DEFAULT_CUSTOM_PROFILE, ProtocolErrorCode, type SfuNewProducerPayload } from '@monky/shared';
 import { ParticipantManager } from '../src/renderer/core/ParticipantManager';
 import { NetworkClient, ProtocolRequestError } from '../src/renderer/core/NetworkClient';
 import { SfuClientEngine } from '../src/renderer/core/webrtc/SfuClientEngine';
@@ -818,7 +818,9 @@ test('SFU announcements from a background server cannot alter the call even with
     handleRemoteProducerClosed: { value: () => { closes++; } },
   });
   engine['subscribeNetworkEvents']();
-  const producer = { channelId: 'room', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', appData: { mediaType: 'mic' } };
+  const producer: SfuNewProducerPayload = {
+    channelId: 'room', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', appData: { mediaType: 'mic' },
+  };
   setEventOrigin('other-server');
   appEvents.emit(`message.${MessageType.SFU_NEW_PRODUCER}`, producer);
   appEvents.emit(`message.${MessageType.SFU_PRODUCER_CLOSED}`, producer);

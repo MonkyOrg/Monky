@@ -1,5 +1,6 @@
 import { appEvents } from '../core/EventBus';
 import { isForegroundEvent } from '../core/sessionRouting';
+import { nextIndex } from '../utils/rovingFocus';
 import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/surfaceMotion';
 
 export interface ContextMenuItem {
@@ -197,11 +198,8 @@ export class ContextMenu {
         const activeMenu = this.submenuEl?.contains(document.activeElement) ? this.submenuEl : this.menuEl;
         if (activeMenu === this.menuEl) this.closeSubmenu();
         const buttons = Array.from(activeMenu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
-        if (!buttons.length) return;
-        const current = buttons.findIndex((button) => button === document.activeElement);
-        const next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
-          : (current + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
-        buttons[next]?.focus({ preventScroll: true });
+        const next = nextIndex(e.key, buttons.findIndex((button) => button === document.activeElement), buttons.length);
+        if (next !== null) buttons[next].focus({ preventScroll: true });
       }
     };
     const handleResize = () => this.close();

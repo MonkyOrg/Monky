@@ -1,8 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
-import type { BotLocale } from '@monky/shared';
 import { runNpm } from '../../tooling/process';
 import { isRecord } from '../../tooling/config';
 import { DEFAULT_AUTOUPDATE_SCHEDULE, GENERATED_WRAPPER_FILE } from '../constants';
@@ -21,6 +19,7 @@ import { configuredUpdateSource, withUpdateCandidate } from '../updateSources';
 import { projectForUpdates } from '../updateConfiguration';
 import { updateEnvironment } from '../updateCredentials';
 import { CliError, cliText } from '../locale';
+import { askCliConfirm } from '../prompts';
 import { createUpdateProgressReporter } from '../updateProgress';
 import {
   candidateHostConsent, HOST_CONSENT_ENV, hostAccessNotice, hostConsentFingerprint, hostConsentStatus, writeHostConsent,
@@ -70,31 +69,11 @@ async function reviewCandidateConsent(
     console.log(text('Esta versão do CLI não consegue exibir a nova declaração. Para atualizar, instale o pacote manualmente e revise os acessos com consent antes de reiniciar.',
       'This CLI version cannot display the new declaration. To update, install the package manually and review the access with consent before restarting.'));
   }
-  if (!candidate.definition || !(await promptYesNo(text('Autorizar esses acessos e instalar?', 'Allow this access and install?'), false, context.locale))) {
+  if (!candidate.definition || !(await askCliConfirm(context.locale, text('Autorizar esses acessos e instalar?', 'Allow this access and install?'), false))) {
     console.log(text('Atualização não instalada; o bot atual continua rodando.', 'Update not installed; the current bot keeps running.'));
     throw new UpdateDeferred();
   }
   return { ...result, approved: true };
-}
-
-function promptYesNo(question: string, defaultYes: boolean, locale: BotLocale): Promise<boolean> {
-  const hint = defaultYes ? cliText(locale, '[S/n]', '[Y/n]') : cliText(locale, '[s/N]', '[y/N]');
-  return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, historySize: 0 });
-    const onClose = (): void => reject(new CliError('Atualização cancelada.', 'Update cancelled.'));
-    rl.once('close', onClose);
-    rl.on('SIGINT', () => rl.close());
-    rl.question(`${question} ${hint} `, (answer) => {
-      rl.off('close', onClose);
-      rl.close();
-      const normalized = answer.trim().toLowerCase();
-      if (!normalized) {
-        resolve(defaultYes);
-        return;
-      }
-      resolve(['y', 'yes', 's', 'sim'].includes(normalized));
-    });
-  });
 }
 
 function parseUpdateArgs(args: string[]): { includeBeta: boolean; checkOnly: boolean; assumeYes: boolean } {
@@ -251,8 +230,8 @@ export async function updateCommand(context: CliContext, args: string[]): Promis
         throw new CliError('Use update --yes para instalar sem interação ou --check para consultar.',
           'Use update --yes to install a release non-interactively, or --check to inspect it.');
       }
-      if (!options.assumeYes && !(await promptYesNo(text(`Atualizar ${context.cliName} para ${latest.version}?`,
-        `Update ${context.cliName} to ${latest.version}?`), true, context.locale))) {
+      if (!options.assumeYes && !(await askCliConfirm(context.locale, text(`Atualizar ${context.cliName} para ${latest.version}?`,
+        `Update ${context.cliName} to ${latest.version}?`), true))) {
         console.log(text('Atualização cancelada.', 'Update cancelled.'));
         return;
       }

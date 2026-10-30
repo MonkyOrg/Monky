@@ -13,18 +13,24 @@
 #include "node/event_queue_checks.h"
 #include "audio/foundation_checks.h"
 #include "audio/operational_checks.h"
+#if defined(_WIN32)
 #include "mf_rtc_timing_checks.h"
 #include "mf_rtc_configuration_checks.h"
 #include "mf_rtc_encoder_diagnostic_checks.h"
 #include "mf_rtc_encoder_submit_checks.h"
+#endif
 #include "rtc_send_diagnostics_checks.h"
+#if defined(_WIN32)
 #include "encoder_diagnostics_checks.h"
 #include "mf_rtc_decoder_diagnostic_checks.h"
 #include "mf_rtc_decoder_submit_checks.h"
 #include "decoder_diagnostics_checks.h"
+#endif
 #include "rtc_receive_diagnostics_checks.h"
 #include "rtc_receive_sdk_checks.h"
+#if defined(_WIN32)
 #include "adapter_policy_probe.h"
+#endif
 #ifdef GetObject
 #undef GetObject
 #endif
@@ -271,20 +277,27 @@ int main() {
     group("nodeEventQueue", [] { monky::native_rtc::node::RunEventQueueChecks(Check); });
     group("audioFoundations", [] { rtc::audio::RunAudioFoundationChecks(Check); });
     group("audioOperationalPolicies", [] { rtc::audio::RunAudioOperationalChecks(Check); });
+    // The Media Foundation adapters exist only on Windows; every other group also runs on macOS.
+#if defined(_WIN32)
     group("encoderScheduling", [] { monky::native_rtc::mf::RunEncoderSchedulingChecks(Check); });
     group("encoderConfiguration", [] { monky::native_rtc::mf::RunEncoderConfigurationChecks(Check); });
     group("encoderDiagnostics", [] { monky::native_rtc::mf::RunEncoderDiagnosticChecks(Check); });
     group("encoderSubmitBranches", [] { monky::native_rtc::mf::RunEncoderSubmitBranchChecks(Check); });
+#endif
     group("rtcSendDrops", [] { rtc::RunRtcSendDiagnosticChecks(Check); });
+#if defined(_WIN32)
     group("encoderDiagnosticJson", [] { rtc::RunEncoderJsonChecks(Check); });
     group("decoderDiagnostics", [] { monky::native_rtc::mf::RunDecoderDiagnosticChecks(Check); });
     group("decoderScheduling", [] { monky::native_rtc::mf::RunDecoderSchedulingChecks(Check); });
     group("decoderSubmitBranches", [] { monky::native_rtc::mf::RunDecoderSubmitBranchChecks(Check); });
     group("decoderMapping", [] { monky::native_rtc::mf::RunDecoderMappingChecks(Check); });
     group("decoderDiagnosticJson", [] { rtc::RunDecoderJsonChecks(Check); });
+#endif
     group("rtcReceiveDiagnostics", [] { rtc::RunRtcReceiveDiagnosticChecks(Check); });
     group("rtcReceiveSdk", [] { rtc::RunRtcReceiveSdkChecks(Check); });
+#if defined(_WIN32)
     group("adapterPolicies", [] { monky::native_rtc::VerifyDeviceFreeAdapterPolicies(Check); });
+#endif
     group("binaryLayout", [] {
       Check(MONKY_ENGINE_ABI_VERSION == 2 && MONKY_ENGINE_CONTRACT_REVISION == 8,
             "Binary ABI or JSON contract revision changed unexpectedly");

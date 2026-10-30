@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { root, execute, write, fingerprint, verify, regularFiles } = require('./buildTools.cjs');
+const { root, execute, write, fingerprint, verify, regularFiles, withBuildLock } = require('./buildTools.cjs');
 const windowsToolchain = require('./windowsToolchain.cjs');
 
 const vendor = path.join(root, 'src', 'vendor', 'obs');
@@ -60,8 +60,7 @@ function build(config) {
   assert.ok(fs.existsSync(job), 'Build the RTC toolchain before the capture host.');
   const buildDirectory = config.buildDirectory ?? path.join(root, 'build', 'capture-production');
   fs.mkdirSync(buildDirectory, { recursive: true });
-  const lock = path.join(buildDirectory, 'capture.lock'), handle = fs.openSync(lock, 'wx');
-  try {
+  return withBuildLock(path.join(buildDirectory, 'capture.lock'), () => {
     const commands = [];
     const run = (name, executable, args) => {
       const output = execute(executable, args, { cwd: buildDirectory, env, capture: true });
@@ -319,9 +318,7 @@ function build(config) {
     console.log(JSON.stringify({ captureBuilt: true, checks: contracts.checks, runtimeFiles: runtime.length,
       runtimeBytes: runtime.reduce((sum, file) => sum + file.bytes, 0), host: report.host, module: report.module }));
     return report;
-  } finally {
-    fs.closeSync(handle); fs.unlinkSync(lock);
-  }
+  });
 }
 
 module.exports = { options, build };

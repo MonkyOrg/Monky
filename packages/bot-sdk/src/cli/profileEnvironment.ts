@@ -1,14 +1,12 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { isIP } from 'node:net';
-import { randomUUID } from 'node:crypto';
 import { normalizeBotReachabilityOrigin } from '@monky/shared';
 import { isRecord, type BotMode } from '../tooling/config';
 import {
   EMPTY_BOT_REQUIREMENTS, MANIFEST_PORT_ID, localizedText, type BotLocalizedText, type BotPortRequirement, type BotRequirements,
 } from '../tooling/requirements';
 import { readConfig, type BotConfig, type CliContext } from './config';
-import { readJsonFile, writePrivateJson } from './fs';
+import { readOptionalPrivateJson, writePrivateJsonAtomic } from './fs';
 import { readBotPublicKey } from './keys';
 import { CliError, cliText } from './locale';
 import { assertDeclaredPortAvailable, assertNoOwnPortConflict, portFromValue, type OwnPort } from './ports';
@@ -109,13 +107,12 @@ export function readProfileEnvironment(homeDir: string): Record<string, string> 
   const file = profileEnvironmentFile(homeDir);
   let stored: unknown;
   try {
-    if (!fs.lstatSync(file).isFile()) throw new Error('Not a regular file.');
-    stored = readJsonFile(file, 'Bot environment', 512 * 1024);
-  } catch (error: unknown) {
-    if (isRecord(error) && error.code === 'ENOENT') return {};
+    stored = readOptionalPrivateJson(file, 'Bot environment', 512 * 1024);
+  } catch {
     throw new CliError(`Não foi possível ler ${file}. Corrija ou remova o arquivo e configure novamente com config env set.`,
       `Could not read ${file}. Fix or remove it and configure again with config env set.`);
   }
+  if (stored === undefined) return {};
   if (!isRecord(stored) || stored.version !== 1 || !isRecord(stored.values) ||
       !Object.entries(stored.values).every(([name, value]) => /^[A-Z_][A-Z0-9_]{0,99}$/.test(name) && typeof value === 'string')) {
     throw new CliError(`${file} tem um formato inválido; ele não foi alterado.`, `${file} has an invalid format; it was not changed.`);
@@ -124,15 +121,11 @@ export function readProfileEnvironment(homeDir: string): Record<string, string> 
 }
 
 export function writeProfileEnvironment(homeDir: string, values: Record<string, string>): void {
-  const pending = path.join(homeDir, `.environment-${randomUUID()}.pending`);
   try {
-    writePrivateJson(pending, { version: 1, values });
-    fs.renameSync(pending, profileEnvironmentFile(homeDir));
+    writePrivateJsonAtomic(profileEnvironmentFile(homeDir), { version: 1, values });
   } catch {
     throw new CliError('Não foi possível salvar as variáveis do bot; o arquivo anterior foi preservado.',
       'Could not save the bot variables; the previous file was preserved.');
-  } finally {
-    fs.rmSync(pending, { force: true });
   }
 }
 

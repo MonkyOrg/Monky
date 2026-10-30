@@ -278,6 +278,8 @@ export function createIdentity(): AppIdentity {
  * The current identity. With `createIfMissing`, a computer that has none gets
  * one; an identity that exists but cannot be read throws instead.
  */
+export function getIdentity(createIfMissing?: true): AppIdentity;
+export function getIdentity(createIfMissing: boolean): AppIdentity | null;
 export function getIdentity(createIfMissing = true): AppIdentity | null {
   const stored = loadIdentity();
   if (stored.kind === 'missing') return createIfMissing ? publicIdentity(createFrom(stored)) : null;

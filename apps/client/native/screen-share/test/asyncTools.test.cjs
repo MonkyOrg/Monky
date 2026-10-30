@@ -27,6 +27,28 @@ test('within refuses a deadline that is not a duration instead of timing out at 
   assert.equal(await within(Promise.resolve('done'), 0, 'Too late.'), 'done');
 });
 
+test('within runs on an injected clock and rejects with the error its timeout creates only on expiry', async () => {
+  const pending = new Map();
+  let next = 1;
+  const timers = {
+    setTimeout: (callback, delay) => { pending.set(next, { callback, delay }); return next++; },
+    clearTimeout: id => { pending.delete(id); },
+  };
+  let created = 0;
+  const expire = () => { for (const [id, timer] of [...pending]) { pending.delete(id); timer.callback(); } };
+  const timedOut = within(new Promise(() => {}), 100, () => {
+    created++;
+    return Object.assign(new Error('Native work did not complete.'), { code: 'P2P_TIMEOUT' });
+  }, { timers });
+  assert.equal(created, 0);
+  assert.deepEqual([...pending.values()].map(timer => timer.delay), [100]);
+  expire();
+  await assert.rejects(timedOut, { code: 'P2P_TIMEOUT', message: 'Native work did not complete.' });
+  assert.equal(created, 1);
+  assert.equal(await within(Promise.resolve('done'), 100, () => assert.fail('Settled work never times out.'), { timers }), 'done');
+  assert.equal(pending.size, 0, 'Settling clears the injected timer.');
+});
+
 test('notifyObserver delivers every argument and logs synchronous or asynchronous observer failures', async t => {
   const logged = [];
   t.mock.method(console, 'error', (...values) => logged.push(values));

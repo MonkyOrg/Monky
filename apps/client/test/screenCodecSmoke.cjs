@@ -298,7 +298,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
   const rtc = new WebRtcManager();
   const store = { serverDetails: { voiceMode: 'p2p' }, currentUser: { id: 'self', sessionId: 'self' } };
   Object.defineProperty(rtc, 'voiceServerStore', { value: store });
-  rtc.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
+  rtc.p2p.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
   rtc.setCurrentSessionId('self');
   let remote, signalQueue = Promise.resolve();
   let remoteEpoch;
@@ -480,7 +480,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
 
   async function testScreenSharePickerLifecycle() {
     const [{ ScreenSharePickerModal }, { webRtcManager: globalRtc }, { callClient }] = await Promise.all([
-      import('/views/ScreenSharePickerModal.ts'), import('/core/WebRtcManager.ts'), import('/core/serverConnection.ts'),
+      import('/views/ScreenSharePickerModal.ts'), import('/core/WebRtcManager.ts'), import('/core/callScope.ts'),
     ]);
     const picker = new ScreenSharePickerModal();
     const client = callClient();

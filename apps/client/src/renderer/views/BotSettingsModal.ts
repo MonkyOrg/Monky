@@ -3,6 +3,7 @@ import {
   normalizeBotLocale, resolveBotLocale, resolveBotSettingsValues, type BotLocale,
   botPermissionsSnapshotSchema, isBotStorageCapability, unreviewedBotPermissions, type BotCapability,
   type BotForm, type BotFormValues, type BotSettingsDefinition, type BotSettingsPatch, type BotSettingsSnapshot, type BotSettingsSummary,
+  type ClientMessageArgs,
 } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
 import { appEvents } from '../core/EventBus';
@@ -127,7 +128,7 @@ export class BotSettingsModal {
     window.addEventListener('keydown', this.onKeyDown);
     this.unbind.push(() => window.removeEventListener('keydown', this.onKeyDown), audioPreviewService.bind(this.root));
     this.unbind.push(appEvents.on('session.changed', () => this.close()));
-    for (const event of ['network.disconnected', 'network.status', 'server.updated', 'server.roles_updated', 'user.updated']) {
+    for (const event of ['network.disconnected', 'network.status', 'server.updated', 'server.roles_updated', 'user.updated'] as const) {
       this.unbind.push(appEvents.on(event, () => {
         if (!this.isOrigin(session)) return;
         if (!this.isCurrent(session)) { this.close(); return; }
@@ -167,11 +168,11 @@ export class BotSettingsModal {
     return this.session === session && !!this.root?.isConnected && validSession(session);
   }
 
-  private async request(session: SettingsSession, type: MessageType, payload: unknown): Promise<unknown> {
+  private async request(session: SettingsSession, ...message: ClientMessageArgs): Promise<unknown> {
     if (!this.isCurrent(session)) throw new DOMException('Settings closed', 'AbortError');
     const id = uuidv4();
     this.pending.add(id);
-    try { return await session.client.sendRequest<unknown>(type, payload, id); }
+    try { return await session.client.sendRequest<unknown>(...message, id); }
     finally { this.pending.delete(id); }
   }
 
@@ -513,7 +514,7 @@ export class BotSettingsModal {
         botName: () => this.snapshot?.bot.botId === botId ? this.snapshot.bot.name : botId,
         canManage: () => this.canManage(),
         isCurrent: () => this.isCurrent(session) && this.snapshot?.bot.botId === botId,
-        request: (type, payload) => this.request(session, type, payload),
+        request: (...message) => this.request(session, ...message),
       });
       this.storageSettings.mount(storageRoot);
     }

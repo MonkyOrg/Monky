@@ -10,7 +10,7 @@ import { appEvents } from '../core/EventBus';
 import { networkClient, ProtocolRequestError } from '../core/NetworkClient';
 import { currentPresenceStatus, publishedCustomStatus, sessionManager, type PresenceStatus } from '../core/SessionManager';
 import { isForegroundEvent } from '../core/sessionRouting';
-import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession, showHome } from '../core/serverConnection';
+import { isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession, showHome } from '../core/serverConnection';
 import { participantManager, type ParticipantViewModel } from '../core/ParticipantManager';
 import { accessSignature, serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
@@ -28,7 +28,7 @@ import { bindAudioDevicePopovers } from './AudioDevicePopover';
 import { bindFooterControlsMotion } from './FooterControlsMotion';
 import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
 import { getVoiceControlModeration, isViewingCallServer, leaveCall, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
-import { toggleCamera as toggleCallCamera } from '../core/cameraControls';
+import { toggleCamera as toggleCallCamera } from '../core/CameraPublication';
 import { VoiceStageView } from './VoiceStageView';
 import { BotScreenDock } from './BotScreenDock';
 import { createChannelModal } from './CreateChannelModal';
@@ -51,6 +51,8 @@ import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { afkChannelIdOf, renderVoiceUserLimitBadge, voiceUserLimitOf } from '../utils/voiceRooms';
 import { renderChannelIcon } from './channelIcon';
 import { renderKeyedList, type KeyedItem } from '../utils/keyedList';
+import { followPointerReorder, onPrimaryPress } from '../utils/pointerReorder';
+import { nextIndex } from '../utils/rovingFocus';
 import { preserveViewState } from '../utils/preserveViewState';
 import { captureHostedServerLeaveState, promptShutdownAfterLeave } from '../utils/hostedServer';
 import { userContextMenu } from './UserContextMenu';
@@ -73,7 +75,7 @@ import { getBotVoiceContext } from '../utils/botVoice';
 import { ServerCommunityView } from './ServerCommunityView';
 import { MessageSearch } from './MessageSearch';
 import { ForumView } from './ForumView';
-import type { MessageSearchResultPayload } from '@monky/shared';
+import type { ClientMessageArgs, MessageSearchResultPayload } from '@monky/shared';
 
 /** A loose channel or a category, the two kinds of entries at the sidebar root. */
 type ChannelTreeTarget = { kind: 'channel' | 'category'; id: string };
@@ -142,8 +144,6 @@ export class MainView {
   private userCardObserver: ResizeObserver | null = null;
   /** Delegated listeners of the sidebar lists, by list element: each list binds them once. */
   private readonly listEvents = new Map<HTMLElement, AbortController>();
-  /** The handle whose next click ends a reorder drag, and is swallowed. */
-  private dragEndClick: Element | null = null;
   /** The channel or category being dragged to reorder the tree. */
   private draggedTreeEntry: ChannelTreeTarget | null = null;
   /** The voice room shown with a spinner while it is joined (#48). */
@@ -1736,13 +1736,6 @@ export class MainView {
 
   private bindChannelListEvents(list: HTMLElement, signal: AbortSignal): void {
     const target = (event: Event): Element | null => event.target instanceof Element ? event.target : null;
-    // The click that ends a reorder drag belongs to the drag, not to the row it started on.
-    list.addEventListener('click', event => {
-      if (!this.dragEndClick || !(event.target instanceof Node) || !this.dragEndClick.contains(event.target)) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      this.dragEndClick = null;
-    }, { capture: true, signal });
     list.addEventListener('click', event => {
       const element = target(event);
       const collapse = element?.closest<HTMLButtonElement>('[data-collapse-category]');
@@ -1803,16 +1796,16 @@ export class MainView {
         this.openChannelMenu(item.dataset.channelId, event.clientX, event.clientY);
       }
     }, { signal });
-    list.addEventListener('mousedown', event => {
-      if (event.button !== 0 || !serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
+    onPrimaryPress(list, event => {
+      if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
       const element = target(event);
       const handle = element?.closest<HTMLElement>('.channel-item.channel-reorder-handle[data-channel-id]');
       if (handle) {
-        if (!element?.closest('button')) this.beginChannelReorder(handle, event, list);
+        if (!element?.closest('button')) this.beginChannelReorder(handle, event, list, signal);
         return;
       }
       const title = element?.closest<HTMLElement>('.category-title.category-reorder-handle');
-      if (title && !element?.closest('.category-add-btn')) this.beginCategoryReorder(title, event, list);
+      if (title && !element?.closest('.category-add-btn')) this.beginCategoryReorder(title, event, list, signal);
     }, { signal });
     // Dragging people between voice rooms (#248). The AFK room is no destination:
     // nobody is brought there by hand (#357).
@@ -1930,63 +1923,36 @@ export class MainView {
   }
 
   /**
-   * Follows a press on a sidebar reorder handle: past 6 px it becomes a drag,
-   * releasing drops it, and losing the window or the sidebar cancels it.
-   */
-  private followReorderPointer(start: MouseEvent, list: HTMLElement, handle: HTMLElement, drag: {
-    begin: () => void;
-    move: (event: MouseEvent) => void;
-    end: (drop: MouseEvent | null) => void;
-  }): void {
-    const pointer = new AbortController();
-    let active = false;
-    const finish = (drop: MouseEvent | null) => {
-      if (pointer.signal.aborted) return;
-      pointer.abort();
-      if (!active) return;
-      this.dragEndClick = handle;
-      window.setTimeout(() => { if (this.dragEndClick === handle) this.dragEndClick = null; }, 0);
-      drag.end(drop);
-    };
-    window.addEventListener('mousemove', event => {
-      if (!active && Math.hypot(event.clientX - start.clientX, event.clientY - start.clientY) < 6) return;
-      if (!active) {
-        active = true;
-        drag.begin();
-      }
-      event.preventDefault();
-      drag.move(event);
-    }, { signal: pointer.signal });
-    window.addEventListener('mouseup', event => finish(event), { signal: pointer.signal });
-    window.addEventListener('blur', () => finish(null), { signal: pointer.signal });
-    this.listEvents.get(list)?.signal.addEventListener('abort', () => finish(null), { signal: pointer.signal });
-  }
-
-  /**
    * Channels are reordered by a pointer drag, so it mixes categories without
    * interfering with the native voice-member or attachment drags. A voice room
    * and its participants live in a wrapper: the direct child of the list moves.
    */
-  private beginChannelReorder(handle: HTMLElement, start: MouseEvent, list: HTMLElement): void {
+  private beginChannelReorder(handle: HTMLElement, press: PointerEvent, list: HTMLElement, signal: AbortSignal): void {
     const channelId = handle.dataset.channelId;
     if (!channelId) return;
-    this.followReorderPointer(start, list, handle, {
-      begin: () => {
+    const settle = () => {
+      this.draggedTreeEntry = null;
+      list.querySelectorAll('.channel-dragging').forEach((element) => element.classList.remove('channel-dragging'));
+      this.clearChannelDropTargets(list);
+    };
+    followPointerReorder(press, {
+      capture: list,
+      signal,
+      onStart: () => {
         this.draggedTreeEntry = { kind: 'channel', id: channelId };
         this.markDraggedTreeEntry(list);
         list.classList.add('channel-reorder-active');
       },
-      move: event => this.showChannelDropTarget(list, this.channelDropTarget(event.clientX, event.clientY)),
-      end: drop => {
+      onMove: (x, y) => this.showChannelDropTarget(list, this.channelDropTarget(x, y)),
+      onDrop: (x, y) => {
         // Measured before the drop surfaces fold away and move what is under the pointer.
-        const target = drop && this.channelDropTarget(drop.clientX, drop.clientY);
-        this.draggedTreeEntry = null;
-        list.querySelectorAll('.channel-dragging').forEach((element) => element.classList.remove('channel-dragging'));
-        this.clearChannelDropTargets(list);
+        const target = this.channelDropTarget(x, y);
+        settle();
         if (target && target.target?.id !== channelId) {
           void this.commitChannelOrder(target.categoryId, channelId, target.target, target.after);
         }
       },
+      onCancel: settle,
     });
   }
 
@@ -2061,7 +2027,7 @@ export class MainView {
   }
 
   /** Categories are reordered the same way, by dragging their title. */
-  private beginCategoryReorder(title: HTMLElement, start: MouseEvent, list: HTMLElement): void {
+  private beginCategoryReorder(title: HTMLElement, press: PointerEvent, list: HTMLElement, signal: AbortSignal): void {
     const categoryId = title.closest<HTMLElement>('.channel-category[data-category-id]')?.dataset.categoryId;
     if (!categoryId) return;
     const clearIndicators = () => {
@@ -2069,25 +2035,31 @@ export class MainView {
         .forEach((element) => element.classList.remove('category-drop-before', 'category-drop-after', 'channel-drop-before',
           'channel-drop-after', 'channel-category-drop-target'));
     };
-    this.followReorderPointer(start, list, title, {
-      begin: () => {
+    const settle = () => {
+      this.draggedTreeEntry = null;
+      list.classList.remove('category-reorder-active');
+      list.querySelectorAll('.category-dragging').forEach((element) => element.classList.remove('category-dragging'));
+      clearIndicators();
+    };
+    followPointerReorder(press, {
+      capture: list,
+      signal,
+      onStart: () => {
         this.draggedTreeEntry = { kind: 'category', id: categoryId };
         this.markDraggedTreeEntry(list);
         list.classList.add('category-reorder-active');
       },
-      move: event => {
+      onMove: (x, y) => {
         clearIndicators();
-        const target = this.categoryDropTarget(event.clientX, event.clientY);
+        const target = this.categoryDropTarget(x, y);
         target?.indicator.classList.add(target.indicatorClass);
       },
-      end: drop => {
-        const target = drop && this.categoryDropTarget(drop.clientX, drop.clientY);
-        this.draggedTreeEntry = null;
-        list.classList.remove('category-reorder-active');
-        list.querySelectorAll('.category-dragging').forEach((element) => element.classList.remove('category-dragging'));
-        clearIndicators();
+      onDrop: (x, y) => {
+        const target = this.categoryDropTarget(x, y);
+        settle();
         if (target && target.target?.id !== categoryId) this.commitCategoryOrder(categoryId, target.target, target.after);
       },
+      onCancel: settle,
     });
   }
 
@@ -2280,8 +2252,8 @@ export class MainView {
     ]);
   }
 
-  private requestCategoryChange(type: MessageType, payload: object): void {
-    void networkClient.sendRequest(type, payload).catch((error: unknown) => {
+  private requestCategoryChange(...message: ClientMessageArgs): void {
+    void networkClient.sendRequest(...message).catch((error: unknown) => {
       void showAlert({ title: t('common.error'), message: error instanceof Error ? error.message : t('categories.error'), variant: 'danger' });
     });
   }
@@ -2794,10 +2766,8 @@ export class MainView {
       } else if (menu.contains(event.target as Node) && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
         event.preventDefault();
         const items = menuItems();
-        const index = items.indexOf(document.activeElement as HTMLElement);
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
-          : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
-        items[next]?.focus();
+        const next = nextIndex(event.key, items.indexOf(document.activeElement as HTMLElement), items.length);
+        if (next !== null) items[next].focus();
       }
     };
     document.addEventListener('keydown', menuKeyboard);

@@ -9,7 +9,7 @@ import {
   type GameShareClosedPayload,
   type GameShareRequestSentPayload,
   type GameShareRequestedPayload,
-  type ProtocolMessage,
+  type ServerMessage,
   type UserActivity,
 } from '@monky/shared';
 
@@ -23,7 +23,7 @@ export interface GameShareSession {
 
 /** What the service needs from the WebSocket layer; kept narrow so tests need no sockets. */
 export interface GameShareTransport<TSession extends GameShareSession> {
-  send(session: TSession, message: ProtocolMessage): void;
+  send(session: TSession, message: ServerMessage): void;
   sessionsOfUser(userId: string): TSession[];
   /** Voice channel of one connection, or null when it is not in a call. */
   voiceChannelOf(sessionId: string): string | null;

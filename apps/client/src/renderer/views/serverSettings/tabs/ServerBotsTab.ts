@@ -244,14 +244,14 @@ export class ServerBotsTab {
 
     try {
       const result = await context.operations.run('bot-install', t('bots.installTitle'), Permission.MANAGE_BOTS, async () => {
-        const response = await context.request<unknown>(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: url }, Permission.MANAGE_BOTS, 15000);
+        const response = await context.request<unknown>([MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: url }], Permission.MANAGE_BOTS, 15000);
         if (!this.isAttached(generation, client)) return false;
         const preview = botInstallPreviewSchema.parse(response);
         this.showInstallStatus('loading', t('botPermissions.reviewHint'));
         const grantedCapabilities = await showBotPermissionReview(preview, this.reviewAbort.signal);
         if (!grantedCapabilities || !this.isAttached(generation, client)) return false;
         this.showInstallStatus('loading', t('bots.installing'));
-        await context.request<unknown>(MessageType.BOT_INSTALL, { previewId: preview.previewId, grantedCapabilities }, Permission.MANAGE_BOTS, 30000);
+        await context.request<unknown>([MessageType.BOT_INSTALL, { previewId: preview.previewId, grantedCapabilities }], Permission.MANAGE_BOTS, 30000);
         return true;
       });
       if (!result.ok) throw new Error(result.message);
@@ -313,7 +313,7 @@ export class ServerBotsTab {
       });
       if (!confirmed || !this.isAttached(generation, client)) return;
       const result = await context.operations.run('bot-create', t('bots.createTitle'), Permission.MANAGE_BOTS,
-        () => context.request<BotCreatedPayload>(MessageType.BOT_CREATE, {}, Permission.MANAGE_BOTS));
+        () => context.request<BotCreatedPayload>([MessageType.BOT_CREATE, {}], Permission.MANAGE_BOTS));
       if (!result.ok) throw new Error(result.message);
       const response = result.value;
       if (!this.isAttached(generation, client)) return;
@@ -444,7 +444,7 @@ export class ServerBotsTab {
         variant: 'danger',
       });
       if (!confirmed) return;
-      await context.request<unknown>(MessageType.BOT_REVOKE, { botId }, Permission.MANAGE_BOTS);
+      await context.request<unknown>([MessageType.BOT_REVOKE, { botId }], Permission.MANAGE_BOTS);
       if (this.isAttached(generation, client)) {
         this.bots = this.bots.filter((entry) => entry.id !== botId);
         this.renderBotList();
@@ -458,7 +458,7 @@ export class ServerBotsTab {
     const context = this.context;
     if (!context || !this.client || !BotStorageSettings.supported(serverStore)) return 0;
     try {
-      const info = botStorageInfoSchema.parse(await context.request<unknown>(MessageType.BOT_STORAGE_INFO_GET, { botId }, Permission.MANAGE_BOTS));
+      const info = botStorageInfoSchema.parse(await context.request<unknown>([MessageType.BOT_STORAGE_INFO_GET, { botId }], Permission.MANAGE_BOTS));
       return info.botId === botId ? info.server?.usage.usedBytes ?? 0 : 0;
     } catch (error: unknown) {
       console.warn('[Bots] Could not read the bot storage before removal.', error);

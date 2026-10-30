@@ -8,6 +8,7 @@ import { isHexColor } from '../utils/colors';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { scrollWithin, smoothScrollIntoView } from '../utils/scroll';
+import { focusItem, nextIndex } from '../utils/rovingFocus';
 import { animateEnter, hideWithMotion, ownSurface } from '../utils/surfaceMotion';
 
 export class ResourceAudiencePicker {
@@ -300,12 +301,8 @@ export class ResourceAudiencePicker {
         choices[0]?.click();
       } else if (['ArrowDown', 'ArrowUp'].includes(event.key) || current && ['Home', 'End'].includes(event.key)) {
         event.preventDefault();
-        const index = current ? choices.indexOf(current) : -1;
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1
-          : event.key === 'ArrowDown' ? (index + 1) % choices.length
-            : index <= 0 ? choices.length - 1 : index - 1;
-        choices[next]?.focus({ preventScroll: true });
-        if (choices[next]) smoothScrollIntoView(choices[next], { block: 'nearest' });
+        const next = nextIndex(event.key, current ? choices.indexOf(current) : -1, choices.length);
+        if (next !== null) focusItem(choices[next]);
       }
     }, { signal });
     this.sync(container);
@@ -403,7 +400,7 @@ export class ResourceAudiencePicker {
         <span class="share-audience-identity">
           ${kind === 'role'
             ? `<span class="share-audience-role" style="--role-color: ${isHexColor(value.color) ? value.color : 'var(--text-muted)'}" aria-hidden="true"></span>`
-            : `<img class="share-audience-avatar" src="${escapeHtml(getAvatarUrl(value.avatarUrl))}" alt="">`}
+            : `<img class="share-audience-avatar" src="${escapeHtml(getAvatarUrl(value.avatarUrl))}" alt="" data-fallback="avatar">`}
           <span class="share-audience-name">${escapeHtml(value.name)}</span>
         </span>
         <span class="material-symbols-outlined md-18 share-audience-check" aria-hidden="true">check</span>

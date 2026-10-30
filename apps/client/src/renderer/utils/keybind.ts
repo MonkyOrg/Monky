@@ -12,6 +12,21 @@ export function shortcutIdentity(accelerator: string): string | null {
   return tokens ? [...tokens.modifiers, ...tokens.codes.map((code) => `code:${code}`)].join('+') : null;
 }
 
+/**
+ * The entries other than `except` bound to the same keys, compared by identity: a
+ * legacy "Control+Q" and a captured "Ctrl+code:KeyQ" are the same shortcut. Older
+ * versions let several sounds share keys, so there can be more than one.
+ */
+export function findShortcutConflicts(
+  shortcuts: Readonly<Record<string, { accelerator: string } | undefined>>, accelerator: string, except: string,
+): string[] {
+  const identity = shortcutIdentity(accelerator);
+  if (!identity) return [];
+  return Object.entries(shortcuts)
+    .filter(([name, shortcut]) => name !== except && !!shortcut?.accelerator && shortcutIdentity(shortcut.accelerator) === identity)
+    .map(([name]) => name);
+}
+
 function modifierForCode(code: string): ShortcutModifier | undefined {
   if (code.startsWith('Control')) return 'Ctrl';
   return SHORTCUT_MODIFIERS.find((modifier) => code.startsWith(modifier));

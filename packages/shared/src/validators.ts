@@ -30,6 +30,20 @@ export const screenMetadataSignalSchema = z.object({
   streamId: screenShareIdSchema,
   subscriptionId: screenShareIdSchema,
 }).strict();
+/** An `RTCSessionDescriptionInit` as it travels in RTC_SIGNAL. */
+export const rtcSignalDescriptionSchema = z.object({
+  type: z.enum(['offer', 'answer', 'pranswer', 'rollback']),
+  sdp: z.string().max(1024 * 1024).optional(),
+});
+export type RtcSignalDescription = z.infer<typeof rtcSignalDescriptionSchema>;
+/** An `RTCIceCandidateInit` as it travels in RTC_SIGNAL. */
+export const rtcSignalCandidateSchema = z.object({
+  candidate: z.string().max(8192).optional(),
+  sdpMid: z.string().max(128).nullable().optional(),
+  sdpMLineIndex: z.number().int().min(0).max(65535).nullable().optional(),
+  usernameFragment: z.string().max(256).nullable().optional(),
+});
+export type RtcSignalCandidate = z.infer<typeof rtcSignalCandidateSchema>;
 export const rtcSignalSchema = z.union([
   screenWatchSignalSchema,
   screenMetadataSignalSchema,
@@ -38,16 +52,8 @@ export const rtcSignalSchema = z.union([
     targetSessionId: messageReferenceSchema,
     signalType: z.enum(['offer', 'answer', 'candidate', 'user-left']),
     subscriptionId: screenShareIdSchema.optional(),
-    sdp: z.object({
-      type: z.enum(['offer', 'answer', 'pranswer', 'rollback']),
-      sdp: z.string().max(1024 * 1024).optional(),
-    }).optional(),
-    candidate: z.object({
-      candidate: z.string().max(8192).optional(),
-      sdpMid: z.string().max(128).nullable().optional(),
-      sdpMLineIndex: z.number().int().min(0).max(65535).nullable().optional(),
-      usernameFragment: z.string().max(256).nullable().optional(),
-    }).optional(),
+    sdp: rtcSignalDescriptionSchema.optional(),
+    candidate: rtcSignalCandidateSchema.optional(),
   }).strict().refine(value => (value.signalType !== 'offer' && value.signalType !== 'answer') || !!value.subscriptionId),
 ]);
 export const sfuConsumerClosedSchema = z.object({

@@ -1,5 +1,5 @@
 import {
-  LIMITS, Permission, channelPermissionTargetKey, channelTreeRoot,
+  Permission, channelPermissionTargetKey, channelTreeRoot,
   type ChannelCategory, type ChannelPermissionOverwrite, type ChannelSummary, type ServerAuditChange,
   type ServerAuditRef, type ServerEvent,
 } from '@monky/shared';
@@ -163,27 +163,27 @@ export function channelTreeMoves(before: ChannelTreeSnapshot, after: ChannelTree
     }));
 }
 
-/** Settings as members see them, with the same defaults the server applies. */
+/** Settings as members see them; getServer() already applied the defaults. */
 function serverSettings(server: ServerRecord) {
   return {
     name: server.name,
     maxUsers: server.maxUsers,
-    maxMessageLength: server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
-    deleteUndoSeconds: server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
-    allowSoundboard: server.allowSoundboard !== false,
-    dmRelay: server.dmRelayEnabled !== false,
-    recentSounds: Boolean(server.recentSoundCacheEnabled),
-    recentSoundsLimit: server.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
-    everyoneMention: server.allowEveryoneMention !== false,
-    messageEdit: server.allowMessageEdit !== false,
-    roleBadges: server.showRoleBadgesToEveryone !== false,
-    voiceMode: server.voiceMode ?? 'p2p',
-    relay: Boolean(server.turnEnabled),
-    maxFileSize: server.maxAttachmentFileBytes ?? null,
-    maxStorage: server.maxAttachmentStorageBytes ?? null,
-    maxBots: server.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
+    maxMessageLength: server.maxMessageLength,
+    deleteUndoSeconds: server.messageDeleteUndoSeconds,
+    allowSoundboard: server.allowSoundboard,
+    dmRelay: server.dmRelayEnabled,
+    recentSounds: server.recentSoundCacheEnabled,
+    recentSoundsLimit: server.recentSoundCacheLimit,
+    everyoneMention: server.allowEveryoneMention,
+    messageEdit: server.allowMessageEdit,
+    roleBadges: server.showRoleBadgesToEveryone,
+    voiceMode: server.voiceMode,
+    relay: server.turnEnabled,
+    maxFileSize: server.maxAttachmentFileBytes,
+    maxStorage: server.maxAttachmentStorageBytes,
+    maxBots: server.maxBots,
     afkChannel: Boolean(server.afkChannelId),
-    afkTimeout: server.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS,
+    afkTimeout: server.afkTimeoutSeconds,
   };
 }
 

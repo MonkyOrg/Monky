@@ -1,9 +1,9 @@
-import { appEvents, type EventBus } from './EventBus';
+import { appEvents, type AppEventBus } from './EventBus';
 import { sessionManager } from './SessionManager';
 import { commandVoiceContextKey } from '../utils/botVoice';
 
 /** Hidden channel drafts must lose stale choices too, even after leaving and rejoining the same room. */
-export function bindBotVoiceCommandEvents(events: EventBus = appEvents): () => void {
+export function bindBotVoiceCommandEvents(events: AppEventBus = appEvents): () => void {
   const refresh = (): void => {
     for (const session of sessionManager.getAll()) {
       session.chatStore.refreshVoiceCommandContexts((command) =>

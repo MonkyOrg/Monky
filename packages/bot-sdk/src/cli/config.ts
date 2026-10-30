@@ -11,7 +11,7 @@ import {
   GENERATED_WRAPPER_FILE,
   UPDATER_ECOSYSTEM_FILE,
 } from './constants';
-import { ensurePrivateDirectory, readJsonFile, writePrivateJson } from './fs';
+import { readJsonFile, readOptionalPrivateJson, writePrivateJsonAtomic } from './fs';
 import { CliError, defaultCliLocale } from './locale';
 import { marketplaceBaseUrl } from '../marketplace';
 import {
@@ -281,13 +281,18 @@ export function normalizeLegacyConfig(value: unknown, defaults: { botName?: stri
 }
 
 export function readConfig(context: CliContext): BotConfig | null {
-  return fs.existsSync(context.configFile)
-    ? readConfigFile(context.configFile, { botName: defaultBotName(context) }) : null;
+  const stored = readOptionalPrivateJson(context.configFile, 'The bot config file', 256_000);
+  return stored === undefined ? null
+    : validateConfig(normalizeLegacyConfig(stored, { botName: defaultBotName(context) }));
 }
 
+/**
+ * Saves the profile configuration atomically, like the other profile files: a
+ * failed or interrupted write keeps the previous `config.json` instead of
+ * leaving it truncated.
+ */
 export function writeConfig(context: CliContext, config: BotConfig): void {
-  ensurePrivateDirectory(context.homeDir);
-  writePrivateJson(context.configFile, config);
+  writePrivateJsonAtomic(context.configFile, config);
 }
 
 export function ensureModeSupported(context: CliContext, mode: BotMode): void {

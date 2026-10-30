@@ -32,7 +32,7 @@ import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } fro
 import { CrashRecovery } from './crashRecovery';
 import { hasIdentity } from './identityService';
 import { initializeMainLanguage, mt } from './i18n';
-import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, BOT_STORAGE_CHANGED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
+import { APP_RENDERER_READY, APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, BOT_STORAGE_CHANGED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
 import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
 import { configureVideoPresentation } from './videoPresentation';
 import { handleScreenPictureInPictureOpen } from './screenPictureInPictureWindow';
@@ -486,7 +486,7 @@ function createWindow(deferShow = false): void {
     const cleanupReveal = (): void => {
       if (revealTimer) clearTimeout(revealTimer);
       if (dismissTimer) clearTimeout(dismissTimer);
-      if (onRendererReady) ipcMain.removeListener('app:renderer-ready', onRendererReady);
+      if (onRendererReady) ipcMain.removeListener(APP_RENDERER_READY, onRendererReady);
       revealTimer = null;
       dismissTimer = null;
       onRendererReady = null;
@@ -513,7 +513,7 @@ function createWindow(deferShow = false): void {
         reveal('renderer-ready');
       }
     };
-    ipcMain.on('app:renderer-ready', onRendererReady);
+    ipcMain.on(APP_RENDERER_READY, onRendererReady);
     // Fallback: never leave the window stranded behind the splash if the signal
     // never arrives (renderer crash, load failure, …).
     revealTimer = setTimeout(() => reveal('timeout'), 20000);

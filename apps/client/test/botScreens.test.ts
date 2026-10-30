@@ -457,7 +457,7 @@ test('viewer updates describe only the exact removed instance and never replay d
   store.bus = new EventBus();
   voiceStore.setChannel('voice', 'toast-lifetime');
   const updates: VoiceBotScreensUpdated[] = [];
-  const off = appEvents.on<VoiceBotScreensUpdated>('voice.bot_screens_updated', (update) => updates.push(update));
+  const off = appEvents.on('voice.bot_screens_updated', (update) => updates.push(update));
   try {
     store.upsert(snapshot());
     assert.equal(updates.at(-1)?.removed, undefined);

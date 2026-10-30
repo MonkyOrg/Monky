@@ -33,6 +33,7 @@ import type {
   LocalTaskFailureEvent,
 } from './localExecution.js';
 import type { UserActivity } from './models.js';
+import type { DmEvent, DmExportMode, DmInvokeChannels } from './directMessages.js';
 import {
   botDeviceStorageGrantSchema, botDeviceStorageScopeSchema,
   type BotDeviceStorageDocumentState, type BotDeviceStorageEntry, type BotDeviceStorageResponse,
@@ -916,8 +917,11 @@ export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEven
 
 /**
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
+ *
+ * Os canais das DMs ficam em `DmInvokeChannels` (directMessages.ts), junto do
+ * resto do contrato delas, e entram aqui por herança.
  */
-export interface IpcInvokeChannels {
+export interface IpcInvokeChannels extends DmInvokeChannels {
   'bot-screen-document:create': { args: [html: string, consent: BotScreenDocumentConsent]; returnType: string };
   'bot-screen-document:remove': { args: [url: string]; returnType: void };
   'bot-storage:document-state': { args: [url: string]; returnType: BotDeviceStorageDocumentState };
@@ -943,7 +947,9 @@ export interface IpcInvokeChannels {
   'crash-recovery:close': { args: []; returnType: boolean };
   // Janela
   'window:minimize': { args: []; returnType: void };
-  'screen-pip:open': { args: [requestId: string, requireInactive: boolean]; returnType: boolean };
+  'screen-pip:open': { args: [requestId: string, requireInactive: boolean, aspectRatio: number]; returnType: boolean };
+  /** "Voltar ao Monky": brings the main window back from minimized or the tray. */
+  'screen-pip:return': { args: []; returnType: void };
   'window:maximize': { args: []; returnType: void };
   'window:toggle-maximize': { args: []; returnType: void };
   'window:set-in-server': { args: [inServer: boolean]; returnType: void };
@@ -979,6 +985,7 @@ export interface IpcInvokeChannels {
   'app:set-minimize-to-tray': { args: [enabled: boolean]; returnType: void };
   'app:download-file': { args: [url: string, fileName: string]; returnType: { success: boolean; error?: string } };
   'app:download-files': { args: [request: FileBatchDownloadRequest]; returnType: FileBatchDownloadResult };
+  'app:save-csv-file': { args: [content: string, fileName: string]; returnType: { success: boolean; error?: string } };
   'app:save-recent-sound': { args: [input: RecentSoundSaveInput]; returnType: RecentSoundSaveResult };
   'community:save-event-calendar': { args: [input: EventCalendarExport]; returnType: EventCalendarSaveResult };
   'onboarding:save-hosting-skill': { args: [id: HostingSkillId]; returnType: HostingSkillSaveResult };
@@ -992,7 +999,7 @@ export interface IpcInvokeChannels {
   'identity:get': { args: []; returnType: AppIdentityResult };
   'identity:get-client-id': { args: []; returnType: string };
   'identity:sign-challenge': { args: [nonceHex: string]; returnType: string };
-  'identity:export': { args: [password: string, extras?: string]; returnType: string };
+  'identity:export': { args: [password: string, extras?: string, dmMode?: DmExportMode]; returnType: string };
   'identity:import': {
     args: [exportedIdentity: string, password: string, replace?: string];
     returnType: AppIdentityImportOutcome;
@@ -1160,7 +1167,27 @@ export interface IpcEvents {
   'overlay:signal-received': [signal: OverlaySignal];
   'overlay:sync-state-received': [state: OverlaySyncState];
   'overlay:close-requested': [];
+
+  // Mensagens diretas (#743)
+  'dm:event': [event: DmEvent];
 }
+
+/**
+ * Mensagens Renderer -> Main sem resposta (ipcRenderer.send / ipcMain.on).
+ */
+export interface IpcSendChannels {
+  /** The renderer painted its first frame: the window may be revealed. */
+  'app:renderer-ready': [];
+}
+export const APP_RENDERER_READY = 'app:renderer-ready' satisfies keyof IpcSendChannels;
 
 export type IpcInvokeChannel = keyof IpcInvokeChannels;
 export type IpcEventChannel = keyof IpcEvents;
+export type IpcSendChannel = keyof IpcSendChannels;
+
+/** A bridge method that is exactly one invoke channel: its arguments, then its answer. */
+export type IpcInvoker<C extends IpcInvokeChannel> =
+  (...args: IpcInvokeChannels[C]['args']) => Promise<IpcInvokeChannels[C]['returnType']>;
+
+/** A bridge method that listens to one Main -> renderer event; the result stops listening. */
+export type IpcSubscriber<E extends IpcEventChannel> = (callback: (...args: IpcEvents[E]) => void) => () => void;

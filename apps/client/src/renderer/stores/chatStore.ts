@@ -22,7 +22,7 @@ import {
   type SoundDownloadResult,
   type BotSettingsSummary,
 } from '@monky/shared';
-import { appEvents, EventBus } from '../core/EventBus';
+import { appEvents, type AppEventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { initialBotInputValues, seedCommandInputs } from '../utils/botInputs';
 import {
@@ -109,7 +109,7 @@ export interface BotInvocation extends CommandInvokedPayload {
 
 export class ChatStore {
   /** See ServerStore.bus: background servers get a silent bus (#400). */
-  public bus: EventBus = appEvents;
+  public bus: AppEventBus = appEvents;
   // Public history windows and private responses have separate bounded caches:
   // private responses cannot be fetched again when leaving an old history window.
   private messages: Map<string, ChatMessage[]> = new Map();

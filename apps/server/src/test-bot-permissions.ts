@@ -6,11 +6,14 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import {
   BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, botPermissionsSnapshotSchema,
-  botSettingsListResponseSchema, botSettingsSnapshotSchema, botSettingsSummarySchema, createProtocolOffer,
-  type BotCapability,
+  botSettingsListResponseSchema, botSettingsSnapshotSchema, botSettingsSummarySchema, canAccessChannel, createProtocolOffer,
+  hasPermission, type BotCapability, type ChannelSummary,
 } from '@monky/shared';
 import { SqliteBotPermissionRepository } from './infrastructure/database/SqliteBotPermissionRepository';
 import { BotPermissionService } from './application/services/BotPermissionService';
+import {
+  BOT_ACCESS_REFUSALS, BotAccess, evaluateBotChannelAccess, type BotAccessDenial, type BotAccessFacts, type BotAccessRequirement,
+} from './application/services/BotAccessPolicy';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { botMessageCapabilities } from './infrastructure/websocket/botCapabilityPolicy';
 import { createFixture, identity, record, records, text } from './testFixtures/bots';
@@ -1020,4 +1023,154 @@ test('installation stays powerless during registration and rejects runtime decla
     clock.mock.restore();
   }
   assert.equal(requests, 3, 'an expired preview must not issue another token');
+});
+
+test('each surface keeps its own bot access rule, decided in one place (BOTS-8)', () => {
+  const everything = Permission.VIEW_CHANNEL | Permission.READ_MESSAGES | Permission.SEND_MESSAGES |
+    Permission.USE_BOT_COMMANDS | Permission.SPEAK;
+  const channel = (type: ChannelSummary['type'], botCommandsEnabled = true, isPrivate = false): ChannelSummary => ({
+    id: 'room', serverId: 'server', name: 'room', type, position: 0, createdAt: 0, isPrivate,
+    allowedRoleIds: [], botCommandsEnabled,
+  });
+  const decide = (requirement: BotAccessRequirement, options: {
+    type?: ChannelSummary['type']; enabled?: boolean; isPrivate?: boolean; without?: number; member?: boolean; bot?: boolean;
+  } = {}): BotAccessDenial | undefined => {
+    const room = channel(options.type ?? 'VOICE', options.enabled ?? true, options.isPrivate ?? false);
+    const facts: BotAccessFacts = {
+      channel: room, rules: room, isMember: options.member ?? true,
+      context: { userId: 'principal', permissions: everything & ~(options.without ?? 0), roleIds: [], isBot: options.bot },
+    };
+    return evaluateBotChannelAccess(facts, requirement);
+  };
+  const caller = BotAccess.commandCaller;
+  assert.equal(decide(caller), undefined);
+  assert.equal(decide(caller, { type: 'TEXT', without: Permission.READ_MESSAGES }), undefined, 'commands do not ask for READ_MESSAGES');
+  assert.equal(decide(caller, { without: Permission.SEND_MESSAGES }), 'interact');
+  assert.equal(decide(caller, { without: Permission.USE_BOT_COMMANDS }), 'interact');
+  assert.equal(decide(caller, { enabled: false }), 'interact');
+  assert.equal(decide(caller, { type: 'FORUM' }), 'channel');
+  assert.equal(decide(caller, { type: 'FORUM', member: false }), 'member', 'a command checks membership first');
+
+  const viewer = BotAccess.selector(true, false, false);
+  assert.equal(decide(viewer, { enabled: false, without: Permission.SEND_MESSAGES }), undefined);
+  assert.equal(decide(viewer, { without: Permission.READ_MESSAGES }), 'channel', 'people see a selector with READ_MESSAGES');
+  assert.equal(decide(viewer, { member: false }), 'member');
+  assert.equal(decide(viewer, { type: 'FORUM', member: false }), 'channel', 'a selector checks the channel first');
+  const responder = BotAccess.selector(true, true, true);
+  assert.equal(decide(responder, { without: Permission.USE_BOT_COMMANDS }), 'interact');
+  assert.equal(decide(responder, { enabled: false }), 'interact');
+  assert.equal(decide(responder, { without: Permission.SEND_MESSAGES, member: false }), 'interact', 'and membership last');
+  const selectorBot = BotAccess.selector(false, true, false);
+  assert.equal(decide(selectorBot, { bot: true, without: Permission.READ_MESSAGES | Permission.USE_BOT_COMMANDS, enabled: false }), undefined);
+  assert.equal(decide(selectorBot, { bot: true, without: Permission.SEND_MESSAGES }), 'interact');
+  assert.equal(decide(selectorBot, { bot: true, isPrivate: true }), 'channel', 'bots never enter private channels');
+
+  const actor = BotAccess.screen(true, true);
+  assert.equal(decide(actor, { without: Permission.SEND_MESSAGES }), undefined, 'acting on a miniapp needs USE_BOT_COMMANDS alone');
+  assert.equal(decide(actor, { without: Permission.USE_BOT_COMMANDS }), 'interact');
+  assert.equal(decide(actor, { type: 'TEXT' }), 'channel', 'miniapps live in voice rooms');
+  assert.equal(decide(actor, { without: Permission.USE_BOT_COMMANDS, member: false }), 'member', 'a miniapp checks membership second');
+  assert.equal(decide(BotAccess.screen(true, false), { without: Permission.USE_BOT_COMMANDS }), undefined);
+  const screenBot = BotAccess.screen(false, true);
+  assert.equal(decide(screenBot, { bot: true, without: Permission.USE_BOT_COMMANDS }), undefined);
+  assert.equal(decide(screenBot, { bot: true, without: Permission.SEND_MESSAGES }), 'interact');
+
+  assert.equal(decide(BotAccess.voiceRoom(true), { without: Permission.SPEAK }), 'interact');
+  assert.equal(decide(BotAccess.voiceRoom(false), { without: Permission.SPEAK }), undefined);
+  assert.equal(decide(BotAccess.voiceRoom(true), { member: false }), undefined, 'membership was checked with the command');
+  assert.equal(decide(BotAccess.voiceRoom(true), { type: 'TEXT' }), 'channel');
+});
+
+test('every bot access preset decides each case exactly as its surface did before BOTS-8', () => {
+  // The rules as d6ecc1d6 wrote them, given the same channel, rules and channel-scoped context:
+  // BotInteractionHandler.getAccessError and authorizeVoiceContext, and requirePrincipal of
+  // BotSelectorHandler and BotScreenHandler. The synchronous reconcileAccess reads its context
+  // through ChannelService.withinChannel and is covered by the command tests of test-bots.ts instead.
+  const allows = (facts: BotAccessFacts, permission: Permission) => hasPermission(facts.context.permissions, permission);
+  const visible = (facts: BotAccessFacts, isBot: boolean | undefined) => facts.rules !== null &&
+    canAccessChannel(facts.rules, facts.context.permissions, facts.context.roleIds, isBot, facts.context.userId);
+  const textOrVoice = (facts: BotAccessFacts) => facts.channel?.type === 'TEXT' || facts.channel?.type === 'VOICE';
+  const before = {
+    command(facts: BotAccessFacts): ProtocolErrorCode | undefined {
+      if (!facts.isMember) return ProtocolErrorCode.UNAUTHORIZED;
+      if (!textOrVoice(facts) || !visible(facts, false)) return ProtocolErrorCode.CHANNEL_NOT_FOUND;
+      if (!allows(facts, Permission.SEND_MESSAGES)) return ProtocolErrorCode.PERMISSION_DENIED;
+      if (!facts.channel?.botCommandsEnabled || !allows(facts, Permission.USE_BOT_COMMANDS)) return ProtocolErrorCode.PERMISSION_DENIED;
+      return undefined;
+    },
+    voiceRoom(facts: BotAccessFacts, speak: boolean): boolean {
+      return facts.channel?.type === 'VOICE' && !(speak && !allows(facts, Permission.SPEAK)) && visible(facts, false);
+    },
+    selector(facts: BotAccessFacts, human: boolean, interact: boolean, requireEnabled: boolean): BotAccessDenial | undefined {
+      if (!textOrVoice(facts) || (human && !allows(facts, Permission.READ_MESSAGES)) || !visible(facts, facts.context.isBot)) return 'channel';
+      if ((requireEnabled && facts.channel?.botCommandsEnabled === false) ||
+          (interact && (!allows(facts, Permission.SEND_MESSAGES) || (human && !allows(facts, Permission.USE_BOT_COMMANDS))))) return 'interact';
+      if (human && !facts.isMember) return 'member';
+      return undefined;
+    },
+    screen(facts: BotAccessFacts, human: boolean, interact: boolean): BotAccessDenial | undefined {
+      if (facts.channel?.type !== 'VOICE' || !visible(facts, facts.context.isBot)) return 'channel';
+      if (human && !facts.isMember) return 'member';
+      if (interact && !allows(facts, human ? Permission.USE_BOT_COMMANDS : Permission.SEND_MESSAGES)) return 'interact';
+      return undefined;
+    },
+  };
+  // Selectors worded their refusals this way, and commands answered with these codes.
+  assert.deepEqual(BOT_ACCESS_REFUSALS, {
+    channel: { code: ProtocolErrorCode.CHANNEL_NOT_FOUND, message: 'Channel is unavailable.' },
+    interact: { code: ProtocolErrorCode.PERMISSION_DENIED, message: 'Bot interactions are not permitted in this channel.' },
+    member: { code: ProtocolErrorCode.UNAUTHORIZED, message: 'Membership is required.' },
+  });
+
+  const bits = [Permission.VIEW_CHANNEL, Permission.READ_MESSAGES, Permission.SEND_MESSAGES, Permission.USE_BOT_COMMANDS,
+    Permission.SPEAK, Permission.ADMINISTRATOR];
+  /** Every channel, permission, role and membership a principal can meet. A person is never a bot, and the reverse. */
+  function* cases(isBot: boolean): Generator<BotAccessFacts> {
+    for (const type of [null, 'TEXT', 'VOICE', 'FORUM'] as const) {
+      for (const botCommandsEnabled of [true, false]) for (const isPrivate of [false, true]) for (const overwrites of [false, true]) {
+        const channel: ChannelSummary | null = type === null ? null : {
+          id: 'room', serverId: 'server', name: 'room', type, position: 0, createdAt: 0, isPrivate,
+          allowedRoleIds: ['allowed'], botCommandsEnabled, ...(overwrites ? { permissionOverwrites: [] } : {}),
+        };
+        for (let mask = 0; mask < 1 << bits.length; mask++) {
+          const permissions = bits.reduce((sum, bit, index) => mask & (1 << index) ? sum | bit : sum, 0);
+          for (const roleIds of [[], ['allowed']]) for (const isMember of [true, false]) {
+            yield { channel, rules: channel, isMember, context: { userId: 'principal', permissions, roleIds, isBot } };
+          }
+        }
+      }
+    }
+  }
+  const mismatches: string[] = [];
+  let compared = 0;
+  const expect = (label: string, facts: BotAccessFacts, actual: unknown, expected: unknown) => {
+    compared++;
+    if (actual !== expected && mismatches.length < 5) {
+      mismatches.push(`${label} ${JSON.stringify({ ...facts.context, channel: facts.channel, isMember: facts.isMember })}: ${String(actual)} ≠ ${String(expected)}`);
+    }
+  };
+  const decide = (facts: BotAccessFacts, requirement: BotAccessRequirement) => evaluateBotChannelAccess(facts, requirement);
+  for (const facts of cases(false)) {
+    const caller = decide(facts, BotAccess.commandCaller);
+    expect('command', facts, caller && BOT_ACCESS_REFUSALS[caller].code, before.command(facts));
+    for (const speak of [true, false]) expect(`voice room speak=${speak}`, facts, decide(facts, BotAccess.voiceRoom(speak)) === undefined, before.voiceRoom(facts, speak));
+    for (const interact of [true, false]) {
+      for (const enabled of [true, false]) {
+        expect(`person on selector interact=${interact} enabled=${enabled}`, facts,
+          decide(facts, BotAccess.selector(true, interact, enabled)), before.selector(facts, true, interact, enabled));
+      }
+      expect(`person on miniapp interact=${interact}`, facts, decide(facts, BotAccess.screen(true, interact)), before.screen(facts, true, interact));
+    }
+  }
+  for (const facts of cases(true)) {
+    for (const interact of [true, false]) {
+      for (const enabled of [true, false]) {
+        expect(`bot on selector interact=${interact} enabled=${enabled}`, facts,
+          decide(facts, BotAccess.selector(false, interact, enabled)), before.selector(facts, false, interact, enabled));
+      }
+      expect(`bot on miniapp interact=${interact}`, facts, decide(facts, BotAccess.screen(false, interact)), before.screen(facts, false, interact));
+    }
+  }
+  assert.deepEqual(mismatches, []);
+  assert.equal(compared, 8192 * 9 + 8192 * 6, 'every case was compared');
 });

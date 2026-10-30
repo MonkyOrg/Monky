@@ -1,5 +1,6 @@
 import { appEvents } from './EventBus';
 import { bindMicrophoneLevelMeter } from './MicrophoneLevelMeter';
+import { effectiveAudioOutput, registerAudioOutputConsumer } from './audioOutputRouting';
 import { settingsStore } from '../stores/settingsStore';
 
 type StopReason = 'device-changed' | 'disconnected';
@@ -10,13 +11,18 @@ export type MicrophoneTestState =
   | { status: 'playing' }
   | { status: 'error'; error: unknown };
 
-/** Explicit, local loopback only. The shared preview owns capture and never changes RTC tracks. */
+/**
+ * Explicit, local loopback only. The shared preview owns capture and never changes RTC tracks.
+ * It plays on the voice output, where the call is heard, and stops rather than following a
+ * change of device: moving a live loopback to other speakers could start feedback.
+ */
 export class MicrophoneTest {
   private active = false;
   private destroyed = false;
   private generation = 0;
   private playback: HTMLAudioElement | null = null;
   private unbindMeter: (() => void) | null = null;
+  private unbindOutput: (() => void) | null = null;
   private unbind: Array<() => void> = [];
   private inputId = '';
   private outputId = '';
@@ -26,9 +32,7 @@ export class MicrophoneTest {
     const visibilityChanged = () => { if (document.hidden) this.stop(); };
     this.unbind = [
       appEvents.on('settings.updated', () => {
-        if (this.active && (this.inputId !== settingsStore.selectedMicrophoneId || this.outputId !== settingsStore.selectedSpeakerId)) {
-          this.stop('device-changed');
-        }
+        if (this.active && this.inputId !== settingsStore.selectedMicrophoneId) this.stop('device-changed');
       }),
       appEvents.on('voice.channel_changed', () => this.stop('disconnected')),
       appEvents.on('network.disconnected', () => this.stop('disconnected')),
@@ -69,7 +73,10 @@ export class MicrophoneTest {
     if (this.active || this.destroyed || !this.meter.isConnected || this.isHidden()) return;
     this.active = true;
     this.inputId = settingsStore.selectedMicrophoneId;
-    this.outputId = settingsStore.selectedSpeakerId;
+    this.outputId = effectiveAudioOutput('voice');
+    this.unbindOutput = registerAudioOutputConsumer(async () => {
+      if (this.active && effectiveAudioOutput('voice') !== this.outputId) this.stop('device-changed');
+    });
     this.onState({ status: 'starting' });
     try {
       const unbind = bindMicrophoneLevelMeter(
@@ -109,7 +116,7 @@ export class MicrophoneTest {
         if (this.playback === currentAudio && this.active) this.fail(new Error(currentAudio.error?.message || 'Microphone playback failed'));
       };
       if (typeof audio.setSinkId !== 'function') throw new Error('Audio output selection unavailable');
-      await audio.setSinkId(this.outputId === 'default' ? '' : this.outputId);
+      await audio.setSinkId(this.outputId);
       if (!this.active || generation !== this.generation) {
         this.releasePlayback(audio);
         return;
@@ -136,6 +143,8 @@ export class MicrophoneTest {
     this.active = false;
     this.generation++;
     this.releasePlayback(this.playback);
+    this.unbindOutput?.();
+    this.unbindOutput = null;
     this.unbindMeter?.();
     this.unbindMeter = null;
     const fill = this.meter.querySelector<HTMLElement>('.vad-meter-fill');

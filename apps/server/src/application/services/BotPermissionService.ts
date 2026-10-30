@@ -3,10 +3,9 @@ import {
   type BotCapability, type BotPermissions, type BotPermissionsUpdate,
 } from '@monky/shared';
 import type { IBotPermissionRepository } from '../../domain/repositories';
+import { ServiceError } from '../errors';
 
-export class BotPermissionError extends Error {
-  constructor(readonly code: ProtocolErrorCode, message: string) { super(message); }
-}
+export class BotPermissionError extends ServiceError {}
 
 /**
  * Bot capability grants. They are checked on every bot message, every channel

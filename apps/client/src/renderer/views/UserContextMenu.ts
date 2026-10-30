@@ -333,7 +333,7 @@ export class UserContextMenu {
     const client = getActiveNetworkClient();
     const store = getActiveServerStore();
     try {
-      const change = await changeMemberRole((type, payload) => client.sendRequest(type, payload), store, userId, roleId, assign);
+      const change = await changeMemberRole((...message) => client.sendRequest(...message), store, userId, roleId, assign);
       if (getActiveNetworkClient() === client) showSuccessToast(memberRoleChangedMessage(assign, change));
       return true;
     } catch (err: unknown) {
@@ -554,14 +554,14 @@ export class UserContextMenu {
       });
     }
 
-    for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
+    for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed'] as const) {
       this.unbindGlobalListeners.push(appEvents.on(event, () => this.close()));
     }
     if (this.isSelf(user)) {
       this.menuEl.querySelector('[data-action="self-mute"]')?.addEventListener('click', toggleMicrophoneMute);
       this.menuEl.querySelector('[data-action="self-deafen"]')?.addEventListener('click', toggleAudioDeafen);
       this.updateSelfControls();
-      for (const event of ['voice.state_updated', 'server.voice_restrictions_updated', 'i18n.language_changed']) {
+      for (const event of ['voice.state_updated', 'server.voice_restrictions_updated', 'i18n.language_changed'] as const) {
         this.unbindGlobalListeners.push(appEvents.on(event, () => this.updateSelfControls()));
       }
     }

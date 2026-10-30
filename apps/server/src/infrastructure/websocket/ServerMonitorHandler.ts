@@ -1,6 +1,6 @@
 import {
   LIMITS, MessageType, Permission, ProtocolErrorCode, serverMonitorGetSchema,
-  type ProtocolMessage, type ServerErrorPayload, type ServerMonitorSnapshotPayload,
+  type ServerMessage,
   type UserSummary,
 } from '@monky/shared';
 import type { WebSocket } from 'ws';
@@ -19,7 +19,7 @@ interface ServerMonitorHooks {
   accessVersion(): number;
   send(
     session: ServerMonitorSession,
-    message: ProtocolMessage<ServerMonitorSnapshotPayload | ServerErrorPayload>,
+    message: ServerMessage<MessageType.SERVER_MONITOR_SNAPSHOT | MessageType.SERVER_ERROR>,
   ): void;
 }
 

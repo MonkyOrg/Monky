@@ -57,6 +57,11 @@ automatically. Every other command only warns about it:
 npm install -g pm2
 ```
 
+The CLI looks for PM2 the way the terminal would, through `PATH`, so it also
+finds one installed by pnpm, Yarn or Volta. A PM2 that is found but fails
+`pm2 --version` is never installed over: the CLI warns instead, and it should be
+fixed with the tool that installed it.
+
 ## Quick start
 
 ```bash
@@ -243,7 +248,7 @@ It then prints a summary, asks for confirmation and offers to start the server.
 |---|---|---|
 | `--identity <code>` | Owner identity code | asked |
 | `--name <name>` | Server name | `Friends Server` |
-| `--port <n>` | Server port | `3000` |
+| `--port <n>` | Server port, from 1024 to 65535 | `3000` |
 | `--password <password>` | Server password (empty = no password) | asked |
 | `--max-users <n>` | Registered member limit (`0` = no limit) | asked |
 | `--voice-mode <p2p|sfu>` | Voice and media mode (`p2p` or `sfu`) | `p2p` |
@@ -580,6 +585,10 @@ name, comma separated. Colors use the `#RRGGBB` format. The server's default
 role cannot be removed from a member. Creating, assigning, removing and
 deleting roles requires the server to be stopped; listing them does not.
 
+A new role follows the same rules as the app: its name has 1 to 32 characters
+and cannot be `Admin`, which is reserved for the administrator role. Roles do
+not grant the administrator permission; use `monky admin add` for that.
+
 ---
 
 ## `monky config`
@@ -601,13 +610,13 @@ monky config set <key> [value]     # change it directly
 |---|---|---|
 | `name` | Server name (at least 2 characters) | `Servidor dos Amigos` |
 | `password` | Join password. Empty, `none` or `clear` removes it | no password |
-| `port` | TCP port | `3000` |
+| `port` | TCP port, from 1024 to 65535 | `3000` |
 | `icon` | Path to an image, copied into the data directory. Empty or `clear` removes it | no icon |
 | `maxUsers` | Maximum registered members. `0` removes the limit | `20` |
 | `maxMessageLength` | Characters per message. `0` removes the character limit; the 8 MiB packet limit still applies | `16000` |
-| `allowSoundboard` | Allows the soundboard (`true`/`false`) | `true` |
+| `allowSoundboard` | Allows the soundboard (`true`/`false`). Turning it off also turns off the recent sounds cache | `true` |
 | `allowEveryoneMention` | Allows `@everyone`/`@todos` in chat (`true`/`false`) | `true` |
-| `maxAttachmentFileBytes` | Maximum size per attachment, in bytes | no limit |
+| `maxAttachmentFileBytes` | Maximum size per attachment, in bytes. Cannot exceed the total storage | no limit |
 | `maxAttachmentStorageBytes` | Total attachment storage, in bytes | no limit |
 | `voiceMode` | Voice mode: `p2p` (direct mesh) or `sfu` (Selective Forwarding Unit) | `p2p` |
 | `autoUpdate` | Enables the machine's automatic updates (`true`/`false`). See [Automatic updates](#automatic-updates) | `false` |
@@ -814,6 +823,11 @@ Removes the database, attachments, avatars and configuration, kills the PM2
 process and drops the server from the registry. It asks for two confirmations:
 typing `DESTROY` and a final "yes". It only accepts folders that actually hold a
 Monky server.
+
+Without a PM2 the CLI can use, the server's PM2 processes cannot be removed and
+would keep restarting the deleted server. In that case the warning names them,
+and a third confirmation asks whether to delete the data anyway; declining
+leaves everything as it was.
 
 If anyone is connected, the warning shows up before the confirmations, saying
 how many people will be disconnected.

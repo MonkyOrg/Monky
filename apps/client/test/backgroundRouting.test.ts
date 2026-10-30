@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { MessageType } from '@monky/shared';
+import { MessageType, type ChatMessage } from '@monky/shared';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { SessionManager, type ServerSession } from '../src/renderer/core/SessionManager';
 import { isForegroundEvent, routeSessionEvent } from '../src/renderer/core/sessionRouting';
@@ -28,18 +28,25 @@ function servers(context: TestContext) {
 test('a server in the background repaints the rail only when its badge changes', (context) => {
   const { background } = servers(context);
   const activity: string[] = [];
+  const mentioned = new Set<string>();
   const off = [
-    appEvents.on<{ key: string }>('session.background_activity', ({ key }) => activity.push(key)),
+    appEvents.on('session.background_activity', ({ key }) => activity.push(key)),
     // Stand-in for the app's handler: while routed, the proxies point at the sender.
-    appEvents.on<{ channelId: string; mention?: boolean }>(CHAT_MESSAGE, (message) => {
-      if (message.mention) chatStore.markMention(message.channelId);
+    appEvents.on(CHAT_MESSAGE, (message) => {
+      if (mentioned.has(message.id)) chatStore.markMention(message.channelId);
       else chatStore.markUnread(message.channelId);
     }),
   ];
   context.after(() => off.forEach((unbind) => unbind()));
   const route = (event: string, emit: () => void) => routeSessionEvent(background.key, event, emit);
-  const deliver = (message: { channelId: string; mention?: boolean }) =>
+  let sent = 0;
+  const deliver = ({ channelId, mention = false }: { channelId: string; mention?: boolean }) => {
+    const message: ChatMessage = {
+      id: `message-${++sent}`, channelId, userId: 'peer', userNickname: 'Peer', content: 'hello', createdAt: sent,
+    };
+    if (mention) mentioned.add(message.id);
     route(CHAT_MESSAGE, () => appEvents.emit(CHAT_MESSAGE, message));
+  };
 
   deliver({ channelId: 'general' });
   assert.deepEqual(activity, [background.key], 'the first message shows the unread badge');
@@ -148,7 +155,7 @@ test('an attempt that never signed in and is not on screen leaves without a word
   const opened = fixtureSockets(context);
   const { manager } = servers(context);
   const heard: string[] = [];
-  const off = ['network.disconnected', 'session.changed', 'session.connections_changed']
+  const off = (['network.disconnected', 'session.changed', 'session.connections_changed'] as const)
     .map((name) => appEvents.on(name, () => heard.push(name)));
   context.after(() => off.forEach((unbind) => unbind()));
   const attempt = (session: ServerSession) => {

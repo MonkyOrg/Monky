@@ -1,8 +1,11 @@
+import { randomUUID } from 'crypto';
 import http from 'http';
 import { isIP } from 'net';
+import { BOT_MANIFEST_FEATURES_HEADER, botRegistrationSchema, type BotManifest } from '@monky/shared';
+import { handleReachabilityProbe } from './reachability';
 
 /**
- * HTTP plumbing of the marketplace listener started by `BotClient.serve()`.
+ * The marketplace listener started by `BotClient.serve()`.
  *
  * Only Monky servers talk to it: they fetch `/manifest` and post one small
  * registration to `/register`. Nothing here is meant for browsers, so there is
@@ -155,5 +158,107 @@ export class RegistrationLimiter {
       released = true;
       this.active--;
     };
+  }
+}
+
+/** A registration the bot accepted, with the server ID it will be known by. */
+export interface MarketplaceRegistration {
+  token: string;
+  serverId: string;
+  serverName: string;
+  serverUrl?: string;
+}
+
+/** What the listener asks of the bot; every HTTP decision stays in this module. */
+export interface MarketplaceBot {
+  readonly publicKey: string;
+  isClosing(): boolean;
+  manifest(serverFeatures: string | undefined): BotManifest;
+  /** Links the bot to the registering server; rejects when it cannot authenticate or save the link. */
+  register(registration: MarketplaceRegistration): Promise<void>;
+  /** Runs once the link is saved, while the bot is still running. */
+  registered(registration: MarketplaceRegistration): void;
+  report(error: unknown): void;
+}
+
+const SHUTTING_DOWN = { error: 'The bot is shutting down.' };
+
+export function createMarketplaceServer(bot: MarketplaceBot): http.Server {
+  const limiter = new RegistrationLimiter();
+  return http.createServer(MARKETPLACE_SERVER_OPTIONS, (req, res) => {
+    if (bot.isClosing()) {
+      replyJson(res, 503, SHUTTING_DOWN);
+      return;
+    }
+    if (handleReachabilityProbe(req, res, bot.publicKey)) return;
+    if (req.method === 'GET' && req.url === '/manifest') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Monky-Bot-Public-Key': bot.publicKey.toLowerCase() });
+      const features = req.headers[BOT_MANIFEST_FEATURES_HEADER];
+      res.end(JSON.stringify(bot.manifest(typeof features === 'string' ? features : undefined)));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/register') {
+      void handleRegistration(req, res, limiter, bot);
+      return;
+    }
+    res.writeHead(404);
+    res.end('Not Found');
+  });
+}
+
+/** `POST /register`: a Monky server hands this bot the token of a new installation. */
+async function handleRegistration(
+  req: http.IncomingMessage, res: http.ServerResponse, limiter: RegistrationLimiter, bot: MarketplaceBot,
+): Promise<void> {
+  if (!isJsonContentType(req.headers['content-type'])) {
+    replyJson(res, 415, { error: 'Registrations must be sent as application/json.' }, { close: true });
+    return;
+  }
+  if (!limiter.allowAttempt(req.socket.remoteAddress)) {
+    replyJson(res, 429, { error: 'Too many registration attempts. Try again later.' }, { close: true, retryAfterSeconds: 60 });
+    return;
+  }
+  const body = await readRequestBody(req, MAX_REGISTRATION_BYTES);
+  if (!body.ok) {
+    if (body.reason === 'too_large') replyJson(res, 413, { error: 'Registration is too large.' }, { close: true });
+    return;
+  }
+  if (bot.isClosing()) {
+    replyJson(res, 503, SHUTTING_DOWN);
+    return;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body.text);
+  } catch {
+    replyJson(res, 400, { error: 'Invalid JSON.' });
+    return;
+  }
+  const parsed = botRegistrationSchema.safeParse(raw);
+  if (!parsed.success) {
+    replyJson(res, 400, { error: 'Invalid registration settings.' });
+    return;
+  }
+  const release = limiter.acquire();
+  if (!release) {
+    replyJson(res, 429, { error: 'The bot is busy with other registrations. Try again shortly.' }, { retryAfterSeconds: 10 });
+    return;
+  }
+  const registration: MarketplaceRegistration = { ...parsed.data, serverId: parsed.data.serverId ?? randomUUID() };
+  try {
+    await bot.register(registration);
+    if (bot.isClosing()) {
+      replyJson(res, 503, SHUTTING_DOWN);
+      return;
+    }
+    bot.registered(registration);
+    replyJson(res, bot.isClosing() ? 503 : 200, bot.isClosing() ? SHUTTING_DOWN : { publicKey: bot.publicKey });
+  } catch (error) {
+    if (!bot.isClosing()) bot.report(error);
+    replyJson(res, bot.isClosing() ? 503 : 502, {
+      error: 'The bot could not complete registration. Check the bot logs and server compatibility.',
+    });
+  } finally {
+    release();
   }
 }

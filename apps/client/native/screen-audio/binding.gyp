@@ -17,7 +17,10 @@
               "Release": {
                 "msbuild_toolset": "v143",
                 "msvs_settings": {
-                  "VCCLCompilerTool": { "RuntimeLibrary": 2, "RuntimeTypeInfo": "true" }
+                  "VCCLCompilerTool": {
+                    "RuntimeLibrary": 0,  # /MT: Electron ships no Visual C++ runtime for this addon to load
+                    "RuntimeTypeInfo": "true"
+                  }
                 }
               },
               "Debug": {

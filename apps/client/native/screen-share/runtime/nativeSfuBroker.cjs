@@ -1,7 +1,8 @@
 'use strict';
 
 const { isDeepStrictEqual, types: { isPromise } } = require('node:util');
-const { NativeRtcCommands, isNativeRtcCommandsForEngine, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
+const { NativeRtcCommands, isNativeRtcCommandsForEngine } = require('./nativeRtcCommands.cjs');
+const { NativeCommandLedger } = require('./nativeCommandLedger.cjs');
 const { isNativeAudioReceiveAdapterForEngine, nativeAudioSfuReceiveHooks } = require('./nativeAudioReceiveAdapter.cjs');
 const nativeContract = require('./nativeRtc/engine/contract.json');
 const requiredAudioCapabilities = Object.freeze({
@@ -16,6 +17,10 @@ const {
 
 const brokerError = Symbol('native-sfu-broker-error');
 const audioBrokers = new WeakSet();
+// A creation command can be cancelled from dispatch: while still queued it then creates nothing.
+// Others keep their earlier rule: a gate after its first callback; volume and statistics never,
+// since cancelling one mid-execution makes native close its consumer or whole transport.
+const CANCELLABLE_FROM_DISPATCH = new Set(['sfu.load', 'sfu.createTransport', 'sfu.produce', 'sfu.consume']);
 const positiveId = value => Number.isSafeInteger(value) && value > 0;
 const reference = value => messageReferenceSchema.safeParse(value).success;
 const shareReference = value => screenShareIdSchema.safeParse(value).success;
@@ -314,9 +319,9 @@ function encoding(value, kind = 'video') {
  * native producer. Failed-create pause cleanup alone uses the transport target
  * with enabled:false; it may outlive the local transport, but must match the
  * active original create command and its exact owned server reservation.
- * NativeRtcCommands may expose a validated own Promise.requestId property for
- * eager cancellation before the first callback. Without it, callbacks provide
- * IDs for cancellation and all other late native results are awaited/retired.
+ * The requestId of each NativeRtcCommands request lets a closing resource cancel
+ * its creation commands even before their first callback; every late native
+ * result is still awaited and retired.
  */
 class NativeSfuBroker {
   constructor({ engine, commands, rpc, channelId, publisherSessionId, isCurrent, isWatchCurrent, routes, onError,
@@ -342,7 +347,7 @@ class NativeSfuBroker {
       && typeof isAudioWatchCurrent === 'function' && typeof isAudioPublicationCurrent === 'function'),
     'CONFIG', `Native SFU audio requires its genuine same-engine receive adapter, revision${nativeContract.contractRevision} capabilities and dedicated audio authorization.`);
     Object.defineProperties(this, {
-      engine: { value: engine }, commands: { value: commands },
+      engine: { value: engine }, commands: { value: commands }, ledger: { value: new NativeCommandLedger(engine, commands) },
       scope: { value: Object.freeze({ channelId, publisherSessionId }) },
       screenSessionId: { value: screenSessionId },
       isCurrent: { value: isCurrent }, isWatchCurrent: { value: isWatchCurrent },
@@ -363,8 +368,6 @@ class NativeSfuBroker {
     this.tentativeNativeOwners = new Map();
     this.serverOwners = new Map();
     this.operations = new Set();
-    this.nativeRetirementWaiters = new Set();
-    this.engineRetired = false;
     this.engineCloseProof = null;
     this.callbacks = new Map();
     this.externalRequests = new Map();
@@ -376,6 +379,9 @@ class NativeSfuBroker {
     this.reportedErrors = new WeakSet();
     this.observerFailures = 0;
   }
+
+  /** Whether the complete close of the engine was proven: no native command result remains owned. */
+  get engineRetired() { return this.ledger.retired; }
 
   report(error) {
     if (!error?.[brokerError]) error = failure('ADAPTER', 'A native SFU adapter failed without a safe diagnostic.');
@@ -947,27 +953,22 @@ class NativeSfuBroker {
         'Native SFU audio admission must carry this attempt\'s exact prepared output epoch.');
     }
     requireValue(this.operations.size < this.maximumPendingOperations, 'LIMIT', 'Native SFU pending operation limit reached.');
-    const pending = { record, operation, target, data: json(data), id: null, callbacks: new Map() };
+    const pending = { record, operation, target, data: json(data), id: null, callbacks: new Map(),
+      cancellable: CANCELLABLE_FROM_DISPATCH.has(operation) };
     if (operation === 'sfu.setProducerEnabled') {
       pending.intentApplied = new Promise(resolve => { pending.resolveIntent = resolve; });
     }
     this.operations.add(pending);
     let request, nativeCompleted = false;
     try {
-      request = this.commands.request(operation, target, pending.data);
-      requireValue(request && typeof request.then === 'function', 'NATIVE', 'Native SFU command did not return a Promise.');
-      // Optional backwards-compatible request-ID exposure permits eager cancel
-      // even for creation commands that have not emitted a callback yet.
-      try {
-        const requestId = Object.getOwnPropertyDescriptor(request, 'requestId')?.value;
-        if (positiveId(requestId)) {
-          const original = this.commands.getPendingRequest(requestId);
-          requireValue(original?.id === requestId && original.operation === operation && original.target === target
-            && isDeepStrictEqual(original.data, pending.data), 'NATIVE', 'Native SFU request-ID metadata did not match its original command.');
-          pending.id = requestId;
-        }
-      } catch { this.report(failure('NATIVE', 'Native SFU request-ID metadata could not be correlated; late completion remains tracked.')); }
-      const completion = await this.waitForNative(request);
+      const issued = this.ledger.issue(operation, target, pending.data);
+      request = issued.completion;
+      // The real request ID lets markClosing cancel even a creation command that has not emitted a callback yet.
+      pending.id = issued.id;
+      if (issued.id === null) {
+        this.report(failure('NATIVE', 'Native SFU request ID could not be correlated; late completion remains tracked.'));
+      }
+      const completion = await this.ledger.untilRetired(request);
       requireValue(!completion.retired, 'STALE', 'The complete native engine close retired this operation.');
       const result = completion.value;
       nativeCompleted = true;
@@ -1011,6 +1012,10 @@ class NativeSfuBroker {
         }
       }
       if (error?.[brokerError]) throw error;
+      // Like P2P: a command this broker cancelled because its resource retires is stale, not a native failure.
+      if (pending.cancelAttempted && ['CANCELLED', 'ERR_RTC_CANCELLED'].includes(error?.code)) {
+        throw failure('STALE', 'The native SFU resource retired before its cancelled command completed.');
+      }
       throw failure('NATIVE', 'Native SFU command failed; media or credentials are not included in diagnostics.');
     } finally {
       // A failed result invalidates the record before releasing dependants.
@@ -1019,20 +1024,6 @@ class NativeSfuBroker {
       pending.resolveIntent?.();
       this.operations.delete(pending);
     }
-  }
-
-  waitForNative(promise) {
-    if (this.engineRetired) {
-      void Promise.resolve(promise).catch(() => {});
-      return Promise.resolve({ retired: true });
-    }
-    let resolveRetired;
-    const retired = new Promise(resolve => { resolveRetired = resolve; });
-    this.nativeRetirementWaiters.add(resolveRetired);
-    return Promise.race([
-      Promise.resolve(promise).then(value => ({ retired: false, value })),
-      retired.then(() => ({ retired: true })),
-    ]).finally(() => { this.nativeRetirementWaiters.delete(resolveRetired); });
   }
 
   async callRpc(type, payload, allocation = null) {
@@ -1134,6 +1125,7 @@ class NativeSfuBroker {
         && isDeepStrictEqual(candidate.data, command.data));
       requireValue(pending, 'CALLBACK', 'Native SFU callback does not match an active broker operation.');
       pending.id = requestId;
+      pending.cancellable = true;
       record = pending.record;
       transport = record.parent;
       requireValue(transport?.kind === 'transport' && transport.serverId === payload.transportId && positiveId(transport.nativeId),
@@ -1406,15 +1398,9 @@ class NativeSfuBroker {
     for (const child of record.children) this.markClosing(child);
     if (this.engineRetired || this.engineCloseProof) return;
     for (const operation of this.operations) {
-      if (operation.record !== record || !positiveId(operation.id) || operation.cancelAttempted) continue;
+      if (operation.record !== record || !operation.cancellable || !positiveId(operation.id) || operation.cancelAttempted) continue;
       operation.cancelAttempted = true;
-      try {
-        const original = this.commands.getPendingRequest(operation.id);
-        if (!original) continue;
-        requireValue(original.id === operation.id && original.operation === operation.operation && original.target === operation.target
-          && isDeepStrictEqual(original.data, operation.data), 'CANCEL', 'Native SFU cannot cancel a different original command.');
-        this.engine.cancel(operation.id);
-      }
+      try { this.ledger.cancel(operation); }
       catch { this.report(failure('CANCEL', 'Native SFU cancellation was not acknowledged; late results remain owned.')); }
     }
   }
@@ -1567,7 +1553,7 @@ class NativeSfuBroker {
     if (!record.nativeOwned) return Promise.reject(failure('OWNERSHIP', 'Native SFU allocation has no acknowledged native ID; ownership is unresolved.'));
     record.localClosing = (async () => {
       try {
-        const completion = await this.waitForNative(this.commands.request('resource.close', record.nativeId, {}));
+        const completion = await this.ledger.untilRetired(this.commands.request('resource.close', record.nativeId, {}));
         requireValue(completion.retired || exact(completion.value, []), 'ACK', 'Native SFU local resource close was not acknowledged.');
         this.retiredSide(record, 'native');
       } catch (error) {
@@ -1654,12 +1640,9 @@ class NativeSfuBroker {
     requireValue(isPromise(engineClosePromise) && isNativeRtcCommandsForEngine(this.commands, this.engine),
       'ENGINE_CLOSE', 'Native SFU retirement requires commands.closeEngine() and its complete-close proof API.');
     const proof = engineClosePromise.then(() => {
-      try { assertNativeRtcEngineClosed(this.commands, this.engine); }
+      try { this.ledger.proveRetired(); }
       catch { throw failure('ENGINE_CLOSE', 'The command registry has not proven complete closure of this native engine.'); }
-      this.engineRetired = true;
       for (const record of [...this.resources]) this.retiredSide(record, 'native');
-      for (const resolve of this.nativeRetirementWaiters) resolve();
-      this.nativeRetirementWaiters.clear();
     }, () => { throw failure('ENGINE_CLOSE', 'The complete native engine close failed; native ownership is retained.'); });
     this.engineCloseProof = proof;
     this.invalidateScope();

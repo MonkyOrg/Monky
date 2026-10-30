@@ -13,18 +13,25 @@ const INLINE_AVATAR = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,[A-Za
 const WEB_AVATAR = /^https?:\/\/[^\s"'<>`/?#][^\s"'<>`]*$/i;
 
 /**
- * Where an avatar is drawn from: a file the server stores (`/avatars/<name>`,
- * resolved against `baseUrl`), a web address or a picture inlined by the app.
- * Anything else — a local file, a script address or a value carrying markup —
- * gives the default silhouette, so a hostile server cannot reach past the
- * picture even where a template forgot to escape it.
+ * Where a picture is drawn from: a file the server stores (`/avatars/<name>`:
+ * avatars, server icons, banners, covers and carousel images), resolved
+ * against `baseUrl`, the address of the server that sent it; a web address;
+ * or a picture inlined by the app. Anything else (a local file, a script
+ * address, another path on the server or a value carrying markup) is no
+ * picture at all, so a hostile server cannot reach past it even where a
+ * template forgot to escape it.
  */
-export function resolveAvatarUrl(url: string | null | undefined, baseUrl: string): string {
+export function resolveImageUrl(url: string | null | undefined, baseUrl: string): string | null {
   const value = typeof url === 'string' ? url.trim() : '';
   if (INLINE_AVATAR.test(value)) return value;
   // Relative paths must be resolved against the server that sent them.
   const candidate = SERVER_AVATAR_PATH.test(value) ? `${baseUrl}${value}` : value;
-  return WEB_AVATAR.test(candidate) ? candidate : DEFAULT_AVATAR_URL;
+  return WEB_AVATAR.test(candidate) ? candidate : null;
+}
+
+/** An avatar as `resolveImageUrl` finds it, or the default silhouette. */
+export function resolveAvatarUrl(url: string | null | undefined, baseUrl: string): string {
+  return resolveImageUrl(url, baseUrl) ?? DEFAULT_AVATAR_URL;
 }
 
 /** Avatar address for the server on screen; see `resolveAvatarUrl`. */
@@ -43,9 +50,7 @@ export function toAbsoluteServerIconUrl(
   port: number,
   iconUrl?: string | null
 ): string | null {
-  if (!iconUrl || iconUrl.trim().length === 0) return null;
-  if (!iconUrl.startsWith('/')) return iconUrl;
-  return `${toHttpBase({ host, port })}${iconUrl}`;
+  return resolveImageUrl(iconUrl, toHttpBase({ host, port }));
 }
 
 /**

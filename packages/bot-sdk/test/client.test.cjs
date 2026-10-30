@@ -776,6 +776,67 @@ test('persistent messages are acknowledged and reactions outlive command invocat
   assert.deepEqual(errors, []);
 });
 
+test('resource requests share one budget across servers and only settle from their own connection', async (t) => {
+  const first = await makeServer(t);
+  const second = await makeServer(t);
+  const { bot, errors } = makeBot(t, first);
+  bot.connect({ serverId: 'first' });
+  bot.connect({ serverId: 'second', serverUrl: second.url });
+  await Promise.all([first.next(MessageType.COMMAND_REGISTER), second.next(MessageType.COMMAND_REGISTER)]);
+  const firstLists = Array.from({ length: 60 }, () => bot.listSelectors('first'));
+  const secondLists = Array.from({ length: 40 }, () => bot.listSelectors('second'));
+  const dropped = Promise.allSettled(secondLists);
+  let settled = 0;
+  for (const list of firstLists) list.then(() => { settled++; }, () => { settled++; });
+  await assert.rejects(bot.listSelectors('first'), /Too many pending bot resource requests/);
+  const firstRequests = [];
+  for (let index = 0; index < firstLists.length; index++) firstRequests.push(await first.next(MessageType.SELECTOR_LIST));
+  for (let index = 0; index < secondLists.length; index++) await second.next(MessageType.SELECTOR_LIST);
+  second.send(MessageType.SELECTOR_LIST_RESULT, { selectors: [] }, firstRequests[0].requestId);
+  await sdkBarrier(second);
+  assert.equal(settled, 0, 'A reply on another connection cannot settle the request');
+  bot.disconnect('second');
+  for (const result of await dropped) {
+    assert.equal(result.status, 'rejected');
+    assert.match(result.reason.message, /disconnected before the resource acknowledgement/);
+  }
+  const freed = bot.listSelectors('first');
+  firstRequests.push(await first.next(MessageType.SELECTOR_LIST));
+  for (const request of firstRequests) first.send(MessageType.SELECTOR_LIST_RESULT, { selectors: [] }, request.requestId);
+  assert.deepEqual(await Promise.all([...firstLists, freed]), Array(61).fill([]));
+  assert.deepEqual(errors, []);
+});
+
+test('channel messages and resource requests are bounded and fail without a valid acknowledgement', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  bot.connect({ serverId: 'chat-server' });
+  await server.next(MessageType.COMMAND_REGISTER);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const sent = Array.from({ length: 100 }, (_, index) => bot.sendMessage('chat-server', 'channel-one', `Message ${index}`));
+    const invalid = assert.rejects(sent[0], /invalid channel message acknowledgement/);
+    const unacknowledged = Promise.allSettled(sent.slice(1));
+    await assert.rejects(bot.sendMessage('chat-server', 'channel-one', 'One too many'), /Too many unacknowledged messages/);
+    const frames = [];
+    for (let index = 0; index < sent.length; index++) frames.push(await server.next(MessageType.CHAT_SEND));
+    server.send(MessageType.CHAT_MESSAGE, { id: 'not-a-message' }, frames[0].requestId);
+    await invalid;
+    const resource = assert.rejects(bot.listSelectors('chat-server'), /Bot resource acknowledgement timed out/);
+    await server.next(MessageType.SELECTOR_LIST);
+    t.mock.timers.tick(8000);
+    await resource;
+    t.mock.timers.tick(30_000 - 8000);
+    for (const result of await unacknowledged) {
+      assert.equal(result.status, 'rejected');
+      assert.match(result.reason.message, /did not acknowledge the channel message/);
+    }
+  } finally {
+    t.mock.timers.reset();
+  }
+  assert.deepEqual(errors, []);
+});
+
 test('reaction subscriptions filter a human answer, advance the question and unsubscribe', { timeout: 10000 }, async (t) => {
   const server = await makeServer(t);
   const { bot, errors } = makeBot(t, server);
@@ -1634,7 +1695,7 @@ test('lazy audio previews run only on explicit requests, with immutable settings
   assert.equal('reply' in context, false);
   assert.equal('downloadSound' in context, false);
   assert.equal(bot.httpServers.size, 0);
-  assert.equal(bot.audioPreviewWork, 0);
+  assert.equal(bot.liveRequests.audioPreviewWork, 0);
   assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_FINISH), false);
   assert.deepEqual(errors, []);
 });
@@ -1677,7 +1738,7 @@ test('lazy audio preview cancellation and disconnect isolate matching IDs across
   assert.equal(work.get('first').ctx.signal.aborted, true);
   work.get('first').resolve({ bytes: previewBytes(), mimeType: 'audio/wav' });
   await sdkBarrier(second);
-  assert.equal(bot.audioPreviewWork, 0);
+  assert.equal(bot.liveRequests.audioPreviewWork, 0);
   assert.deepEqual(errors, []);
 });
 
@@ -1717,10 +1778,10 @@ test('lazy audio preview providers report errors, validate bytes and MIME, and a
     t.mock.timers.tick(LIMITS.BOT_AUDIO_PREVIEW_TIMEOUT_MS);
     assert.deepEqual((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload, { status: 'failed', reason: 'timeout' });
     assert.equal(timed.signal.aborted, true);
-    assert.equal(bot.audioPreviewWork, 1, 'An unsettled aborted provider retains its concurrency slot');
+    assert.equal(bot.liveRequests.audioPreviewWork, 1, 'An unsettled aborted provider retains its concurrency slot');
     finish({ bytes: previewBytes(), mimeType: 'audio/wav' });
     await sdkBarrier(server);
-    assert.equal(bot.audioPreviewWork, 0);
+    assert.equal(bot.liveRequests.audioPreviewWork, 0);
     assert.equal([...bot.connections.values()][0].audioPreviews.size, 0);
     assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT), false);
   } finally {
@@ -1762,7 +1823,7 @@ test('lazy audio preview concurrency stays bounded even when providers ignore ca
   immediate = true;
   server.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(), 'released');
   assert.equal((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload.status, 'ok');
-  assert.equal(bot.audioPreviewWork, 0);
+  assert.equal(bot.liveRequests.audioPreviewWork, 0);
 });
 
 test('autocomplete registration and callbacks preserve typed partial options without invoking commands', async (t) => {
@@ -1996,6 +2057,46 @@ test('autocomplete reports source errors, rejects invalid choices and bounds its
   }
   assert.equal(errors.length, 1);
   assert.match(errors[0].message, /Source failed/);
+});
+
+// The server cancels the previous search on every keystroke. A handler that ignores its
+// signal keeps running, so it must keep its slot or typing would pile up background work.
+test('autocomplete concurrency stays bounded even when handlers ignore cancellation', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const work = [];
+  let immediate = false;
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, handler: () => {},
+    autocomplete: (ctx) => immediate ? [{ label: 'Ready', value: 'ready' }] :
+      new Promise((resolve) => { work.push({ ctx, resolve }); }),
+  });
+  t.after(() => { for (const pending of work) pending.resolve([]); });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  for (let index = 0; index < LIMITS.MAX_BOT_AUTOCOMPLETE_REQUESTS; index++) {
+    server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest(`query ${index}`), `work-${index}`);
+  }
+  await sdkBarrier(server);
+  assert.equal(work.length, LIMITS.MAX_BOT_AUTOCOMPLETE_REQUESTS);
+  for (let index = 0; index < work.length; index++) {
+    server.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: `work-${index}` });
+  }
+  await sdkBarrier(server);
+  assert.ok(work.every((pending) => pending.ctx.signal.aborted));
+  immediate = true;
+  server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('full'), 'full');
+  assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload,
+    { status: 'failed', reason: 'handler_failed' });
+  for (const pending of work) pending.resolve([]);
+  await sdkBarrier(server);
+  server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('released'), 'released');
+  const released = await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT);
+  assert.equal(released.requestId, 'released');
+  assert.deepEqual(released.payload, { status: 'ok', choices: [{ label: 'Ready', value: 'ready' }] });
+  assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT), false,
+    'Cancelled searches never answer');
+  assert.deepEqual(errors, []);
 });
 
 test('sound downloads await structured outcomes, remain private and consume one request per invocation', async (t) => {

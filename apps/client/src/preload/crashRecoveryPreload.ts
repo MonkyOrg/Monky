@@ -1,12 +1,6 @@
-import { ipcRenderer } from 'electron';
 import { CRASH_RECOVERY_IPC } from '@monky/shared';
-import type { CrashRecoveryActionResult, IpcInvokeChannels } from '@monky/shared';
-
-function invoke<K extends keyof IpcInvokeChannels>(
-  channel: K, ...args: IpcInvokeChannels[K]['args']
-): Promise<IpcInvokeChannels[K]['returnType']> {
-  return ipcRenderer.invoke(channel, ...args);
-}
+import type { CrashRecoveryActionResult } from '@monky/shared';
+import { invoke } from './ipc';
 
 // No Node/Electron object or general-purpose bridge is exposed to this page.
 window.addEventListener('DOMContentLoaded', () => {

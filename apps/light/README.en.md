@@ -282,7 +282,8 @@ cancels blocked reads before releasing callbacks.
 
 `ProtocolSession` confirms admission before creating media, reconciles the
 participant roster, and correlates replies by connection, generation, ID, and
-type. Reconnecting preserves identity; kicks cancel the intent to rejoin.
+type. Reconnecting preserves identity; kicks cancel the intent to rejoin, and a
+server move is followed only during a call or an admission to one.
 P2P/SFU transitions follow the server protocol without hidden fallback.
 
 `VoiceEngine` retains the ADM, audio processing, and WebRTC factory only during

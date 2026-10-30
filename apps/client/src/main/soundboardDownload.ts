@@ -10,7 +10,7 @@ import {
 } from '@monky/shared';
 import { isSoundFileName } from './soundAudioValidation';
 import { fetchSoundAudio, nativeSoundTransport, SoundDownloadError, soundDownloadUrl, type SoundDownloadTransport } from './audioFetch';
-export { nativeSoundTransport, SoundDownloadError, soundDownloadUrl, isPublicSoundAddress, type SoundDownloadTransport } from './audioFetch';
+export { nativeSoundTransport, SoundDownloadError, soundDownloadUrl, type SoundDownloadTransport } from './audioFetch';
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

@@ -1,9 +1,7 @@
 import {
   MessageType,
   type ChatMessage,
-  type ChatMessageUpdatedPayload,
-  type ForumPostSaved,
-  type ProtocolMessage,
+  type ServerMessage,
 } from '@monky/shared';
 
 function withoutForward(message: ChatMessage): ChatMessage {
@@ -13,37 +11,33 @@ function withoutForward(message: ChatMessage): ChatMessage {
   return legacy;
 }
 
+const forwarded = (message: ChatMessage): boolean => !!message.forwarded;
+
 /**
  * Peers without `message-forward` may validate messages strictly, so every
  * message they receive goes without its `forwarded` marker. Payloads are shared
  * between recipients and are never mutated.
  */
-export function projectLegacyForwards(message: ProtocolMessage): ProtocolMessage {
+export function projectLegacyForwards(message: ServerMessage): ServerMessage {
   switch (message.type) {
-    case MessageType.CHAT_MESSAGE: {
-      const chat: ChatMessage | undefined = message.payload;
-      return chat?.forwarded ? { ...message, payload: withoutForward(chat) } : message;
-    }
-    case MessageType.CHAT_MESSAGE_UPDATED: {
-      const payload: ChatMessageUpdatedPayload | undefined = message.payload;
-      return payload?.message?.forwarded
-        ? { ...message, payload: { ...payload, message: withoutForward(payload.message) } }
+    case MessageType.CHAT_MESSAGE:
+      return message.payload.forwarded ? { ...message, payload: withoutForward(message.payload) } : message;
+    case MessageType.CHAT_MESSAGE_UPDATED:
+      return message.payload.message.forwarded
+        ? { ...message, payload: { ...message.payload, message: withoutForward(message.payload.message) } }
         : message;
-    }
-    case MessageType.FORUM_POST_SAVED: {
-      const payload: ForumPostSaved | undefined = message.payload;
-      return payload?.message?.forwarded
-        ? { ...message, payload: { ...payload, message: withoutForward(payload.message) } }
+    case MessageType.FORUM_POST_SAVED:
+      return message.payload.message?.forwarded
+        ? { ...message, payload: { ...message.payload, message: withoutForward(message.payload.message) } }
         : message;
-    }
     case MessageType.CHAT_HISTORY:
-    case MessageType.CHAT_SEARCH_RESULTS: {
-      const payload: { messages?: ChatMessage[] } | undefined = message.payload;
-      const messages = payload?.messages;
-      return payload && messages?.some(entry => entry.forwarded)
-        ? { ...message, payload: { ...payload, messages: messages.map(withoutForward) } }
+      return message.payload.messages.some(forwarded)
+        ? { ...message, payload: { ...message.payload, messages: message.payload.messages.map(withoutForward) } }
         : message;
-    }
+    case MessageType.CHAT_SEARCH_RESULTS:
+      return message.payload.messages.some(forwarded)
+        ? { ...message, payload: { ...message.payload, messages: message.payload.messages.map(withoutForward) } }
+        : message;
     default:
       return message;
   }

@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { WebSocket } from 'ws';
 import {
-  ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, MessageType, Permission, canAccessChannel, getChannelPermissions,
-  hasChannelPermission, hasPermission, resolveMemberPermissions,
+  ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, MessageType, PROTOCOL_VERSION, Permission, ProtocolErrorCode, botSettingsListResponseSchema,
+  canAccessChannel, createProtocolOffer, getChannelPermissions, hasChannelPermission, hasPermission, resolveMemberPermissions,
   type BotCapability, type ChannelSummary, type ProtocolMessage,
 } from '@monky/shared';
 import type { IDatabaseDriver } from './infrastructure/database/SqliteWrapper';
@@ -450,6 +450,148 @@ test('a selector vote notifies the channel reading each member once', async t =>
   assert.equal(notified.size, 41, 'every member who can read the channel, and its bot');
   // About 1,500 statements when each session was checked twice.
   assert.ok(vote.count <= 200, `a vote took ${vote.count} statements`);
+});
+
+test('a selector vote under constant access changes gives up instead of checking forever (BOTS-8)', async t => {
+  const f = await setup(t);
+  const botId = await f.bot(['selectors', 'send_messages', 'read_messages']);
+  const channel = await f.channel({ name: 'churn', type: 'TEXT', botCommandsEnabled: true });
+  const voter = session(await f.member('Churn voter'));
+  const current = new Set([voter, session(botId, true)]);
+  const selectors = new BotSelectorService(new SqliteBotSelectorRepository(f.db));
+  const sent: ProtocolMessage[] = [];
+  let version = 0;
+  let checks = 0;
+  const handler = new BotSelectorHandler(selectors, f.channelService, f.userService, {
+    sessions: () => current,
+    isCurrent: entry => current.has(entry),
+    allowsBot: () => true,
+    // Every read sees a new version, as when channels or roles keep changing during the check.
+    accessVersion: () => version++,
+    send: (_entry, message) => { sent.push(message); },
+    authorizeInvocation: async () => undefined,
+    publish: async () => { throw new Error('Not published in this test.'); },
+    broadcastMessage: async () => {},
+  });
+  t.after(() => handler.close());
+  const contexts = f.channelService.getAccessContext.bind(f.channelService);
+  t.mock.method(f.channelService, 'getAccessContext', (userId: string, channelId?: string) => {
+    if (userId === voter.user!.id) checks++;
+    return contexts(userId, channelId);
+  });
+  const selector = selectors.create(botId, {
+    channelId: channel.id, title: 'Churn', choices: [{ label: 'A', value: 'a' }, { label: 'B', value: 'b' }],
+    presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 10,
+  });
+  selectors.markPublished(selector.id, botId);
+  const busy = { code: ProtocolErrorCode.BOT_COMMAND_BUSY, message: 'Permissions are changing. Retry shortly.' };
+
+  await handler.handle(voter, MessageType.SELECTOR_RESPOND, { id: selector.id, value: 'a' }, 'churn');
+  assert.deepEqual(sent.find(message => message.requestId === 'churn')?.payload, busy);
+  assert.ok(checks > 0 && checks <= 8, `the vote was checked ${checks} times`);
+  assert.deepEqual(selectors.get(selector.id)?.responses, {}, 'no vote is recorded on access that never held still');
+
+  // A role write under way blocks the answer the same way, as it does for miniapps.
+  t.mock.method(f.channelService, 'getRoleAccessVersion', () => null);
+  await handler.handle(voter, MessageType.SELECTOR_RESPOND, { id: selector.id, value: 'a' }, 'pending-role');
+  assert.deepEqual(sent.find(message => message.requestId === 'pending-role')?.payload, busy);
+  assert.deepEqual(selectors.get(selector.id)?.responses, {});
+});
+
+/** A bot that announced its profile, so the settings list shows it, holding a storage grant older clients cannot parse. */
+async function profiledBot(f: Awaited<ReturnType<typeof setup>>, name: string) {
+  const botId = await f.bot(['commands', 'server_storage']);
+  assert.equal((await f.botService.updateProfile(botId, { name })).success, true);
+  return botId;
+}
+
+test('a bot settings broadcast reads the bots once and builds each kind of message once (BOTS-5)', async t => {
+  const f = await setup(t);
+  await f.serverRepo.updateServer({ maxUsers: LIMITS.MAX_USERS_UNLIMITED });
+  const botId = await profiledBot(f, 'Settings bot');
+  await profiledBot(f, 'Other bot');
+  const configurers = await f.role('Bot configurers', Permission.CONFIGURE_BOTS);
+  const offer = createProtocolOffer('client');
+  const older = { ...offer, features: offer.features.filter(feature => feature !== 'bot-storage' && feature !== 'bot-manifest-url') };
+  // The owner manages bots; the others alternate between configuring or not, on current and older clients.
+  const people = [{ peer: f.owner.peer, configures: true }];
+  const join = async (count: number) => {
+    for (let index = 0; index < count; index++) {
+      const order = people.length;
+      const person = await f.human(`Reader ${order}`, undefined, undefined, false, PROTOCOL_VERSION, order % 3 === 0 ? older : offer);
+      if (order % 2 === 0) await f.roleRepo.assignRole(person.id, configurers);
+      people.push({ peer: person.peer, configures: order % 2 === 0 });
+    }
+    await Promise.all(people.map(({ peer }) => peer.barrier()));
+  };
+  const broadcast = async () => {
+    const since = people.map(({ peer }) => peer.messages.length);
+    const measured = await f.counter.measure(() => f.wsServer['broadcastBotSettings'](botId));
+    await Promise.all(people.map(({ peer }) => peer.barrier()));
+    const received = people.map(({ peer }, index) => peer.messages.slice(since[index]).filter(message =>
+      message.type === MessageType.BOT_SETTINGS_LIST_RESPONSE || message.type === MessageType.BOT_SETTINGS_SNAPSHOT));
+    const reads = (pattern: RegExp) => measured.sql.filter(sql => pattern.test(sql)).length;
+    return { received, count: measured.count, bots: reads(/FROM bots ORDER BY/), settings: reads(/\bbot_settings\b/) };
+  };
+
+  await join(6);
+  const few = await broadcast();
+  await join(6);
+  const many = await broadcast();
+  for (const [index, { peer, configures }] of people.entries()) {
+    const [list, snapshot, ...rest] = many.received[index];
+    assert.equal(rest.length, 0, `reader ${index} gets one list and at most one snapshot`);
+    // Each reader gets exactly what asking for it returns, though readers of the same kind share one message.
+    assert.equal(list?.type, MessageType.BOT_SETTINGS_LIST_RESPONSE);
+    assert.deepEqual(list.payload, (await peer.request(MessageType.BOT_SETTINGS_LIST, {})).payload, `reader ${index} list`);
+    if (!configures) {
+      assert.equal(snapshot, undefined, `reader ${index} may not see the changed bot's settings`);
+      continue;
+    }
+    assert.equal(snapshot?.type, MessageType.BOT_SETTINGS_SNAPSHOT);
+    assert.deepEqual(snapshot.payload, (await peer.request(MessageType.BOT_SETTINGS_GET, { botId })).payload, `reader ${index} snapshot`);
+  }
+  assert.ok(many.bots <= 2 && many.bots === few.bots, `the bots and their manifest URLs were listed ${many.bots} times`);
+  assert.equal(many.settings, few.settings, 'settings are read once per kind of reader, not once per reader');
+  // About 14 statements for each reader, and the bots listed 31 times for 13 readers, when every connection
+  // read the bots and checked its permissions twice.
+  const perReader = (many.count - few.count) / 6;
+  assert.ok(perReader <= 6, `each extra reader took ${perReader} statements`);
+});
+
+test('bot settings broadcasts arrive in the order of the changes, even when one is slow (BOTS-5)', async t => {
+  const f = await setup(t);
+  const botId = await profiledBot(f, 'Before');
+  const reader = await f.human('Slow reader');
+  await reader.peer.barrier();
+  const check = f.permissions.checkPermission.bind(f.permissions);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const holding = new Promise<void>(resolve => { entered = resolve; });
+  let hold = true;
+  t.mock.method(f.permissions, 'checkPermission', async (userId: string, permission: Permission) => {
+    const allowed = await check(userId, permission);
+    if (userId === reader.id && permission === Permission.CONFIGURE_BOTS && hold) {
+      hold = false;
+      entered();
+      await held;
+    }
+    return allowed;
+  });
+  const since = reader.peer.messages.length;
+  const first = f.wsServer['broadcastBotSettings']();
+  await holding;
+  assert.equal((await f.botService.updateProfile(botId, { name: 'After' })).success, true);
+  const second = f.wsServer['broadcastBotSettings'](botId);
+  // Reading and sending involve no I/O: a broadcast that did not wait for the first one would be done by now.
+  await new Promise(resolve => setTimeout(resolve, 20));
+  release();
+  await Promise.all([first, second]);
+  await reader.peer.barrier();
+  const names = reader.peer.messages.slice(since).filter(message => message.type === MessageType.BOT_SETTINGS_LIST_RESPONSE)
+    .map(message => botSettingsListResponseSchema.parse(message.payload).bots.find(bot => bot.botId === botId)?.name);
+  assert.deepEqual(names, ['Before', 'After'], 'the list read before the change never lands after the newer one');
 });
 
 test('the deleted-message sweep finds its rows through an index, not by reading every message', async t => {

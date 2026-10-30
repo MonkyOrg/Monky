@@ -2,37 +2,11 @@ import type { SelectionChoice } from './selection.js';
 import type { CommandLocalizations } from './botLocales.js';
 import type { LocalCapabilityId } from './localExecution.js';
 import type { NativeScreenSource } from './screenSharing.js';
+import type { RtcSignalCandidate, RtcSignalDescription } from './validators.js';
 
 export type ChannelType = 'VOICE' | 'TEXT' | 'FORUM';
 
 export type VoiceMode = 'p2p' | 'sfu';
-
-export interface SfuTransportOptions {
-  id: string;
-  iceParameters: any;
-  iceCandidates: any[];
-  dtlsParameters: any;
-  sctpParameters?: any;
-}
-
-export interface SfuProducerData {
-  id: string;
-  kind: 'audio' | 'video';
-  rtpParameters: any;
-  type?: string;
-  paused?: boolean;
-  appData: Record<string, any>;
-}
-
-export interface SfuConsumerData {
-  id: string;
-  producerId: string;
-  kind: 'audio' | 'video';
-  rtpParameters: any;
-  type?: string;
-  producerAppData: Record<string, any>;
-  producerSessionId: string;
-}
 
 export type UserStatus = 'ONLINE' | 'IDLE' | 'VOICE' | 'DISCONNECTED';
 
@@ -562,8 +536,8 @@ export interface WebRtcSignalPayload {
   targetSessionId: string;
   fromSessionId: string;
   signalType: 'offer' | 'answer' | 'candidate' | 'user-left' | 'screen-audio-meta' | 'screen-video-meta' | 'screen-watch';
-  sdp?: any; // RTCSessionDescriptionInit
-  candidate?: any; // RTCIceCandidateInit
+  sdp?: RtcSignalDescription;
+  candidate?: RtcSignalCandidate;
   streamId?: string; // For screen-audio-meta/screen-video-meta: the MediaStream ID of the screen track
   /** Sender's epoch for SDP/metadata; publisher's epoch for a Watch command. */
   subscriptionId?: string;
@@ -581,10 +555,4 @@ export interface ScreenWatchSignalPayload extends WebRtcSignalPayload {
   watcherSubscriptionId: string;
   subscriptionRevision: number;
   watching: boolean;
-}
-
-export interface BandwidthSettings {
-  maxUploadKbps: number;
-  maxDownloadKbps: number;
-  qualityPreset: 'ECONOMIC' | 'NORMAL' | 'HIGH' | 'GAMING' | 'QHD' | 'UHD' | 'UHD120';
 }

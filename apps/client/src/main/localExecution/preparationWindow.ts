@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { errorDiagnostic } from '@monky/bot-sdk/dist/localRuntime';
 import {
-  LOCAL_PREPARATION_DIALOG_CHANGED, LOCAL_PREPARATION_DIALOG_IPC,
+  LOCAL_PREPARATION_DIALOG_CHANGED, LOCAL_PREPARATION_DIALOG_IPC, deferred,
   type LocalBotIdentity, type LocalCapabilityId, type LocalConsentDecision, type LocalPreparationDialogState,
 } from '@monky/shared';
 import { mt } from '../i18n';
@@ -73,12 +73,7 @@ export class LocalPreparationWindow {
   private settled = false;
   private ready = false;
   private loadingTimeout: ReturnType<typeof setTimeout> | null = null;
-  private resolve!: (decision: LocalToolDialogResult) => void;
-  private reject!: (error: unknown) => void;
-  private readonly result = new Promise<LocalToolDialogResult>((resolve, reject) => {
-    this.resolve = resolve;
-    this.reject = reject;
-  });
+  private readonly result = deferred<LocalToolDialogResult>();
 
   constructor(private readonly options: LocalToolDialogOptions) {
     this.signal = AbortSignal.any([options.signal, this.cancellation.signal]);
@@ -129,7 +124,7 @@ export class LocalPreparationWindow {
         ? preparationDialogHtml({ ...this.options, inventory: this.options.tools.preparationInfo(this.options.capability), icon, font })
         : maintenanceDialogHtml(this.options, { icon, font });
       const loaded = contents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-      const [, decision] = await Promise.all([loaded, this.result]);
+      const [, decision] = await Promise.all([loaded, this.result.promise]);
       return decision;
     } finally {
       if (this.loadingTimeout) clearTimeout(this.loadingTimeout);
@@ -236,7 +231,7 @@ export class LocalPreparationWindow {
   private finish(decision?: LocalToolDialogResult, error?: unknown): void {
     if (this.settled) return;
     this.settled = true;
-    if (decision !== undefined) this.resolve(decision);
-    else this.reject(error ?? new LocalExecutionError('cancelled'));
+    if (decision !== undefined) this.result.resolve(decision);
+    else this.result.reject(error ?? new LocalExecutionError('cancelled'));
   }
 }

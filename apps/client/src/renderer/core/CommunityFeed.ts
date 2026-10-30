@@ -69,7 +69,7 @@ export class CommunityFeed {
         if (!notice.interested || this.notified.has(key)) return;
         this.notified.add(key);
         if (this.notified.size > 500) this.notified.delete(this.notified.values().next().value!);
-        appEvents.emit<CommunityStartNotice>('community.event_started', {
+        appEvents.emit('community.event_started', {
           title: notice.title, serverName: server.serverDetails?.name ?? '',
         });
       }

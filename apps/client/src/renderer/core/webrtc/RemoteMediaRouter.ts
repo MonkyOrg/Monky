@@ -1,9 +1,9 @@
 import { settingsStore } from '../../stores/settingsStore';
 import { voiceStore } from '../../stores/voiceStore';
 import type { ParticipantManager } from '../ParticipantManager';
-import type { PeerSession } from '../WebRtcManager';
 import { normalizeAudioOutputId } from '../../utils/audioPreferences';
 import { setAudioOutputSink } from '../AudioOutputSink';
+import { effectiveAudioOutput } from '../audioOutputRouting';
 
 interface AudioPlaybackPipeline {
   source: MediaStreamAudioSourceNode;
@@ -66,7 +66,7 @@ export class RemoteMediaRouter {
 
   private async routeAudioOutput(category: 'voice' | 'screen'): Promise<void> {
     const context = this.getOrCreateAudioContext(category);
-    const sinkId = this.speakerDeviceIds[category] ?? settingsStore.getAudioOutputDeviceId(category);
+    const sinkId = this.speakerDeviceIds[category] ?? effectiveAudioOutput(category);
     if (typeof context.setSinkId !== 'function') throw new Error('Audio output selection unavailable');
     await setAudioOutputSink(context, sinkId);
     if (context.state === 'suspended') await context.resume();
@@ -77,7 +77,7 @@ export class RemoteMediaRouter {
       if (!audioEl.isConnected) return;
       // The native renderer is shared across elements. Serialize its switches
       // globally and resolve the latest voice preference after waiting.
-      const voiceId = this.speakerDeviceIds.voice ?? settingsStore.getAudioOutputDeviceId('voice');
+      const voiceId = this.speakerDeviceIds.voice ?? effectiveAudioOutput('voice');
       await setAudioOutputSink(audioEl, voiceId);
     };
     const change = this.decoderOutputQueue.then(apply, apply);
@@ -138,10 +138,6 @@ export class RemoteMediaRouter {
   }
 
   // ── Speaker device routing ──
-
-  public async setSpeakerDeviceId(deviceId: string): Promise<void> {
-    await this.setOutputDeviceIds(deviceId, deviceId);
-  }
 
   public async setOutputDeviceIds(voiceDeviceId: string, screenDeviceId: string): Promise<void> {
     const voiceId = normalizeAudioOutputId(voiceDeviceId);
@@ -385,7 +381,8 @@ export class RemoteMediaRouter {
     return work;
   }
 
-  public cleanupPeerMedia(peerSessionId: string, session?: PeerSession): void {
+  /** Stops playing a person's microphone: its element and its playback graph. */
+  public removeVoiceAudio(peerSessionId: string): void {
     const audioEl = this.audioElements.get(peerSessionId);
     if (audioEl) {
       try {
@@ -396,17 +393,12 @@ export class RemoteMediaRouter {
       this.audioElements.delete(peerSessionId);
     }
     this.cleanupAudioPipeline(peerSessionId, this.voicePipelines);
+  }
 
+  /** Everything a person plays: the microphone and every screen's audio. */
+  public cleanupPeerMedia(peerSessionId: string): void {
+    this.removeVoiceAudio(peerSessionId);
     this.cleanupScreenAudio(peerSessionId);
-
-    if (session) {
-      // Explicitly stop all remote voice/camera tracks to free WebRTC decoding buffers
-      session.remoteStream.getTracks().forEach((track) => {
-        try {
-          track.stop();
-        } catch {}
-      });
-    }
   }
 
   public closeAllMedia(): void {

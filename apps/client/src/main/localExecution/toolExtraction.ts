@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { terminate } from '@monky/bot-sdk/dist/localRuntime';
+import { linkedSignal, raceSignal } from '@monky/shared';
 import { LocalExecutionError, localFailure } from './errors';
 import { localToolStorageError, localToolUnsafeFileError, missingLocalToolFile } from './localToolsStorage';
 
@@ -72,33 +73,17 @@ function extractionEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
-function waitForExtraction(closed: Promise<void>, signal: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const abort = (): void => { reject(signal.reason); };
-    signal.addEventListener('abort', abort, { once: true });
-    closed.then(
-      () => { signal.removeEventListener('abort', abort); resolve(); },
-      (error: unknown) => { signal.removeEventListener('abort', abort); reject(error); },
-    );
-    if (signal.aborted) abort();
-  });
-}
-
 export async function checkToolExtraction(support: ToolExtractionSupport, signal: AbortSignal): Promise<'gnu' | 'bsd'> {
   signal.throwIfAborted();
-  const controller = new AbortController();
-  const abort = (): void => controller.abort(signal.reason);
-  signal.addEventListener('abort', abort, { once: true });
-  if (signal.aborted) abort();
+  const check = linkedSignal(signal, { ms: 5000, reason: () => new LocalExecutionError('timeout') });
   const child = spawn(support.tar, ['--version'], {
     stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true, detached: process.platform !== 'win32',
     env: extractionEnvironment(),
   });
   let output = '';
-  const timer = setTimeout(() => controller.abort(new LocalExecutionError('timeout')), 5000);
   const capture = (chunk: Buffer): void => {
     if (Buffer.byteLength(output) + chunk.length > DIAGNOSTIC_LIMIT) {
-      controller.abort(new LocalExecutionError('unsupported_platform'));
+      check.abort(new LocalExecutionError('unsupported_platform'));
     } else output += chunk.toString('utf8');
   };
   child.stdout.on('data', capture);
@@ -108,16 +93,15 @@ export async function checkToolExtraction(support: ToolExtractionSupport, signal
     child.once('close', (code) => code === 0 ? resolve() : reject(new LocalExecutionError('unsupported_platform')));
   });
   try {
-    await waitForExtraction(closed, controller.signal);
-    controller.signal.throwIfAborted();
+    await raceSignal(closed, check.signal);
+    check.signal.throwIfAborted();
     if (output.includes('bsdtar')) return 'bsd';
     if (output.includes('GNU tar') && support.gzip && support.xz) return 'gnu';
     throw new LocalExecutionError('unsupported_platform');
   } catch (error) {
-    throw new LocalExecutionError(localFailure(error, 'unsupported_platform', controller.signal), { cause: error });
+    throw new LocalExecutionError(localFailure(error, 'unsupported_platform', check.signal), { cause: error });
   } finally {
-    clearTimeout(timer);
-    signal.removeEventListener('abort', abort);
+    check.dispose();
     child.stdout.destroy();
     child.stderr.destroy();
     try {
@@ -144,23 +128,15 @@ export async function extractLocalTool(options: {
       member.split('/').some((part) => part === '..') ||
       !Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new LocalExecutionError('invalid_request');
   signal.throwIfAborted();
-  const controller = new AbortController();
-  const abort = (): void => controller.abort(signal.reason);
-  signal.addEventListener('abort', abort, { once: true });
-  if (signal.aborted) abort();
-  const timer = setTimeout(() => controller.abort(new LocalExecutionError('timeout')), EXTRACTION_TIMEOUT);
   const args = ['-xOf', archive];
   if (options.implementation === 'gnu') {
     const compressor = format === 'tar.xz' ? support.xz : format === 'tar.gz' ? support.gzip : null;
-    if (!compressor) {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', abort);
-      throw new LocalExecutionError('unsupported_platform');
-    }
+    if (!compressor) throw new LocalExecutionError('unsupported_platform');
     // GNU tar must not resolve its decompressor through the inherited PATH.
     args.push(`--use-compress-program=${compressor}`);
   }
   args.push('--', member);
+  const extraction = linkedSignal(signal, { ms: EXTRACTION_TIMEOUT, reason: () => new LocalExecutionError('timeout') });
   const child = spawn(support.tar, args, {
     stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true, detached: process.platform !== 'win32',
     env: extractionEnvironment(),
@@ -168,7 +144,7 @@ export async function extractLocalTool(options: {
   let diagnosticBytes = 0;
   child.stderr.on('data', (chunk: Buffer) => {
     diagnosticBytes += chunk.length;
-    if (diagnosticBytes > DIAGNOSTIC_LIMIT) controller.abort(new LocalExecutionError('tool_install_failed'));
+    if (diagnosticBytes > DIAGNOSTIC_LIMIT) extraction.abort(new LocalExecutionError('tool_install_failed'));
   });
   const closed = new Promise<void>((resolve, reject) => {
     child.once('error', reject);
@@ -182,20 +158,19 @@ export async function extractLocalTool(options: {
     },
   });
   const output = createWriteStream(destination, { flags: 'wx', mode: 0o600 });
-  const extracted = pipeline(child.stdout, limit, output, { signal: controller.signal });
+  const extracted = pipeline(child.stdout, limit, output, { signal: extraction.signal });
   try {
     await Promise.all([closed, extracted]);
-    controller.signal.throwIfAborted();
+    extraction.signal.throwIfAborted();
     if (!bytes) throw new LocalExecutionError('integrity_failed');
     const handle = await fs.open(destination, 'r+');
     try { await handle.sync(); } finally { await handle.close(); }
   } catch (error) {
     if (localToolStorageError(error)) throw new LocalExecutionError('storage_failed', { cause: error });
     if (localToolUnsafeFileError(error)) throw new LocalExecutionError('integrity_failed', { cause: error });
-    throw new LocalExecutionError(localFailure(error, 'tool_install_failed', controller.signal), { cause: error });
+    throw new LocalExecutionError(localFailure(error, 'tool_install_failed', extraction.signal), { cause: error });
   } finally {
-    clearTimeout(timer);
-    signal.removeEventListener('abort', abort);
+    extraction.dispose();
     child.stdout.destroy();
     child.stderr.destroy();
     output.destroy();

@@ -1,25 +1,29 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import * as mediasoup from 'mediasoup';
 import type { types as MediasoupTypes } from 'mediasoup';
-import { AuthSuccessPayload, MessageType, Permission, ProtocolErrorCode, ServerDetails, ServerErrorPayload, UserSummary, VoiceConnectionHealth, VoiceUserJoinedPayload, SfuProducersListPayload, hasPermission } from '@monky/shared';
+import { AuthSuccessPayload, ChannelSummary, DEFAULT_PERMISSIONS, MessageType, Permission, ProtocolErrorCode, ServerDetails, ServerErrorPayload, UserSummary, VoiceConnectionHealth, VoiceUserJoinedPayload, SfuProducersListPayload, hasPermission } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { PermissionService } from './application/services/PermissionService';
 import { UserService } from './application/services/UserService';
 import { SignalingService } from './application/services/SignalingService';
 import { ChannelRecord, VoiceRestrictions } from './domain/entities';
+import { SERVER_SETTING_DEFAULTS } from './domain/serverSettings';
 import type { IVoiceRestrictionRepository } from './domain/repositories';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
 import { SfuManager, SfuProducerClosedError, SfuProducerLimitError } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import { VoiceSessionHandler } from './infrastructure/websocket/voice/VoiceSessionHandler';
 import { Logger } from './infrastructure/logger/Logger';
-import { createFixture, record, records as recordList, text } from './testFixtures/bots';
+import { createFixture, record, records as recordList, text, type Received } from './testFixtures/bots';
 import './test-screen-subscriptions';
 
 function memoryRestrictions(): IVoiceRestrictionRepository {
@@ -432,10 +436,12 @@ test('voice join snapshot is captured after async broadcast and includes peers w
     canUserAccessChannel: async () => true, getAfkChannelId: async () => null,
   } as unknown as WebSocketServer['channelService'];
   server['serverRepo'] = {
-    getServer: async () => ({ id: 'server', name: 'Voice', passwordHash: '', createdAt: 1, maxUsers: 10, voiceMode: 'sfu' }),
+    getServer: async () => ({
+      ...SERVER_SETTING_DEFAULTS, id: 'server', name: 'Voice', passwordHash: '', createdAt: 1, maxUsers: 10, voiceMode: 'sfu',
+    }),
     createServer: async () => {}, updateServer: async () => {},
   };
-  type Session = Parameters<WebSocketServer['handleVoiceJoin']>[0];
+  type Session = Parameters<WebSocketServer['handleMessage']>[0];
   const makeSession = (id: string): Session => {
     const ws = Object.create(WebSocket.prototype) as WebSocket;
     Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
@@ -466,7 +472,7 @@ test('voice join snapshot is captured after async broadcast and includes peers w
   };
   const messages: Parameters<WebSocketServer['send']>[1][] = [];
   server['send'] = (_ws, message) => { messages.push(message); };
-  await server['handleVoiceJoin'](self, { channelId: 'room' }, 'current-admission');
+  await server['voiceSessions']['handleVoiceJoin'](self, { channelId: 'room' }, 'current-admission');
   assert.equal(messages[0].requestId, 'current-admission', 'only the final direct response confirms admission');
   assert.equal((messages[0].payload as VoiceUserJoinedPayload).voiceState.serverMuted, true);
   assert.equal((messages[0].payload as VoiceUserJoinedPayload).voiceState.serverDeafened, true);
@@ -477,13 +483,13 @@ test('voice join snapshot is captured after async broadcast and includes peers w
   assert.equal(maskedPeer.user.status, 'DISCONNECTED');
   assert.equal(maskedPeer.user.invisible, undefined);
   assert.equal(maskedPeer.user.sessionId, 'peer', 'voice keeps the physical session address');
-  assert.equal(server['getVoiceRoster']('room', 'peer').find((p) => p.user.id === 'peer')?.user.invisible, true);
-  await server['handleSfuGetProducers'](self, { channelId: 'room' });
+  assert.equal(server['voiceSessions'].getVoiceRoster('room', 'peer').find((p) => p.user.id === 'peer')?.user.invisible, true);
+  await server['sfuSignaling']['handleSfuGetProducers'](self, { channelId: 'room' });
   const resync = messages[1].payload as SfuProducersListPayload;
   assert.deepEqual(resync.participants, roster, 'media rejoin reconciles even muted/listen-only peers with no producer');
   assert.equal(service.getParticipantsInChannel('room').length, 3, 'media resync never evicts live participants');
   server['broadcastToChannel'] = async () => { service.leaveVoiceChannel('self'); };
-  await server['handleVoiceJoin'](self, { channelId: 'room' }, 'interrupted-admission');
+  await server['voiceSessions']['handleVoiceJoin'](self, { channelId: 'room' }, 'interrupted-admission');
   assert.equal(messages.at(-1)?.type, MessageType.SERVER_ERROR, 'interrupted admission rejects instead of leaving the request pending');
   assert.equal(messages.at(-1)?.requestId, 'interrupted-admission');
 });
@@ -538,21 +544,21 @@ test('a listen-only member with nothing to receive (the AFK room) is not shown c
     }
   }
   assert.equal(sfu.getConnectionHealth('afk-member', 'room'), 'connecting');
-  assert.equal(server['sfuCallHealth']('afk-member', 'room'), 'idle', 'no media to carry, so connectivity is untested');
-  assert.equal(server['sfuCallHealth']('speaker', 'room'), 'connecting', 'a member who may speak is still about to publish');
+  assert.equal(server['sfuSignaling'].sfuCallHealth('afk-member', 'room'), 'idle', 'no media to carry, so connectivity is untested');
+  assert.equal(server['sfuSignaling'].sfuCallHealth('speaker', 'room'), 'connecting', 'a member who may speak is still about to publish');
 
   sfu['consumers'].set('consumer', {
     consumer: { id: 'consumer', close() {} } as MediasoupTypes.Consumer,
     transportId: 'afk-member-recv', sessionId: 'afk-member', channelId: 'room', producerId: 'producer',
   });
-  assert.equal(server['sfuCallHealth']('afk-member', 'room'), 'connecting', 'something to receive needs a real negotiation');
+  assert.equal(server['sfuSignaling'].sfuCallHealth('afk-member', 'room'), 'connecting', 'something to receive needs a real negotiation');
   sfu['consumers'].clear();
   sfu['transports'].get('afk-member-recv')!.healthState = 'failed';
-  assert.equal(server['sfuCallHealth']('afk-member', 'room'), 'failed', 'a real failure is never masked');
+  assert.equal(server['sfuSignaling'].sfuCallHealth('afk-member', 'room'), 'failed', 'a real failure is never masked');
   sfu.close();
 });
 
-test('real missing-producer consume path replies before the delayed close broadcast without reporting transport failure', async () => {
+test('a consume crossing a producer close gets the terminal reply, and the close goes out at once, without reporting transport failure', async () => {
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   const sfu = new SfuManager();
   server['sfuManager'] = sfu;
@@ -566,7 +572,7 @@ test('real missing-producer consume path replies before the delayed close broadc
     transportId: 'send-peer',
     sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'camera' },
   });
-  const session: Parameters<WebSocketServer['handleSfuConsume']>[0] = {
+  const session: Parameters<WebSocketServer['handleMessage']>[0] = {
     ws: Object.create(WebSocket.prototype) as WebSocket, sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1',
     messageQueue: Promise.resolve(),
     user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
@@ -574,30 +580,26 @@ test('real missing-producer consume path replies before the delayed close broadc
   const sent: Parameters<WebSocketServer['send']>[1][] = [];
   const broadcasts: Parameters<WebSocketServer['send']>[1][] = [];
   server['send'] = (_ws, message) => { sent.push(message); };
-  assert.ok(server['projectScreenMessage'](session, {
+  assert.ok(server['screens'].projectScreenMessage(session, {
     type: MessageType.SFU_NEW_PRODUCER,
     payload: { channelId: 'room', producerId: 'producer', producerSessionId: 'peer',
       kind: 'video', appData: { mediaType: 'camera' } },
   }), 'the consumer request must follow a producer advertised to this client');
-  let releaseBroadcast = () => {};
-  const pendingPermission = new Promise<void>((resolve) => { releaseBroadcast = resolve; });
-  server['broadcastToChannel'] = async (_channelId, message) => {
-    await pendingPermission;
-    broadcasts.push(message);
-  };
-  server['handleSfuProducerClosed']({ ...session, sessionId: 'peer' }, { channelId: 'room', producerId: 'producer' });
-  await server['handleSfuConsume'](session, {
+  server['broadcast'] = (message) => { broadcasts.push(message); };
+  server['sfuSignaling']['handleSfuProducerClosed']({ ...session, sessionId: 'peer' }, { channelId: 'room', producerId: 'producer' });
+  // Its projection keeps it to whoever was told of the producer, so no room
+  // audience is resolved first: nothing for the close to wait on (S-VOICE-5).
+  assert.deepEqual(broadcasts, [{
+    type: MessageType.SFU_PRODUCER_CLOSED, payload: { channelId: 'room', producerId: 'producer' },
+  }], 'the close is announced before the request returns');
+  await server['sfuSignaling']['handleSfuConsume'](session, {
     channelId: 'room', transportId: 'recv', producerId: 'producer', rtpCapabilities: {},
   }, 'consume-request');
   assert.deepEqual(sent, [{
     type: MessageType.SFU_PRODUCER_CLOSED, requestId: 'consume-request',
     payload: { channelId: 'room', producerId: 'producer' },
   }]);
-  assert.equal(broadcasts.length, 0, 'the terminal reply is independent of slow broadcast authorization');
   assert.equal(sfu['transports'].size, 1);
-  releaseBroadcast();
-  await pendingPermission;
-  assert.equal(broadcasts.length, 1);
   sfu.close();
 });
 
@@ -610,7 +612,7 @@ test('permission-muted SFU participants can publish video but not microphone or 
   server['closing'] = false;
   const ws = Object.create(WebSocket.prototype) as WebSocket;
   Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
-  const session: Parameters<WebSocketServer['handleSfuProduce']>[0] = {
+  const session: Parameters<WebSocketServer['handleMessage']>[0] = {
     ws, sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
   };
@@ -626,16 +628,16 @@ test('permission-muted SFU participants can publish video but not microphone or 
   await service.joinVoiceChannel('self', 'self', 'room', false, false, true);
   service.updateVoiceState('self', { screenShareIds: ['share'] });
 
-  await server['handleSfuProduce'](session, {
+  await server['sfuSignaling']['handleSfuProduce'](session, {
     channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'mic' },
   }, 'mic');
-  await server['handleSfuProduce'](session, {
+  await server['sfuSignaling']['handleSfuProduce'](session, {
     channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'screen_audio', shareId: 'share' },
   }, 'screen-audio');
-  await server['handleSfuProduce'](session, {
+  await server['sfuSignaling']['handleSfuProduce'](session, {
     channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] }, appData: { mediaType: 'camera' },
   }, 'camera');
-  await server['handleSfuProduce'](session, {
+  await server['sfuSignaling']['handleSfuProduce'](session, {
     channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] }, appData: { mediaType: 'screen_video', shareId: 'share' },
   }, 'screen-video');
 
@@ -727,7 +729,7 @@ test('SFU allocations completing after a human reconnect are reaped without touc
         Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
         return ws;
       };
-      const session: Parameters<WebSocketServer['handleSfuCreateWebRtcTransport']>[0] = {
+      const session: Parameters<WebSocketServer['handleMessage']>[0] = {
         ws: makeSocket(), sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
         user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
       };
@@ -775,14 +777,14 @@ test('SFU allocations completing after a human reconnect are reaped without touc
             iceCandidates: [], dtlsParameters: { fingerprints: [] },
           };
         };
-        pending = server['handleSfuCreateWebRtcTransport'](session, { channelId: 'room', direction: 'send' }, 'old-request');
+        pending = server['sfuSignaling']['handleSfuCreateWebRtcTransport'](session, { channelId: 'room', direction: 'send' }, 'old-request');
       } else if (allocation === 'producer') {
         sfu.produce = async () => {
           await gate;
           register(abandoned);
           return { id: abandoned.id };
         };
-        pending = server['handleSfuProduce'](session, {
+        pending = server['sfuSignaling']['handleSfuProduce'](session, {
           channelId: 'room', transportId: 'old-transport', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'mic' },
         }, 'old-request');
       } else {
@@ -802,7 +804,7 @@ test('SFU allocations completing after a human reconnect are reaped without touc
             kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'mic' },
           };
         };
-        pending = server['handleSfuConsume'](session, {
+        pending = server['sfuSignaling']['handleSfuConsume'](session, {
           channelId: 'room', transportId: 'old-transport', producerId: 'peer-producer', rtpCapabilities: {},
         }, 'old-request');
         assert.equal(consumeStarted, true, 'the authorized producer must reach allocation before the reconnect race');
@@ -912,7 +914,7 @@ test('SFU media parameters are bounded before mediasoup and real client shapes p
   server['closing'] = false;
   const ws = Object.create(WebSocket.prototype) as WebSocket;
   Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
-  const session: Parameters<WebSocketServer['handleSfuProduce']>[0] = {
+  const session: Parameters<WebSocketServer['handleMessage']>[0] = {
     ws, sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
   };
@@ -979,7 +981,7 @@ test('SFU media parameters are bounded before mediasoup and real client shapes p
   };
   for (const [name, rtpParameters] of Object.entries(shapes)) {
     const video = name === 'desktopCamera' || name === 'nativeScreen';
-    await server['handleSfuProduce'](session, {
+    await server['sfuSignaling']['handleSfuProduce'](session, {
       channelId: 'room', transportId: 'send', kind: video ? 'video' : 'audio', rtpParameters,
       appData: { mediaType: video ? 'camera' : 'mic' },
     }, name);
@@ -997,7 +999,7 @@ test('SFU media parameters are bounded before mediasoup and real client shapes p
     missingCodecs: {},
     notAnObject: 'parameters',
   })) {
-    await server['handleSfuProduce'](session, {
+    await server['sfuSignaling']['handleSfuProduce'](session, {
       channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters, appData: { mediaType: 'mic' },
     }, name);
     assert.equal((reply(name)?.payload as ServerErrorPayload | undefined)?.code, ProtocolErrorCode.BAD_REQUEST, name);
@@ -1005,7 +1007,7 @@ test('SFU media parameters are bounded before mediasoup and real client shapes p
   assert.equal(produced.length, Object.keys(shapes).length, 'nothing refused reaches mediasoup');
 
   const fingerprint = { algorithm: 'sha-256', value: 'AB:CD:EF' };
-  await server['handleSfuConnectWebRtcTransport'](session, {
+  await server['sfuSignaling']['handleSfuConnectWebRtcTransport'](session, {
     channelId: 'room', transportId: 'send', dtlsParameters: { role: 'client', fingerprints: [fingerprint] },
   }, 'connect');
   assert.equal(reply('connect')?.type, MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED);
@@ -1017,14 +1019,14 @@ test('SFU media parameters are bounded before mediasoup and real client shapes p
     longValue: { fingerprints: [{ ...fingerprint, value: 'A'.repeat(257) }] },
     noFingerprints: {},
   })) {
-    await server['handleSfuConnectWebRtcTransport'](session, { channelId: 'room', transportId: 'send', dtlsParameters }, name);
+    await server['sfuSignaling']['handleSfuConnectWebRtcTransport'](session, { channelId: 'room', transportId: 'send', dtlsParameters }, name);
     assert.equal((reply(name)?.payload as ServerErrorPayload | undefined)?.code, ProtocolErrorCode.BAD_REQUEST, name);
   }
   assert.equal(connected.length, 1);
 
   // A second live producer in one slot is a client error, not a server failure.
   sfu.produce = async () => { throw new SfuProducerLimitError('This session already publishes mic on this transport'); };
-  await server['handleSfuProduce'](session, {
+  await server['sfuSignaling']['handleSfuProduce'](session, {
     channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: shapes.desktopMicrophone, appData: { mediaType: 'mic' },
   }, 'second-microphone');
   assert.equal((reply('second-microphone')?.payload as ServerErrorPayload | undefined)?.code, ProtocolErrorCode.BAD_REQUEST);
@@ -1083,4 +1085,509 @@ test('the address a client reached the server by is announced to ICE only in a f
     'IPv4 sockets cannot be reached on an IPv6 address, bracketed or not');
   assert.deepEqual(announced('::', '[2001:db8::1]'), ['2001:db8::1', '127.0.0.1'], 'no brackets in a candidate');
   assert.deepEqual(announced('0.0.0.0', 'localhost'), ['127.0.0.1']);
+});
+
+/**
+ * Connections that receive through the real fan-out (`publish`, `send` and its
+ * projections), each told about the rooms given (#384). `joining` is still
+ * signing in: it has no snapshot yet. An access change is in progress
+ * throughout, which drops anything that waits on a room's audience.
+ */
+function departureFixture() {
+  const service = signaling();
+  const sfu = new SfuManager();
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  server['signalingService'] = service;
+  server['sfuManager'] = sfu;
+  server['closing'] = false;
+  server['botSettingsPermissionVersion'] = 0;
+  server['localAccessVersion'] = 0;
+  server['pendingLocalAccessMutations'] = 1;
+  const permissions = Object.create(PermissionService.prototype) as PermissionService;
+  permissions.getRoleAccessVersion = () => 0;
+  server['permissionService'] = permissions;
+  const frames: Array<{ to: string; message: Record<string, unknown> }> = [];
+  type Session = Parameters<WebSocketServer['handleMessage']>[0];
+  const connect = (sessionId: string, userId: string, rooms?: string[], extra: Partial<Session> = {}): Session => {
+    const ws = Object.create(WebSocket.prototype) as WebSocket;
+    Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+    Object.defineProperty(ws, 'bufferedAmount', { value: 0 });
+    ws.send = (...args: unknown[]) => { frames.push({ to: sessionId, message: record(JSON.parse(String(args[0]))) }); };
+    return {
+      ws, sessionId, lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(), visibleChannelIds: rooms && new Set(rooms),
+      user: { id: userId, sessionId, clientId: sessionId, nickname: userId, status: 'ONLINE', joinedAt: 1 }, ...extra,
+    };
+  };
+  const clients = {
+    alice: connect('alice', 'alice', ['room']),
+    // The same person on a device that was never told about the room.
+    alicePhone: connect('alice-phone', 'alice', ['lobby']),
+    bob: connect('bob', 'bob', ['room']),
+    outsider: connect('outsider', 'outsider', ['lobby']),
+    joining: connect('joining', 'joining'),
+    moderator: connect('moderator', 'moderator', ['lobby']),
+    // Admitted into the room by a command, without seeing it.
+    bot: connect('bot:helper', 'helper', ['lobby'], {
+      isBot: true, botId: 'helper',
+      botVoiceGrant: { channelId: 'room', creatorUserId: 'bob', originChannelId: 'text', accessVersion: 0 },
+    }),
+  };
+  const all = Object.values(clients);
+  server['sessions'] = new Map(all.map((client) => [client.ws, client]));
+  server['sessionSockets'] = new Map(all.map((client) => [client.sessionId!, client.ws]));
+  const received = (client: Session, type: MessageType) =>
+    frames.filter((frame) => frame.to === client.sessionId && frame.message.type === type).map((frame) => frame.message);
+  return { server, service, sfu, clients, frames, received };
+}
+
+test('a voice departure reaches who knows the room and every device of who left, at once and whatever access is doing (S-VOICE-5)', async () => {
+  for (const exit of ['leave', 'eviction'] as const) {
+    const f = departureFixture();
+    for (const [sessionId, userId] of [['alice', 'alice'], ['bob', 'bob'], ['bot:helper', 'helper']]) {
+      await f.service.joinVoiceChannel(sessionId, userId, 'room');
+    }
+    if (exit === 'leave') await f.server['voiceSessions']['handleVoiceLeave'](f.clients.alice, { channelId: 'room' }, 'leave');
+    else f.server['voiceSessions'].evictFromVoiceChannel('alice', 'room');
+    assert.equal(f.service.getVoiceState('alice'), undefined);
+    const { alice, alicePhone, bob, bot, outsider, joining, moderator } = f.clients;
+    for (const client of [alice, alicePhone, bob, bot]) {
+      const left = f.received(client, MessageType.VOICE_USER_LEFT);
+      assert.equal(left.length, 1, `${exit}: ${client.sessionId} hears it once`);
+      assert.deepEqual(left[0].payload, { channelId: 'room', userId: 'alice', sessionId: 'alice' });
+    }
+    if (exit === 'leave') assert.equal(f.received(alice, MessageType.VOICE_USER_LEFT)[0].requestId, 'leave', 'it answers the leave');
+    for (const client of [outsider, joining, moderator]) {
+      assert.equal(f.received(client, MessageType.VOICE_USER_LEFT).length, 0, `${exit}: ${client.sessionId} never knew the room`);
+    }
+    f.server['voiceSessions'].evictFromVoiceChannel('bob', 'other-room');
+    assert.equal(f.service.getVoiceState('bob')?.channelId, 'room', 'an eviction names the room it is for');
+    f.sfu.close();
+  }
+});
+
+test('a voice kick reaches only who it names and who asked, before the room hears of the departure (S-VOICE-5)', async () => {
+  const f = departureFixture();
+  const { alice, alicePhone, bob, bot, outsider, joining, moderator } = f.clients;
+  for (const [sessionId, userId] of [['alice', 'alice'], ['bob', 'bob'], ['bot:helper', 'helper']]) {
+    await f.service.joinVoiceChannel(sessionId, userId, 'room');
+  }
+  await f.server['voiceSessions']['handleAdminKickVoice'](moderator, { targetSessionId: 'alice' }, 'kick');
+  assert.equal(f.service.getVoiceState('alice'), undefined);
+  const kicked = f.received(moderator, MessageType.ADMIN_KICK_VOICE);
+  assert.deepEqual(kicked.map((message) => [message.requestId, message.payload]), [['kick', { targetSessionId: 'alice' }]]);
+  assert.equal(f.received(alice, MessageType.ADMIN_KICK_VOICE).length, 1);
+  for (const client of [alicePhone, bob, bot, outsider, joining]) {
+    assert.equal(f.received(client, MessageType.ADMIN_KICK_VOICE).length, 0, `${client.sessionId} is not told of the kick`);
+  }
+  const toAlice = f.frames.filter((frame) => frame.to === 'alice').map((frame) => frame.message.type);
+  assert.deepEqual(toAlice, [MessageType.ADMIN_KICK_VOICE, MessageType.VOICE_USER_LEFT], 'the kick first, then the departure');
+  for (const client of [alicePhone, bob, bot]) assert.equal(f.received(client, MessageType.VOICE_USER_LEFT).length, 1);
+  for (const client of [outsider, joining, moderator]) {
+    assert.equal(f.received(client, MessageType.VOICE_USER_LEFT).length, 0, `${client.sessionId} never knew the room`);
+  }
+  await f.server['voiceSessions']['handleAdminKickVoice'](moderator, { targetSessionId: 'alice' }, 'again');
+  assert.equal(f.received(moderator, MessageType.SERVER_ERROR).length, 1, 'nobody left to kick');
+  f.sfu.close();
+});
+
+test('a closed SFU producer reaches whoever was told of it, at once and whatever access is doing (S-VOICE-5)', async () => {
+  const f = departureFixture();
+  const { alice, bob, outsider, joining } = f.clients;
+  for (const id of ['alice', 'bob']) await f.service.joinVoiceChannel(id, id, 'room');
+  f.sfu['producers'].set('camera', {
+    producer: { id: 'camera', closed: false, close() {} } as MediasoupTypes.Producer,
+    transportId: 'send-alice', sessionId: 'alice', channelId: 'room', kind: 'video', appData: { mediaType: 'camera' },
+  });
+  bob.knownProducerIds = new Set(['camera']);
+  f.server['sfuSignaling']['handleSfuProducerClosed'](alice, { channelId: 'room', producerId: 'camera' }, 'close');
+  assert.deepEqual(f.received(alice, MessageType.SFU_PRODUCER_CLOSED).map((message) => message.requestId), ['close']);
+  assert.deepEqual(f.received(bob, MessageType.SFU_PRODUCER_CLOSED).map((message) => message.payload),
+    [{ channelId: 'room', producerId: 'camera' }], 'who consumed it learns it is gone');
+  for (const client of [outsider, joining]) assert.equal(f.received(client, MessageType.SFU_PRODUCER_CLOSED).length, 0);
+  f.sfu.close();
+});
+
+test('a private voice room keeps its departures, kicks and moves to whoever may see it; a deleted one loses its router (S-VOICE-5)', { timeout: 30_000 }, async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Room owner');
+  const insider = await f.human('Room insider');
+  const outsider = await f.human('Room outsider');
+  const role = { id: randomUUID(), name: 'Room members', color: null, position: 1,
+    permissions: DEFAULT_PERMISSIONS, isDefault: false, createdAt: Date.now() };
+  await f.roleRepo.create(role);
+  const publicId = text(recordList(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const roomId = text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'private-room', type: 'VOICE', isPrivate: true, allowedRoleIds: [role.id],
+  })).payload.channel).id);
+  const sessionOf = (joined: Awaited<ReturnType<typeof f.human>>) => text(record(joined.auth.payload.currentUser).sessionId);
+  const member = async (name: string) => {
+    const joined = await f.human(name);
+    await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: joined.id, roleId: role.id });
+    return { ...joined, sessionId: sessionOf(joined) };
+  };
+  await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: insider.id, roleId: role.id });
+  await insider.peer.wait((message) => message.type === MessageType.CHANNEL_CREATED && record(message.payload.channel).id === roomId);
+  const outsiderSince = outsider.peer.messages.length;
+  const left = (sessionId: string, channelId = roomId) => (message: Received) =>
+    message.type === MessageType.VOICE_USER_LEFT && message.payload.sessionId === sessionId && message.payload.channelId === channelId;
+
+  // Brought in by someone allowed and taken out again: the destination and the
+  // departure stay with those who see the room, and with the guest.
+  const guest = await f.human('Moved guest');
+  const guestSessionId = sessionOf(guest);
+  await guest.peer.request(MessageType.VOICE_JOIN, { channelId: publicId });
+  const movedIn = await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: roomId });
+  assert.equal(movedIn.type, MessageType.ADMIN_MOVE_USER, 'whoever asked gets the move as its answer');
+  await guest.peer.wait((message) => message.type === MessageType.ADMIN_MOVE_USER && message.payload.channelId === roomId);
+  let since = guest.peer.messages.length;
+  await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: publicId });
+  await insider.peer.wait(left(guestSessionId));
+  await guest.peer.wait(left(guestSessionId), since);
+
+  const participant = await member('Room participant');
+  await participant.peer.request(MessageType.VOICE_JOIN, { channelId: roomId });
+  since = insider.peer.messages.length;
+  assert.equal((await owner.peer.request(MessageType.ADMIN_KICK_VOICE, { targetSessionId: participant.sessionId })).type,
+    MessageType.ADMIN_KICK_VOICE);
+  await participant.peer.wait((message) => message.type === MessageType.ADMIN_KICK_VOICE);
+  await insider.peer.wait(left(participant.sessionId), since);
+
+  const removed = await member('Removed member');
+  await removed.peer.request(MessageType.VOICE_JOIN, { channelId: roomId });
+  await owner.peer.request(MessageType.MEMBER_KICK, { targetUserId: removed.id });
+  await insider.peer.wait(left(removed.sessionId));
+
+  const dropped = await member('Dropped member');
+  await dropped.peer.request(MessageType.VOICE_JOIN, { channelId: roomId });
+  await dropped.peer.close();
+  await insider.peer.wait(left(dropped.sessionId));
+
+  await participant.peer.request(MessageType.VOICE_JOIN, { channelId: roomId });
+  await f.serverRepo.updateServer({ voiceMode: 'sfu' });
+  since = insider.peer.messages.length;
+  assert.equal((await owner.peer.request(MessageType.SERVER_UPDATE_SETTINGS, { voiceMode: 'p2p' })).type,
+    MessageType.SERVER_SETTINGS_UPDATED);
+  const switched = await insider.peer.wait(left(participant.sessionId), since);
+  assert.ok(record(switched.payload.reconnect).id, 'the mode switch departure carries the way back in');
+  const leaks = async () => {
+    await outsider.peer.barrier();
+    return outsider.peer.messages.slice(outsiderSince).filter((message) =>
+      message.type === MessageType.ADMIN_KICK_VOICE || message.type === MessageType.ADMIN_MOVE_USER
+      || JSON.stringify(message.payload).includes(roomId)).map((message) => message.type);
+  };
+  assert.deepEqual(await leaks(), [], 'an outsider learns nothing of the private room');
+
+  // Deleting the room ends the call inside it and closes its router, whose
+  // last producers are announced to whoever was told of them.
+  await participant.peer.request(MessageType.VOICE_JOIN, { channelId: roomId });
+  const sfu = f.wsServer['sfuManager'];
+  let routerClosed = false;
+  sfu['routers'].set(roomId, { closed: false, close: () => { routerClosed = true; } } as MediasoupTypes.Router);
+  sfu['producers'].set('straggler', {
+    producer: { id: 'straggler', closed: false, close() {} } as MediasoupTypes.Producer,
+    transportId: 'straggler-send', sessionId: 'straggler', channelId: roomId, kind: 'audio', appData: { mediaType: 'mic' },
+  });
+  const insiderSession = [...f.wsServer['sessions'].values()].find((session) => session.user?.id === insider.id);
+  assert.ok(insiderSession);
+  insiderSession.knownProducerIds = new Set(['straggler']);
+  since = insider.peer.messages.length;
+  await owner.peer.request(MessageType.CHANNEL_DELETE, { channelId: roomId });
+  await insider.peer.wait(left(participant.sessionId), since);
+  const closed = await insider.peer.wait((message) => message.type === MessageType.SFU_PRODUCER_CLOSED, since);
+  assert.deepEqual(closed.payload, { channelId: roomId, producerId: 'straggler' });
+  assert.equal(routerClosed, true, 'nothing else would ever close the router of a deleted room');
+  assert.equal(sfu['routers'].has(roomId), false);
+  assert.deepEqual(await leaks(), [], 'nor of its deletion');
+});
+
+test('a voice room that leaves or joins a connection\'s list takes or brings who is inside, but not its own person nor whom a command keeps a bot hearing (S-VOICE-5)', async () => {
+  const f = departureFixture();
+  for (const [sessionId, userId] of [['alice', 'alice'], ['bob', 'bob'], ['bot:helper', 'helper']]) {
+    await f.service.joinVoiceChannel(sessionId, userId, 'room');
+  }
+  const { alicePhone, bob, bot, outsider } = f.clients;
+  type Client = typeof bob;
+  alicePhone.visibleChannelIds = new Set(['room', 'lobby']);
+  bot.visibleChannelIds = new Set(['room', 'lobby']);
+  const room: ChannelSummary = {
+    id: 'room', serverId: 'server', name: 'room', type: 'VOICE', position: 0, createdAt: 0, botCommandsEnabled: false,
+    isPrivate: false, allowedRoleIds: [],
+  };
+  const list = (client: Client, userId: string, visible: string[]) => f.server['sendChannelVisibility'](client, new Set(visible),
+    [room], [], { userId, permissions: 0, roleIds: [], isBot: client.isBot }, false);
+  const withdraw = (client: Client, userId: string) => list(client, userId, ['lobby']);
+  const show = (client: Client, userId: string) => list(client, userId, ['lobby', 'room']);
+  const story = (client: Client) => f.frames.filter((frame) => frame.to === client.sessionId).map(({ message }) =>
+    message.type === MessageType.VOICE_USER_LEFT ? `left:${text(record(message.payload).sessionId)}`
+      : message.type === MessageType.VOICE_USER_JOINED ? `joined:${text(record(message.payload).sessionId)}` : text(message.type))
+    .filter((entry) => entry !== MessageType.CATEGORIES_UPDATED);
+
+  withdraw(bob, 'bob');
+  assert.deepEqual(story(bob), ['left:alice', 'left:bot:helper', MessageType.CHANNEL_DELETED],
+    'everyone still inside goes before the room, or the client keeps them there for good');
+  show(bob, 'bob');
+  assert.deepEqual(story(bob).slice(3), [MessageType.CHANNEL_CREATED, 'joined:alice', 'joined:bot:helper'],
+    'shown again, the room comes back with them, or it would look empty');
+  withdraw(alicePhone, 'alice');
+  show(alicePhone, 'alice');
+  assert.deepEqual(story(alicePhone), ['left:bob', 'left:bot:helper', MessageType.CHANNEL_DELETED,
+    MessageType.CHANNEL_CREATED, 'joined:bob', 'joined:bot:helper'],
+  'its own person is left out: their departure and arrival reach every device of theirs, from any room');
+  show(outsider, 'outsider');
+  assert.deepEqual(story(outsider), [MessageType.CHANNEL_CREATED, 'joined:alice', 'joined:bob', 'joined:bot:helper'],
+    'a room shown for the first time comes with whoever was already inside');
+  const arrival = f.received(outsider, MessageType.VOICE_USER_JOINED)[0];
+  assert.equal(arrival.requestId, undefined);
+  assert.equal(record(record(arrival.payload).user).id, 'alice');
+  assert.equal(record(record(arrival.payload).voiceState).channelId, 'room');
+  assert.equal(record(arrival.payload).participants, undefined, 'a roster goes only to the connection that joins');
+
+  withdraw(bot, 'helper');
+  show(bot, 'helper');
+  assert.deepEqual(story(bot), [MessageType.CHANNEL_DELETED, MessageType.CHANNEL_CREATED],
+    'the command that admitted it still lets it hear of the room');
+  bot.botVoiceGrant = undefined;
+  withdraw(bot, 'helper');
+  show(bot, 'helper');
+  assert.deepEqual(story(bot).slice(2), ['left:alice', 'left:bob', MessageType.CHANNEL_DELETED,
+    MessageType.CHANNEL_CREATED, 'joined:alice', 'joined:bob'],
+  'without the command, the bot is just another connection that stops and starts seeing the room');
+  assert.equal(f.service.getParticipantsInChannel('room').length, 3, 'a room going in or out of a list moves nobody');
+  f.sfu.close();
+});
+
+test('a connection that stops seeing a voice room is told who was inside left, whoever the reconciliation reaches first (S-VOICE-5)', { timeout: 30_000 }, async (t) => {
+  const f = await createFixture({ approvedBotCapabilities: ['publish_voice'] });
+  t.after(() => f.dispose());
+  const owner = await f.human('Room manager');
+  // Connected before the bot, so the reconciliation reaches the watcher first,
+  // and the bot is evicted only after the room left the watcher's list.
+  const watcher = await f.human('Room watcher');
+  const insider = await f.human('Room insider');
+  const roomId = text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'closing-room', type: 'VOICE' }))
+    .payload.channel).id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const bot = await f.bot(text(created.payload.token));
+  const insiderSessionId = text(record(insider.auth.payload.currentUser).sessionId);
+  const botSessionId = text(record(bot.auth.payload.currentUser).sessionId);
+  await insider.peer.request(MessageType.VOICE_JOIN, { channelId: roomId });
+  assert.equal((await bot.peer.request(MessageType.VOICE_JOIN, { channelId: roomId })).type, MessageType.VOICE_USER_JOINED);
+  for (const sessionId of [insiderSessionId, botSessionId]) {
+    await watcher.peer.wait((message) => message.type === MessageType.VOICE_USER_JOINED && message.payload.sessionId === sessionId);
+  }
+  const story = (peer: typeof watcher.peer, since: number) => peer.messages.slice(since)
+    .filter((message) => JSON.stringify(message.payload).includes(roomId))
+    .map((message) => message.type === MessageType.VOICE_USER_LEFT ? `left:${text(message.payload.sessionId)}` : message.type);
+  const deleted = (message: Received) => message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === roomId;
+
+  // Managers only: the watcher and the bot lose the room in the same pass. The
+  // insider stays, as someone inside a room keeps seeing it.
+  const watcherSince = watcher.peer.messages.length;
+  const botSince = bot.peer.messages.length;
+  assert.equal((await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: roomId, isPrivate: true, allowedRoleIds: [] })).type,
+    MessageType.CHANNEL_UPDATED);
+  await watcher.peer.wait(deleted, watcherSince);
+  await bot.peer.wait(deleted, botSince);
+  assert.deepEqual(story(watcher.peer, watcherSince), [`left:${insiderSessionId}`, `left:${botSessionId}`, MessageType.CHANNEL_DELETED],
+    'both go before the room, the bot too though its eviction comes after');
+  assert.deepEqual(story(bot.peer, botSince), [`left:${botSessionId}`, `left:${insiderSessionId}`, MessageType.CHANNEL_DELETED],
+    'the evicted bot hears of its own departure first');
+  assert.equal(f.wsServer['signalingService'].getVoiceState(insiderSessionId)?.channelId, roomId);
+
+  const after = watcher.peer.messages.length;
+  await owner.peer.request(MessageType.ADMIN_KICK_VOICE, { targetSessionId: insiderSessionId });
+  await insider.peer.close();
+  await watcher.peer.barrier();
+  assert.deepEqual(story(watcher.peer, after), [], 'nothing about the room reaches it any more');
+});
+
+test('a voice room shown to a connection brings whoever is already inside, the first time and every time after (S-VOICE-5)', { timeout: 30_000 }, async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Room manager');
+  const watcher = await f.human('Room watcher');
+  const roomId = text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'appearing-room', type: 'VOICE', isPrivate: true, allowedRoleIds: [],
+  })).payload.channel).id);
+  const ownerSessionId = text(record(owner.auth.payload.currentUser).sessionId);
+  await owner.peer.request(MessageType.VOICE_JOIN, { channelId: roomId });
+  const tracked = new Set<string>([MessageType.CHANNEL_CREATED, MessageType.CHANNEL_DELETED,
+    MessageType.VOICE_USER_JOINED, MessageType.VOICE_USER_LEFT]);
+  const story = (since: number) => watcher.peer.messages.slice(since)
+    .filter((message) => tracked.has(message.type) && JSON.stringify(message.payload).includes(roomId))
+    .map((message) => message.type === MessageType.VOICE_USER_JOINED ? `joined:${text(message.payload.sessionId)}`
+      : message.type === MessageType.VOICE_USER_LEFT ? `left:${text(message.payload.sessionId)}` : message.type);
+  // Managers only, or open to everyone: the watcher loses or gains the room.
+  const setPrivate = async (isPrivate: boolean) => {
+    const since = watcher.peer.messages.length;
+    assert.equal((await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: roomId, isPrivate, allowedRoleIds: [] })).type,
+      MessageType.CHANNEL_UPDATED);
+    await watcher.peer.wait((message) => message.type === (isPrivate ? MessageType.CHANNEL_DELETED : MessageType.CHANNEL_CREATED)
+      && JSON.stringify(message.payload).includes(roomId), since);
+    await watcher.peer.barrier();
+    return since;
+  };
+
+  let since = await setPrivate(false);
+  assert.deepEqual(story(since), [MessageType.CHANNEL_CREATED, `joined:${ownerSessionId}`], 'the first time it is shown');
+  const arrival = watcher.peer.messages.slice(since).find((message) => message.type === MessageType.VOICE_USER_JOINED);
+  assert.equal(record(arrival?.payload.user).id, owner.id);
+  assert.equal(record(arrival?.payload.voiceState).channelId, roomId);
+  since = await setPrivate(true);
+  assert.deepEqual(story(since), [`left:${ownerSessionId}`, MessageType.CHANNEL_DELETED]);
+  since = await setPrivate(false);
+  assert.deepEqual(story(since), [MessageType.CHANNEL_CREATED, `joined:${ownerSessionId}`],
+    'and every time again: shown empty, it would stay so until each of them changed something');
+});
+
+test('whoever saw a voice room only from inside is told of the move or the leave before the room goes, and who stayed in it with the room (S-VOICE-5)', { timeout: 30_000 }, async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Room manager');
+  const guest = await f.human('Moved guest');
+  const publicId = text(recordList(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const roomId = text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'managers-room', type: 'VOICE', isPrivate: true, allowedRoleIds: [],
+  })).payload.channel).id);
+  const ownerSessionId = text(record(owner.auth.payload.currentUser).sessionId);
+  const guestSessionId = text(record(guest.auth.payload.currentUser).sessionId);
+  await owner.peer.request(MessageType.VOICE_JOIN, { channelId: roomId });
+  await guest.peer.request(MessageType.VOICE_JOIN, { channelId: publicId });
+  // The move out names only the destination, so it is kept by its type.
+  const tracked = new Set<string>([MessageType.CHANNEL_CREATED, MessageType.CHANNEL_DELETED,
+    MessageType.VOICE_USER_JOINED, MessageType.VOICE_USER_LEFT]);
+  const story = (since: number) => guest.peer.messages.slice(since)
+    .filter((message) => message.type === MessageType.ADMIN_MOVE_USER
+      || (tracked.has(message.type) && JSON.stringify(message.payload).includes(roomId)))
+    .map((message) => message.type === MessageType.VOICE_USER_LEFT ? `left:${text(message.payload.sessionId)}`
+      : message.type === MessageType.VOICE_USER_JOINED ? `joined:${text(message.payload.sessionId)}` : message.type);
+
+  for (const exit of ['move', 'leave'] as const) {
+    const movedIn = guest.peer.messages.length;
+    await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: roomId });
+    await guest.peer.wait((message) => message.type === MessageType.VOICE_USER_JOINED &&
+      message.payload.sessionId === guestSessionId && message.payload.channelId === roomId, movedIn);
+    // Already inside when the room is shown, the guest is told who else is,
+    // but not of itself: its client is still in the old call, and follows
+    // only once told of the move.
+    assert.deepEqual(story(movedIn), [MessageType.CHANNEL_CREATED, `joined:${ownerSessionId}`, MessageType.ADMIN_MOVE_USER,
+      `joined:${guestSessionId}`], `${exit}: the room, who is inside, the move, then its own arrival`);
+    const since = guest.peer.messages.length;
+    if (exit === 'move') await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: publicId });
+    else await guest.peer.request(MessageType.VOICE_LEAVE, { channelId: roomId });
+    await guest.peer.wait((message) => message.type === MessageType.CHANNEL_DELETED && message.payload.channelId === roomId, since);
+    // Withdrawn before the move, the owner's departure would reach a client
+    // still in the call: it would hear them leave and drop their connection.
+    assert.deepEqual(story(since), [
+      ...(exit === 'move' ? [MessageType.ADMIN_MOVE_USER] : []),
+      `left:${guestSessionId}`, `left:${ownerSessionId}`, MessageType.CHANNEL_DELETED,
+    ], `${exit}: its own departure, then who stayed, then the room`);
+  }
+
+  const after = guest.peer.messages.length;
+  await owner.peer.request(MessageType.VOICE_LEAVE, { channelId: roomId });
+  await guest.peer.barrier();
+  assert.deepEqual(story(after), [], 'nothing about the room reaches it any more');
+});
+
+test('a person moved by the server keeps the call when their client follows by leaving the old room first, as Light does (S-VOICE-5)', { timeout: 30_000 }, async (t) => {
+  const follow = VoiceSessionHandler.FOLLOW_MOVE_MS;
+  VoiceSessionHandler.FOLLOW_MOVE_MS = 500;
+  t.after(() => { VoiceSessionHandler.FOLLOW_MOVE_MS = follow; });
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Room manager');
+  const guest = await f.human('Light guest');
+  const lobbyId = text(recordList(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const create = async (name: string, isPrivate: boolean) => text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name, type: 'VOICE', isPrivate, allowedRoleIds: [],
+  })).payload.channel).id);
+  const hiddenId = await create('managers-room', true);
+  const openId = await create('open-room', false);
+  const guestSessionId = text(record(guest.auth.payload.currentUser).sessionId);
+  await guest.peer.request(MessageType.VOICE_JOIN, { channelId: lobbyId });
+
+  // Into a room the guest cannot see, where its leave used to take away the
+  // access its join then needed, and into one it sees, where the room heard
+  // it leave and come back.
+  let from = lobbyId;
+  for (const [label, to] of [['hidden', hiddenId], ['visible', openId]] as const) {
+    await owner.peer.request(MessageType.VOICE_JOIN, { channelId: to });
+    const ownerSince = owner.peer.messages.length;
+    const guestSince = guest.peer.messages.length;
+    await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: to });
+    await guest.peer.wait((message) => message.type === MessageType.ADMIN_MOVE_USER && message.payload.channelId === to, guestSince);
+    // What Light does on a move: a leave of the room it was in, with no requestId, then the join.
+    guest.peer.send(MessageType.VOICE_LEAVE, { channelId: from });
+    const joined = await guest.peer.request(MessageType.VOICE_JOIN, { channelId: to });
+    assert.equal(joined.type, MessageType.VOICE_USER_JOINED, `${label}: ${JSON.stringify(joined.payload)}`);
+    assert.ok(recordList(joined.payload.participants).some((participant) => record(participant.voiceState).sessionId === guestSessionId));
+    // Past the wait for that join, the leave it cancelled must not take effect.
+    await delay(VoiceSessionHandler.FOLLOW_MOVE_MS * 2);
+    assert.equal(f.wsServer['signalingService'].getVoiceState(guestSessionId)?.channelId, to, `${label}: still in the call`);
+    await owner.peer.barrier();
+    assert.equal(owner.peer.messages.slice(ownerSince).some((message) => message.type === MessageType.VOICE_USER_LEFT
+      && message.payload.sessionId === guestSessionId && message.payload.channelId === to), false, `${label}: the room never hears it leave`);
+    from = to;
+  }
+});
+
+test('a hang-up that crossed one move or two, or named a room it never reached, still ends the call where it is (S-VOICE-5)', { timeout: 30_000 }, async (t) => {
+  const follow = VoiceSessionHandler.FOLLOW_MOVE_MS;
+  t.after(() => { VoiceSessionHandler.FOLLOW_MOVE_MS = follow; });
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Room manager');
+  const guest = await f.human('Desktop guest');
+  const lobbyId = text(recordList(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const create = async (name: string) => text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, { name, type: 'VOICE' }))
+    .payload.channel).id);
+  const roomId = await create('other-room');
+  const thirdId = await create('third-room');
+  const guestSessionId = text(record(guest.auth.payload.currentUser).sessionId);
+  const state = () => f.wsServer['signalingService'].getVoiceState(guestSessionId);
+  await owner.peer.request(MessageType.VOICE_JOIN, { channelId: roomId });
+  await guest.peer.request(MessageType.VOICE_JOIN, { channelId: lobbyId });
+
+  // The desktop hung up before reading the move: its leave names the lobby,
+  // and no join follows, as it is no longer in a call to take along.
+  VoiceSessionHandler.FOLLOW_MOVE_MS = 2000;
+  const ownerSince = owner.peer.messages.length;
+  const guestSince = guest.peer.messages.length;
+  await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: roomId });
+  guest.peer.send(MessageType.VOICE_LEAVE, { channelId: lobbyId }, 'hang-up');
+  await guest.peer.barrier();
+  assert.equal(state()?.channelId, roomId, 'the leave waits for a join that would follow the move');
+  const ended = await guest.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT && message.requestId === 'hang-up',
+    guestSince);
+  assert.deepEqual(ended.payload, { channelId: roomId, userId: guest.id, sessionId: guestSessionId },
+    'none came: the call ends where it is, answering the hang-up');
+  assert.equal(state(), undefined, 'nobody is left in a call their client hung up');
+  await owner.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT && message.payload.sessionId === guestSessionId
+    && message.payload.channelId === roomId, ownerSince);
+
+  // Moved again while that leave waits: the desktop follows neither move, so
+  // the hang-up still ends the call, in the room the second one took it to.
+  await guest.peer.request(MessageType.VOICE_JOIN, { channelId: lobbyId });
+  const againSince = guest.peer.messages.length;
+  await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: roomId });
+  guest.peer.send(MessageType.VOICE_LEAVE, { channelId: lobbyId }, 'hang-up-again');
+  await guest.peer.barrier();
+  await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: thirdId });
+  assert.equal(state()?.channelId, thirdId, 'the second move went through while the leave waited');
+  const endedAgain = await guest.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT
+    && message.requestId === 'hang-up-again', againSince);
+  assert.deepEqual(endedAgain.payload, { channelId: thirdId, userId: guest.id, sessionId: guestSessionId },
+    'a later move keeps the waiting hang-up, which ends the call where it took it');
+  assert.equal(state(), undefined);
+
+  // Switching rooms and hanging up before the join went out: the leave names
+  // a room the connection never reached, and ends the call at once.
+  VoiceSessionHandler.FOLLOW_MOVE_MS = 60_000;
+  await guest.peer.request(MessageType.VOICE_JOIN, { channelId: lobbyId });
+  const left = await guest.peer.request(MessageType.VOICE_LEAVE, { channelId: roomId });
+  assert.equal(left.type, MessageType.VOICE_USER_LEFT);
+  assert.equal(left.payload.channelId, lobbyId);
+  assert.equal(state(), undefined);
 });

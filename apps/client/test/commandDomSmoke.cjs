@@ -3273,7 +3273,7 @@ async function runSidebarPttSmoke() {
     document.getElementById('ptt-stage-fixture').style.display = 'none';
     view.render();
     language.setLanguage('pt-BR');
-    const healthChanged = webRtcManager.sfuEngine.callbacks.onHealthChanged;
+    const healthChanged = webRtcManager.sfu.engine.callbacks.onHealthChanged;
     const connectionRow = () => root.querySelector('#voice-connection-row');
     const connectionStatus = () => root.querySelector('.voice-conn-status');
     const connectionSignal = () => root.querySelector('.voice-conn-signal');

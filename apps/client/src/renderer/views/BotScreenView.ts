@@ -136,7 +136,7 @@ export class BotScreenView {
       // Another tile of the same bot, or another window, may have changed the saved volume.
       appEvents.on('settings.updated', () => this.syncVolume()),
       // Another tile of the same bot is moving the volume right now.
-      appEvents.on<{ botId: string }>('miniapp_volume.changed', ({ botId }) => {
+      appEvents.on('miniapp_volume.changed', ({ botId }) => {
         if (botId === this.screen.botId) this.syncVolume();
       }),
       appEvents.on('voice.miniapp_mute_changed', () => this.syncVolume()),

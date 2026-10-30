@@ -11,6 +11,7 @@ const { SoundboardFiles } = require('../dist-electron/main/soundboardFiles.js');
 const { SoundboardDownloads } = require('../dist-electron/main/soundboardDownload.js');
 const { createSoundboardEncoder } = require('../dist-electron/main/soundboardEncoder.js');
 const { authoredOggPreview } = require('./fixtures/authoredAudio.cjs');
+const { loadPreload } = require('./preloadFixture.cjs');
 
 const rate = 48000;
 const times = { start: 0.25, end: 1.25, fadeIn: 0.2, fadeOut: 0.3 };
@@ -349,9 +350,12 @@ test('production IPC handlers reject foreign frames and cleanly unregister; prel
   destroyed = true;
   assert.equal((await handlers.get(shared.SOUNDBOARD_FILES_IPC.read)(owner, input)).reason, 'invalid_request');
   dispose(); dispose(); assert.equal(handlers.size, 0);
-  const preload = await fs.readFile(path.resolve(__dirname, '..', 'src', 'preload', 'preload.ts'), 'utf8');
+  const preload = loadPreload();
   for (const [method, channel] of Object.entries({
     readSoundboardEdit: 'read', renameSoundboardFile: 'rename', deleteSoundboardFile: 'delete', saveSoundboardEdit: 'edit',
     openSoundboardEditor: 'open', overwriteSoundboardAudio: 'overwrite',
-  })) assert.ok(preload.includes(`${method}: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.${channel}, input)`));
+  })) {
+    await preload.api[method](input);
+    assert.deepEqual(preload.invoked.at(-1), [shared.SOUNDBOARD_FILES_IPC[channel], input], method);
+  }
 });

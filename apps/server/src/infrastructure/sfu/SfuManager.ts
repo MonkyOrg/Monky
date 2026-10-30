@@ -1236,10 +1236,13 @@ export class SfuManager {
     return { closedProducerIds };
   }
 
-  public closeChannel(channelId: string): void {
+  /** Closes everything of a removed channel, its router included, reporting the producers that went with it. */
+  public closeChannel(channelId: string): { closedProducerIds: string[] } {
     this.cancelPendingTransports(pending => pending.channelId === channelId);
+    const closedProducerIds: string[] = [];
     for (const [id, record] of Array.from(this.producers.entries())) {
       if (record.channelId === channelId) {
+        closedProducerIds.push(id);
         record.producer.close();
         this.producers.delete(id);
       }
@@ -1264,6 +1267,7 @@ export class SfuManager {
       router.close();
       this.routers.delete(channelId);
     }
+    return { closedProducerIds };
   }
 
   public close(): void {

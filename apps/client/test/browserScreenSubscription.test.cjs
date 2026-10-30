@@ -518,3 +518,14 @@ test('P2P screen answers cannot silently negotiate a different codec than the so
   for (const tier of [-1, 2, 'invalid', null])
     assert.equal(supportsBrowserAv1Level(video, { tier, 'level-idx': 23 }), false);
 });
+
+test('P2P answers and SFU capabilities extend H.264 Main only below the screen level (R-VOICE-11)', t => {
+  const { h264MaxReceiveLevel } = fixture(t).load('./browserScreenCodecs');
+  const screen = shared.getScreenShareProfile({ width: 3840, height: 2160, fps: 30, maxBitrateKbps: 80000 }, 'source');
+  assert.equal(h264MaxReceiveLevel('4d001f', screen), '0033', 'a lower default level is extended to the screen');
+  assert.equal(h264MaxReceiveLevel('4D001F', screen), '0033', 'SDP hex is case-insensitive');
+  assert.equal(h264MaxReceiveLevel('4d0033', screen), null, 'the level the screen needs is already offered');
+  assert.equal(h264MaxReceiveLevel('4d0034', screen), null, 'a higher level is never lowered');
+  for (const other of ['42e01f', '640033', '4d01', undefined, 0x4d001f])
+    assert.equal(h264MaxReceiveLevel(other, screen), null, `${String(other)} is not an H.264 Main profile-level-id`);
+});

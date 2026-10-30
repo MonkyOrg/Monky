@@ -6,6 +6,7 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import {
+  DM_MAX_ATTACHMENTS,
   DM_PROFILE_AVATAR_MAX_LENGTH,
   LIMITS,
   MESSAGE_FORWARD_SOURCE_MAX_LENGTH,
@@ -21,6 +22,7 @@ import {
   type UserSummary,
 } from '@monky/shared';
 import { DmKeyring, newDmId, verifyDmCertificate } from '../src/main/dm/dmCrypto';
+import { SELF_REPEAT_WINDOW_MS } from '../src/main/dm/dmModel';
 import { DmPersistence } from '../src/main/dm/dmPersistence';
 import { DmError, DmService, DM_DOWNLOAD_STALL_MS, DM_FILE_CHUNK_BYTES, DM_FILE_TRANSFER_IDLE_MS } from '../src/main/dm/dmService';
 import { DmTransport, type DmRelayApi } from '../src/renderer/core/DmTransport';
@@ -1738,4 +1740,175 @@ test('one sighting of a friend sends the outbox once, however many hellos it bri
   const second = greet();
   assert.equal(second.filter((type) => type === 'msg').length, 0, 'A hello moments later does not send it again');
   assert.ok(second.includes('hello'), 'It is still answered');
+});
+
+test('a backup is read like the history of another own device: what does not fit stays out instead of breaking the store', () => {
+  const aliceIdentity = createIdentity();
+  const alice = createDevice('Alice', aliceIdentity);
+  const bob = createDevice('Bob', createIdentity());
+  const stranger = createIdentity();
+  const bobKey = bob.identity.publicKey;
+  befriend([alice, bob], alice, bob);
+  relay([alice, bob], alice, alice.service.sendMessage({ peer: bobKey, content: 'guardada no backup' }));
+  const [sent] = alice.service.getConversation(bobKey).messages;
+  relay([alice, bob], bob, bob.service.react(aliceIdentity.publicKey, sent.id, '👍', true));
+
+  // A backup edited by hand or written by another version: reactions in other shapes, one of someone else,
+  // a date far ahead and more files than a message can have.
+  const backup = JSON.parse(JSON.stringify(alice.service.exportData(true)));
+  const [message] = backup.conversations[0].messages;
+  assert.equal('delivery' in message, false, 'A backup carries what the message says, not how this device holds it');
+  message.reactions = {
+    '👍': message.reactions['👍'],
+    '🔥': null,
+    '❤️': { [bobKey]: null },
+    '🎉': { [bobKey]: { on: true, ts: 'ontem' } },
+    '😀': { [stranger.publicKey]: { on: true, ts: 1 } },
+  };
+  message.createdAt = Date.now() + 365 * 86_400_000;
+  message.attachments = Array.from({ length: DM_MAX_ATTACHMENTS + 5 }, (_, index) => ({
+    fileId: newDmId(), name: `arquivo-${index}.bin`, size: 1, mime: 'application/octet-stream', sha256: '0'.repeat(64),
+  }));
+
+  const restored = createDevice('Alice', aliceIdentity);
+  restored.service.importData(backup);
+  const [view] = restored.service.getConversation(bobKey).messages;
+  assert.equal(view.content, 'guardada no backup');
+  assert.deepEqual(view.reactions, [{ emoji: '👍', users: [bobKey] }]);
+  assert.ok(view.createdAt <= Date.now() + 5 * 60_000, 'A date far ahead is brought back');
+  assert.equal(view.attachments.length, DM_MAX_ATTACHMENTS);
+  assert.ok(view.attachments.every((file) => file.state === 'unavailable'));
+  // The summary own devices compare their history by is still computed.
+  assert.ok((restored.service.hello(false).broadcast?.length ?? 0) > 0);
+});
+
+/** Counts the history items (`hist`) that `devices` get from the other devices of their identity; each call gives the count since the last one. */
+function historyReceived(context: TestContext, devices: Device[]): () => number {
+  let count = 0;
+  for (const device of devices) {
+    const keyring = new DmKeyring(device.identity.publicKey, device.identity.privateKey);
+    const ingest = device.service.ingest.bind(device.service);
+    context.mock.method(device.service, 'ingest', (item: DmIncomingRelayItem) => {
+      if (item.kind !== 'friend' && item.from === device.identity.publicKey
+        && keyring.open(item.data, item.from, keyring.certificate()).header.type === 'hist') count += 1;
+      return ingest(item);
+    });
+  }
+  return () => {
+    const seen = count;
+    count = 0;
+    return seen;
+  };
+}
+
+/**
+ * Own-device rounds as connecting to a server brings them, each one after the window in which the copies of one
+ * greeting from other servers count once: `device` greets, the others answer. Returns the history items of each.
+ */
+function ownDeviceRounds(devices: Device[], device: Device, advance: (ms: number) => void, history: () => number, rounds = 3): number[] {
+  return Array.from({ length: rounds }, () => {
+    advance(SELF_REPEAT_WINDOW_MS + 1_000);
+    relay(devices, device, device.service.hello(false));
+    return history();
+  });
+}
+
+/** How `device` holds a message: what own devices compare besides the id. */
+function versionOf(device: Device, other: Identity, id: string) {
+  const message = device.service.getConversation(other.publicKey, null, 500).messages.find((entry) => entry.id === id);
+  return message && { deleted: message.deleted, editedAt: message.editedAt };
+}
+
+test('a device restored from a backup holds a message edited and then deleted as the others do, and nothing goes back and forth', (context) => {
+  let clock = Date.UTC(2024, 0, 1, 12);
+  const now = () => clock;
+  const aliceIdentity = createIdentity();
+  const alice = createDevice('Alice', aliceIdentity, undefined, now);
+  const bob = createDevice('Bob', createIdentity(), undefined, now);
+  const bobKey = bob.identity.publicKey;
+  befriend([alice, bob], alice, bob);
+  relay([alice, bob], alice, alice.service.sendMessage({ peer: bobKey, content: 'rascunho' }));
+  const [sent] = alice.service.getConversation(bobKey).messages;
+  clock += 1_000;
+  relay([alice, bob], alice, alice.service.editMessage(bobKey, sent.id, 'editada'));
+  clock += 1_000;
+  relay([alice, bob], alice, alice.service.deleteMessage(bobKey, sent.id));
+  const original = versionOf(alice, bob.identity, sent.id);
+  assert.equal(original?.deleted, true);
+  assert.equal(typeof original?.editedAt, 'number', 'Deleting keeps the edit mark the devices compare');
+
+  const restored = createDevice('Alice', aliceIdentity, undefined, now);
+  restored.service.importData(JSON.parse(JSON.stringify(alice.service.exportData(true))));
+  const history = historyReceived(context, [alice, restored]);
+  assert.deepEqual(ownDeviceRounds([alice, restored], restored, (ms) => { clock += ms; }, history), [0, 0, 0],
+    'The restored device holds the same version: no history to send, now or in any later round');
+  assert.deepEqual(versionOf(restored, bob.identity, sent.id), original);
+});
+
+test('a message that reaches an own device already deleted, through the history, is the same version there and is not sent again', (context) => {
+  let clock = Date.UTC(2024, 0, 1, 12);
+  const now = () => clock;
+  const alice = createDevice('Alice', createIdentity(), undefined, now);
+  const bobIdentity = createIdentity();
+  const bob1 = createDevice('Bob', bobIdentity, undefined, now);
+  const bob2 = createDevice('Bob', bobIdentity, undefined, now);
+  const devices = [alice, bob1, bob2];
+  const bobKey = bobIdentity.publicKey;
+  befriend(devices, alice, bob1);
+  // bob2 is away while Alice writes, edits and deletes: only bob1 gets the message, and bob2 learns of it deleted.
+  bob2.online = false;
+  relay(devices, alice, alice.service.sendMessage({ peer: bobKey, content: 'rascunho' }));
+  const [sent] = alice.service.getConversation(bobKey).messages;
+  clock += 1_000;
+  relay(devices, alice, alice.service.editMessage(bobKey, sent.id, 'editada'));
+  clock += 1_000;
+  relay(devices, alice, alice.service.deleteMessage(bobKey, sent.id));
+  bob2.online = true;
+  const kept = versionOf(bob1, alice.identity, sent.id);
+  assert.equal(kept?.deleted, true);
+  assert.equal(typeof kept?.editedAt, 'number');
+
+  const history = historyReceived(context, [bob1, bob2]);
+  const rounds = ownDeviceRounds(devices, bob2, (ms) => { clock += ms; }, history);
+  assert.ok(rounds[0] > 0, 'The first round brings bob2 the history it lacks');
+  assert.deepEqual(rounds.slice(1), [0, 0], 'Both hold the same version: nothing goes back and forth after that');
+  assert.deepEqual(versionOf(bob2, alice.identity, sent.id), kept);
+});
+
+test('own devices whose copies of a deleted message disagree on its edit mark agree in one round and stop', (context) => {
+  // Each device got the delete, but only one of them the edit before it; or the other got neither and only learns
+  // of the delete from the history. Versions before this fix also left such pairs behind through the history.
+  for (const deleteReachesBoth of [true, false]) {
+    let clock = Date.UTC(2024, 0, 1, 12);
+    const now = () => clock;
+    const alice = createDevice('Alice', createIdentity(), undefined, now);
+    const bobIdentity = createIdentity();
+    const bob1 = createDevice('Bob', bobIdentity, undefined, now);
+    const bob2 = createDevice('Bob', bobIdentity, undefined, now);
+    const devices = [alice, bob1, bob2];
+    const bobKey = bobIdentity.publicKey;
+    befriend(devices, alice, bob1);
+    relay(devices, alice, alice.service.sendMessage({ peer: bobKey, content: 'rascunho' }));
+    const [sent] = alice.service.getConversation(bobKey).messages;
+    bob2.online = false;
+    clock += 1_000;
+    relay(devices, alice, alice.service.editMessage(bobKey, sent.id, 'editada'));
+    bob2.online = deleteReachesBoth;
+    clock += 1_000;
+    relay(devices, alice, alice.service.deleteMessage(bobKey, sent.id));
+    bob2.online = true;
+    const edited = versionOf(bob1, alice.identity, sent.id);
+    assert.equal(edited?.deleted, true);
+    assert.equal(typeof edited?.editedAt, 'number');
+    assert.deepEqual(versionOf(bob2, alice.identity, sent.id), { deleted: deleteReachesBoth, editedAt: null });
+
+    const history = historyReceived(context, [bob1, bob2]);
+    const rounds = ownDeviceRounds(devices, bob2, (ms) => { clock += ms; }, history);
+    const situation = deleteReachesBoth ? 'both deleted it' : 'only one deleted it';
+    assert.ok(rounds[0] > 0, `${situation}: the first round compares them`);
+    assert.deepEqual(rounds.slice(1), [0, 0], `${situation}: once they agree, nothing goes back and forth`);
+    for (const device of [bob1, bob2]) {
+      assert.deepEqual(versionOf(device, alice.identity, sent.id), edited, `${situation}: the newest edit mark wins on both`);
+    }
+  }
 });

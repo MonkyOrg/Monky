@@ -1,16 +1,21 @@
 import assert from 'node:assert/strict';
 import { randomUUID, sign } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
 import {
   DEFAULT_PERMISSIONS, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, createProtocolOffer,
-  type LogEntry, type ProtocolMessage,
+  type LogEntry, type ServerMessage,
 } from '@monky/shared';
 import { Logger } from './infrastructure/logger/Logger';
+import { BotStorageError } from './application/services/BotStorageService';
+import { NativePollError } from './application/services/NativePollService';
 import { CoturnManager } from './infrastructure/turn/CoturnManager';
 import { MESSAGE_BUDGETS, WS_FLOW_LIMITS, type WsFlowLimits } from './infrastructure/websocket/flowControl';
+import { toProtocolError } from './infrastructure/websocket/protocolErrors';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 import { createApprovedBotFixture, createFixture, identity, record, records, text, type Peer } from './testFixtures/bots';
 
@@ -294,8 +299,10 @@ test('a recipient that stopped reading skips discardable messages, then is dropp
   Object.defineProperty(ws, 'bufferedAmount', { get: () => buffered });
   ws.send = (data: unknown) => { sent.push(String(data)); };
   ws.terminate = () => { terminated++; };
-  const sound: ProtocolMessage = { type: MessageType.SOUNDBOARD_PLAYED, payload: { soundName: 'Late' } };
-  const update: ProtocolMessage = { type: MessageType.USER_UPDATED, payload: { user: { id: 'someone' } } };
+  const sound: ServerMessage = { type: MessageType.SOUNDBOARD_PLAYED,
+    payload: { channelId: 'room', userId: 'someone', userName: 'Someone', soundName: 'Late', audioBase64: '' } };
+  const update: ServerMessage = { type: MessageType.USER_UPDATED,
+    payload: { user: { id: 'someone', clientId: 'someone', nickname: 'Someone', status: 'ONLINE', joinedAt: 1 } } };
   const types = () => sent.map((data) => record(JSON.parse(data)).type);
 
   server.send(ws, sound);
@@ -618,9 +625,9 @@ test('a fan-out serializes each message once, still projects it for older client
     replaced, connection('anonymous', current, false),
   ];
   server['sessions'] = new Map(sessions.map((session) => [session.ws, session]));
-  const message: ProtocolMessage = {
+  const message: ServerMessage = {
     type: MessageType.CHAT_MESSAGE,
-    payload: { id: 'forwarded', channelId: 'general', userId: 'author', content: 'Hello', createdAt: 1,
+    payload: { id: 'forwarded', channelId: 'general', userId: 'author', userNickname: 'Author', content: 'Hello', createdAt: 1,
       forwarded: { source: '#news', createdAt: 1 } },
   };
 
@@ -638,4 +645,30 @@ test('a fan-out serializes each message once, still projects it for older client
   const payload = (index: number) => record(record(JSON.parse(String(frames[index].data))).payload);
   assert.deepEqual(payload(0).forwarded, { source: '#news', createdAt: 1 });
   assert.equal('forwarded' in payload(2), false, 'clients without message-forward still get their projection');
+});
+
+test('a caught refusal goes out as its service worded it, a failure only in general terms (S-APP-8)', () => {
+  const logged: LogEntry[] = [];
+  const stop = Logger.subscribe((entry) => { logged.push(entry); });
+  try {
+    const failure = { message: 'Could not create poll.', category: 'NETWORK' } as const;
+    assert.deepEqual(toProtocolError(new NativePollError('Poll is closed.'), failure),
+      { code: ProtocolErrorCode.BAD_REQUEST, message: 'Poll is closed.' });
+    assert.deepEqual(toProtocolError(new BotStorageError(ProtocolErrorCode.RATE_LIMITED, 'Slow down.'), failure),
+      { code: ProtocolErrorCode.RATE_LIMITED, message: 'Slow down.' });
+    assert.equal(logged.length, 0, 'a refusal is not a failure');
+
+    const where = path.join(os.tmpdir(), 'monky-data', 'avatars', 'community-stage-x.png');
+    const disk = Object.assign(new Error(`EPERM: operation not permitted, rename '${where}'`), { code: 'EPERM' });
+    const reply = toProtocolError(disk, failure);
+    assert.deepEqual(reply, { code: ProtocolErrorCode.INTERNAL_ERROR, message: 'Could not create poll.' });
+    assert.ok(!JSON.stringify(reply).includes('monky-data'), 'the client never learns a path on the server');
+    assert.equal(toProtocolError(disk, { ...failure, code: ProtocolErrorCode.BOT_INTERACTION_INVALID }).code,
+      ProtocolErrorCode.BOT_INTERACTION_INVALID, 'a handler keeps the code its failures always had');
+    assert.equal(logged.length, 2);
+    assert.ok(logged.every((entry) => entry.level === 'ERROR' && entry.message.includes('monky-data')),
+      'the operator still sees what failed');
+  } finally {
+    stop();
+  }
 });

@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import { after, before, test, type TestContext } from 'node:test';
-import { MessageType, type WebRtcSignalPayload } from '@monky/shared';
+import { MessageType, QUALITY_PRESETS, type WebRtcSignalPayload } from '@monky/shared';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { clientLog } from '../src/renderer/core/ClientLogService';
-import { NetworkClient } from '../src/renderer/core/NetworkClient';
+import { getActiveNetworkClient, NetworkClient, setActiveNetworkClient } from '../src/renderer/core/NetworkClient';
 import { ParticipantManager } from '../src/renderer/core/ParticipantManager';
-import { WebRtcManager, type PeerSession } from '../src/renderer/core/WebRtcManager';
+import { SessionManager, sessionManager } from '../src/renderer/core/SessionManager';
+import { WebRtcManager } from '../src/renderer/core/WebRtcManager';
+import type { PeerLink } from '../src/renderer/core/webrtc/p2p/PeerLink';
+import type { RemoteMediaKind, RemoteTrack } from '../src/renderer/core/webrtc/RemoteMediaSink';
 import { RtcDiagnosticsCollector } from '../src/renderer/core/webrtc/RtcDiagnosticsCollector';
 import { averageRoundTrip, candidateRoute, diagnosticCandidateRoute } from '../src/renderer/core/webrtc/rtcStats';
+import type { VoiceTransport } from '../src/renderer/core/webrtc/VoiceTransport';
 import { voiceStore } from '../src/renderer/stores/voiceStore';
 import { voiceConnectionIndicator } from '../src/renderer/utils/voiceConnection';
 
@@ -67,6 +71,9 @@ class PeerConnection extends EventTarget {
   public localDescription: RTCSessionDescriptionInit | null = null;
   public remoteDescription: RTCSessionDescriptionInit | null = null;
   public onconnectionstatechange: (() => void) | null = null;
+  public oniceconnectionstatechange: (() => void) | null = null;
+  public onicecandidate: ((event: { candidate: RTCIceCandidateInit | null }) => void) | null = null;
+  public ontrack: ((event: { track: MediaStreamTrack; receiver: { track: MediaStreamTrack } }) => void) | null = null;
   public transceivers: Transceiver[] = [];
   /** Remote descriptions and candidates in the order they reached the connection. */
   public applied: string[] = [];
@@ -159,6 +166,13 @@ const settle = async () => {
   for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
 };
 
+/** Links never time out in these tests: the recovery ladder is exercised on its own. */
+function quietRecovery(manager: WebRtcManager): void {
+  const recovery = manager['p2p']['recovery'];
+  recovery['beginFailureCountdown'] = () => {};
+  recovery['watch'] = () => {};
+}
+
 function callFixture(t: TestContext) {
   appEvents.clear();
   voiceStore.reset();
@@ -173,8 +187,7 @@ function callFixture(t: TestContext) {
   Object.defineProperty(manager, 'voiceParticipants', { configurable: true, get: () => participants });
   t.mock.method(manager['nativeScreens'], 'sync', async () => {});
   t.mock.method(manager['nativeScreens'], 'close', async () => {});
-  manager['beginPeerFailureCountdown'] = () => {};
-  manager['startConnectionWatchdog'] = () => {};
+  quietRecovery(manager);
   manager.setCurrentSessionId('self');
   t.after(() => {
     manager.closeAllPeers();
@@ -185,14 +198,14 @@ function callFixture(t: TestContext) {
   });
   const offersTo = (peer: string) => sent.filter(({ payload }) =>
     field(payload, 'signalType') === 'offer' && field(payload, 'targetSessionId') === peer).length;
-  const join = async (sessionId: string): Promise<{ session: PeerSession; pc: PeerConnection }> => {
+  const join = async (sessionId: string): Promise<{ session: PeerLink; pc: PeerConnection }> => {
     participants.addUser({ id: sessionId, sessionId, clientId: sessionId, nickname: sessionId, status: 'ONLINE', joinedAt: 1 });
     participants.updateVoiceState({
       sessionId, userId: sessionId, channelId: 'room', isMuted: false, isDeafened: false, serverMuted: false,
       serverDeafened: false, isSpeaking: false, isCameraOn: false, isScreenSharing: false, isSharingScreenAudio: false,
     });
     await manager.connectToPeer(sessionId, false);
-    const session = manager['peers'].get(sessionId);
+    const session = manager['p2p'].peers.get(sessionId);
     const pc = PeerConnection.created.at(-1);
     assert.ok(session && pc);
     return { session, pc };
@@ -366,14 +379,16 @@ test('a server settings change during an SFU join or rejoin never "migrates" the
 
   // The SFU call was admitted, but its engine is still joining (or between rejoin rungs).
   f.manager.resumeAfterVoiceReconnect();
-  f.manager['sfuReconnectAttempts'] = 2;
-  assert.equal(f.manager['sfuEngine'].isReady(), false);
+  f.manager['sfu']['attempts'] = 2;
+  assert.equal(f.manager['sfu'].engine.isReady(), false);
   await f.manager.handleVoiceModeUpdate();
-  appEvents.emit('server.meta_updated', {});
+  appEvents.emit('server.meta_updated', {
+    id: 'server', name: 'Server', createdAt: 1, maxUsers: 10, members: [], voiceStates: {}, channels: [], voiceMode: 'sfu',
+  });
   await new Promise(resolve => setTimeout(resolve, 200));
   assert.equal(teardowns.mock.callCount(), 0, 'peers, screens and cameras survive the settings change');
   assert.equal(joins.mock.callCount(), 0, 'no extra join cuts through the backoff');
-  assert.equal(f.manager['sfuReconnectAttempts'], 2, 'the rejoin ladder keeps its count');
+  assert.equal(f.manager['sfu'].reconnectAttempts, 2, 'the rejoin ladder keeps its count');
   assert.deepEqual(switched, []);
 
   // A call that really runs on P2P still moves to the SFU, once.
@@ -506,7 +521,8 @@ test('ICE candidates wait behind their description, are bounded and fail visibly
 test('an SFU rejoin with a dead microphone stays listen-only instead of rejoining forever (R-VOICE-12)', async t => {
   const f = callFixture(t);
   t.mock.method(f.manager, 'isSfuMode', () => true);
-  const engine = f.manager['sfuEngine'];
+  const sfu = f.manager['sfu'];
+  const engine = sfu.engine;
   t.mock.method(engine, 'join', async () => true);
   t.mock.method(engine, 'canProduceKind', () => true);
   let produced = 0;
@@ -518,18 +534,404 @@ test('an SFU rejoin with a dead microphone stays listen-only instead of rejoinin
     } },
   });
   let failures = 0;
-  const handleFailure = f.manager['handleSfuConnectionFailure'].bind(f.manager);
-  f.manager['handleSfuConnectionFailure'] = (reason: string) => { failures++; handleFailure(reason); };
+  const handleFailure = sfu['connectionFailed'].bind(sfu);
+  sfu['connectionFailed'] = (reason: string) => { failures++; handleFailure(reason); };
   const notices: unknown[] = [];
   appEvents.on('voice.microphone_failed', notice => notices.push(notice));
   const microphone = track('microphone', 'audio');
   microphone.stop();
   f.manager['localAudioTrack'] = microphone;
 
-  await f.manager['performSfuJoin']();
+  await sfu['join']();
   assert.equal(failures, 0, 'a dead capture track is not a broken link');
-  assert.equal(f.manager['sfuReconnectTimer'], null, 'no rejoin is scheduled');
+  assert.equal(sfu['reconnectTimer'], null, 'no rejoin is scheduled');
   assert.equal(produced, 0, 'the dead track is not offered to the server');
   assert.equal(f.manager['localAudioTrack'], null, 'a device change can publish a fresh microphone afterwards');
   assert.equal(notices.length, 1, 'the user is told the microphone stopped');
 });
+
+test('a call whose server session is gone signals nobody, never the server on screen (R-VOICE-8)', async t => {
+  appEvents.clear();
+  voiceStore.reset();
+  const sessions = new SessionManager();
+  const call = sessions.create('rtc-call.invalid', 10301, 'Self');
+  const visible = sessions.create('rtc-visible.invalid', 10302, 'Self');
+  const available = new Map([[call.key, call], [visible.key, visible]]);
+  t.mock.method(sessionManager, 'get', (key: string) => available.get(key));
+  t.mock.method(sessionManager, 'getActive', () => visible);
+  // The global proxies follow the server on screen, as after activating it.
+  const previousClient = getActiveNetworkClient();
+  setActiveNetworkClient(visible.client);
+  const sent: string[] = [];
+  for (const session of [call, visible]) {
+    t.mock.method(session.client, 'send', (type: MessageType) => { sent.push(`${session.key} ${type}`); });
+  }
+  voiceStore.setChannel('room', call.key);
+  const manager = new WebRtcManager();
+  t.mock.method(manager['nativeScreens'], 'sync', async () => {});
+  t.mock.method(manager['nativeScreens'], 'close', async () => {});
+  quietRecovery(manager);
+  manager.setCurrentSessionId('self');
+  t.after(() => {
+    manager.closeAllPeers();
+    setActiveNetworkClient(previousClient);
+    appEvents.clear();
+    voiceStore.reset();
+  });
+  call.participants.addUser({ id: 'peer', sessionId: 'peer', clientId: 'peer', nickname: 'Peer', status: 'ONLINE', joinedAt: 1 });
+  call.participants.updateVoiceState({
+    sessionId: 'peer', userId: 'peer', channelId: 'room', isMuted: false, isDeafened: false, serverMuted: false,
+    serverDeafened: false, isSpeaking: false, isCameraOn: false, isScreenSharing: false, isSharingScreenAudio: false,
+  });
+  await manager.connectToPeer('peer', false);
+  const pc = PeerConnection.created.at(-1);
+  assert.ok(pc?.onicecandidate);
+  pc.onicecandidate({ candidate: candidate('while-connected') });
+  assert.deepEqual(sent, [`${call.key} ${MessageType.RTC_SIGNAL}`], 'signalling goes to the call server');
+
+  available.delete(call.key);
+  pc.onicecandidate({ candidate: candidate('after-removal') });
+  assert.deepEqual(sent, [`${call.key} ${MessageType.RTC_SIGNAL}`], 'the visible server never gets the call signalling');
+});
+
+test('peer links and SFU consumers hand their tracks to one sink, in the same shape (R-VOICE-5)', async t => {
+  const f = callFixture(t);
+  t.mock.method(f.manager, 'isSfuMode', () => false);
+  const sink = f.manager['remoteMedia'];
+  const arrived = t.mock.method(sink, 'trackArrived', (_remote: RemoteTrack) => {});
+  const unmuted = t.mock.method(sink, 'trackUnmuted', (_peer: string, _kind: RemoteMediaKind, _track: MediaStreamTrack) => {});
+  const ended = t.mock.method(sink, 'trackEnded', (_peer: string, _kind: RemoteMediaKind, _track: MediaStreamTrack) => {});
+  const { pc } = await f.join('peer');
+
+  const microphone = track('microphone', 'audio');
+  const receiver = { track: microphone };
+  pc.ontrack?.({ track: microphone, receiver });
+  const camera = track('camera', 'video');
+  pc.ontrack?.({ track: camera, receiver: { track: camera } });
+  camera.onunmute?.(new Event('unmute'));
+  camera.onended?.(new Event('ended'));
+  const [p2pMic] = arrived.mock.calls.map(call => call.arguments[0]);
+  assert.equal(p2pMic?.receiver?.(), receiver, 'voice activity reads the receiver of the current link');
+
+  const consumer = track('consumer', 'video');
+  const callbacks = f.manager['sfu'].engine['callbacks'];
+  callbacks.onConsumerTrack({
+    producerSessionId: 'peer', kind: 'video', mediaType: 'camera', track: consumer, consumerId: 'c', producerId: 'p',
+  });
+  callbacks.onConsumerClosed('peer', 'camera', consumer);
+
+  assert.deepEqual(arrived.mock.calls.map(({ arguments: [remote] }) => [remote.peerSessionId, remote.kind, remote.track.id]),
+    [['peer', 'mic', 'microphone'], ['peer', 'camera', 'camera'], ['peer', 'camera', 'consumer']]);
+  assert.deepEqual(unmuted.mock.calls.map(call => call.arguments), [['peer', 'camera', camera]]);
+  assert.deepEqual(ended.mock.calls.map(call => call.arguments), [['peer', 'camera', camera], ['peer', 'camera', consumer]]);
+
+  f.manager.removePeer('peer');
+  assert.equal(p2pMic?.receiver?.(), null, 'a removed link reads nothing');
+  camera.onended?.(new Event('ended'));
+  assert.equal(ended.mock.callCount(), 2, 'a removed link reports nothing');
+});
+
+test('ICE and the connection dropping together give a link one grace period, then one recovery (R-VOICE-2)', async t => {
+  const f = callFixture(t);
+  t.mock.method(f.manager, 'isSfuMode', () => false);
+  const { pc } = await f.join('peer');
+  const recovered: string[] = [];
+  f.manager['p2p']['recovery']['recover'] = (_link: PeerLink, reason: string) => { recovered.push(reason); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  pc.iceConnectionState = 'disconnected';
+  pc.oniceconnectionstatechange?.();
+  pc.connectionState = 'disconnected';
+  pc.onconnectionstatechange?.();
+  t.mock.timers.tick(3999);
+  assert.deepEqual(recovered, [], 'a brief drop is waited out');
+  t.mock.timers.tick(1);
+  assert.deepEqual(recovered, ['ice_disconnected'], 'one grace for both states, one recovery');
+
+  pc.iceConnectionState = 'connected';
+  pc.oniceconnectionstatechange?.();
+  pc.iceConnectionState = 'disconnected';
+  pc.oniceconnectionstatechange?.();
+  pc.iceConnectionState = 'connected';
+  t.mock.timers.tick(4000);
+  assert.deepEqual(recovered, ['ice_disconnected'], 'a link that came back is not recovered');
+});
+
+test('a link that never connected is flagged the moment ICE gives up; one that worked waits (#426)', async t => {
+  const f = callFixture(t);
+  t.mock.method(f.manager, 'isSfuMode', () => false);
+  f.manager['p2p']['recovery']['recover'] = () => {};
+  const failed: unknown[] = [];
+  appEvents.on('remote.peer_failed', event => failed.push(event));
+  const fresh = await f.join('fresh');
+  fresh.pc.iceConnectionState = 'failed';
+  fresh.pc.oniceconnectionstatechange?.();
+  assert.deepEqual(failed, [{ sessionId: 'fresh' }]);
+  assert.equal(f.participants.get('fresh')?.peerConnectionFailed, true);
+  await settle();
+  assert.ok(f.sent.some(({ type }) => type === MessageType.RTC_DIAGNOSTICS_REPORT), 'the server gets what the link tried');
+
+  const seasoned = await f.join('seasoned');
+  seasoned.pc.connectionState = 'connected';
+  seasoned.pc.onconnectionstatechange?.();
+  seasoned.pc.iceConnectionState = 'failed';
+  seasoned.pc.oniceconnectionstatechange?.();
+  assert.equal(failed.length, 1, 'a link that worked before waits out its grace');
+  f.manager.removePeer('fresh');
+  assert.equal(f.participants.get('fresh')?.peerConnectionFailed, false, 'the warning leaves with the link (#466)');
+});
+
+test('a hard reconnect retires the dead link like any other teardown and rebuilds it with its attempts (R-VOICE-2)', async t => {
+  const f = callFixture(t);
+  t.mock.method(f.manager, 'isSfuMode', () => false);
+  const first = await f.join('peer');
+  first.session.reconnectAttempts = 1;
+  await f.signal('peer', { signalType: 'candidate', candidate: candidate('early') });
+  assert.equal(first.session.candidateQueue.length, 1);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const rebuilding = f.manager['p2p']['recovery']['hardReconnect']('peer');
+  assert.equal(first.pc.signalingState, 'closed');
+  assert.equal(first.pc.onconnectionstatechange, null, 'the dead link stops reacting before it closes');
+  assert.equal(first.pc.oniceconnectionstatechange, null);
+  assert.equal(first.session.candidateQueue.length, 0);
+  assert.equal(f.manager['p2p'].peers.has('peer'), false);
+  t.mock.timers.tick(2000);
+  await rebuilding;
+  const rebuilt = f.manager['p2p'].peers.get('peer');
+  assert.ok(rebuilt && rebuilt !== first.session, 'a new link replaces it');
+  assert.equal(rebuilt.reconnectAttempts, 2, 'the ladder keeps counting across rebuilds');
+});
+
+test('a quality the native shares refuse is reported with a reason the user has a message for (R-SHELL-8)', async t => {
+  const f = callFixture(t);
+  const notices: unknown[] = [];
+  appEvents.on('native_screen.source_failed', notice => notices.push(notice));
+  t.mock.method(f.manager['nativeScreens'], 'report', () => {});
+  const refusals = [
+    Object.assign(new Error('AMF level'), { code: 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' }),
+    new Error('Native runtime gone'),
+  ];
+  t.mock.method(f.manager['nativeScreens'], 'applyQuality', async () => { throw refusals.shift(); });
+
+  assert.equal(await f.manager.setQualityPreset('NORMAL'), null);
+  assert.equal(await f.manager.setQualityPreset('NORMAL'), null);
+  // The same reasons the native runtime reports, each with a translated notice; "runtime" had none.
+  assert.deepEqual(notices, [{ reason: 'unsupported' }, { reason: 'connection-failed' }]);
+});
+
+test('the facade hands each media operation to the transport its server runs (R-VOICE-2)', async t => {
+  const f = callFixture(t);
+  let sfu = false;
+  t.mock.method(f.manager, 'isSfuMode', () => sfu);
+  const calls: string[] = [];
+  for (const mode of ['p2p', 'sfu'] as const) {
+    const transport: VoiceTransport = f.manager[mode];
+    t.mock.method(transport, 'addParticipant', async () => { calls.push(`${mode} addParticipant`); });
+    t.mock.method(transport, 'setMicrophone', async () => { calls.push(`${mode} setMicrophone`); });
+    t.mock.method(transport, 'replaceMicrophone', async () => {
+      calls.push(`${mode} replaceMicrophone`);
+      return async () => {};
+    });
+    t.mock.method(transport, 'setCamera', async () => { calls.push(`${mode} setCamera`); });
+    t.mock.method(transport, 'cameraSenders', () => { calls.push(`${mode} cameraSenders`); return []; });
+    t.mock.method(transport, 'receiverForTrack', () => { calls.push(`${mode} receiverForTrack`); return null; });
+  }
+  const closedCamera = t.mock.method(f.manager['sfu'], 'closeCamera', () => {});
+  const operate = async () => {
+    await f.manager.connectToPeer('peer', true);
+    await f.manager.setLocalAudioTrack(track('microphone', 'audio'));
+    await f.manager.replaceMicrophoneTrack(track('headset', 'audio'), new AbortController().signal);
+    await f.manager.setLocalCameraTrack(track('camera', 'video'));
+    await f.manager.setLocalCameraTrack(null);
+    f.manager.getCameraSenders();
+    f.manager.getReceiverForTrack('peer', 'remote');
+  };
+
+  await operate();
+  sfu = true;
+  await operate();
+  const operations = (mode: string, stop: string[]) => [
+    `${mode} addParticipant`, `${mode} setMicrophone`, `${mode} replaceMicrophone`, `${mode} setCamera`,
+    ...stop, `${mode} cameraSenders`, `${mode} receiverForTrack`,
+  ];
+  assert.deepEqual(calls, [...operations('p2p', ['p2p setCamera']), ...operations('sfu', [])],
+    'every operation reaches only the transport of the call; on the SFU a stop is the close of its camera');
+  assert.equal(closedCamera.mock.callCount(), 2, 'a stop closes the SFU camera whatever the transport');
+});
+
+/**
+ * One transport under the VoiceTransport contract, with what the other side
+ * receives from it: the same assertions run against the P2P mesh and the SFU
+ * session (R-VOICE-2).
+ */
+interface TransportUnderTest {
+  transport: VoiceTransport;
+  /** The camera and microphone the other side receives from us. */
+  camera(): MediaStreamTrack | null;
+  microphone(): MediaStreamTrack | null;
+  microphoneSender(): Pick<RTCRtpSender, 'getParameters'> | null;
+  /** A track the transport receives, with its receiver. */
+  remote: { peerSessionId: string; trackId: string; receiver: unknown };
+  /** The media path reports this round trip from now on. */
+  measure(ms: number): void;
+}
+
+/** A call on the mesh with one person, linked while publishing `microphone`. */
+async function meshUnderTest(t: TestContext, microphone: MediaStreamTrack): Promise<TransportUnderTest> {
+  const f = callFixture(t);
+  t.mock.method(f.manager, 'isSfuMode', () => false);
+  f.manager['localAudioTrack'] = microphone;
+  const { pc } = await f.join('peer');
+  const audio = pc.transceivers.find(entry => entry.receiver.track.kind === 'audio');
+  assert.ok(audio);
+  return {
+    transport: f.manager['p2p'],
+    camera: () => cameraTransceiver(pc).sender.track,
+    microphone: () => audio.sender.track,
+    microphoneSender: () => audio.sender,
+    remote: { peerSessionId: 'peer', trackId: audio.receiver.track.id, receiver: audio.receiver },
+    measure: ms => {
+      pc.connectionState = 'connected';
+      pc.stats = routeStats({ rtt: 0.5, local: 'host' }, { rtt: ms / 1000, local: 'host' });
+    },
+  };
+}
+
+/** What mediasoup hands back for a published track: a producer on its own RTP sender. */
+class Producer {
+  private static created = 0;
+  public readonly id = `producer-${++Producer.created}`;
+  public readonly rtpSender: Sender;
+  public closed = false;
+  constructor(public track: MediaStreamTrack) {
+    this.rtpSender = new Sender(track, track.kind);
+  }
+  on() {}
+  close() { this.closed = true; }
+  async replaceTrack({ track: value }: { track: MediaStreamTrack | null }) {
+    if (!value) throw new Error('the fixture never pauses a producer');
+    this.track = value;
+    await this.rtpSender.replaceTrack(value);
+  }
+}
+
+/** A call on the SFU already in its room, publishing `microphone` and receiving one consumer. */
+async function sfuUnderTest(t: TestContext, microphone: MediaStreamTrack): Promise<TransportUnderTest> {
+  const f = callFixture(t);
+  t.mock.method(f.manager, 'isSfuMode', () => true);
+  const engine = f.manager['sfu'].engine;
+  const sendTransport = {
+    id: 'send',
+    connectionState: 'new' as RTCPeerConnectionState,
+    stats: new Map<string, object>(),
+    async produce({ track: value }: { track: MediaStreamTrack }) { return new Producer(value); },
+    async getStats() { return sendTransport.stats; },
+    close() {},
+  };
+  const consumed = track('consumer', 'audio');
+  const receiver = { track: consumed };
+  Object.defineProperties(engine, {
+    isInitialized: { configurable: true, writable: true, value: true },
+    channelId: { configurable: true, writable: true, value: 'room' },
+    device: { configurable: true, writable: true, value: { loaded: true, canProduce: () => true, sendRtpCapabilities: { codecs: [] } } },
+    sendTransport: { configurable: true, writable: true, value: sendTransport },
+    recvTransport: { configurable: true, writable: true, value: { id: 'recv', connectionState: 'new', close() {} } },
+    consumers: { configurable: true, writable: true, value: new Map([
+      ['remote-producer', { id: 'consumer', track: consumed, rtpReceiver: receiver, close() {} }],
+    ]) },
+  });
+  assert.ok(await engine.produceMic(microphone));
+  return {
+    transport: f.manager['sfu'],
+    camera: () => engine.getCameraTrack(),
+    microphone: () => engine['producers'].get('mic')?.track ?? null,
+    microphoneSender: () => engine['producers'].get('mic')?.rtpSender ?? null,
+    remote: { peerSessionId: 'peer', trackId: consumed.id, receiver },
+    measure: ms => {
+      sendTransport.connectionState = 'connected';
+      sendTransport.stats = routeStats({ rtt: 0.5, local: 'host' }, { rtt: ms / 1000, local: 'host' });
+    },
+  };
+}
+
+const cancelled = () => { throw new DOMException('cancelled', 'AbortError'); };
+const live = () => {};
+
+for (const [mode, open] of [['p2p', meshUnderTest], ['sfu', sfuUnderTest]] as const) {
+  test(`VoiceTransport (${mode}): publishes, switches and takes off the camera on the senders it reports`, async t => {
+    const subject = await open(t, track('microphone', 'audio'));
+    assert.equal(subject.transport.mode, mode);
+    assert.equal(subject.camera(), null);
+    const first = track('camera', 'video');
+    await subject.transport.setCamera(first, live);
+    assert.equal(subject.camera(), first);
+    const senders = subject.transport.cameraSenders();
+    assert.ok(senders.length > 0 && senders.every(sender => sender.track === first), 'the stats read what is on air');
+
+    const second = track('effects', 'video');
+    await subject.transport.setCamera(second, live);
+    assert.equal(subject.camera(), second);
+    assert.deepEqual(subject.transport.cameraSenders(), senders, 'a switch replaces the track on the same senders');
+
+    await subject.transport.detachCamera(first);
+    assert.equal(subject.camera(), second, 'a camera that is no longer published has nothing to detach');
+    await subject.transport.detachCamera(second);
+    assert.equal(subject.camera(), null);
+    assert.ok(subject.transport.cameraSenders().every(sender => !sender.track));
+    assert.equal(subject.microphone()?.id, 'microphone', 'the microphone stays on air');
+  });
+
+  test(`VoiceTransport (${mode}): a stop takes the camera off the air, and a cancelled start publishes nothing`, async t => {
+    const subject = await open(t, track('microphone', 'audio'));
+    await assert.rejects(subject.transport.setCamera(track('camera', 'video'), cancelled), { name: 'AbortError' });
+    assert.equal(subject.camera(), null);
+    assert.ok(subject.transport.cameraSenders().every(sender => !sender.track));
+
+    await subject.transport.setCamera(track('camera', 'video'), live);
+    await subject.transport.setCamera(null, live);
+    assert.equal(subject.camera(), null);
+    assert.ok(subject.transport.cameraSenders().every(sender => !sender.track));
+  });
+
+  test(`VoiceTransport (${mode}): a microphone switch is one change that can be undone`, async t => {
+    const previous = track('microphone', 'audio');
+    const subject = await open(t, previous);
+    const headset = track('headset', 'audio');
+    const sameSession = () => true;
+    const rollback = await subject.transport.replaceMicrophone({ track: headset, previous, ensureCurrent: live, sameSession });
+    assert.equal(subject.microphone(), headset);
+    await rollback();
+    assert.equal(subject.microphone(), previous);
+
+    // Cancelled once the new microphone is on air: the previous one goes back.
+    const ensureCurrent = () => { if (subject.microphone() === headset) cancelled(); };
+    await assert.rejects(subject.transport.replaceMicrophone({ track: headset, previous, ensureCurrent, sameSession }),
+      { name: 'AbortError' });
+    assert.equal(subject.microphone(), previous);
+  });
+
+  test(`VoiceTransport (${mode}): the quality policy reaches every published sender unless a newer one won`, async t => {
+    const subject = await open(t, track('microphone', 'audio'));
+    await subject.transport.setCamera(track('camera', 'video'), live);
+    const [camera] = subject.transport.cameraSenders();
+    const encoding = (sender: Pick<RTCRtpSender, 'getParameters'> | null | undefined) =>
+      sender?.getParameters().encodings[0];
+    const profile = { ...QUALITY_PRESETS.NORMAL, audioBitrateKbps: 55, cameraBitrateKbps: 777, cameraFps: 17 };
+    await subject.transport.applyQuality('CUSTOM', profile, () => false);
+    assert.deepEqual([encoding(subject.microphoneSender()), encoding(camera)], [{}, {}]);
+
+    await subject.transport.applyQuality('CUSTOM', profile, () => true);
+    assert.deepEqual(encoding(subject.microphoneSender()), { maxBitrate: 55_000 });
+    assert.deepEqual(encoding(camera), { maxBitrate: 777_000, maxFramerate: 17 });
+  });
+
+  test(`VoiceTransport (${mode}): the ping waits for a measured path, and a receiver is found by its track`, async t => {
+    const subject = await open(t, track('microphone', 'audio'));
+    assert.equal(await subject.transport.samplePing(), null, 'nothing is measured before media flows');
+    subject.measure(40);
+    assert.equal(await subject.transport.samplePing(), 40, 'the pair carrying media, not the first one listed');
+
+    const { peerSessionId, trackId, receiver } = subject.remote;
+    assert.equal(subject.transport.receiverForTrack(peerSessionId, trackId), receiver);
+    assert.equal(subject.transport.receiverForTrack(peerSessionId, 'unknown'), null);
+  });
+}

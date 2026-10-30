@@ -2362,6 +2362,14 @@ input:focus, textarea:focus, select:focus {
   cursor: grabbing;
 }
 
+/* The list holds the pointer while one of its rows is dragged, so all of it shows the grip, as the server rail does. */
+.channel-reorder-active,
+.channel-reorder-active *,
+.category-reorder-active,
+.category-reorder-active * {
+  cursor: grabbing !important;
+}
+
 .category-dragging {
   opacity: 0.45;
 }

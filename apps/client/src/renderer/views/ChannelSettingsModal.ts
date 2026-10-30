@@ -1,6 +1,6 @@
 import {
   MessageType, Permission, CHANNEL_PERMISSIONS, EVERYONE_ROLE_ID, LIMITS, channelOverwrites, channelPrivacy, withChannelPrivacy, channelPermissionTargetKey, resolveChannelPermissions,
-  type ChannelCategory, type ChannelSummary, type ChannelPermissionOverwrite, type ChannelAccessRules,
+  type ChannelCategory, type ChannelSummary, type ChannelPermissionOverwrite, type ChannelAccessRules, type ClientMessageArgs,
 } from '@monky/shared';
 import { getActiveNetworkClient } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
@@ -8,6 +8,7 @@ import { getActiveServerStore } from '../stores/serverStore';
 import { isForegroundEvent } from '../core/sessionRouting';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { nextIndex } from '../utils/rovingFocus';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { animateEnter } from '../utils/surfaceMotion';
 import { enableBackdropClose } from '../utils/modal';
@@ -165,7 +166,7 @@ export class ChannelSettingsModal {
             key: channelPermissionTargetKey(entry),
             name: member?.nickname ?? role?.name ?? entry.userId ?? entry.roleId ?? '',
             icon: entry.userId !== undefined
-              ? `<img class="share-audience-avatar" src="${escapeHtml(getAvatarUrl(member?.avatarUrl))}" alt="">`
+              ? `<img class="share-audience-avatar" src="${escapeHtml(getAvatarUrl(member?.avatarUrl))}" alt="" data-fallback="avatar">`
               : `<span class="share-audience-role" style="--role-color:${isHexColor(role?.color) ? role.color : 'var(--text-muted)'}" aria-hidden="true"></span>`,
           };
         }),
@@ -309,12 +310,11 @@ export class ChannelSettingsModal {
       if (!handlesModalKey(root, event)) return;
       if (event.key === 'Escape') { event.preventDefault(); close(); return; }
       const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-permission-state]') : null;
-      if (button && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      const states = [...(button?.parentElement?.querySelectorAll<HTMLButtonElement>('button') ?? [])];
+      const next = button ? nextIndex(event.key, states.indexOf(button), states.length, { orientation: 'horizontal' }) : null;
+      if (next !== null) {
         event.preventDefault();
-        const buttons = [...button.parentElement!.querySelectorAll<HTMLButtonElement>('button')];
-        const index = buttons.indexOf(button);
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (index + (event.key === 'ArrowRight' ? 1 : 2)) % 3;
-        buttons[next].click();
+        states[next].click();
       }
       if (event.key === 'Tab') {
         const focusable = [...root.querySelectorAll<HTMLElement>('button, input, select, [tabindex="0"]')]
@@ -346,15 +346,15 @@ export class ChannelSettingsModal {
       };
       const changedLimit = target.kind === 'channel' && userLimit != null
         && userLimit !== (target.value.maxParticipants ?? LIMITS.VOICE_USER_LIMIT_NONE) ? { maxParticipants: userLimit } : {};
-      const payload = target.kind === 'channel'
-        ? { channelId: target.value.id, name: name.value.trim(), categoryId: categorySelect?.value || null,
+      const request: ClientMessageArgs = target.kind === 'channel'
+        ? [MessageType.CHANNEL_UPDATE, { channelId: target.value.id, name: name.value.trim(), categoryId: categorySelect?.value || null,
           inheritCategoryPermissions: inherited, ...changedLimit,
-          botCommandsEnabled: readChannelBotCommandsField(root), ...(inherited ? {} : changedRules) }
-        : { categoryId: target.value.id, name: name.value.trim(), ...changedRules };
+          botCommandsEnabled: readChannelBotCommandsField(root), ...(inherited ? {} : changedRules) }]
+        : [MessageType.CATEGORY_UPDATE, { categoryId: target.value.id, name: name.value.trim(), ...changedRules }];
       pending = true;
       root.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>('button, input, select').forEach(control => { control.disabled = true; });
       root.querySelector('.channel-settings-card')!.setAttribute('aria-busy', 'true');
-      void client.sendRequest(target.kind === 'channel' ? MessageType.CHANNEL_UPDATE : MessageType.CATEGORY_UPDATE, payload)
+      void client.sendRequest(...request)
         .then(() => { if (isCurrent()) { pending = false; close(); } })
         .catch((error: unknown) => { if (isCurrent()) showErrorToast(error instanceof Error ? error.message : t('channelModal.editError')); })
         .finally(() => {

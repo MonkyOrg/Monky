@@ -6,10 +6,9 @@ import {
 import type { BotStorageObjectRecord, IBotStorageRepository } from '../../domain/repositories';
 import type { BotStorageFileStore } from '../../infrastructure/security/BotStorageFileStore';
 import { Logger } from '../../infrastructure/logger/Logger';
+import { ServiceError } from '../errors';
 
-export class BotStorageError extends Error {
-  constructor(readonly code: ProtocolErrorCode, message: string) { super(message); }
-}
+export class BotStorageError extends ServiceError {}
 
 function info(record: BotStorageObjectRecord): BotStorageObjectInfo {
   return { key: record.key, sizeBytes: record.sizeBytes, contentType: record.contentType, updatedAt: record.updatedAt };

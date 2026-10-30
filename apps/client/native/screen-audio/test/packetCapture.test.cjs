@@ -99,7 +99,7 @@ test('unsupported and unavailable remain explicit without native discovery', asy
   let calls = 0;
   const forbidden = new Proxy({}, { get() { calls++; throw new Error('No native access permitted'); } });
   const events = [];
-  const session = createPacketCaptureFactory(forbidden, 'darwin')({}, (event) => events.push(event));
+  const session = createPacketCaptureFactory(forbidden, 'linux')({}, (event) => events.push(event));
   await assert.rejects(session.ready, { code: 'ERR_AUDIO_UNSUPPORTED' });
   assert.equal((await session.stop()).state, 'failed');
   assert.equal(calls, 0);
@@ -581,6 +581,65 @@ test('packet sessions are bounded and a released slot is reusable', async () => 
   for (const session of [...sessions, reused]) await session.stop();
   assert.equal(binding.activeWorkers(), 0);
   assert.equal(binding.captureLeases(), 0);
+});
+
+test('live packet sessions never hold libuv threadpool threads, on the main thread or in a Worker', () => {
+  // Each capture used to park a pool thread until it ended: with the default four threads, live
+  // shares stalled fs, dns, crypto and zlib and a fifth session could not even confirm its stop.
+  const result = spawnSync(process.execPath, ['-e', `
+    const assert = require('node:assert/strict');
+    const { pbkdf2 } = require('node:crypto');
+    const fs = require('node:fs');
+    const { once } = require('node:events');
+    const { Worker } = require('node:worker_threads');
+    const [doublePath, timeoutMs] = [process.argv[1], Number(process.argv[2])];
+    const binding = require(doublePath);
+    async function within(promise, label) {
+      let timer;
+      try {
+        return await Promise.race([promise, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(label + ' waited behind live packet sessions')), timeoutMs);
+        })]);
+      } finally { clearTimeout(timer); }
+    }
+    const poolIsFree = async () => {
+      await within(fs.promises.readFile(doublePath), 'fs.promises.readFile');
+      await within(new Promise((resolve, reject) => pbkdf2('monky', 'salt', 1, 32, 'sha256',
+        (error, key) => error ? reject(error) : resolve(key))), 'crypto.pbkdf2');
+    };
+    (async () => {
+      binding.configure(4);
+      const sessions = Array.from({ length: 8 }, () => binding.createPacketCapture({}, () => {}));
+      await within(Promise.all(sessions.map(session => session.ready)), 'ready');
+      assert.equal(binding.activeWorkers(), 8);
+      await poolIsFree();
+      assert.equal((await within(sessions.pop().stop(), 'stop')).state, 'closed');
+      assert.equal(binding.activeWorkers(), 7, 'Stopping one session leaves the others capturing');
+      for (const session of sessions) await within(session.stop(), 'stop');
+      assert.equal(binding.captureLeases(), 0);
+
+      const worker = new Worker(\`
+        const { parentPort, workerData } = require('node:worker_threads');
+        const binding = require(workerData);
+        const sessions = Array.from({ length: 8 }, () => binding.createPacketCapture({}, () => {}));
+        Promise.all(sessions.map(session => session.ready)).then(() => parentPort.postMessage('ready'));
+      \`, { eval: true, workerData: doublePath });
+      assert.equal((await within(once(worker, 'message'), 'Worker sessions'))[0], 'ready');
+      assert.equal(binding.activeWorkers(), 8);
+      await poolIsFree();
+      await within(worker.terminate(), 'Worker termination');
+      assert.equal(binding.activeWorkers(), 0);
+      assert.equal(binding.captureLeases(), 0);
+      console.log('threadpool-free');
+    })().catch(error => {
+      console.error(error.stack);
+      process.exit(1);
+    });
+  `, doublePath, '2000'], {
+    encoding: 'utf8', timeout: 20000, env: { ...process.env, UV_THREADPOOL_SIZE: '4' },
+  });
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.match(result.stdout, /threadpool-free/u);
 });
 
 test('runtime failure and callback exception close only after the worker and queue drain', async () => {

@@ -107,6 +107,23 @@ not one store mixing every server's data:
 
 </div>
 
+The bus events are typed in `core/appEventMap.ts`: each name declares what it
+carries, and an emitter or subscriber using another shape does not compile.
+Server messages arrive as `message.<TYPE>`, with the payload of the protocol map
+(`ServerToClientPayloads`, in `@monky/shared`). Stores follow three shapes:
+
+- **Per session** (`serverStore`, `chatStore`, `botScreenStore` and
+  `ParticipantManager`): they emit on their own `bus`, which is `appEvents` for
+  the visible session and the silent bus for the others. The rest of the app
+  reaches them through a proxy that points at the active session.
+- **Global** (`settingsStore`, `connectionStore` and `voiceStore`): they emit on
+  `appEvents` directly, and the event says what changed; `settings.updated`, for
+  instance, carries the keys that changed. `voiceStore` also changes during
+  other servers' events, so it notifies through `emitOutsideRouting`.
+- **View models** (`favoritesStore` and `CommunityFeed`): they tell the views
+  using them through their own `subscribe()`. `dmStore` has a bus of its own,
+  typed by `DmEvents`.
+
 ### The services
 
 Every large client responsibility lives in its own class, under
@@ -619,11 +636,19 @@ is why Monky has a native C++ module:
 | **macOS** | ScreenCaptureKit (macOS 13+ for audio; native video requires 14+), capturing system audio or the entire selected application after confirmation |
 | **Others** | Not supported — the app keeps working, just without screen audio |
 
-If the module fails to load, nothing breaks: sharing keeps working without sound
-and the app says so.
+On Windows the same module also identifies the picker's windows and monitors,
+reads the keyboard layout for shortcuts and constrains the overlay's resizing.
+That is why it embeds the Visual C++ runtime instead of depending on the
+redistributable installed on the system, and packaging rejects a build that
+needs it again. If the module still fails to load, the main process logs the
+cause in the app log, and the functions that depend on it fail with that cause
+instead of returning empty lists: on Windows, the picker cannot list windows or
+monitors. On macOS, sharing keeps working without sound and the app says so.
 
 Each share with sound opens its own capture session. The module accepts up to 8
-sessions at once, one for each screen a person may share. The main process decides which sounds may coexist and repeats
+sessions at once, one for each screen a person may share. Each session runs on
+its own thread, which notifies the Node loop when it ends; none of them occupies
+the libuv thread pool, which serves files, DNS and cryptography. The main process decides which sounds may coexist and repeats
 the picker's checks: a monitor's sound (and, on macOS, any source's, because
 ScreenCaptureKit delivers the system mix) does not coexist with another, and two
 windows of the same process do not capture the same sound. Because process

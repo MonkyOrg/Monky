@@ -1,7 +1,7 @@
 import { MessageType, SCREEN_SHARE_LIMITS } from '@monky/shared';
 import { voiceStore } from '../stores/voiceStore';
-import { networkClient, type NetworkClient } from './NetworkClient';
-import { sessionManager } from './SessionManager';
+import type { NetworkClient } from './NetworkClient';
+import { captureCall } from './callScope';
 import { videoService } from './VideoService';
 import { webRtcManager } from './WebRtcManager';
 import type { ServerStore } from '../stores/serverStore';
@@ -16,20 +16,10 @@ type StopScreenSharesOptions =
   | { shareIds?: readonly string[]; notify?: boolean; teardown?: false }
   | { teardown: true; shareIds?: never; notify?: false };
 
+/** The call the screens are published to; a call whose session disappeared has no client (R-VOICE-8). */
 export function captureScreenShareCall(): ScreenShareCall {
-  const sessionKey = voiceStore.voiceSessionKey;
-  const channelId = voiceStore.currentVoiceChannelId;
-  const session = sessionKey ? sessionManager.get(sessionKey) : sessionManager.getActive();
-  const sessionId = session?.serverStore.currentUser?.sessionId;
-  return {
-    // Never fall back to the visible server when the call's session disappeared.
-    client: session?.client ?? (sessionKey ? null : networkClient),
-    serverStore: session?.serverStore ?? null,
-    isCurrent: () => channelId !== null && voiceStore.currentVoiceChannelId === channelId
-      && voiceStore.voiceSessionKey === sessionKey
-      && (sessionKey ? !!session && sessionManager.get(sessionKey) === session : sessionManager.getActive() === session)
-      && session?.serverStore.currentUser?.sessionId === sessionId,
-  };
+  const call = captureCall();
+  return { client: call.server?.client ?? null, serverStore: call.server?.serverStore ?? null, isCurrent: call.isCurrent };
 }
 
 /** Screens this call may publish at once; a server without `screen-shares-8` only accepts the legacy pair. */

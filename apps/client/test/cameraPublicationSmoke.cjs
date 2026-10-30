@@ -261,7 +261,7 @@ async function runCameraPublicationSmoke(filter) {
   const originalSend = network.send;
   const originalRequest = network.sendRequest;
   const originalSignalDescriptor = Object.getOwnPropertyDescriptor(rtc, 'signalClient');
-  const originalRtcConfiguration = rtc.rtcConfig;
+  const originalRtcConfiguration = rtc.p2p.rtcConfig;
   const self = { id: 'fixture-user', sessionId: 'fixture-self', nickname: 'Camera fixture', status: 'CONNECTED' };
   const check = (condition, message, detail) => {
     if (!condition) throw new Error(`${message}${detail === undefined ? '' : `; actual=${JSON.stringify(detail)}`}`);
@@ -393,7 +393,7 @@ async function runCameraPublicationSmoke(filter) {
   network.send = transport.send;
   network.sendRequest = async type => { throw new Error(`Real server request forbidden: ${type}`); };
   Object.defineProperty(rtc, 'signalClient', { configurable: true, value: transport });
-  rtc.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
+  rtc.p2p.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
   rtc.setCurrentSessionId(self.sessionId);
   settings.inputMode = 'push_to_talk';
   settings.noiseSuppressionEnabled = false;
@@ -414,7 +414,7 @@ async function runCameraPublicationSmoke(filter) {
       candidateQueue: [], isPolite: true, makingOffer: false,
       iceRestartAttempts: 0, reconnectAttempts: 0, isRecovering: false,
     };
-    rtc.peers.set(id, session);
+    rtc.p2p.peers.set(id, session);
     return { session, camera, audio, audioSender };
   };
   const preserveOtherMedia = peer => check(
@@ -470,7 +470,7 @@ async function runCameraPublicationSmoke(filter) {
       route.videos.set(event.transceiver.mid, receiveVideo(event.track, 'Loopback playback').element);
     };
     remote.onicecandidate = event => {
-      if (event.candidate && rtc.peers.get(session.peerSessionId) === session) {
+      if (event.candidate && rtc.p2p.peers.get(session.peerSessionId) === session) {
         void rtc.handleIncomingSignal({
           fromSessionId: session.peerSessionId, signalType: 'candidate', candidate: event.candidate.toJSON(),
         }).catch(error => { unexpected.push(`Loopback ICE: ${error}`); });
@@ -807,12 +807,12 @@ async function runCameraPublicationSmoke(filter) {
     await run('p2p-idle-loopback-lifecycle', async () => {
       rtc.localAudioTrack = mic();
       await rtc.connectToPeer('fixture-peer', false);
-      const session = rtc.peers.get('fixture-peer');
+      const session = rtc.p2p.peers.get('fixture-peer');
       const camera = session.pc.getTransceivers().find(entry => entry.receiver.track.kind === 'video');
       const peer = { session, camera, audio: rtc.localAudioTrack, audioSender: session.audioSender };
       check(camera.sender.track === null, 'Production connectToPeer creates an initially idle primary video transceiver');
       const route = loopback(session);
-      await rtc.sendOffer(session);
+      await rtc.p2p.sendOffer(session);
       await stable(session);
       const initialOffers = sent.filter(entry => entry.payload?.signalType === 'offer').length;
       const first = source('#ee2020').track;
@@ -864,7 +864,7 @@ async function runCameraPublicationSmoke(filter) {
         'A peer that refuses the replacement does not take the camera away from the others');
       check(!calls.includes(raw) && bad.camera.sender.track?.readyState !== 'live',
         'Failure never restores a stopped raw track');
-      rtc.peers.delete('good');
+      rtc.p2p.peers.delete('good');
       const last = source('#20ee20').track;
       check(await rejected(rtc.setLocalCameraTrack(last), 'Replacement refused by every peer rejects') === failure,
         'When no peer takes the camera, the actual native failure reaches the caller');
@@ -881,8 +881,8 @@ async function runCameraPublicationSmoke(filter) {
       const createOffer = peer.session.pc.createOffer.bind(peer.session.pc);
       patch(peer.session.pc, 'createOffer', async () => { throw failure; });
       const calls = [];
-      const sendOffer = rtc.sendOffer;
-      patch(rtc, 'sendOffer', async function (...args) {
+      const sendOffer = rtc.p2p.sendOffer;
+      patch(rtc.p2p, 'sendOffer', async function (...args) {
         calls.push(args);
         return sendOffer.apply(this, args);
       });
@@ -894,7 +894,7 @@ async function runCameraPublicationSmoke(filter) {
       check(peer.session.negotiationNeeded === true, 'The direction change stays owed to the peer after the failed offer');
       patch(peer.session.pc, 'createOffer', createOffer);
       const offers = sent.filter(entry => entry.payload?.signalType === 'offer').length;
-      await rtc.renegotiateIfNeeded(peer.session);
+      await rtc.p2p.renegotiateIfNeeded(peer.session);
       check(calls.length === 2 && peer.session.negotiationNeeded === false
         && sent.filter(entry => entry.payload?.signalType === 'offer').length === offers + 1,
       'The owed change goes out in the next offer the link can make');
@@ -968,7 +968,7 @@ async function runCameraPublicationSmoke(filter) {
       await rejected(rtc.setLocalCameraTrack(candidate), 'Reconnect does not report nonnull publication success', 'AbortError');
       check(rtc.localCameraTrack === null && candidate.readyState === 'live', 'Reconnect cancellation clears cache without taking capture ownership');
       let initializations = 0;
-      patch(rtc, 'initSfuForCurrentChannel', async () => { initializations++; });
+      patch(rtc.sfu, 'ensureJoined', async () => { initializations++; });
       server.serverDetails.voiceMode = 'sfu';
       await rtc.setLocalCameraTrack(null);
       check(initializations === 0, 'Stopping a camera never initializes SFU while reconnecting');
@@ -984,8 +984,8 @@ async function runCameraPublicationSmoke(filter) {
           ...settings.customProfile, cameraWidth: 1920, cameraHeight: 1080, cameraFps: 60, screenFps: 45,
         });
         patch(rtc, 'currentPreset', rtc.currentPreset);
-        patch(rtc.sfuEngine, 'qualityProfile', rtc.sfuEngine.qualityProfile);
-        patch(rtc.sfuEngine, 'qualityPreset', rtc.sfuEngine.qualityPreset);
+        patch(rtc.sfu.engine, 'qualityProfile', rtc.sfu.engine.qualityProfile);
+        patch(rtc.sfu.engine, 'qualityPreset', rtc.sfu.engine.qualityPreset);
         let peer;
         let route;
         let micProducer;
@@ -995,7 +995,7 @@ async function runCameraPublicationSmoke(filter) {
           peer = makePeer('fixture-fps-peer', 'recvonly');
           route = loopback(peer.session);
         } else {
-          const engine = rtc.sfuEngine;
+          const engine = rtc.sfu.engine;
           sfuConnection = installSfuTransport(engine).connection;
           micProducer = await engine.produceMic(mic());
         }
@@ -1004,7 +1004,7 @@ async function runCameraPublicationSmoke(filter) {
         const stream = await published();
         await publicationsSettled();
         if (peer) await stable(peer.session);
-        const sender = peer?.camera.sender ?? rtc.sfuEngine.producers.get('camera')?.rtpSender;
+        const sender = peer?.camera.sender ?? rtc.sfu.engine.producers.get('camera')?.rtpSender;
         check(sender instanceof RTCRtpSender, `${transportMode} FPS fixture uses the native RTP sender`);
         if (sfuConnection) {
           const receiver = pc();
@@ -1019,7 +1019,7 @@ async function runCameraPublicationSmoke(filter) {
           await receiver.setLocalDescription(await receiver.createAnswer());
           await until(() => receiver.iceGatheringState === 'complete', 'Native SFU receiver gathers local ICE');
           await sfuConnection.setRemoteDescription(receiver.localDescription);
-          await rtc.sfuEngine.applyQualityParams('CUSTOM', settings.customProfile);
+          await rtc.sfu.engine.applyQualityParams('CUSTOM', settings.customProfile);
         }
         const getDecoded = () => peer ? route.videos.get(peer.camera.mid) : decoded;
         await until(() => sender.getParameters().encodings[0]?.maxFramerate === 60,
@@ -1077,7 +1077,7 @@ async function runCameraPublicationSmoke(filter) {
 
     await run('sfu-genuine-producer-replacement', async () => {
       server.serverDetails.voiceMode = 'sfu';
-      const engine = rtc.sfuEngine;
+      const engine = rtc.sfu.engine;
       const fixture = installSfuTransport(engine);
       const microphone = mic();
       const micProducer = await engine.produceMic(microphone);
@@ -1103,7 +1103,7 @@ async function runCameraPublicationSmoke(filter) {
 
     await run('sfu-false-and-null-publication-failures', async () => {
       server.serverDetails.voiceMode = 'sfu';
-      const engine = rtc.sfuEngine;
+      const engine = rtc.sfu.engine;
       installSfuTransport(engine);
       const first = source('#2020ee').track;
       await rtc.setLocalCameraTrack(first);
@@ -1122,7 +1122,7 @@ async function runCameraPublicationSmoke(filter) {
     });
 
     await run('sfu-pending-produce-and-ownership', async () => {
-      const engine = rtc.sfuEngine;
+      const engine = rtc.sfu.engine;
       const fixture = installSfuTransport(engine);
       const track = source().track;
       const gate = deferred();
@@ -1155,7 +1155,7 @@ async function runCameraPublicationSmoke(filter) {
 
     await run('sfu-first-initialization-self-epoch', async () => {
       server.serverDetails.voiceMode = 'sfu';
-      const engine = rtc.sfuEngine;
+      const engine = rtc.sfu.engine;
       let fixture;
       let joins = 0;
       patch(engine, 'join', async channelId => {
@@ -1168,9 +1168,9 @@ async function runCameraPublicationSmoke(filter) {
       const camera = (await video.startCamera()).getVideoTracks()[0];
       const microphone = mic();
       rtc.localAudioTrack = microphone;
-      const epoch = rtc.sfuJoinEpoch;
+      const epoch = rtc.sfu.joinEpoch;
       await rtc.setLocalCameraTrack(camera);
-      check(joins === 1 && rtc.sfuJoinEpoch === epoch + 1, 'Initial SFU setup advances its own join epoch exactly once');
+      check(joins === 1 && rtc.sfu.joinEpoch === epoch + 1, 'Initial SFU setup advances its own join epoch exactly once');
       check(rtc.localCameraTrack === camera && engine.getCameraTrack() === camera
         && fixture.options.filter(input => input.appData.mediaType === 'camera').length === 1,
       'Self-advanced join epoch does not cancel or duplicate initial camera publication');
@@ -1180,7 +1180,7 @@ async function runCameraPublicationSmoke(filter) {
 
     await run('sfu-rejoin-camera-failure-preserves-mic', async () => {
       server.serverDetails.voiceMode = 'sfu';
-      const engine = rtc.sfuEngine;
+      const engine = rtc.sfu.engine;
       patch(engine, 'join', async () => {
         engine.leave();
         installSfuTransport(engine, false);
@@ -1203,7 +1203,7 @@ async function runCameraPublicationSmoke(filter) {
       bindPublication();
       const peer = makePeer();
       const route = loopback(peer.session);
-      await rtc.sendOffer(peer.session);
+      await rtc.p2p.sendOffer(peer.session);
       await stable(peer.session);
       const started = [];
       const replaced = [];
@@ -1232,7 +1232,7 @@ async function runCameraPublicationSmoke(filter) {
       'The publication binding propagates the processed source to both sender and late-peer cache');
       await decodedColor(() => route.videos.get(peer.camera.mid), [32, 32, 238], 'Only the chroma-composited background reaches the loopback decoder');
       await rtc.connectToPeer('late-peer', false);
-      check(rtc.peers.get('late-peer').videoSender.track === processed.getVideoTracks()[0],
+      check(rtc.p2p.peers.get('late-peer').videoSender.track === processed.getVideoTracks()[0],
         'A new peer starts with the latest processed cached track');
       const incomingUser = { id: 'incoming-user', sessionId: 'incoming-peer', nickname: 'Incoming fixture', status: 'CONNECTED' };
       participants.addUser(incomingUser);
@@ -1247,7 +1247,7 @@ async function runCameraPublicationSmoke(filter) {
         subscriptionId: remoteSubscriptionId,
       });
       await bounded(signalQueue, 'incoming peer answer');
-      check(rtc.peers.get('incoming-peer')?.videoSender?.track === processed.getVideoTracks()[0],
+      check(rtc.p2p.peers.get('incoming-peer')?.videoSender?.track === processed.getVideoTracks()[0],
         'An incoming offer also answers with the latest processed camera, never the old raw source');
       preserveOtherMedia(peer);
       const stopMessages = sent.filter(entry => entry.type === MessageType.VOICE_STATE_UPDATE).length;
@@ -1268,7 +1268,7 @@ async function runCameraPublicationSmoke(filter) {
         bindPublication();
         const peer = makePeer();
         const route = loopback(peer.session);
-        await rtc.sendOffer(peer.session);
+        await rtc.p2p.sendOffer(peer.session);
         await stable(peer.session);
         const replacements = [];
         const terminalEvents = [];
@@ -1666,7 +1666,7 @@ async function runCameraPublicationSmoke(filter) {
     network.sendRequest = originalRequest;
     if (originalSignalDescriptor) Object.defineProperty(rtc, 'signalClient', originalSignalDescriptor);
     else delete rtc.signalClient;
-    rtc.rtcConfig = originalRtcConfiguration;
+    rtc.p2p.rtcConfig = originalRtcConfiguration;
     media.getUserMedia = originalCapture;
     media.enumerateDevices = originalEnumerate;
     media.getDisplayMedia = originalDisplay;

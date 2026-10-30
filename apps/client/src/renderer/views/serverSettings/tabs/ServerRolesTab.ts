@@ -361,7 +361,7 @@ export class ServerRolesTab {
       void context.operations.run('role-order', t('roles.dragReorderHint'), Permission.MANAGE_ROLES, async () => {
         for (const [index, roleId] of ordered.entries()) {
           await context.request<RolesListPayload>(
-            MessageType.ROLE_UPDATE, { roleId, position: ordered.length - index }, Permission.MANAGE_ROLES,
+            [MessageType.ROLE_UPDATE, { roleId, position: ordered.length - index }], Permission.MANAGE_ROLES,
           );
         }
       });
@@ -420,7 +420,7 @@ export class ServerRolesTab {
         const roleId = target.dataset.roleId;
         if (target.dataset.memberAction === 'kick') {
           void context.operations.run(`kick:${userId}`, t('userMenu.kickMember'), Permission.KICK_MEMBERS,
-            () => context.request<unknown>(MessageType.MEMBER_KICK, { targetUserId: userId }, Permission.KICK_MEMBERS));
+            () => context.request<unknown>([MessageType.MEMBER_KICK, { targetUserId: userId }], Permission.KICK_MEMBERS));
         } else if (roleId) {
           this.assignRole(userId, roleId, !context.store.getUserRoleIds(userId).includes(roleId));
         }
@@ -509,7 +509,7 @@ export class ServerRolesTab {
       const latest = context.store.getRole(roleId);
       if (!latest) throw new Error(t('serverSettings.roleUnavailable'));
       if (!this.canDeleteRole(latest)) throw new Error(t('protocolError.permissionDenied'));
-      await context.request<RolesListPayload>(MessageType.ROLE_DELETE, { roleId }, Permission.MANAGE_ROLES);
+      await context.request<RolesListPayload>([MessageType.ROLE_DELETE, { roleId }], Permission.MANAGE_ROLES);
     }).then(() => {
       if (this.roleDeletion === deletion) this.roleDeletion = null;
     });
@@ -675,7 +675,7 @@ export class ServerRolesTab {
       if (payload.name !== undefined && (!payload.name.trim() || payload.name.length > 32)) {
         throw new Error(t('serverSettings.roleNameInvalid'));
       }
-      await context.request<RolesListPayload>(MessageType.ROLE_UPDATE, payload, Permission.MANAGE_ROLES);
+      await context.request<RolesListPayload>([MessageType.ROLE_UPDATE, payload], Permission.MANAGE_ROLES);
     });
   }
 
@@ -693,7 +693,7 @@ export class ServerRolesTab {
     const deny = context.store.roleModel === 'deny' ? { deny: 0 } : {};
     void context.operations.run('role-create', t('roles.createRole'), Permission.MANAGE_ROLES, async () => {
       if (!name || name.length > 32) throw new Error(t('serverSettings.roleNameInvalid'));
-      await context.request<RolesListPayload>(MessageType.ROLE_CREATE, { name, color, isDefault, permissions, ...deny }, Permission.MANAGE_ROLES);
+      await context.request<RolesListPayload>([MessageType.ROLE_CREATE, { name, color, isDefault, permissions, ...deny }], Permission.MANAGE_ROLES);
     }).then(result => {
       if (result.ok && context.isCurrent() && this.editor === editor) editor?.close();
     });
@@ -704,7 +704,7 @@ export class ServerRolesTab {
     if (!context || context.operations.isPending(`assignment:${userId}:${roleId}`)) return;
     void context.operations.run(`assignment:${userId}:${roleId}`, t('roles.assignedColumn'), Permission.MANAGE_ROLES,
       () => changeMemberRole(
-        (type, payload) => context.request<RolesListPayload>(type, payload, Permission.MANAGE_ROLES),
+        (...message) => context.request<RolesListPayload>(message, Permission.MANAGE_ROLES),
         context.store, userId, roleId, assign,
       )).then(result => {
       if (result.ok && context.isCurrent()) showSuccessToast(memberRoleChangedMessage(assign, result.value));

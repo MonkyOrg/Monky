@@ -69,6 +69,7 @@ class PeerConnection {
   public transceivers: RTCRtpTransceiver[] = [];
   getTransceivers() { return this.transceivers; }
   getSenders() { return this.transceivers.map(entry => entry.sender); }
+  getReceivers() { return this.transceivers.map(entry => entry.receiver); }
   addTransceiver(value: string | MediaStreamTrack, init?: RTCRtpTransceiverInit) {
     const kind = typeof value === 'string' ? value : value.kind;
     const sender = new Sender(typeof value === 'string' ? null : value, kind, init?.sendEncodings);
@@ -114,8 +115,9 @@ async function p2pFixture(t: TestContext) {
   Object.defineProperty(manager, 'signalClient', { configurable: true, get: () => client });
   Object.defineProperty(manager, 'voiceParticipants', { configurable: true, get: () => participants });
   t.mock.method(manager, 'isSfuMode', () => false);
-  manager['beginPeerFailureCountdown'] = () => {};
-  manager['startConnectionWatchdog'] = () => {};
+  const recovery = manager['p2p']['recovery'];
+  recovery['beginFailureCountdown'] = () => {};
+  recovery['watch'] = () => {};
   manager.setCurrentSessionId('publisher');
   const microphone = track('microphone', 'audio');
   const camera = track('camera', 'video');
@@ -181,7 +183,7 @@ test('a bot authorized to receive microphones is never offered camera media', as
     isSpeaking: false, isCameraOn: false, isScreenSharing: false, isSharingScreenAudio: false,
   });
   await f.manager.connectToPeer(sessionId, false);
-  const peer = f.manager['peers'].get(sessionId)!;
+  const peer = f.manager['p2p'].peers.get(sessionId)!;
   assert.equal(peer.botPeer, true);
   assert.equal(peer.receiveOnly, false);
   assert.equal(peer.audioSender, undefined, 'an answerer attaches the authorized microphone after the offer');

@@ -1,12 +1,14 @@
 import { escapeHtml } from '../utils/html';
+import { resolveImageUrl } from '../utils/avatar';
 import { t } from '../i18n';
 import {
   resolveBotCarouselPresentation,
   type BotCarouselPresentation,
 } from '@monky/shared';
 
+/** A slide: an image the server stores, resolved against it, or a preview the app already holds. */
 function source(url: string, baseUrl: string): string {
-  return /^(?:data:|blob:|https?:)/.test(url) ? url : `${baseUrl}${url}`;
+  return resolveImageUrl(url, baseUrl) ?? '';
 }
 
 function renderCarousel(

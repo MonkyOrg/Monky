@@ -4,6 +4,7 @@ import { stopLocalScreenShares } from '../core/screenShareControls';
 import { videoService } from '../core/VideoService';
 import { t } from '../i18n';
 import { voiceStore } from '../stores/voiceStore';
+import { nextIndex } from '../utils/rovingFocus';
 import { animateEnter, ownSurface, positionAnchoredSurface, removeWithMotion } from '../utils/surfaceMotion';
 
 export type ScreenSharePurpose = 'stop' | 'switch';
@@ -12,7 +13,6 @@ export type ScreenShareSelection = { readonly all: true } | { readonly shareId: 
 const KIND_ICONS: Readonly<Record<NativeScreenCaptureKind, string>> = {
   monitor: 'desktop_windows', window: 'web_asset', game: 'sports_esports',
 };
-const NAVIGATION_KEYS = new Set(['ArrowDown', 'ArrowUp', 'Home', 'End']);
 
 /**
  * Dropdown that asks which local screen share a control acts on, showing a
@@ -180,13 +180,11 @@ class ScreenShareChooser {
         dismiss();
         return;
       }
-      if (!NAVIGATION_KEYS.has(event.key)) return;
-      event.preventDefault();
       const items = [...surface.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-      const current = items.findIndex(item => item === document.activeElement);
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
-        : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
-      items[next]?.focus({ preventScroll: true });
+      const next = nextIndex(event.key, items.findIndex(item => item === document.activeElement), items.length);
+      if (next === null) return;
+      event.preventDefault();
+      items[next].focus({ preventScroll: true });
     };
     const sharesChanged = (shareId: unknown) => {
       if (typeof shareId !== 'string' || shareIds.includes(shareId)) dismiss();

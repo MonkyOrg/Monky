@@ -689,8 +689,10 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       const cameraStream = new MediaStream();
       participants.get(remote.sessionId).remoteStream = cameraStream;
       stage.renderParticipants();
-      check(document.querySelector(`[data-tile-key="${remote.sessionId}:camera"] video`).srcObject === cameraStream
-        && camera.srcObject === null, 'A real camera stream replacement must still retire the previous attachment');
+      // A camera moving to a new track (a new SFU consumer, a rebuilt peer link) keeps its card
+      // and element, which shows the new stream instead of the previous one (R-VOICE-5).
+      check(document.querySelector(`[data-tile-key="${remote.sessionId}:camera"] video`) === camera
+        && camera.srcObject === cameraStream, 'A real camera stream replacement must still retire the previous attachment, in place');
       participants.get(remote.sessionId).remoteStream = undefined;
       stage.renderParticipants();
       check(document.querySelector(`[data-tile-key="${remote.sessionId}:camera"] video`).srcObject === null,

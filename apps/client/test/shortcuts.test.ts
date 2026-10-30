@@ -5,7 +5,7 @@ import { EventType, UiohookKey as K, type UiohookKeyboardEvent } from 'uiohook-n
 import { GlobalInputHook, isPttConfig, parseAcceleratorToHotkey as parseNativeAccelerator } from '../src/main/globalInputHook';
 import { WindowsKeyboardLayout } from '../src/main/windowsKeyboardLayout';
 import type { KeyboardLayoutSnapshot } from '@monky/screen-audio';
-import { captureShortcut, ShortcutCapture, shortcutIdentity } from '../src/renderer/utils/keybind';
+import { captureShortcut, findShortcutConflicts, ShortcutCapture, shortcutIdentity } from '../src/renderer/utils/keybind';
 
 class Hook extends EventEmitter {
   starts = 0;
@@ -52,6 +52,23 @@ test('legacy saved accelerators, Spanish punctuation, numpad and physical codes 
   assert.equal(shortcutIdentity('Control+Q+W'), shortcutIdentity('Ctrl+code:KeyW+code:KeyQ'));
   assert.equal(shortcutIdentity('Ctrl++'), shortcutIdentity('Ctrl+code:Equal'));
   assert.equal(shortcutIdentity('Shift+!'), shortcutIdentity('Shift+code:Digit1'));
+});
+
+test('a soundboard shortcut conflict compares the keys, not how they were saved', () => {
+  const shortcuts = {
+    Legacy: { accelerator: 'Control+Q' },
+    Captured: { accelerator: 'Shift+code:Digit1' },
+    Duplicate: { accelerator: 'Ctrl+code:KeyQ' },
+    Broken: { accelerator: 'Unknown+Q' },
+  };
+  // A capture saves physical codes; older settings hold logical keys. The global hook fires both,
+  // and older versions let several sounds share keys: every one of them is a conflict.
+  assert.deepEqual(findShortcutConflicts(shortcuts, 'Ctrl+code:KeyQ', 'Airhorn'), ['Legacy', 'Duplicate']);
+  assert.deepEqual(findShortcutConflicts(shortcuts, 'Q+Ctrl', 'Airhorn'), ['Legacy', 'Duplicate'], 'the order of the keys does not matter');
+  assert.deepEqual(findShortcutConflicts(shortcuts, 'Shift+!', 'Airhorn'), ['Captured']);
+  assert.deepEqual(findShortcutConflicts(shortcuts, 'Ctrl+code:KeyQ', 'Legacy'), ['Duplicate'], 'a sound never conflicts with itself');
+  assert.deepEqual(findShortcutConflicts(shortcuts, 'Ctrl+code:KeyW', 'Airhorn'), []);
+  assert.deepEqual(findShortcutConflicts(shortcuts, 'Unknown+Q', 'Airhorn'), [], 'an unreadable combination conflicts with nothing');
 });
 
 test('capture accumulates any number of simultaneously held ordinary keys and commits after release', () => {

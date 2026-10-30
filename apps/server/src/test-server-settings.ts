@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
-import { MessageType, ProtocolErrorCode, type ProtocolMessage, type ServerSettingsUpdatedPayload } from '@monky/shared';
+import { MessageType, PROTOCOL_VERSION, ProtocolErrorCode, createProtocolOffer, type ProtocolMessage, type ServerSettingsUpdatedPayload } from '@monky/shared';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
-import { AuthService } from './application/services/AuthService';
+import { AuthService, serverSettingsPayload } from './application/services/AuthService';
 import { BotLocalExecutionService } from './application/services/BotLocalExecutionService';
 import { CoturnManager } from './infrastructure/turn/CoturnManager';
 import { Logger } from './infrastructure/logger/Logger';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { ServerRecord } from './domain/entities';
+import { SERVER_SETTING_DEFAULTS } from './domain/serverSettings';
+import { createFixture, identity, record as asRecord } from './testFixtures/bots';
 
 function deferred() {
   let resolve!: () => void;
@@ -29,7 +32,7 @@ function fixture() {
     user: { id: 'admin', clientId: 'admin-key', sessionId: 'admin-session', nickname: 'Admin', status: 'ONLINE', joinedAt: 1 },
   };
   const record: ServerRecord = {
-    id: 'server', name: 'Server', createdAt: 1, maxUsers: 0, passwordHash: '',
+    ...SERVER_SETTING_DEFAULTS, id: 'server', name: 'Server', createdAt: 1, maxUsers: 0, passwordHash: '',
     voiceMode: 'p2p', turnEnabled: false, turnSecret: 'test-secret', dmRelayEnabled: true,
   };
   let allowed = true;
@@ -40,7 +43,6 @@ function fixture() {
   server['sessions'] = new Map([[ws, session]]);
   server['sessionSockets'] = new Map([['admin-session', ws]]);
   server['settingsUpdateQueue'] = Promise.resolve();
-  server['voiceReconnectGrants'] = new Map();
   server['localAccessVersion'] = 0;
   server['pendingLocalAccessMutations'] = 0;
   server['botLocalExecution'] = Object.create(BotLocalExecutionService.prototype) as typeof server['botLocalExecution'];
@@ -57,7 +59,7 @@ function fixture() {
     if (patch.turnEnabled !== undefined) record.turnEnabled = patch.turnEnabled;
     if (patch.dmRelayEnabled !== undefined) record.dmRelayEnabled = patch.dmRelayEnabled;
     if (record.voiceMode === 'sfu') record.turnEnabled = false;
-    return { success: true, name: record.name, hasPassword: false, voiceMode: record.voiceMode, turnEnabled: record.turnEnabled, dmRelayEnabled: record.dmRelayEnabled };
+    return { success: true, settings: serverSettingsPayload(record, { usedBytes: 0, maxTotalBytes: 1, maxFileBytes: 1 }) };
   };
   server['authService'] = auth;
   server['channelService'] = { getAfkChannelId: async () => null } as unknown as WebSocketServer['channelService'];
@@ -305,4 +307,28 @@ test('relay availability is probed off the event loop once for every sign-in, an
   assert.deepEqual(await CoturnManager.availability(), { supported: false, reason: 'not-installed', autoInstallable: true },
     'turning the relay on probes the host again');
   assert.equal(lookups(), 3);
+});
+
+test('a settings change and the next login describe the server in the same words (S-APP-10)', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const offer = createProtocolOffer('client');
+  const owner = await f.human('Settings owner', identity(), randomUUID(), false, PROTOCOL_VERSION, offer);
+  const before = asRecord(owner.auth.payload.server);
+  assert.equal(before.allowSoundboard, true);
+  assert.equal(before.messageDeleteUndoSeconds, SERVER_SETTING_DEFAULTS.messageDeleteUndoSeconds, 'defaults reach the snapshot');
+
+  const changed = await owner.peer.request(MessageType.SERVER_UPDATE_SETTINGS, {
+    name: 'Renamed server', maxUsers: 40, allowSoundboard: false, allowMessageEdit: false, allowEveryoneMention: false,
+    showRoleBadgesToEveryone: false, messageDeleteUndoSeconds: 120, maxMessageLength: 500, dmRelayEnabled: false,
+  });
+  assert.equal(changed.type, MessageType.SERVER_SETTINGS_UPDATED);
+  const member = await f.human('Late member', identity(), randomUUID(), false, PROTOCOL_VERSION, offer);
+  const snapshot = asRecord(member.auth.payload.server);
+  const keys = Object.keys(serverSettingsPayload({ ...SERVER_SETTING_DEFAULTS, id: '', name: '', passwordHash: '', createdAt: 0, maxUsers: 0 },
+    { usedBytes: 0, maxTotalBytes: 0, maxFileBytes: 0 }));
+  for (const key of keys) assert.deepEqual(snapshot[key], changed.payload[key], key);
+  assert.equal(snapshot.name, 'Renamed server');
+  assert.equal(snapshot.allowSoundboard, false);
+  assert.equal(snapshot.messageDeleteUndoSeconds, 120);
 });

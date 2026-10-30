@@ -98,8 +98,9 @@ node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
 ```
 
 Use `--arch=x64` on both builds to produce Intel artifacts on Apple Silicon with
-Rosetta. The build runs the helper's self-test and queries the actual target
-library; it never fabricates capabilities from arm64. CI also builds on Intel
+Rosetta. The build runs the helper's self-test and the engine's device-free
+contracts (all of them except the Media Foundation ones, which exist only on
+Windows) and queries the actual target library; it never fabricates capabilities from arm64. CI also builds on Intel
 and Apple Silicon runners. `macNativeHostSmoke.cjs` is device-free, not media proof.
 For actual media, `nativeCaptureSmoke.cjs`, `nativeAvSmoke.cjs` and
 `screen-audio/test/macPacketAudioSmoke.cjs` use owned synthetic sources and require

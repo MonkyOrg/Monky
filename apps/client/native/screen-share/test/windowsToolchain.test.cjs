@@ -443,7 +443,7 @@ function modelBuilder(name, f, selected, env, paths = path) {
     ...inputs, 'node:fs': io, 'node:path': paths,
     './windowsToolchain.cjs': { ...tools, resolveWindowsToolchain: () => selected, msvcEnvironment: () => env },
     './buildTools.cjs': { ...real, root: packageRoot, write: save, regularFiles: () => [],
-      fingerprint: () => ({ bytes: 1, sha256: '0'.repeat(64) }), verify() {},
+      fingerprint: () => ({ bytes: 1, sha256: '0'.repeat(64) }), verify() {}, withBuildLock: (_lock, build) => build(),
       execute(exe, args, options) {
         calls.push({ exe, args, options });
         const base = paths.basename(exe);

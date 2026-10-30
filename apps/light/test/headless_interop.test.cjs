@@ -284,3 +284,63 @@ test('quit, EOF, and transport closure during logout retire the native applicati
     assert.ok(client.events.some(event => event.event === 'stopped'));
   }
 });
+
+test('a native call follows a move into a room it cannot see, but a client that hung up follows none', { timeout: 45_000 }, async t => {
+  const { VoiceSessionHandler } = require('../../server/dist/infrastructure/websocket/voice/VoiceSessionHandler.js');
+  const follow = VoiceSessionHandler.FOLLOW_MOVE_MS;
+  VoiceSessionHandler.FOLLOW_MOVE_MS = 500;
+  t.after(() => { VoiceSessionHandler.FOLLOW_MOVE_MS = follow; });
+  const fixture = await createServerFixture(t);
+  const admin = await fixture.connectHuman('Fixture admin');
+  const light = new NativeClient(fixture, { nickname: 'Moved Light' });
+  const auth = await light.wait('authenticated');
+  const lobbyId = auth.channels.find(channel => channel.type === 'VOICE').id;
+  // Managers only: the client is shown it only while the server keeps it inside.
+  const created = await admin.peer.request(MessageType.CHANNEL_CREATE,
+    { name: 'Managers', type: 'VOICE', isPrivate: true, allowedRoleIds: [] }, [MessageType.CHANNEL_CREATED]);
+  const hiddenId = created.payload.channel.id;
+  const wsServer = fixture.server.wsServer;
+  const room = () => wsServer.signalingService.getVoiceState(auth.sessionId)?.channelId;
+  const move = channelId => admin.peer.request(MessageType.ADMIN_MOVE_USER,
+    { targetSessionId: auth.sessionId, channelId }, [MessageType.ADMIN_MOVE_USER]);
+
+  // In a call, the client follows by leaving the old room and joining the new
+  // one: the server holds that leave for the join right behind it.
+  await light.join(lobbyId);
+  let since = light.events.length;
+  await move(hiddenId);
+  await light.wait(event => event.event === 'voice-admitted' && event.channelId === hiddenId, since);
+  await new Promise(resolve => setTimeout(resolve, VoiceSessionHandler.FOLLOW_MOVE_MS * 3));
+  assert.equal(room(), hiddenId, 'Following the move took the client out of the call');
+  assert.equal((await light.state()).phase, 'admitted');
+
+  // Hanging up as a move goes out: the server reads the move first, so it
+  // reaches a client that already left. Followed, it would start a new call.
+  await light.join(lobbyId);
+  const voice = wsServer.voiceSessions;
+  const handle = voice.handle;
+  let crossed = false;
+  voice.handle = async function (session, type, payload, requestId) {
+    if (!crossed && type === MessageType.VOICE_LEAVE && session.sessionId === auth.sessionId) {
+      crossed = true;
+      await move(hiddenId);
+    }
+    return handle.call(this, session, type, payload, requestId);
+  };
+  t.after(() => { delete voice.handle; });
+  since = light.events.length;
+  const adminSince = admin.peer.messages.length;
+  assert.equal((await light.command('leave')).event, 'command-accepted');
+  // Its own join would be announced without the move's request ID.
+  const outcome = await admin.peer.wait(message => message.payload?.sessionId === auth.sessionId &&
+    message.payload.channelId === hiddenId && (message.type === MessageType.VOICE_USER_LEFT ||
+      (message.type === MessageType.VOICE_USER_JOINED && message.requestId === undefined)), adminSince);
+  assert.ok(crossed, 'The move did not cross the leave');
+  assert.equal(outcome.type, MessageType.VOICE_USER_LEFT, 'The client that hung up followed the move into a call');
+  assert.equal(room(), undefined);
+  assert.equal(light.events.slice(since).some(event => event.event === 'voice-admitted'), false);
+  const state = await light.state();
+  assert.equal(state.phase, 'ready');
+  assert.equal(state.mediaActive, false);
+  await light.close();
+});

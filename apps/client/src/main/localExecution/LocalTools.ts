@@ -18,8 +18,10 @@ import {
 import {
   LOCAL_CAPABILITY_TOOLS,
   LOCAL_TOOL_IDS,
+  linkedSignal,
   localToolIdSchema,
   localToolReceiptSchema,
+  raceSignal,
   type LocalExecutionFailure,
   type LocalCapabilityId,
   type LocalToolId,
@@ -176,18 +178,7 @@ function assertSignal(signal: AbortSignal): void {
 }
 
 function waitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const abort = (): void => {
-      signal.removeEventListener('abort', abort);
-      reject(toolError(signal.reason, 'cancelled', signal));
-    };
-    signal.addEventListener('abort', abort, { once: true });
-    promise.then(
-      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
-      (error: unknown) => { signal.removeEventListener('abort', abort); reject(error); },
-    );
-    if (signal.aborted) abort();
-  });
+  return raceSignal(promise, signal, { abortReason: () => toolError(signal.reason, 'cancelled', signal) });
 }
 
 async function joinPreparation(preparation: Preparation | null): Promise<void> {
@@ -719,21 +710,16 @@ export class LocalTools {
 
   private async check(tool: LocalToolId, paths: LocalToolPaths, signal: AbortSignal): Promise<string> {
     assertSignal(signal);
-    const controller = new AbortController();
-    const abort = (): void => controller.abort(signal.reason);
-    signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) abort();
-    const timer = setTimeout(() => controller.abort(new LocalExecutionError('timeout')), PROBE_TIMEOUT[tool]);
+    const probe = linkedSignal(signal, { ms: PROBE_TIMEOUT[tool], reason: () => new LocalExecutionError('timeout') });
     try {
-      const version = (await this.probe(tool, { ...paths }, controller.signal)).trim();
-      assertSignal(controller.signal);
+      const version = (await this.probe(tool, { ...paths }, probe.signal)).trim();
+      assertSignal(probe.signal);
       if (!version || version.length > 128 || /[\x00-\x1f\x7f]/.test(version)) throw new LocalExecutionError('tool_install_failed');
       return version;
     } catch (error) {
-      throw toolError(error, 'tool_install_failed', controller.signal);
+      throw toolError(error, 'tool_install_failed', probe.signal);
     } finally {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', abort);
+      probe.dispose();
     }
   }
 

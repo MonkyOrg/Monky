@@ -175,7 +175,7 @@ export function bindSoundboardLimiterControls(container: HTMLElement): () => voi
   toggle.addEventListener('change', changeEnabled);
   ceiling.addEventListener('input', changeCeiling);
   const unsubscribe = appEvents.on('settings.updated', sync);
-  const unsubscribeIntensity = appEvents.on<number | null>('soundboard.intensity', value => {
+  const unsubscribeIntensity = appEvents.on('soundboard.intensity', value => {
     intensity = value;
     syncIntensity();
   });

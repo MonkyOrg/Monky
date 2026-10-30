@@ -34,7 +34,7 @@ import { NativeDecoderDiagnosticsSampler } from '../core/webrtc/nativeDecoderDia
 import { formatVideoTelemetry, serializeVideoTelemetry, VideoTelemetrySnapshot } from './VideoTelemetry';
 import { showCopyToast } from './CopyToast';
 import { t } from '../i18n';
-import { toggleCamera as toggleCallCamera, turnCameraOff } from '../core/cameraControls';
+import { toggleCamera as toggleCallCamera, turnCameraOff } from '../core/CameraPublication';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { BotScreenDock, type BotScreenStage } from './BotScreenDock';
 import { ScreenViewersView } from './ScreenViewersView';
@@ -982,6 +982,9 @@ export class VoiceStageView {
     const video = card.querySelector<HTMLVideoElement>('video[data-video-tile-key]');
     const stream = tile.kind === 'screen' && sidOf(tile.p) !== currentSessionId
       && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!) ? null : this.getTileStream(tile, currentSessionId);
+    // A remote camera moving to a new track (a new SFU consumer, a rebuilt peer link) keeps
+    // its card: refreshParticipantMedia points the same element at the new stream.
+    if (tile.kind === 'camera' && video && stream && sidOf(tile.p) !== currentSessionId) return true;
     return video?.srcObject === stream;
   }
 
@@ -1320,10 +1323,9 @@ export class VoiceStageView {
   }
 
   /**
-   * Remote media (RemoteMediaRouter, WebRtcManager) attaches streams straight
-   * to the tile video when a track arrives after the tile rendered, e.g. the
-   * first watch of a screen. Every pending overlay must therefore already be
-   * listening, or it stays over the playing video.
+   * Every pending loading overlay must already be listening for its video to
+   * render, also when a stream reaches the tile video without going through
+   * this view, or it stays over the playing video.
    */
   private watchPendingLoadingOverlays(): void {
     for (const overlay of this.container.querySelectorAll<HTMLElement>('.stage-loading-overlay:not([data-ui-closing])')) {
@@ -2400,7 +2402,7 @@ export class VoiceStageView {
     this.renderParticipants();
   }
 
-  /** The stage's camera button: the camera itself belongs to the call (cameraControls). */
+  /** The stage's camera button: the camera itself belongs to the call (CameraPublication). */
   private async toggleCamera(): Promise<void> {
     await toggleCallCamera();
     this.updateControlsUI();

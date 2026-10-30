@@ -283,7 +283,8 @@ destruição cancela leituras bloqueadas antes de liberar os callbacks.
 `ProtocolSession` confirma a admissão antes de criar mídia, reconcilia a lista
 de participantes e correlaciona respostas por conexão, geração, ID e tipo.
 Reconectar preserva a identidade; expulsões cancelam a intenção de voltar à
-chamada. Alterações P2P/SFU seguem o protocolo do servidor, sem fallback oculto.
+chamada, e um move do servidor só é seguido durante uma chamada ou a entrada
+nela. Alterações P2P/SFU seguem o protocolo do servidor, sem fallback oculto.
 
 `VoiceEngine` mantém ADM, processamento de áudio e fábrica WebRTC apenas durante
 a chamada. Mute interrompe a captura real; deafen interrompe captura e reprodução.

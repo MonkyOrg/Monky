@@ -1,8 +1,8 @@
 import path from 'node:path';
 import {
-  LIMITS, LOCAL_EXECUTION_RUNTIME_LIMITS, LOCAL_PLAYLIST_MAX_TRACKS, localExecutionFailureSchema,
+  LIMITS, LOCAL_EXECUTION_RUNTIME_LIMITS, LOCAL_PLAYLIST_MAX_TRACKS, deferred, localExecutionFailureSchema,
   localRuntimeSourceFailureSchema, localTaskResultSchema, localTaskSpecSchema, localToolIdSchema,
-  type LocalExecutionFailure, type LocalRuntimeSourceFailure, type LocalTaskResult, type LocalTaskSpec, type LocalToolId,
+  type Deferred, type LocalExecutionFailure, type LocalRuntimeSourceFailure, type LocalTaskResult, type LocalTaskSpec, type LocalToolId,
 } from '@monky/shared';
 import { errorDiagnostic, MediaError, safeDiagnostic, SourceRecoveryError } from '@monky/bot-sdk/dist/localRuntime';
 import type { LocalToolPaths } from './LocalTools';
@@ -15,10 +15,6 @@ export const WORKER_LIMITS = {
   startupMs: 5000,
   controlMs: 5000,
   stopMs: 5000,
-  cachePollMs: 500,
-  cacheScanMs: 5000,
-  cacheEntries: 10000,
-  cacheDepth: 16,
 } as const;
 
 interface WorkerStartBase {
@@ -48,18 +44,13 @@ export type WorkerReply =
 
 export type WorkerOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
 
-export function workerDeferred<T>(): {
-  promise: Promise<T>; outcome: Promise<WorkerOutcome<T>>;
-  resolve(value: T): void; reject(error: unknown): void;
-} {
-  let resolve: (value: T) => void = () => { throw new Error('Uninitialized worker promise'); };
-  let reject: (error: unknown) => void = () => { throw new Error('Uninitialized worker promise'); };
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+export function workerDeferred<T>(): Deferred<T> & { outcome: Promise<WorkerOutcome<T>> } {
+  const result = deferred<T>();
   // Keep an explicit failure outcome even before the caller receives the public promise.
-  const outcome = promise.then<WorkerOutcome<T>, WorkerOutcome<T>>(
+  const outcome = result.promise.then<WorkerOutcome<T>, WorkerOutcome<T>>(
     value => ({ ok: true, value }), error => ({ ok: false, error }),
   );
-  return { promise, outcome, resolve, reject };
+  return { ...result, outcome };
 }
 
 function invalid(): never { throw new LocalExecutionError('invalid_request'); }
@@ -253,12 +244,4 @@ export function workerError(error: unknown, fallback: LocalExecutionFailure = 'w
   }
   return new LocalExecutionError(fallback, { cause: new Error(errorDiagnostic(error)),
     ...(sourceFailure ? { sourceFailure } : {}) });
-}
-
-export function workerDirectories(directory: string): Record<'temp' | 'home' | 'config' | 'cache' | 'data' | 'state' | 'runtime', string> {
-  return {
-    temp: path.join(directory, 'temp'), home: path.join(directory, 'home'), config: path.join(directory, 'config'),
-    cache: path.join(directory, 'cache'), data: path.join(directory, 'data'), state: path.join(directory, 'state'),
-    runtime: path.join(directory, 'runtime'),
-  };
 }

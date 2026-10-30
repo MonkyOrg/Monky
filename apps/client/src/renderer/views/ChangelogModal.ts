@@ -1,6 +1,6 @@
 import type { ReleaseHistoryEntry, ReleaseNotesResult } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
-import { getLanguage, t, tCount, type SupportedLanguage, type TranslationKey } from '../i18n';
+import { getLanguage, t, tCount, type TranslationKey } from '../i18n';
 import { CLIENT_NOTE_GROUPS, parseClientReleaseNotes, type ClientNoteGroup, type ClientReleaseNotes } from '../utils/clientReleaseNotes';
 import { escapeHtml } from '../utils/html';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
@@ -223,7 +223,7 @@ export class ChangelogModal {
     };
     window.addEventListener('keydown', onKeyDown, true);
     this.unbind.push(() => window.removeEventListener('keydown', onKeyDown, true));
-    this.unbind.push(appEvents.on<SupportedLanguage>('i18n.language_changed', () => this.renderState()));
+    this.unbind.push(appEvents.on('i18n.language_changed', () => this.renderState()));
     backdrop.querySelector<HTMLButtonElement>('#modal-close')?.focus();
   }
 

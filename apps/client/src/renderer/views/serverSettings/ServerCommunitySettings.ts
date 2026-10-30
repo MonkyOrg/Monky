@@ -45,7 +45,7 @@ export class ServerCommunitySettings {
     toggle?.addEventListener('change', () => {
       const enabled = toggle.checked;
       void context.operations.run('community-events', t('community.eventsAndLiveActions'), Permission.MANAGE_SERVER, async () => {
-        await context.request(MessageType.COMMUNITY_UPDATE_SETTINGS, { eventsEnabled: enabled }, Permission.MANAGE_SERVER);
+        await context.request([MessageType.COMMUNITY_UPDATE_SETTINGS, { eventsEnabled: enabled }], Permission.MANAGE_SERVER);
       }).then(() => { if (!abort.signal.aborted) sync(); });
     }, { signal: abort.signal });
     root.addEventListener('click', (event) => {
@@ -58,7 +58,7 @@ export class ServerCommunitySettings {
         const image = action === 'image' && button ? await pickAndCropImage(button, 'banner') : null;
         if (action === 'image' && image === null) return;
         context.assertAllowed(Permission.MANAGE_SERVER);
-        await context.request(MessageType.COMMUNITY_UPDATE_SETTINGS, { bannerBase64: image }, Permission.MANAGE_SERVER);
+        await context.request([MessageType.COMMUNITY_UPDATE_SETTINGS, { bannerBase64: image }], Permission.MANAGE_SERVER);
       }).then(() => { if (!abort.signal.aborted) sync(); });
     }, { signal: abort.signal });
     const sync = () => this.refreshState(root, context);

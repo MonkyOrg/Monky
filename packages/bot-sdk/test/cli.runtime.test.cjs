@@ -345,6 +345,47 @@ test('closing interactive setup leaves the previous configuration untouched', as
   assert.deepEqual(cliConfig.readConfig(context), existing);
 });
 
+test('a config.json write that fails keeps the previous file whole, like every other profile file', (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  const context = cliConfig.createCliContext(f.bot);
+  const existing = cliConfig.manualConfig(context, { botToken: 'existing-token' });
+  cliConfig.writeConfig(context, existing);
+  const before = fs.readFileSync(context.configFile, 'utf8');
+  const rename = t.mock.method(fs, 'renameSync', () => {
+    throw Object.assign(new Error('fixture disk full'), { code: 'ENOSPC' });
+  });
+  assert.throws(() => cliConfig.writeConfig(context, cliConfig.manualConfig(context, { botToken: 'replacement-token' })),
+    /fixture disk full/);
+  assert.equal(rename.mock.callCount(), 1, 'the new content goes to a temporary file first');
+  assert.equal(fs.readFileSync(context.configFile, 'utf8'), before);
+  assert.deepEqual(fs.readdirSync(context.homeDir).filter((name) => name.endsWith('.pending')), []);
+  rename.mock.restore();
+  assert.deepEqual(cliConfig.readConfig(context), existing);
+});
+
+test('profile files are read without following links, so none is mistaken for another file', (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  const context = cliConfig.createCliContext(f.bot);
+  const outside = path.join(f.root, 'outside.json');
+  json(outside, { version: 1, values: { OUTSIDE: 'value' } });
+  fs.mkdirSync(context.homeDir, { recursive: true });
+  for (const name of ['config.json', 'environment.json']) {
+    try {
+      fs.symlinkSync(outside, path.join(context.homeDir, name), 'file');
+    } catch (error) {
+      if (error.code === 'EPERM') {
+        t.skip('this account cannot create file links');
+        return;
+      }
+      throw error;
+    }
+  }
+  assert.throws(() => cliConfig.readConfig(context), /not a file/);
+  assert.throws(() => environment.readProfileEnvironment(context.homeDir), /Could not read/);
+});
+
 test('interactive setup skips the mode chooser for manual-only projects', async (t) => {
   const f = fixture(t, { modes: ['manual'] });
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state });

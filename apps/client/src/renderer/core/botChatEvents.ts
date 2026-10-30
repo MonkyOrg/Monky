@@ -11,7 +11,7 @@ import {
   type CommandSoundDownloadCancelPayload,
   type BotSettingsListResponse,
 } from '@monky/shared';
-import { appEvents, type EventBus } from './EventBus';
+import { appEvents, type AppEventBus } from './EventBus';
 import { chatStore } from '../stores/chatStore';
 import { serverStore } from '../stores/serverStore';
 import { botCommandMessage } from '../utils/botInputs';
@@ -19,7 +19,7 @@ import { getActiveNetworkClient, type ConnectionStatus } from './NetworkClient';
 import { localSoundDownloads } from './LocalSoundDownloadService';
 
 /** SessionManager routes these synchronous mutations to the originating stores. */
-export function bindBotChatEvents(events: EventBus = appEvents): () => void {
+export function bindBotChatEvents(events: AppEventBus = appEvents): () => void {
   const unbind = [
     events.on(`message.${MessageType.COMMAND_SOUND_DOWNLOAD}`, (payload: CommandSoundDownloadReceivedPayload) => {
       localSoundDownloads.receive(getActiveNetworkClient(), payload);

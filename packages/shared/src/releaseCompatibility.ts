@@ -1,9 +1,9 @@
 import type { BotCompatibilitySummary } from './models.js';
 import { PROTOCOL_VERSION } from './constants.js';
+import { MONKY_RELEASE_HOSTS, TrustedFetchError, fetchTrusted, readLimitedText } from './githubReleases.js';
 import { MIN_BOT_PROTOCOL, MIN_CLIENT_PROTOCOL } from './protocolCompatibility.js';
 
 const RELEASE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
-const RELEASE_HOSTS = new Set(['github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com']);
 const MAX_METADATA_BYTES = 16 * 1024;
 
 export interface ReleaseCompatibility {
@@ -71,56 +71,32 @@ export async function fetchReleaseCompatibility(
   if (!isReleaseVersion(version)) return { status: 'unavailable', reason: 'Invalid release version.' };
   const timeout = AbortSignal.timeout(8000);
   const signal = cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
-  let url = new URL(`https://github.com/MonkyOrg/Monky/releases/download/v${version}/monky-compatibility-${version}.json`);
+  const url = `https://github.com/MonkyOrg/Monky/releases/download/v${version}/monky-compatibility-${version}.json`;
   try {
-    for (let redirects = 0; redirects <= 5; redirects++) {
-      if (url.protocol !== 'https:' || url.username || url.password || url.port || !RELEASE_HOSTS.has(url.hostname)) {
-        return { status: 'unavailable', reason: 'Untrusted compatibility metadata location.' };
-      }
-      const response = await request(url, { redirect: 'manual', signal, headers: { Accept: 'application/json' } });
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        await response.body?.cancel();
-        const location = response.headers.get('location');
-        if (!location) return { status: 'unavailable', reason: 'Compatibility metadata redirect has no location.' };
-        url = new URL(location, url);
-        continue;
-      }
-      if (!response.ok || !response.body) {
-        await response.body?.cancel();
-        return { status: 'unavailable', reason: `Compatibility metadata HTTP ${response.status}.` };
-      }
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let size = 0;
-      let text = '';
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          size += value.byteLength;
-          if (size > MAX_METADATA_BYTES) {
-            await reader.cancel();
-            return { status: 'unavailable', reason: 'Compatibility metadata exceeds its size limit.' };
-          }
-          text += decoder.decode(value, { stream: true });
-        }
-        text += decoder.decode();
-      } finally {
-        reader.releaseLock();
-      }
-      const parsed: unknown = JSON.parse(text);
-      const manifest = parseReleaseCompatibility(parsed, version);
-      return manifest
-        ? { status: 'available', manifest }
-        : { status: 'unavailable', reason: 'Invalid compatibility metadata.' };
-    }
-    return { status: 'unavailable', reason: 'Too many compatibility metadata redirects.' };
+    const response = await fetchTrusted(url, {
+      hosts: MONKY_RELEASE_HOSTS, signal, request, headers: { Accept: 'application/json' },
+    });
+    const parsed: unknown = JSON.parse(await readLimitedText(response, MAX_METADATA_BYTES));
+    const manifest = parseReleaseCompatibility(parsed, version);
+    return manifest
+      ? { status: 'available', manifest }
+      : { status: 'unavailable', reason: 'Invalid compatibility metadata.' };
   } catch (error) {
-    return {
-      status: 'unavailable',
-      reason: error instanceof SyntaxError ? 'Invalid compatibility metadata JSON.'
-        : cancellation?.aborted ? 'Compatibility metadata request cancelled.'
-          : timeout.aborted ? 'Compatibility metadata request timed out.' : 'Compatibility metadata request failed.',
-    };
+    return { status: 'unavailable', reason: compatibilityFailure(error, timeout, cancellation) };
   }
+}
+
+function compatibilityFailure(error: unknown, timeout: AbortSignal, cancellation?: AbortSignal): string {
+  if (error instanceof TrustedFetchError) {
+    switch (error.failure) {
+      case 'untrusted': return 'Untrusted compatibility metadata location.';
+      case 'redirect-missing': return 'Compatibility metadata redirect has no location.';
+      case 'redirects': return 'Too many compatibility metadata redirects.';
+      case 'too-large': return 'Compatibility metadata exceeds its size limit.';
+      case 'http': return `Compatibility metadata HTTP ${error.status}.`;
+    }
+  }
+  return error instanceof SyntaxError ? 'Invalid compatibility metadata JSON.'
+    : cancellation?.aborted ? 'Compatibility metadata request cancelled.'
+      : timeout.aborted ? 'Compatibility metadata request timed out.' : 'Compatibility metadata request failed.';
 }

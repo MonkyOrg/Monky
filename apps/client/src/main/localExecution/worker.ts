@@ -8,8 +8,9 @@ import {
 import { LIMITS, LOCAL_EXECUTION_RUNTIME_LIMITS, localPlaylistResultFitsSpec } from '@monky/shared';
 import type { LocalToolPaths } from './LocalTools';
 import { LocalExecutionError } from './errors';
+import { workerDirectories } from './workerEnvironment';
 import {
-  parseWorkerCommand, workerDeferred, workerDirectories, workerError, workerId, workerResult, workerVersion,
+  parseWorkerCommand, workerDeferred, workerError, workerId, workerResult, workerVersion,
   WORKER_LIMITS, type WorkerOutcome, type WorkerReply, type WorkerStart,
 } from './workerProtocol';
 

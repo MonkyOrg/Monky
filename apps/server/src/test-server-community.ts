@@ -3,8 +3,9 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_PERMISSIONS, MessageType, NATIVE_POLL_VOTER_PREVIEW_LIMIT, PROTOCOL_VERSION, Permission, ProtocolErrorCode, createProtocolOffer, eventTimeInZone, eventOccurrenceStart, eventSaveSchema, eventInterestedListResultSchema, eventResultSchema, type EventSave, type NativePollEdit } from '@monky/shared';
+import { DEFAULT_PERMISSIONS, MessageType, NATIVE_POLL_VOTER_PREVIEW_LIMIT, PROTOCOL_VERSION, Permission, ProtocolErrorCode, createProtocolOffer, eventTimeInZone, eventOccurrenceStart, eventSaveSchema, eventInterestedListResultSchema, eventResultSchema, type EventSave, type LogEntry, type NativePollEdit } from '@monky/shared';
 import { CommunityService, CommunityError } from './application/services/CommunityService';
+import { Logger } from './infrastructure/logger/Logger';
 import { BotSelectorService } from './application/services/BotSelectorService';
 import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
 import { SqliteCommunityRepository } from './infrastructure/database/SqliteCommunityRepository';
@@ -1051,6 +1052,33 @@ test('native polls accept several answers atomically and retain staged carousel 
   assert.equal(voted.payload.totalVotes, 1);
   assert.deepEqual(records(voted.payload.options).map(option => option.votes), [1, 1]);
   assert.ok(voted.payload.closedAt);
+});
+
+test('a disk failure while keeping poll images is logged, never shown with its server path (S-APP-8)', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Poll owner');
+  const channelId = text(records(record(owner.auth.payload.server).channels)
+    .find(channel => channel.type === 'TEXT')?.id);
+  const uploaded = await owner.peer.request(MessageType.COMMUNITY_IMAGE_UPLOAD, { channelId, imageData: PNG_DATA });
+  const where = path.join(f.dataDir, 'avatars');
+  const rename = f.avatars.renameAvatar;
+  f.avatars.renameAvatar = () => {
+    throw Object.assign(new Error(`EPERM: operation not permitted, rename '${where}'`), { code: 'EPERM' });
+  };
+  t.after(() => { f.avatars.renameAvatar = rename; });
+  const logged: LogEntry[] = [];
+  t.after(Logger.subscribe(entry => { logged.push(entry); }));
+
+  const refused = await owner.peer.request(MessageType.POLL_CREATE, {
+    channelId, clientMessageId: 'disk-failure-poll', question: 'Keep it?', maxVoters: 5,
+    options: [{ label: 'Yes', emoji: null }, { label: 'No', emoji: null }], imageAssetRefs: [text(uploaded.payload.ref)],
+  });
+  assert.equal(refused.type, MessageType.SERVER_ERROR);
+  assert.equal(refused.payload.code, ProtocolErrorCode.BAD_REQUEST);
+  assert.equal(refused.payload.message, 'Could not store image.');
+  assert.ok(!JSON.stringify(refused.payload).includes(f.dataDir), 'BAD_REQUEST words are shown to the person');
+  assert.ok(logged.some(entry => entry.level === 'ERROR' && entry.message.includes(where)), 'the operator still sees it');
 });
 
 test('poll votes toggle per answer, keep voter order and never reveal anonymous voters', async t => {

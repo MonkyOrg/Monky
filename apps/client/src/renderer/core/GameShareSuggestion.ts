@@ -47,7 +47,7 @@ export class GameShareSuggestion {
   public start(): void {
     this.activity = gamePresence.current;
     this.unbind.push(
-      appEvents.on<UserActivity | null>('game_presence.changed', (activity) => {
+      appEvents.on('game_presence.changed', (activity) => {
         this.activity = activity;
         this.render();
       }),

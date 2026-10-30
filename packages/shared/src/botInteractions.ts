@@ -3,7 +3,7 @@ import { communityImageAssetRefSchema } from './nativePolls.js';
 import { LIMITS } from './constants.js';
 import { botMessageLocalizationsSchema } from './botMessages.js';
 import { botCarouselPresentationSchema, botMessageComponentInputSchema } from './botCarousels.js';
-import { botCapabilitiesSchema, botPermissionsSchema } from './botPermissions.js';
+import { botCapabilitiesSchema, botPermissionsSchema, type BotCapability } from './botPermissions.js';
 import type { CommandOption } from './models.js';
 import {
   commandCallerContextSchema,
@@ -434,17 +434,23 @@ export const commandDefinitionsSchema = z.array(commandDefinitionSchema).max(LIM
     }
   });
 
+/** Capabilities a bot must request to register these commands: the server and the SDK apply this one rule. */
+export function requiredCommandCapabilities(
+  commands: readonly { downloadsSound?: boolean; localCapabilities?: readonly unknown[] }[],
+): BotCapability[] {
+  return [
+    ...(commands.length ? ['commands'] as const : []),
+    ...(commands.some((command) => command.downloadsSound) ? ['sound_download'] as const : []),
+    ...(commands.some((command) => command.localCapabilities?.length) ? ['local_execution'] as const : []),
+  ];
+}
+
 export const commandRegisterSchema = z.object({
   requestedCapabilities: botCapabilitiesSchema,
   commands: commandDefinitionsSchema,
   settings: botSettingsDefinitionSchema.optional(),
 }).strict().superRefine((value, ctx) => {
-  const required = [
-    ...(value.commands.length ? ['commands'] as const : []),
-    ...(value.commands.some((command) => command.downloadsSound) ? ['sound_download'] as const : []),
-    ...(value.commands.some((command) => command.localCapabilities?.length) ? ['local_execution'] as const : []),
-  ];
-  for (const capability of required) {
+  for (const capability of requiredCommandCapabilities(value.commands)) {
     if (!value.requestedCapabilities.includes(capability)) {
       ctx.addIssue({ code: 'custom', message: `Commands require the declared capability: ${capability}`, path: ['requestedCapabilities'] });
     }

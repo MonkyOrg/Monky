@@ -438,7 +438,7 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
   const app = new VoiceRejoinTestApp();
   app.setupGlobalEventListeners();
   settingsStore.noiseSuppressionMode = 'rnnoise';
-  webRtcManager.rtcConfig = { iceServers: [], iceCandidatePoolSize: 4 };
+  webRtcManager.p2p.rtcConfig = { iceServers: [], iceCandidatePoolSize: 4 };
   await openServerSession('127.0.0.1', port, { clientId: 'fixture', publicKey: 'fixture' }, 'Listener');
   const session = sessionManager.getActive();
   let voiceProbe = null;
@@ -454,7 +454,7 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
   const restoreNativeTrace = [];
   if (traceNative) {
     const record = (operation, subject, argument) => {
-      const peer = [...webRtcManager.peers.values()].find(entry => entry.pc === subject
+      const peer = [...webRtcManager.p2p.peers.values()].find(entry => entry.pc === subject
         || entry.pc.getSenders().includes(subject) || entry.pc.getTransceivers().includes(subject));
       console.debug('VOICE_NATIVE_STEP ' + JSON.stringify({
         operation, argument, peer: peer?.peerSessionId,
@@ -559,15 +559,16 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
     },
     async leave() {
       disposeVoiceProbe();
-      previousPeers = [...webRtcManager.peers.values()];
+      previousPeers = [...webRtcManager.p2p.peers.values()];
       previousTracks = [
         ...(audioProcessor.getLocalAudioStream()?.getTracks() ?? []),
         ...(audioProcessor.getRawMicrophoneStream()?.getTracks() ?? []),
-        ...[...webRtcManager.peers.values()].flatMap(peer => peer.remoteStream.getTracks()),
+        ...[...webRtcManager.p2p.peers.values()].flatMap(peer => peer.pc.getReceivers().map(receiver => receiver.track)),
       ];
       previousContexts = [audioProcessor.audioContext, ...webRtcManager.mediaRouter.audioContexts.values()].filter(Boolean);
-      previousUnmuteCallbacks = [...webRtcManager.peers.values()].flatMap(peer =>
-        peer.remoteStream.getAudioTracks().filter(track => track.onunmute).map(track =>
+      previousUnmuteCallbacks = [...webRtcManager.p2p.peers.values()].flatMap(peer =>
+        peer.pc.getReceivers().map(receiver => receiver.track)
+          .filter(track => track.kind === 'audio' && track.onunmute).map(track =>
           track.onunmute.bind(track)));
       const leave = document.getElementById('sidebar-btn-leave-voice');
       if (!leave) throw new Error('Actual leave-voice control is missing');
@@ -576,7 +577,7 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
       for (const onUnmute of previousUnmuteCallbacks) onUnmute(new Event('unmute'));
     },
     async receiving() {
-      const peer = webRtcManager.peers.get('bot:fixture');
+      const peer = webRtcManager.p2p.peers.get('bot:fixture');
       if (!peer || peer.pc.connectionState !== 'connected') return false;
       const reports = await peer.pc.getStats();
       return [...reports.values()].some(report => report.type === 'inbound-rtp'
@@ -584,7 +585,7 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
         && this.voiceRms() > 0.005;
     },
     noPublicationToBot() {
-      const peer = webRtcManager.peers.get('bot:fixture');
+      const peer = webRtcManager.p2p.peers.get('bot:fixture');
       return peer?.receiveOnly === true && peer.pc.getSenders().every(sender => sender.track === null)
         && peer.pc.getTransceivers().every(transceiver =>
           transceiver.direction === 'recvonly' || transceiver.direction === 'inactive');
@@ -608,14 +609,14 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
       }
     },
     async receivedPackets() {
-      const peer = webRtcManager.peers.get('bot:fixture');
+      const peer = webRtcManager.p2p.peers.get('bot:fixture');
       if (!peer) return 0;
       const reports = await peer.pc.getStats();
       return [...reports.values()].filter(report => report.type === 'inbound-rtp' && report.kind === 'audio')
         .reduce((total, report) => total + report.packetsReceived, 0);
     },
     async audioDiagnostics() {
-      const peer = webRtcManager.peers.get('bot:fixture');
+      const peer = webRtcManager.p2p.peers.get('bot:fixture');
       const reports = peer ? await peer.pc.getStats() : new Map();
       const fields = ['packetsReceived', 'bytesReceived', 'totalAudioEnergy', 'audioLevel',
         'totalSamplesReceived', 'concealedSamples', 'silentConcealedSamples'];
@@ -684,7 +685,7 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
       await until(() => !document.querySelector('.user-context-menu'));
     },
     mediaReleased() {
-      return !audioProcessor.getLocalAudioStream() && webRtcManager.peers.size === 0
+      return !audioProcessor.getLocalAudioStream() && webRtcManager.p2p.peers.size === 0
         && webRtcManager.mediaRouter.voicePipelines.size === 0 && webRtcManager.mediaRouter.audioContexts.size === 0
         && webRtcManager.vadMonitor.remoteAudioVads.size === 0
         && document.querySelectorAll('audio[data-peer-session]').length === 0

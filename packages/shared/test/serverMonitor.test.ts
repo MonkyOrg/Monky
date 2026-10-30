@@ -63,6 +63,16 @@ test('remote snapshots expose an explicit metrics allowlist and reject private h
   ]) assert.equal(serverMonitorSnapshotSchema.safeParse(payload).success, false);
 });
 
+test('a category added by a newer server is shown, while anything that is not a bare identifier is refused', () => {
+  const withCategory = (category: string) => ({ ...snapshot, entries: [{ ...snapshot.entries[0], category }] });
+  for (const category of ['SCHEDULER', 'LOCAL_EXECUTION', 'X', 'A'.repeat(32)]) {
+    assert.deepEqual(serverMonitorSnapshotSchema.parse(withCategory(category)), withCategory(category));
+  }
+  for (const category of ['', 'network', 'A'.repeat(33), 'BOT\nERROR', '<b>BOT</b>', 'BOT 1']) {
+    assert.equal(serverMonitorSnapshotSchema.safeParse(withCategory(category)).success, false, category);
+  }
+});
+
 test('snapshot delivery is bounded, ordered and cannot move a cursor behind its entries', () => {
   const bounded = {
     ...snapshot, cursor: SERVER_MONITOR_LIMITS.MAX_BATCH_ENTRIES,

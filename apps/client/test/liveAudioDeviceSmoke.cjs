@@ -225,7 +225,7 @@ async function runLiveAudioDeviceSmoke() {
     const pc = new RTCPeerConnection();
     peerConnections.push(pc);
     const sender = pc.addTrack(rtc.localAudioTrack, audio.getLocalAudioStream());
-    rtc.peers.set('fixture-peer', { pc, audioSender: sender });
+    rtc.p2p.peers.set('fixture-peer', { pc, audioSender: sender });
     const rawPrevious = rtc.localAudioTrack;
     await devices.selectAudioDevice('input', 'raw-next');
     check(sender.track === audio.getLocalAudioStream().getAudioTracks()[0] && rtc.localAudioTrack === sender.track
@@ -235,26 +235,26 @@ async function runLiveAudioDeviceSmoke() {
     peerConnections.push(badPc);
     const badSender = badPc.addTrack(kept, new MediaStream([kept]));
     badSender.replaceTrack = async () => { throw new DOMException('Replacement failed', 'InvalidModificationError'); };
-    rtc.peers.set('failing-peer', { pc: badPc, audioSender: badSender });
+    rtc.p2p.peers.set('failing-peer', { pc: badPc, audioSender: badSender });
     await reject(devices.selectAudioDevice('input', 'failed-raw'), 'InvalidModificationError', 'RTP replacement errors propagate');
     check(sender.track === kept && rtc.localAudioTrack === kept && kept.readyState === 'live' && allStopped(captures.at(-1)),
       'Partial RTP replacement rolls back successful senders and discards the new capture');
-    rtc.peers.clear();
+    rtc.p2p.peers.clear();
     const wasSfu = rtc.isSfuMode;
-    const replaceSfu = rtc.sfuEngine.replaceTrack;
+    const replaceSfu = rtc.sfu.engine.replaceTrack;
     const replacements = [];
     rtc.isSfuMode = () => true;
-    rtc.sfuEngine.replaceTrack = async (key, track) => { replacements.push({ key, track }); return true; };
+    rtc.sfu.engine.replaceTrack = async (key, track) => { replacements.push({ key, track }); return true; };
     await devices.selectAudioDevice('input', 'sfu-raw');
     check(replacements.at(-1).key === 'mic' && replacements.at(-1).track === audio.getLocalAudioStream().getAudioTracks()[0],
       'Raw SFU replacement updates only the existing microphone producer');
     const sfuKept = audio.getRawMicrophoneStream();
-    rtc.sfuEngine.replaceTrack = async () => false;
+    rtc.sfu.engine.replaceTrack = async () => false;
     await reject(devices.selectAudioDevice('input', 'failed-sfu'), 'Error', 'Failed SFU replacement rejects selection');
     check(audio.getRawMicrophoneStream() === sfuKept && !allStopped(sfuKept) && allStopped(captures.at(-1)),
       'Failed SFU replacement keeps prior microphone and releases candidate');
     rtc.isSfuMode = wasSfu;
-    rtc.sfuEngine.replaceTrack = replaceSfu;
+    rtc.sfu.engine.replaceTrack = replaceSfu;
     audio.stopMicrophone();
 
     // Join remains receive-only after both requested and default capture fail.
@@ -265,7 +265,7 @@ async function runLiveAudioDeviceSmoke() {
     const recoveryPc = new RTCPeerConnection();
     peerConnections.push(recoveryPc);
     const recoverySender = recoveryPc.addTransceiver('audio', { direction: 'sendrecv' }).sender;
-    rtc.peers.set('receive-only', { pc: recoveryPc });
+    rtc.p2p.peers.set('receive-only', { pc: recoveryPc });
     const failedPreference = settings.selectedMicrophoneId;
     await reject(devices.selectAudioDevice('input', 'still-missing'), 'NotFoundError', 'Recovery captures the chosen device strictly');
     check(!audio.getRawMicrophoneStream() && settings.selectedMicrophoneId === failedPreference && !recoverySender.track,
@@ -323,13 +323,13 @@ async function runLiveAudioDeviceSmoke() {
     peerConnections.push(recoveryFailurePc);
     const recoveryFailureSender = recoveryFailurePc.addTransceiver('audio', { direction: 'sendrecv' }).sender;
     recoveryFailureSender.replaceTrack = async () => { throw new DOMException('Cannot publish', 'InvalidModificationError'); };
-    rtc.peers.set('recovery-failure', { pc: recoveryFailurePc, audioSender: recoveryFailureSender });
+    rtc.p2p.peers.set('recovery-failure', { pc: recoveryFailurePc, audioSender: recoveryFailureSender });
     const beforeRecoveryFailure = settings.selectedMicrophoneId;
     await reject(devices.selectAudioDevice('input', 'publication-failure'), 'InvalidModificationError', 'Initial P2P publication failure propagates');
     check(!recoverySender.track && !rtc.localAudioTrack && !audio.getLocalAudioStream() && !audio.audioContext
       && allStopped(captures.at(-1)) && settings.selectedMicrophoneId === beforeRecoveryFailure,
       'Initial publication rollback detaches already-updated peers and releases the whole graph');
-    rtc.peers.delete('recovery-failure');
+    rtc.p2p.peers.delete('recovery-failure');
 
     const publishMicrophone = rtc.replaceMicrophoneTrack;
     const commitAbort = new AbortController();
@@ -401,7 +401,7 @@ async function runLiveAudioDeviceSmoke() {
     check(allStopped(firstRecoveryStream) && audio.getRawMicrophoneStream() === lastRecoveryStream
       && recoverySender.track === audio.getLocalAudioStream().getAudioTracks()[0], 'Late older recovery cannot replace the latest published graph');
     audio.stopMicrophone();
-    rtc.peers.clear();
+    rtc.p2p.peers.clear();
     rtc.localAudioTrack = null;
     navigator.mediaDevices.getUserMedia = capture;
 
@@ -418,7 +418,7 @@ async function runLiveAudioDeviceSmoke() {
         await new Promise(resolve => { finishPublishing = resolve; });
       }
     };
-    rtc.peers.set('receive-only', { pc: recoveryPc });
+    rtc.p2p.peers.set('receive-only', { pc: recoveryPc });
     const supersededPublication = applyAudioDevice('input', 'superseded-publication');
     const supersededPublicationCheck = reject(supersededPublication, 'AbortError', 'A newer selection cancels an in-flight initial publication');
     await publishing;
@@ -431,11 +431,11 @@ async function runLiveAudioDeviceSmoke() {
     recoverySender.replaceTrack = actualReplace;
     audio.stopMicrophone();
     await recoverySender.replaceTrack(null);
-    rtc.peers.clear();
+    rtc.p2p.peers.clear();
     rtc.localAudioTrack = null;
 
     // Exercise real SFU producer creation/replacement; stub only its transport.
-    const engine = rtc.sfuEngine;
+    const engine = rtc.sfu.engine;
     const engineState = { sendTransport: engine.sendTransport, recvTransport: engine.recvTransport,
       device: engine.device, isInitialized: engine.isInitialized };
     const producers = [];
@@ -562,12 +562,13 @@ async function runLiveAudioDeviceSmoke() {
     Object.defineProperty(AudioContext.prototype, 'sinkId', {
       configurable: true, get() { return sinkByContext.get(this) ?? nativeContextSink.call(this); },
     });
+    const { routeChatMedia } = await import('/core/ChatMediaOutput.ts');
     const boardAudio = new Audio();
     const chatVideo = document.createElement('video');
-    chatVideo.dataset.audioOutput = 'media';
     const lightboxVideo = document.createElement('video');
-    lightboxVideo.dataset.audioOutput = 'media';
     document.body.append(chatVideo, lightboxVideo);
+    // Chat players join the media output the way the chat and the lightbox mount them.
+    await Promise.all([routeChatMedia(chatVideo), routeChatMedia(lightboxVideo)]);
     const router = rtc.mediaRouter;
     const peerAudio = router.ensureVoiceAudioElement('peer', source.stream);
     router.routeScreenAudioTrack('peer', source.stream.getAudioTracks()[0]);
@@ -576,24 +577,30 @@ async function runLiveAudioDeviceSmoke() {
     const voiceContext = router.audioContexts.get('voice');
     const screenContext = router.audioContexts.get('screen');
     effects.toneCtx = new AudioContext();
-    soundboard.activePlaybacks.set('board', { audio: boardAudio });
+    // A sound in progress keeps the soundboard graph open; its context is the soundboard's only output.
+    const boardPlayback = new AbortController();
+    await soundboard.audioOutput.connect(boardAudio, boardPlayback.signal);
+    const boardContext = soundboard.audioOutput.graph.context;
     settings.selectedSpeakerId = '';
     await devices.selectAudioDevice('output', 'speaker');
-    const outputs = [boardAudio, chatVideo, lightboxVideo, ...Object.values(effects.audioMap)];
-    check(outputs.every(element => element.sinkId === 'speaker') && settings.selectedSpeakerId === 'speaker',
-      'Specific speaker is applied to native media, effects and soundboard before saving');
+    const outputs = [chatVideo, lightboxVideo, ...Object.values(effects.audioMap)];
+    check(outputs.every(element => element.sinkId === 'speaker') && boardContext.sinkId === 'speaker'
+      && settings.selectedSpeakerId === 'speaker', 'Specific speaker is applied to native media, effects and soundboard before saving');
+    check(boardAudio.sinkId === '' && !sinkCalls.some(({ element }) => element === boardAudio),
+      'A soundboard element is never routed itself: the graph that captures it picks the device');
     check(sinkByContext.get(voiceContext) === 'speaker' && sinkByContext.get(screenContext) === 'speaker' && sinkByContext.get(effects.toneCtx) === 'speaker',
       'Voice and screen playback at 100%, plus generated tones, follow selected output');
     check(peerAudio.volume === 0 && screenAudio.volume === 0
       && peerAudio.sinkId === 'speaker' && screenAudio.sinkId === 'speaker',
       'Remote decoder elements stay silent and align their shared echo-reference device with voice');
     await devices.selectAudioDevice('output', '');
-    check(outputs.every(element => element.sinkId === '') && settings.selectedSpeakerId === '', 'Returning to system default resets every active element');
+    check(outputs.every(element => element.sinkId === '') && boardContext.sinkId === '' && settings.selectedSpeakerId === '',
+      'Returning to system default resets every active element');
     check(sinkByContext.get(voiceContext) === '' && sinkByContext.get(screenContext) === '' && sinkByContext.get(effects.toneCtx) === '', 'Default also resets all output AudioContexts');
     failedContextSinks.set(screenContext, 'broken-speaker');
     await reject(devices.selectAudioDevice('output', 'broken-speaker'), 'NotFoundError', 'Active sink failure rejects even after preflight succeeds');
     check(settings.selectedSpeakerId === '' && outputs.every(element => element.sinkId === '')
-      && voiceContext.sinkId === '' && screenContext.sinkId === '',
+      && voiceContext.sinkId === '' && screenContext.sinkId === '' && boardContext.sinkId === '',
       'Partial speaker switch rolls back all output contexts and keeps previous preference');
     check(contextSinkCalls.some(({ context, id }) => context === voiceContext && id === ''),
       'Default is an actual context setSinkId call, not a skipped empty ID');
@@ -605,8 +612,29 @@ async function runLiveAudioDeviceSmoke() {
     };
     await reject(devices.selectAudioDevice('output', 'cancel-speaker', outputAbort.signal), 'AbortError', 'Closing output picker cancels an awaited sink change');
     check(settings.selectedSpeakerId === '' && outputs.every(element => element.sinkId === '')
-      && voiceContext.sinkId === '' && screenContext.sinkId === '', 'Cancelled output selection restores active sinks');
+      && voiceContext.sinkId === '' && screenContext.sinkId === '' && boardContext.sinkId === '',
+      'Cancelled output selection restores active sinks');
     voiceContext.setSinkId = voiceSetSink;
+    // A player that starts while a selection is still moving the others joins the device being selected.
+    let releaseVoice = null;
+    voiceContext.setSinkId = async function(id) {
+      if (id === 'joining-speaker') await new Promise(resolve => { releaseVoice = resolve; });
+      return voiceSetSink.call(this, id);
+    };
+    const joining = devices.selectAudioDevice('output', 'joining-speaker');
+    for (let attempt = 0; attempt < 100 && !releaseVoice; attempt++) await tick();
+    const lateVideo = document.createElement('video');
+    document.body.append(lateVideo);
+    await routeChatMedia(lateVideo);
+    check(Boolean(releaseVoice) && lateVideo.sinkId === 'joining-speaker' && settings.selectedSpeakerId === '',
+      'A player that starts mid-selection already uses the device being selected, before it is saved');
+    releaseVoice();
+    await joining;
+    voiceContext.setSinkId = voiceSetSink;
+    check(settings.selectedSpeakerId === 'joining-speaker' && lateVideo.sinkId === 'joining-speaker' && boardContext.sinkId === 'joining-speaker',
+      'The finished selection keeps the late player with every other one');
+    lateVideo.remove();
+    await devices.selectAudioDevice('output', '');
     const advanced = {
       selectedSpeakerId: 'general-output', advancedAudioOutputs: true,
       audioOutputDevices: { voice: 'voice-output', screen: 'screen-output', media: 'media-output' },
@@ -619,7 +647,7 @@ async function runLiveAudioDeviceSmoke() {
       'Every remote voice and screen volume uses independent output contexts');
     check(peerAudio.sinkId === 'voice-output' && screenAudio.sinkId === 'voice-output',
       'The native shared renderer follows the voice device even when screen speakers differ');
-    check(boardAudio.sinkId === 'general-output' && Object.values(effects.audioMap).every(element => element.sinkId === 'general-output'),
+    check(boardContext.sinkId === 'general-output' && Object.values(effects.audioMap).every(element => element.sinkId === 'general-output'),
       'Soundboard and alerts remain on the general output');
     await devices.selectAudioDevice('output', 'new-general');
     check(voiceContext.sinkId === 'voice-output' && screenContext.sinkId === 'screen-output' && chatVideo.sinkId === 'media-output',
@@ -645,7 +673,7 @@ async function runLiveAudioDeviceSmoke() {
       selectedSpeakerId: settings.selectedSpeakerId, advancedAudioOutputs: false,
       audioOutputDevices: { ...settings.audioOutputDevices },
     });
-    check(outputs.every(element => element.sinkId === 'new-general')
+    check(outputs.every(element => element.sinkId === 'new-general') && boardContext.sinkId === 'new-general'
       && voiceContext.sinkId === 'new-general' && screenContext.sinkId === 'new-general',
       'Disabling advanced outputs restores general routing everywhere');
     check(settings.audioOutputDevices.voice === 'voice-output' && settings.audioOutputDevices.screen === 'screen-output',
@@ -716,7 +744,7 @@ async function runLiveAudioDeviceSmoke() {
       for (let attempt = 0; attempt < 100 && outputReset.disabled; attempt++) await tick();
       check(settings.selectedSpeakerId === '' && !settings.advancedAudioOutputs
         && Object.values(settings.audioOutputDevices).every(id => id === null), 'Explicit recovery resets general output and every override together');
-      check(outputs.every(element => element.sinkId === '') && sinkByContext.get(voiceContext) === ''
+      check(outputs.every(element => element.sinkId === '') && boardContext.sinkId === '' && sinkByContext.get(voiceContext) === ''
         && sinkByContext.get(screenContext) === '', 'Recovery routes existing players and amplified categories to system default');
       check(outputReset.hidden && !panel.querySelector('#advanced-audio-output-status').textContent,
         'Successful recovery clears its error and hides the unnecessary reset action');
@@ -923,23 +951,22 @@ async function runLiveAudioDeviceSmoke() {
     delete settings.screenAudioVolumes['amplified-peer'];
     await devices.selectAudioDevice('output', 'new-general');
     boardPlays.length = 0;
-    const boardSink = HTMLMediaElement.prototype.setSinkId;
+    // A sound waits for the soundboard output to run before it plays.
+    const resumeBoard = boardContext.resume;
     let resolvePendingBoard;
-    HTMLMediaElement.prototype.setSinkId = async function(id) {
-      if (this.src.startsWith('data:audio/')) await new Promise(resolve => { resolvePendingBoard = resolve; });
-      return boardSink.call(this, id);
+    boardContext.resume = function() {
+      return new Promise(resolve => { resolvePendingBoard = resolve; }).then(() => resumeBoard.call(this));
     };
     const incoming = soundboard.handleIncomingSound({
       userId: 'pending-board', soundName: 'pending', audioBase64: 'AA==', mimeType: 'audio/wav',
     });
     for (let attempt = 0; attempt < 100 && !resolvePendingBoard; attempt++) await tick();
-    check(Boolean(resolvePendingBoard), 'Soundboard waits for output selection before playing');
+    check(Boolean(resolvePendingBoard), 'Soundboard waits for its output before playing');
     soundboard.stopSoundForUser('pending-board');
     resolvePendingBoard();
-    await incoming;
-    check(boardPlays.length === 0 && !soundboard.activePlaybacks.has('pending-board'),
-      'Stopping a sound during sink selection cannot start a late ghost playback');
-    HTMLMediaElement.prototype.setSinkId = boardSink;
+    check(await incoming === 'cancelled' && boardPlays.length === 0 && !soundboard.activePlaybacks.has('pending-board'),
+      'Stopping a sound while its output prepares cannot start a late ghost playback');
+    delete boardContext.resume;
     HTMLMediaElement.prototype.play = originalPlay;
     const previousApi = window.api;
     const previousFolder = settings.soundboardFolderPath;
@@ -984,12 +1011,13 @@ async function runLiveAudioDeviceSmoke() {
     effects.toneCtx = null;
     router.audioElements.clear();
     router.screenAudioElements.clear();
-    soundboard.activePlaybacks.clear();
+    boardPlayback.abort();
+    check(!soundboard.audioOutput.graph, 'The last sound leaving closes the soundboard output');
     return checks;
   } finally {
     unregister();
     audio.stopMicrophone();
-    rtc.peers.clear();
+    rtc.p2p.peers.clear();
     peerConnections.forEach(pc => pc.close());
     captures.forEach(stream => stream.getTracks().forEach(track => track.stop()));
     source.stream.getTracks().forEach(track => track.stop());

@@ -4,6 +4,13 @@
  */
 export function isSupported(): boolean;
 
+/**
+ * Why the compiled module did not load, or null when it did. Besides audio, Windows window, monitor,
+ * keyboard-layout and overlay-resize inspection depend on it: where this platform implements one of
+ * those functions, it then throws an `ERR_SCREEN_AUDIO_UNAVAILABLE` error whose `cause` is this error.
+ */
+export function getLoadError(): Error | null;
+
 /** Windows UI-thread only. A zero ratio removes the constraint; destruction also removes it. Dimensions are DIPs. */
 export function setWindowResizeAspect(handle: Buffer, ratio: number, extraWidth: number, extraHeight: number): void;
 
@@ -132,7 +139,7 @@ export interface WindowOwner {
 /**
  * Lists visible windows with the application that owns them. Only implemented on
  * macOS, where Electron leaves `desktopCapturer`'s `appIcon` empty (#455); other
- * platforms return an empty array.
+ * platforms return an empty array. Throws on macOS when the module did not load.
  */
 export function listWindowOwners(): WindowOwner[];
 
@@ -178,7 +185,8 @@ export function getMonitorState(deviceId: string): NativeMonitorInfo | null;
 /**
  * Lists top-level windows with their raw Win32 attributes. Only implemented on
  * Windows, where the WGC capturer both leaks overlay/tool windows and omits
- * minimized ones (#560); other platforms return an empty array.
+ * minimized ones (#560); other platforms return an empty array. Throws on Windows
+ * when the module did not load, like the monitor enumeration.
  */
 export function listWindows(): NativeWindowInfo[];
 

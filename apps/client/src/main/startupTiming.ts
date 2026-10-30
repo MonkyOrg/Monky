@@ -1,5 +1,6 @@
 import { performance } from 'perf_hooks';
 import { ipcMain, type BrowserWindow, type IpcMainEvent } from 'electron';
+import { APP_RENDERER_READY } from '@monky/shared';
 import type { ClientLogger } from './clientLogger';
 
 /**
@@ -22,7 +23,7 @@ export function markStartup(stage: MainStartupStage): void {
 export function reportStartupWhenPainted(window: BrowserWindow, logger: Pick<ClientLogger, 'write'>): void {
   if (reported) return;
   const contents = window.webContents;
-  const stop = (): void => { ipcMain.removeListener('app:renderer-ready', onPainted); };
+  const stop = (): void => { ipcMain.removeListener(APP_RENDERER_READY, onPainted); };
   const onPainted = (event: IpcMainEvent): void => {
     if (event.sender !== contents) return;
     stop();
@@ -36,6 +37,6 @@ export function reportStartupWhenPainted(window: BrowserWindow, logger: Pick<Cli
       data: { ...timings, painted: Math.round(performance.now()) },
     });
   };
-  ipcMain.on('app:renderer-ready', onPainted);
+  ipcMain.on(APP_RENDERER_READY, onPainted);
   window.once('closed', stop);
 }

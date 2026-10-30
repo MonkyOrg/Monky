@@ -2,292 +2,19 @@ import { contextBridge, ipcRenderer, sharedTexture } from 'electron';
 import { readFileSync } from 'node:fs';
 import type { NativeScreenPresentationController } from '@monky/screen-share/renderer';
 import * as nativeAudioProtocol from '@monky/shared';
-import { BOT_SCREEN_DOCUMENT_IPC, BOT_STORAGE_CHANGED, BOT_STORAGE_IPC, SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, EVENT_CALENDAR_IPC, HOSTING_SKILL_IPC, FILE_BATCH_DOWNLOAD_IPC, type BotScreenDocumentConsent, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
-import type {
-  BotDeviceStorageDecision, BotDeviceStorageDocumentState, BotDeviceStorageEntry, BotDeviceStorageRequest,
-  BotDeviceStorageResponse, BotDeviceStorageScope,
+import {
+  APP_RENDERER_READY, APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, AUDIO_PREVIEW_IPC, BOT_SCREEN_DOCUMENT_IPC, BOT_STORAGE_CHANGED,
+  BOT_STORAGE_IPC, CRASH_RECOVERY_IPC, DESKTOP_SOURCES_IPC, DEVELOPMENT_QA_IPC, DM_EVENT, DM_IPC, EDITOR_COMMAND_IPC,
+  EVENT_CALENDAR_IPC, FILE_BATCH_DOWNLOAD_IPC, HOSTING_SKILL_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC,
+  LOCAL_EXECUTION_TASK_FAILED, MEDIA_FOLDERS_IPC, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, SERVER_INVITE_AVAILABLE,
+  SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, SOUNDBOARD_FILES_IPC, UPDATER_IPC,
+  nativeScreenEventSchema,
+  type ConfiguredMediaFolders,
 } from '@monky/shared';
-import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
-import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, MEDIA_FOLDERS_IPC, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC, type ConfiguredMediaFolders } from '@monky/shared';
-import { DM_EVENT, DM_IPC, type DmApi, type DmEvent, type DmExportMode } from '@monky/shared';
-import type {
-  ActionShortcutBinding,
-  AudioPreviewCancellation,
-  AudioPreviewInput,
-  AudioPreviewResult,
-  AppIdentityImportOutcome,
-  AppIdentityResult,
-  AppIdentityStatus,
-  BackupCryptoResult,
-  ClientLogConfig,
-  ClientLogEntry,
-  DesktopSource,
-  DesktopSourcesOptions,
-  DesktopSourcePreview,
-  DesktopSourcePreviewsRequest,
-  DevelopmentQaConfig,
-  DevelopmentQaReport,
-  DiscoveredLanServer,
-  HostServerOptions,
-  HostServerStatus,
-  ImageSelectionResult,
-  LinkPreviewData,
-  LocalExecutionMutationResult,
-  LocalExecutionSnapshot,
-  LocalPermissionChange,
-  LocalToolId,
-  UserActivity,
-  LocalPreparationInput,
-  LocalPreparationResult,
-  LocalTaskStartInput,
-  LocalTaskStartResult,
-  LocalFrameReadInput,
-  LocalFrameReadResult,
-  LocalFrameProgress,
-  LocalRequestCancellation,
-  LocalTaskPause,
-  LocalConnectionState,
-  LocalTaskFailureEvent,
-  LogEntry,
-  OverlayBounds,
-  OverlayConfig,
-  OverlaySignal,
-  OverlaySignalPayload,
-  OverlaySyncState,
-  PttConfig,
-  PttKeyBinding,
-  ServerProbeResult,
-  ServerInviteResult,
-  ServerStats,
-  SoundboardShortcutBinding,
-  SoundboardSoundData,
-  SoundboardSoundEntry,
-  SoundboardDownloadAvailability,
-  SoundboardDownloadAuthorization,
-  SoundboardDownloadPermit,
-  SoundboardDownloadInput,
-  SoundboardDownloadCancellation,
-  SoundboardDownloadProgress,
-  SoundDownloadResult,
-  StickerData,
-  StickerEntry,
-  StickerSaveResult,
-  TrayVoiceStatus,
-  UpdateCheckResult,
-  UpdatePreflightResult,
-  UpdateOutcome,
-  ReleaseNotesResult,
-  ReleaseHistoryResult,
-  RendererBootstrapFailure,
-  NativeScreenCommand,
-  NativeScreenCommandResult,
-  NativeScreenEvent,
-  NativeScreenReply,
-  NativeScreenPresentation,
-  NativeScreenPresentationSample,
-  UpdateSimpleResult,
-} from '@monky/shared';
+import type { ElectronApi } from './api';
+import { invoke, send, subscribe } from './ipc';
 
-export type { LinkPreviewData, OverlayBounds, OverlayConfig, OverlayMode, OverlayLayout, OverlayPosition, OverlayParticipantState, OverlaySyncState } from '@monky/shared';
-
-export interface BotStorageApi {
-  documentState: (url: string) => Promise<BotDeviceStorageDocumentState>;
-  documentRequest: (url: string, request: BotDeviceStorageRequest) => Promise<BotDeviceStorageResponse>;
-  list: () => Promise<BotDeviceStorageEntry[]>;
-  get: (scope: BotDeviceStorageScope) => Promise<BotDeviceStorageEntry>;
-  setDecision: (scope: BotDeviceStorageScope, decision: BotDeviceStorageDecision) => Promise<BotDeviceStorageEntry>;
-  setQuota: (scope: BotDeviceStorageScope, maxBytes: number) => Promise<BotDeviceStorageEntry>;
-  /** Deletes what the bot stored and keeps the preference. */
-  clear: (scopeId: string) => Promise<void>;
-  /** Deletes what the bot stored and the preferences of that server, account and bot. */
-  forget: (scopeId: string) => Promise<void>;
-  onChanged: (callback: (scopeId: string) => void) => () => void;
-}
-
-export interface ElectronApi {
-  createBotScreenDocument: (html: string, consent: BotScreenDocumentConsent) => Promise<string>;
-  removeBotScreenDocument: (url: string) => Promise<void>;
-  botStorage: BotStorageApi;
-  nativeScreenCommand: (command: NativeScreenCommand) => Promise<NativeScreenCommandResult>;
-  nativeScreenReply: (reply: NativeScreenReply) => Promise<void>;
-  onNativeScreenEvent: (callback: (event: NativeScreenEvent) => void) => () => void;
-  attachNativeScreenPresentation: (input: NativeScreenPresentation) => Promise<void>;
-  attachNativeScreenPreview: (input: NativeScreenPresentation) => Promise<void>;
-  stopNativeScreenPresentation: (presentationId: string) => Promise<void>;
-  sampleNativeScreenPresentation: (presentationId: string) => Promise<NativeScreenPresentationSample | null>;
-  onNativeScreenPresentationError: (callback: (value: { presentationId: string | null; message: string }) => void) => () => void;
-  takeServerInvite: () => Promise<ServerInviteResult | null>;
-  onServerInviteAvailable: (callback: () => void) => () => void;
-  getDevelopmentQaConfig: () => Promise<DevelopmentQaConfig | null>;
-  reportDevelopmentQaState: (report: DevelopmentQaReport) => Promise<boolean>;
-  startLanDiscovery: () => Promise<void>;
-  stopLanDiscovery: () => Promise<void>;
-  onLanDiscoveryFound: (cb: (server: DiscoveredLanServer) => void) => () => void;
-  onLanDiscoveryLost: (cb: (server: DiscoveredLanServer) => void) => () => void;
-  setLanguage: (language: string) => Promise<void>;
-  /** Whether this computer has a usable identity, none yet, or one that could not be opened. */
-  getIdentityStatus: () => Promise<AppIdentityStatus>;
-  /** Creates an identity when there is no readable one; an unreadable file is set aside, never deleted. */
-  createIdentity: () => Promise<AppIdentityResult>;
-  getIdentity: () => Promise<AppIdentityResult>;
-  getClientId: () => Promise<string>;
-  signChallenge: (nonceHex: string) => Promise<string>;
-  exportIdentity: (password: string, extras?: string, dmMode?: DmExportMode) => Promise<string>;
-  /**
-   * Imports an identity code. A code of another identity than the one in use answers `confirm-replace`
-   * without writing anything; calling again with `replace` set to that public key switches to it.
-   */
-  importIdentity: (exportedIdentity: string, password: string, replace?: string) => Promise<AppIdentityImportOutcome>;
-  /** Deletes the identity, friends and DMs from this computer, then relaunches Monky. */
-  logOut: () => Promise<{ success: boolean; error?: string }>;
-  dm: DmApi;
-  saveBackupFile: (contents: string, suggestedName: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
-  openBackupFile: () => Promise<{ success: boolean; contents?: string; error?: string }>;
-  encryptBackup: (contents: string, password: string) => Promise<BackupCryptoResult>;
-  decryptBackup: (payload: string, password: string) => Promise<BackupCryptoResult>;
-  hostServerStart: (options: HostServerOptions) => Promise<{ success: boolean; error?: string }>;
-  hostServerStop: (port: number) => Promise<{ success: boolean }>;
-  hostServerStatus: () => Promise<HostServerStatus>;
-  hostServerLogs: (port: number) => Promise<LogEntry[]>;
-  hostServerClearLogs: (port: number) => Promise<void>;
-  hostServerStats: (port: number) => Promise<ServerStats | null>;
-  hostServerDeleteData: (serverId: string) => Promise<{ success: boolean; error?: string }>;
-  onHostServerLog: (callback: (port: number, entry: LogEntry) => void) => () => void;
-  onHostServerStatusChanged: (callback: (status: HostServerStatus) => void) => () => void;
-  getDesktopSources: (options?: DesktopSourcesOptions) => Promise<DesktopSource[]>;
-  getDesktopSourcePreviews: (request: DesktopSourcePreviewsRequest) => Promise<DesktopSourcePreview[]>;
-  cancelDesktopSourcePreviews: () => Promise<void>;
-  prepareScreenShareWindow: (sourceId: string) => Promise<boolean>;
-  ensureScreenPermission: () => Promise<boolean>;
-  selectImageDialog: () => Promise<ImageSelectionResult | null>;
-  selectImagesDialog: (maxFiles: number) => Promise<ImageSelectionResult[]>;
-  selectSoundFile: () => Promise<string | null>;
-  selectSoundboardFolder: () => Promise<string | null>;
-  getDefaultSoundboardFolder: () => Promise<string | null>;
-  listSoundboardSounds: (folderPath: string) => Promise<SoundboardSoundEntry[]>;
-  readSoundboardSound: (filePath: string) => Promise<SoundboardSoundData | null>;
-  readSoundboardEdit: (input: IpcInvokeChannels['soundboard:edit-read']['args'][0]) => Promise<IpcInvokeChannels['soundboard:edit-read']['returnType']>;
-  openSoundboardEditor: (input: IpcInvokeChannels['soundboard:open-editor']['args'][0]) => Promise<IpcInvokeChannels['soundboard:open-editor']['returnType']>;
-  overwriteSoundboardAudio: (input: IpcInvokeChannels['soundboard:overwrite-audio']['args'][0]) => Promise<IpcInvokeChannels['soundboard:overwrite-audio']['returnType']>;
-  renameSoundboardFile: (input: IpcInvokeChannels['soundboard:rename-file']['args'][0]) => Promise<IpcInvokeChannels['soundboard:rename-file']['returnType']>;
-  deleteSoundboardFile: (input: IpcInvokeChannels['soundboard:delete-file']['args'][0]) => Promise<IpcInvokeChannels['soundboard:delete-file']['returnType']>;
-  saveSoundboardEdit: (input: IpcInvokeChannels['soundboard:save-edited-copy']['args'][0]) => Promise<IpcInvokeChannels['soundboard:save-edited-copy']['returnType']>;
-  soundDownloadAvailability: (configuredFolder: string) => Promise<SoundboardDownloadAvailability>;
-  confirmSoundboardFolder: (configuredFolder: string) => Promise<boolean>;
-  authorizeSoundDownload: (input: SoundboardDownloadAuthorization) => Promise<SoundboardDownloadPermit>;
-  downloadSound: (input: SoundboardDownloadInput) => Promise<SoundDownloadResult>;
-  cancelSoundDownload: (key: SoundboardDownloadCancellation) => Promise<boolean>;
-  onSoundDownloadProgress: (cb: (progress: SoundboardDownloadProgress) => void) => () => void;
-  loadAudioPreview: (input: AudioPreviewInput) => Promise<AudioPreviewResult>;
-  cancelAudioPreview: (input: AudioPreviewCancellation) => Promise<boolean>;
-  getLocalExecutionState: () => Promise<LocalExecutionSnapshot>;
-  setLocalExecutionPermission: (input: LocalPermissionChange) => Promise<LocalExecutionMutationResult>;
-  removeLocalTool: (tool: LocalToolId) => Promise<LocalExecutionMutationResult>;
-  clearLocalExecutionCache: () => Promise<LocalExecutionMutationResult>;
-  cancelLocalExecutionTask: (taskId: string) => Promise<LocalExecutionMutationResult>;
-  onLocalExecutionChanged: (cb: (snapshot: LocalExecutionSnapshot) => void) => () => void;
-  prepareLocalExecution: (input: LocalPreparationInput) => Promise<LocalPreparationResult>;
-  startLocalExecutionTask: (input: LocalTaskStartInput) => Promise<LocalTaskStartResult>;
-  readLocalExecutionFrames: (input: LocalFrameReadInput) => Promise<LocalFrameReadResult>;
-  acknowledgeLocalExecutionFrames: (input: LocalFrameProgress) => Promise<LocalExecutionMutationResult>;
-  cancelLocalExecutionRequest: (input: LocalRequestCancellation) => Promise<LocalExecutionMutationResult>;
-  setLocalExecutionPaused: (input: LocalTaskPause) => Promise<LocalExecutionMutationResult>;
-  setLocalExecutionConnection: (input: LocalConnectionState) => Promise<LocalExecutionMutationResult>;
-  onLocalExecutionTaskFailed: (cb: (failure: LocalTaskFailureEvent) => void) => () => void;
-  selectStickersFolder: () => Promise<string | null>;
-  listStickers: (folderPath: string) => Promise<StickerEntry[]>;
-  readSticker: (filePath: string) => Promise<StickerData | null>;
-  saveSticker: (folderPath: string, fileName: string, bytes: Uint8Array) => Promise<StickerSaveResult>;
-  registerSoundboardShortcuts: (shortcuts: SoundboardShortcutBinding[]) => Promise<boolean>;
-  onSoundboardShortcutTriggered: (cb: (soundName: string) => void) => () => void;
-  registerActionShortcuts: (shortcuts: ActionShortcutBinding[]) => Promise<boolean>;
-  setShortcutCapture: (active: boolean) => Promise<boolean>;
-  onActionShortcutTriggered: (cb: (action: string) => void) => () => void;
-  setPttConfig: (config: PttConfig) => Promise<boolean>;
-  startPttCapture: () => Promise<boolean>;
-  stopPttCapture: () => Promise<boolean>;
-  onPttStateChanged: (cb: (active: boolean) => void) => () => void;
-  onPttCaptured: (cb: (binding: PttKeyBinding) => void) => () => void;
-  minimize: () => Promise<void>;
-  openScreenPictureInPicture: (requestId: string, requireInactive: boolean, aspectRatio: number) => Promise<boolean>;
-  returnFromScreenPictureInPicture: () => Promise<void>;
-  onWindowInactive: (cb: () => void) => () => void;
-  onWindowActive: (cb: () => void) => () => void;
-  maximize: () => Promise<void>;
-  toggleMaximize: () => Promise<void>;
-  setWindowInServer: (inServer: boolean) => Promise<void>;
-  fitHomeWindowToContent: (contentHeight: number) => Promise<void>;
-  close: () => Promise<void>;
-  getAppVersion: () => Promise<string>;
-  signalRendererReady: () => void;
-  reportFatalBootstrap: (failure: RendererBootstrapFailure) => Promise<boolean>;
-  checkForUpdates: (requestId?: string) => Promise<UpdateCheckResult>;
-  downloadUpdate: (expectedVersion?: string, requestId?: string) => Promise<UpdateSimpleResult>;
-  cancelUpdate: (requestId: string) => Promise<UpdateSimpleResult>;
-  checkUpdateCompatibility: (version: string, requestId: string) => Promise<UpdatePreflightResult>;
-  installUpdate: () => Promise<UpdateSimpleResult>;
-  setUpdateChannel: (allowBeta: boolean) => Promise<UpdateSimpleResult>;
-  getUpdateOutcome: () => Promise<UpdateOutcome | null>;
-  getReleaseNotes: (tag?: string) => Promise<ReleaseNotesResult>;
-  getReleaseHistory: (page: number, before?: string) => Promise<ReleaseHistoryResult>;
-  onUpdateProgress: (cb: (percent: number) => void) => () => void;
-  onUpdateDownloaded: (cb: (info: { manual: boolean }) => void) => () => void;
-  onUpdateError: (cb: (message: string) => void) => () => void;
-  openExternal: (url: string) => Promise<{ success: boolean }>;
-  editorCommand: (command: EditorCommand) => Promise<{ success: boolean }>;
-  fetchLinkPreview: (url: string) => Promise<LinkPreviewData | null>;
-  downloadFile: (url: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
-  downloadFiles: (request: IpcInvokeChannels['app:download-files']['args'][0]) => Promise<IpcInvokeChannels['app:download-files']['returnType']>;
-  saveRecentSound: (input: IpcInvokeChannels['app:save-recent-sound']['args'][0]) => Promise<IpcInvokeChannels['app:save-recent-sound']['returnType']>;
-  saveCsvFile: (content: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
-  saveEventCalendar: (input: IpcInvokeChannels['community:save-event-calendar']['args'][0]) => Promise<IpcInvokeChannels['community:save-event-calendar']['returnType']>;
-  saveHostingSkill: (id: IpcInvokeChannels['onboarding:save-hosting-skill']['args'][0]) => Promise<IpcInvokeChannels['onboarding:save-hosting-skill']['returnType']>;
-  probeServer: (host: string, port: number) => Promise<ServerProbeResult>;
-  updateTrayVoiceStatus: (status: TrayVoiceStatus) => Promise<void>;
-  // Encerramento gracioso: sair das chamadas antes do processo morrer (#458)
-  onAppBeforeQuit: (cb: (request: AppShutdownRequest) => void) => () => void;
-  notifyLeaveComplete: (request: AppShutdownRequest) => Promise<void>;
-  onTrayToggleMute: (cb: () => void) => () => void;
-  onTrayToggleDeafen: (cb: () => void) => () => void;
-  onTrayLeaveCall: (cb: () => void) => () => void;
-  getAutoStart: () => Promise<boolean>;
-  setAutoStart: (enabled: boolean) => Promise<void>;
-  setMinimizeToTray: (enabled: boolean) => Promise<void>;
-  // Sobreposição de Tela (Overlay) (#169)
-  // Presença de jogo (#675)
-  setGamePresenceEnabled: (enabled: boolean) => Promise<void>;
-  getCurrentGameActivity: () => Promise<UserActivity | null>;
-  findGameWindows: () => Promise<string[]>;
-  /** Seconds since the last keyboard or mouse input in the whole system, for the AFK channel. */
-  getSystemIdleSeconds: () => Promise<number>;
-  onGamePresenceChanged: (cb: (activity: UserActivity | null) => void) => () => void;
-  openOverlay: (config: OverlayConfig) => Promise<{ success: boolean }>;
-  closeOverlay: () => Promise<{ success: boolean }>;
-  isOverlayOpen: () => Promise<boolean>;
-  getOverlayConfig: () => Promise<OverlayConfig | null>;
-  setOverlayConfig: (config: Partial<OverlayConfig>) => Promise<void>;
-  saveOverlayBounds: (bounds: OverlayBounds) => Promise<void>;
-  resetOverlayBounds: () => Promise<void>;
-  layoutOverlayCards: (layout: IpcInvokeChannels['overlay:layout-cards']['args'][0]) => Promise<OverlayBounds>;
-  sendOverlaySignal: (payload: OverlaySignalPayload) => Promise<void>;
-  sendOverlaySyncState: (state: OverlaySyncState) => Promise<void>;
-  onOverlayStateChanged: (cb: (isOpen: boolean) => void) => () => void;
-  onOverlayConfigUpdated: (cb: (config: OverlayConfig) => void) => () => void;
-  onOverlaySignalReceived: (cb: (signal: OverlaySignal) => void) => () => void;
-  onOverlaySyncStateReceived: (cb: (state: OverlaySyncState) => void) => () => void;
-  onOverlayCloseRequested: (cb: () => void) => () => void;
-  onOverlayHoverChanged: (cb: (hovered: boolean, point?: { x: number; y: number }) => void) => () => void;
-  onOverlayResizeStateChanged: (cb: (resizing: boolean) => void) => () => void;
-
-  // Client Logging (#444)
-  writeClientLog: (entry: ClientLogEntry) => Promise<void>;
-  getClientLogConfig: () => Promise<ClientLogConfig>;
-  setClientLogConfig: (config: Partial<ClientLogConfig>) => Promise<void>;
-  exportClientLogs: () => Promise<{ success: boolean; filePath?: string; error?: string }>;
-  getClientLogSize: () => Promise<number>;
-  clearClientLogs: () => Promise<void>;
-  platform: string;
-}
+export type { BotStorageApi, ElectronApi } from './api';
 
 const preparedQa = process.argv.includes('--monky-prepared-qa');
 
@@ -310,7 +37,7 @@ function reportConfiguredMediaFolders(): void {
     return typeof value === 'string' && value ? value : undefined;
   };
   const folders: ConfiguredMediaFolders = { soundboard: folder('soundboardFolderPath'), stickers: folder('stickersFolderPath') };
-  void ipcRenderer.invoke(MEDIA_FOLDERS_IPC.adopt, folders).catch((error: unknown) => {
+  void invoke(MEDIA_FOLDERS_IPC.adopt, folders).catch((error: unknown) => {
     console.warn('[MediaFolders] Could not report the configured sound and sticker folders:', error);
   });
 }
@@ -362,14 +89,10 @@ window.addEventListener('beforeunload', () => {
 const api: ElectronApi = {
   nativeScreenCommand: command => {
     if (command?.action === 'watch') prepareNativeAudio();
-    return ipcRenderer.invoke(NATIVE_SCREEN_IPC.invoke, command);
+    return invoke(NATIVE_SCREEN_IPC.invoke, command);
   },
-  nativeScreenReply: reply => ipcRenderer.invoke(NATIVE_SCREEN_IPC.reply, reply),
-  onNativeScreenEvent: callback => {
-    const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => callback(nativeScreenEventSchema.parse(value));
-    ipcRenderer.on(NATIVE_SCREEN_EVENT, listener);
-    return () => ipcRenderer.removeListener(NATIVE_SCREEN_EVENT, listener);
-  },
+  nativeScreenReply: reply => invoke(NATIVE_SCREEN_IPC.reply, reply),
+  onNativeScreenEvent: callback => subscribe(NATIVE_SCREEN_EVENT, event => callback(nativeScreenEventSchema.parse(event))),
   attachNativeScreenPresentation: input => presentationController().attach(input),
   attachNativeScreenPreview: input => presentationController().attachPreview(input),
   stopNativeScreenPresentation: presentationId => presentationController().stop(presentationId),
@@ -378,383 +101,217 @@ const api: ElectronApi = {
     nativePresentationErrors.add(callback);
     return () => { nativePresentationErrors.delete(callback); };
   },
-  getDevelopmentQaConfig: () => preparedQa ? ipcRenderer.invoke(DEVELOPMENT_QA_IPC.config) : Promise.resolve(null),
-  reportDevelopmentQaState: (report) => ipcRenderer.invoke(DEVELOPMENT_QA_IPC.report, report),
-  startLanDiscovery: () => preparedQa ? Promise.resolve() : ipcRenderer.invoke('lan:start'),
-  stopLanDiscovery: () => ipcRenderer.invoke('lan:stop'),
-  onLanDiscoveryFound: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, server: DiscoveredLanServer) => cb(server);
-    ipcRenderer.on('lan:found', listener);
-    return () => {
-      ipcRenderer.removeListener('lan:found', listener);
-    };
-  },
-  onLanDiscoveryLost: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, server: DiscoveredLanServer) => cb(server);
-    ipcRenderer.on('lan:lost', listener);
-    return () => {
-      ipcRenderer.removeListener('lan:lost', listener);
-    };
-  },
-  setLanguage: (language) => ipcRenderer.invoke('app:set-language', language),
-  getIdentityStatus: () => ipcRenderer.invoke('identity:status'),
-  createIdentity: () => ipcRenderer.invoke('identity:create'),
-  getIdentity: () => ipcRenderer.invoke('identity:get'),
-  getClientId: () => ipcRenderer.invoke('identity:get-client-id'),
-  signChallenge: (nonceHex) => ipcRenderer.invoke('identity:sign-challenge', nonceHex),
-  exportIdentity: (password, extras, dmMode) => ipcRenderer.invoke('identity:export', password, extras, dmMode),
-  importIdentity: (exportedIdentity, password, replace) =>
-    ipcRenderer.invoke('identity:import', exportedIdentity, password, replace),
-  logOut: () => ipcRenderer.invoke('identity:logout'),
+  getDevelopmentQaConfig: () => preparedQa ? invoke(DEVELOPMENT_QA_IPC.config) : Promise.resolve(null),
+  reportDevelopmentQaState: report => invoke(DEVELOPMENT_QA_IPC.report, report),
+  startLanDiscovery: () => preparedQa ? Promise.resolve() : invoke('lan:start'),
+  stopLanDiscovery: () => invoke('lan:stop'),
+  onLanDiscoveryFound: callback => subscribe('lan:found', callback),
+  onLanDiscoveryLost: callback => subscribe('lan:lost', callback),
+  setLanguage: language => invoke('app:set-language', language),
+  getIdentityStatus: () => invoke('identity:status'),
+  createIdentity: () => invoke('identity:create'),
+  getIdentity: () => invoke('identity:get'),
+  getClientId: () => invoke('identity:get-client-id'),
+  signChallenge: nonceHex => invoke('identity:sign-challenge', nonceHex),
+  exportIdentity: (password, extras, dmMode) => invoke('identity:export', password, extras, dmMode),
+  importIdentity: (exportedIdentity, password, replace) => invoke('identity:import', exportedIdentity, password, replace),
+  logOut: () => invoke('identity:logout'),
   dm: {
-    snapshot: () => ipcRenderer.invoke(DM_IPC.snapshot),
-    conversation: (peer, before, limit) => ipcRenderer.invoke(DM_IPC.conversation, peer, before ?? null, limit),
-    openConversation: peer => ipcRenderer.invoke(DM_IPC.openConversation, peer),
-    closeConversation: peer => ipcRenderer.invoke(DM_IPC.closeConversation, peer),
-    sendFriendRequest: (peer, nickname) => ipcRenderer.invoke(DM_IPC.sendFriendRequest, peer, nickname),
-    acceptFriend: peer => ipcRenderer.invoke(DM_IPC.acceptFriend, peer),
-    declineFriend: peer => ipcRenderer.invoke(DM_IPC.declineFriend, peer),
-    cancelFriendRequest: peer => ipcRenderer.invoke(DM_IPC.cancelFriendRequest, peer),
-    removeFriend: peer => ipcRenderer.invoke(DM_IPC.removeFriend, peer),
-    block: (peer, nickname) => ipcRenderer.invoke(DM_IPC.block, peer, nickname),
-    unblock: peer => ipcRenderer.invoke(DM_IPC.unblock, peer),
-    sendMessage: input => ipcRenderer.invoke(DM_IPC.sendMessage, input),
-    editMessage: (peer, messageId, content) => ipcRenderer.invoke(DM_IPC.editMessage, peer, messageId, content),
-    deleteMessage: (peer, messageId) => ipcRenderer.invoke(DM_IPC.deleteMessage, peer, messageId),
-    react: (peer, messageId, emoji, add) => ipcRenderer.invoke(DM_IPC.react, peer, messageId, emoji, add),
-    markRead: peer => ipcRenderer.invoke(DM_IPC.markRead, peer),
-    typing: peer => ipcRenderer.invoke(DM_IPC.typing, peer),
-    ingest: item => ipcRenderer.invoke(DM_IPC.ingest, item),
-    outgoing: (peers, force) => ipcRenderer.invoke(DM_IPC.outgoing, peers, force === true),
-    hello: (toFriends, announce) => ipcRenderer.invoke(DM_IPC.hello, toFriends, announce !== false),
-    helloTo: peer => ipcRenderer.invoke(DM_IPC.helloTo, peer),
-    pendingPeers: () => ipcRenderer.invoke(DM_IPC.pendingPeers),
-    observePeer: peer => ipcRenderer.invoke(DM_IPC.observePeer, peer),
-    setSelfNickname: nickname => ipcRenderer.invoke(DM_IPC.setSelfNickname, nickname),
-    setSelfProfile: input => ipcRenderer.invoke(DM_IPC.setSelfProfile, input),
-    updateSettings: settings => ipcRenderer.invoke(DM_IPC.updateSettings, settings),
-    readAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.readAttachment, peer, messageId, fileId),
-    saveAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.saveAttachment, peer, messageId, fileId),
-    retryAttachment: (peer, messageId, fileId) => ipcRenderer.invoke(DM_IPC.retryAttachment, peer, messageId, fileId),
-    onEvent: callback => {
-      const listener = (_event: Electron.IpcRendererEvent, value: DmEvent) => callback(value);
-      ipcRenderer.on(DM_EVENT, listener);
-      return () => { ipcRenderer.removeListener(DM_EVENT, listener); };
-    },
+    snapshot: () => invoke(DM_IPC.snapshot),
+    conversation: (peer, before, limit) => invoke(DM_IPC.conversation, peer, before ?? null, limit),
+    openConversation: peer => invoke(DM_IPC.openConversation, peer),
+    closeConversation: peer => invoke(DM_IPC.closeConversation, peer),
+    sendFriendRequest: (peer, nickname) => invoke(DM_IPC.sendFriendRequest, peer, nickname),
+    acceptFriend: peer => invoke(DM_IPC.acceptFriend, peer),
+    declineFriend: peer => invoke(DM_IPC.declineFriend, peer),
+    cancelFriendRequest: peer => invoke(DM_IPC.cancelFriendRequest, peer),
+    removeFriend: peer => invoke(DM_IPC.removeFriend, peer),
+    block: (peer, nickname) => invoke(DM_IPC.block, peer, nickname),
+    unblock: peer => invoke(DM_IPC.unblock, peer),
+    sendMessage: input => invoke(DM_IPC.sendMessage, input),
+    editMessage: (peer, messageId, content) => invoke(DM_IPC.editMessage, peer, messageId, content),
+    deleteMessage: (peer, messageId) => invoke(DM_IPC.deleteMessage, peer, messageId),
+    react: (peer, messageId, emoji, add) => invoke(DM_IPC.react, peer, messageId, emoji, add),
+    markRead: peer => invoke(DM_IPC.markRead, peer),
+    typing: peer => invoke(DM_IPC.typing, peer),
+    ingest: item => invoke(DM_IPC.ingest, item),
+    outgoing: (peers, force) => invoke(DM_IPC.outgoing, peers, force === true),
+    hello: (toFriends, announce) => invoke(DM_IPC.hello, toFriends, announce !== false),
+    helloTo: peer => invoke(DM_IPC.helloTo, peer),
+    pendingPeers: () => invoke(DM_IPC.pendingPeers),
+    observePeer: peer => invoke(DM_IPC.observePeer, peer),
+    setSelfNickname: nickname => invoke(DM_IPC.setSelfNickname, nickname),
+    setSelfProfile: input => invoke(DM_IPC.setSelfProfile, input),
+    updateSettings: settings => invoke(DM_IPC.updateSettings, settings),
+    readAttachment: (peer, messageId, fileId) => invoke(DM_IPC.readAttachment, peer, messageId, fileId),
+    saveAttachment: (peer, messageId, fileId) => invoke(DM_IPC.saveAttachment, peer, messageId, fileId),
+    retryAttachment: (peer, messageId, fileId) => invoke(DM_IPC.retryAttachment, peer, messageId, fileId),
+    onEvent: callback => subscribe(DM_EVENT, callback),
   },
-  saveBackupFile: (contents, suggestedName) => ipcRenderer.invoke('backup:save-file', contents, suggestedName),
-  openBackupFile: () => ipcRenderer.invoke('backup:open-file'),
-  takeServerInvite: () => ipcRenderer.invoke(SERVER_INVITE_IPC.take),
-  createBotScreenDocument: (html, consent) => ipcRenderer.invoke(BOT_SCREEN_DOCUMENT_IPC.create, html, consent),
-  removeBotScreenDocument: url => ipcRenderer.invoke(BOT_SCREEN_DOCUMENT_IPC.remove, url),
+  saveBackupFile: (contents, suggestedName) => invoke('backup:save-file', contents, suggestedName),
+  openBackupFile: () => invoke('backup:open-file'),
+  takeServerInvite: () => invoke(SERVER_INVITE_IPC.take),
+  createBotScreenDocument: (html, consent) => invoke(BOT_SCREEN_DOCUMENT_IPC.create, html, consent),
+  removeBotScreenDocument: url => invoke(BOT_SCREEN_DOCUMENT_IPC.remove, url),
   botStorage: {
-    documentState: url => ipcRenderer.invoke(BOT_STORAGE_IPC.documentState, url),
-    documentRequest: (url, request) => ipcRenderer.invoke(BOT_STORAGE_IPC.documentRequest, url, request),
-    list: () => ipcRenderer.invoke(BOT_STORAGE_IPC.list),
-    get: scope => ipcRenderer.invoke(BOT_STORAGE_IPC.get, scope),
-    setDecision: (scope, decision) => ipcRenderer.invoke(BOT_STORAGE_IPC.setDecision, { scope, decision }),
-    setQuota: (scope, maxBytes) => ipcRenderer.invoke(BOT_STORAGE_IPC.setQuota, { scope, maxBytes }),
-    clear: scopeId => ipcRenderer.invoke(BOT_STORAGE_IPC.clear, scopeId),
-    forget: scopeId => ipcRenderer.invoke(BOT_STORAGE_IPC.forget, scopeId),
-    onChanged: (callback) => {
-      const listener = (_event: Electron.IpcRendererEvent, scopeId: string) => callback(scopeId);
-      ipcRenderer.on(BOT_STORAGE_CHANGED, listener);
-      return () => ipcRenderer.removeListener(BOT_STORAGE_CHANGED, listener);
-    },
+    documentState: url => invoke(BOT_STORAGE_IPC.documentState, url),
+    documentRequest: (url, request) => invoke(BOT_STORAGE_IPC.documentRequest, url, request),
+    list: () => invoke(BOT_STORAGE_IPC.list),
+    get: scope => invoke(BOT_STORAGE_IPC.get, scope),
+    setDecision: (scope, decision) => invoke(BOT_STORAGE_IPC.setDecision, { scope, decision }),
+    setQuota: (scope, maxBytes) => invoke(BOT_STORAGE_IPC.setQuota, { scope, maxBytes }),
+    clear: scopeId => invoke(BOT_STORAGE_IPC.clear, scopeId),
+    forget: scopeId => invoke(BOT_STORAGE_IPC.forget, scopeId),
+    onChanged: callback => subscribe(BOT_STORAGE_CHANGED, callback),
   },
-  onServerInviteAvailable: (callback) => {
-    const listener = () => callback();
-    ipcRenderer.on(SERVER_INVITE_AVAILABLE, listener);
-    return () => ipcRenderer.removeListener(SERVER_INVITE_AVAILABLE, listener);
-  },
-  encryptBackup: (contents, password) => ipcRenderer.invoke('backup:encrypt', contents, password),
-  decryptBackup: (payload, password) => ipcRenderer.invoke('backup:decrypt', payload, password),
-  hostServerStart: (options) => ipcRenderer.invoke('server-host:start', options),
-  hostServerStop: (port) => ipcRenderer.invoke('server-host:stop', port),
-  hostServerStatus: () => ipcRenderer.invoke('server-host:status'),
-  hostServerLogs: (port) => ipcRenderer.invoke('server-host:logs', port),
-  hostServerClearLogs: (port) => ipcRenderer.invoke('server-host:clear-logs', port),
-  hostServerStats: (port) => ipcRenderer.invoke('server-host:stats', port),
-  hostServerDeleteData: (serverId) => ipcRenderer.invoke('server-host:delete-data', serverId),
-  onHostServerLog: (callback) => {
-    const listener = (_event: unknown, port: number, entry: LogEntry) => callback(port, entry);
-    ipcRenderer.on('server-host:log', listener);
-    return () => ipcRenderer.removeListener('server-host:log', listener);
-  },
-  onHostServerStatusChanged: (callback) => {
-    const listener = (_event: unknown, status: HostServerStatus) => callback(status);
-    ipcRenderer.on('server-host:status-changed', listener);
-    return () => ipcRenderer.removeListener('server-host:status-changed', listener);
-  },
-  getDesktopSources: (options) => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.list, options),
-  getDesktopSourcePreviews: (request) => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.previews, request),
-  cancelDesktopSourcePreviews: () => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.cancelPreviews),
-  prepareScreenShareWindow: (sourceId: string) => ipcRenderer.invoke('screen-share:prepare-window', sourceId),
-  ensureScreenPermission: (): Promise<boolean> => ipcRenderer.invoke('screen-share:ensure-permission'),
-  selectImageDialog: () => ipcRenderer.invoke('dialog:select-image'),
-  selectImagesDialog: (maxFiles) => ipcRenderer.invoke('dialog:select-images', maxFiles),
-  selectSoundFile: () => ipcRenderer.invoke('dialog:select-sound-file'),
-  selectSoundboardFolder: () => ipcRenderer.invoke('dialog:select-soundboard-folder'),
-  getDefaultSoundboardFolder: () => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.defaultFolder),
+  onServerInviteAvailable: callback => subscribe(SERVER_INVITE_AVAILABLE, callback),
+  encryptBackup: (contents, password) => invoke('backup:encrypt', contents, password),
+  decryptBackup: (payload, password) => invoke('backup:decrypt', payload, password),
+  hostServerStart: options => invoke('server-host:start', options),
+  hostServerStop: port => invoke('server-host:stop', port),
+  hostServerStatus: () => invoke('server-host:status'),
+  hostServerLogs: port => invoke('server-host:logs', port),
+  hostServerClearLogs: port => invoke('server-host:clear-logs', port),
+  hostServerStats: port => invoke('server-host:stats', port),
+  hostServerDeleteData: serverId => invoke('server-host:delete-data', serverId),
+  onHostServerLog: callback => subscribe('server-host:log', callback),
+  onHostServerStatusChanged: callback => subscribe('server-host:status-changed', callback),
+  getDesktopSources: options => invoke(DESKTOP_SOURCES_IPC.list, options),
+  getDesktopSourcePreviews: request => invoke(DESKTOP_SOURCES_IPC.previews, request),
+  cancelDesktopSourcePreviews: () => invoke(DESKTOP_SOURCES_IPC.cancelPreviews),
+  prepareScreenShareWindow: sourceId => invoke('screen-share:prepare-window', sourceId),
+  ensureScreenPermission: () => invoke('screen-share:ensure-permission'),
+  selectImageDialog: () => invoke('dialog:select-image'),
+  selectImagesDialog: maxFiles => invoke('dialog:select-images', maxFiles),
+  selectSoundFile: () => invoke('dialog:select-sound-file'),
+  selectSoundboardFolder: () => invoke('dialog:select-soundboard-folder'),
+  getDefaultSoundboardFolder: () => invoke(SOUND_DOWNLOAD_IPC.defaultFolder),
   // Only a direct user action (opening the soundboard or the stickers, Retry) may
   // raise Main's native confirmation of a folder not chosen on this computer (D4).
-  listSoundboardSounds: (folderPath) => ipcRenderer.invoke('soundboard:list-sounds', folderPath, navigator.userActivation.isActive),
-  readSoundboardSound: (filePath) => ipcRenderer.invoke('soundboard:read-sound', filePath),
-  readSoundboardEdit: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.read, input),
-  openSoundboardEditor: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.open, input),
-  overwriteSoundboardAudio: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.overwrite, input),
-  renameSoundboardFile: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.rename, input),
-  deleteSoundboardFile: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.delete, input),
-  saveSoundboardEdit: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.edit, input),
-  soundDownloadAvailability: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.availability, folder),
-  confirmSoundboardFolder: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.confirmFolder, folder),
-  authorizeSoundDownload: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.authorize, input),
-  downloadSound: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.download, input),
-  cancelSoundDownload: (key) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.cancel, key),
-  loadAudioPreview: (input) => ipcRenderer.invoke(AUDIO_PREVIEW_IPC.load, input),
-  cancelAudioPreview: (input) => ipcRenderer.invoke(AUDIO_PREVIEW_IPC.cancel, input),
-  getLocalExecutionState: () => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.getState),
-  setLocalExecutionPermission: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.setPermission, input),
-  removeLocalTool: (tool) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.removeTool, tool),
-  clearLocalExecutionCache: () => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.clearCache),
-  cancelLocalExecutionTask: (taskId) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.cancelTask, taskId),
-  onLocalExecutionChanged: (cb) => {
-    const listener = (_event: Electron.IpcRendererEvent, snapshot: LocalExecutionSnapshot) => cb(snapshot);
-    ipcRenderer.on(LOCAL_EXECUTION_CHANGED, listener);
-    return () => ipcRenderer.removeListener(LOCAL_EXECUTION_CHANGED, listener);
-  },
-  prepareLocalExecution: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.prepare, input),
-  startLocalExecutionTask: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.startTask, input),
-  readLocalExecutionFrames: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.readFrames, input),
-  acknowledgeLocalExecutionFrames: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.acknowledgeFrames, input),
-  cancelLocalExecutionRequest: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.cancelRequest, input),
-  setLocalExecutionPaused: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.setPaused, input),
-  setLocalExecutionConnection: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.setConnection, input),
-  onLocalExecutionTaskFailed: (cb) => {
-    const listener = (_event: Electron.IpcRendererEvent, failure: LocalTaskFailureEvent) => cb(failure);
-    ipcRenderer.on(LOCAL_EXECUTION_TASK_FAILED, listener);
-    return () => ipcRenderer.removeListener(LOCAL_EXECUTION_TASK_FAILED, listener);
-  },
-  onSoundDownloadProgress: (cb) => {
-    const listener = (_event: Electron.IpcRendererEvent, progress: SoundboardDownloadProgress) => cb(progress);
-    ipcRenderer.on(SOUND_DOWNLOAD_PROGRESS, listener);
-    return () => ipcRenderer.removeListener(SOUND_DOWNLOAD_PROGRESS, listener);
-  },
-  selectStickersFolder: () => ipcRenderer.invoke('dialog:select-stickers-folder'),
-  listStickers: (folderPath) => ipcRenderer.invoke('stickers:list', folderPath, navigator.userActivation.isActive),
-  readSticker: (filePath) => ipcRenderer.invoke('stickers:read', filePath),
-  saveSticker: (folderPath, fileName, bytes) => ipcRenderer.invoke('stickers:save', folderPath, fileName, bytes),
-  registerSoundboardShortcuts: (shortcuts) => ipcRenderer.invoke(SHORTCUT_IPC.registerSoundboard, shortcuts),
-  onSoundboardShortcutTriggered: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, soundName: string) => cb(soundName);
-    ipcRenderer.on('soundboard:shortcut-triggered', listener);
-    return () => {
-      ipcRenderer.removeListener('soundboard:shortcut-triggered', listener);
-    };
-  },
-  registerActionShortcuts: (shortcuts) => ipcRenderer.invoke(SHORTCUT_IPC.registerActions, shortcuts),
-  setShortcutCapture: (active) => ipcRenderer.invoke(SHORTCUT_IPC.setCapture, active),
-  onActionShortcutTriggered: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, action: string) => cb(action);
-    ipcRenderer.on('shortcut:action-triggered', listener);
-    return () => {
-      ipcRenderer.removeListener('shortcut:action-triggered', listener);
-    };
-  },
-  setPttConfig: (config) => ipcRenderer.invoke(SHORTCUT_IPC.setPttConfig, config),
-  startPttCapture: () => ipcRenderer.invoke(SHORTCUT_IPC.startPttCapture),
-  stopPttCapture: () => ipcRenderer.invoke(SHORTCUT_IPC.stopPttCapture),
-  onPttStateChanged: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, active: boolean) => cb(active);
-    ipcRenderer.on('ptt:state-changed', listener);
-    return () => {
-      ipcRenderer.removeListener('ptt:state-changed', listener);
-    };
-  },
-  onPttCaptured: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, binding: PttKeyBinding) => cb(binding);
-    ipcRenderer.on('ptt:captured', listener);
-    return () => {
-      ipcRenderer.removeListener('ptt:captured', listener);
-    };
-  },
-  minimize: () => ipcRenderer.invoke('window:minimize'),
+  listSoundboardSounds: folderPath => invoke('soundboard:list-sounds', folderPath, navigator.userActivation.isActive),
+  readSoundboardSound: filePath => invoke('soundboard:read-sound', filePath),
+  readSoundboardEdit: input => invoke(SOUNDBOARD_FILES_IPC.read, input),
+  openSoundboardEditor: input => invoke(SOUNDBOARD_FILES_IPC.open, input),
+  overwriteSoundboardAudio: input => invoke(SOUNDBOARD_FILES_IPC.overwrite, input),
+  renameSoundboardFile: input => invoke(SOUNDBOARD_FILES_IPC.rename, input),
+  deleteSoundboardFile: input => invoke(SOUNDBOARD_FILES_IPC.delete, input),
+  saveSoundboardEdit: input => invoke(SOUNDBOARD_FILES_IPC.edit, input),
+  soundDownloadAvailability: folder => invoke(SOUND_DOWNLOAD_IPC.availability, folder),
+  confirmSoundboardFolder: folder => invoke(SOUND_DOWNLOAD_IPC.confirmFolder, folder),
+  authorizeSoundDownload: input => invoke(SOUND_DOWNLOAD_IPC.authorize, input),
+  downloadSound: input => invoke(SOUND_DOWNLOAD_IPC.download, input),
+  cancelSoundDownload: key => invoke(SOUND_DOWNLOAD_IPC.cancel, key),
+  loadAudioPreview: input => invoke(AUDIO_PREVIEW_IPC.load, input),
+  cancelAudioPreview: input => invoke(AUDIO_PREVIEW_IPC.cancel, input),
+  getLocalExecutionState: () => invoke(LOCAL_EXECUTION_IPC.getState),
+  setLocalExecutionPermission: input => invoke(LOCAL_EXECUTION_IPC.setPermission, input),
+  removeLocalTool: tool => invoke(LOCAL_EXECUTION_IPC.removeTool, tool),
+  clearLocalExecutionCache: () => invoke(LOCAL_EXECUTION_IPC.clearCache),
+  cancelLocalExecutionTask: taskId => invoke(LOCAL_EXECUTION_IPC.cancelTask, taskId),
+  onLocalExecutionChanged: callback => subscribe(LOCAL_EXECUTION_CHANGED, callback),
+  prepareLocalExecution: input => invoke(LOCAL_EXECUTION_IPC.prepare, input),
+  startLocalExecutionTask: input => invoke(LOCAL_EXECUTION_IPC.startTask, input),
+  readLocalExecutionFrames: input => invoke(LOCAL_EXECUTION_IPC.readFrames, input),
+  acknowledgeLocalExecutionFrames: input => invoke(LOCAL_EXECUTION_IPC.acknowledgeFrames, input),
+  cancelLocalExecutionRequest: input => invoke(LOCAL_EXECUTION_IPC.cancelRequest, input),
+  setLocalExecutionPaused: input => invoke(LOCAL_EXECUTION_IPC.setPaused, input),
+  setLocalExecutionConnection: input => invoke(LOCAL_EXECUTION_IPC.setConnection, input),
+  onLocalExecutionTaskFailed: callback => subscribe(LOCAL_EXECUTION_TASK_FAILED, callback),
+  onSoundDownloadProgress: callback => subscribe(SOUND_DOWNLOAD_PROGRESS, callback),
+  selectStickersFolder: () => invoke('dialog:select-stickers-folder'),
+  listStickers: folderPath => invoke('stickers:list', folderPath, navigator.userActivation.isActive),
+  readSticker: filePath => invoke('stickers:read', filePath),
+  saveSticker: (folderPath, fileName, bytes) => invoke('stickers:save', folderPath, fileName, bytes),
+  registerSoundboardShortcuts: shortcuts => invoke(SHORTCUT_IPC.registerSoundboard, shortcuts),
+  onSoundboardShortcutTriggered: callback => subscribe('soundboard:shortcut-triggered', callback),
+  registerActionShortcuts: shortcuts => invoke(SHORTCUT_IPC.registerActions, shortcuts),
+  setShortcutCapture: active => invoke(SHORTCUT_IPC.setCapture, active),
+  onActionShortcutTriggered: callback => subscribe('shortcut:action-triggered', callback),
+  setPttConfig: config => invoke(SHORTCUT_IPC.setPttConfig, config),
+  startPttCapture: () => invoke(SHORTCUT_IPC.startPttCapture),
+  stopPttCapture: () => invoke(SHORTCUT_IPC.stopPttCapture),
+  onPttStateChanged: callback => subscribe('ptt:state-changed', callback),
+  onPttCaptured: callback => subscribe('ptt:captured', callback),
+  minimize: () => invoke('window:minimize'),
   openScreenPictureInPicture: (requestId, requireInactive, aspectRatio) =>
-    ipcRenderer.invoke('screen-pip:open', requestId, requireInactive, aspectRatio),
-  returnFromScreenPictureInPicture: () => ipcRenderer.invoke('screen-pip:return'),
-  onWindowInactive: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on('window:inactive', listener);
-    return () => ipcRenderer.removeListener('window:inactive', listener);
-  },
-  onWindowActive: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on('window:active', listener);
-    return () => ipcRenderer.removeListener('window:active', listener);
-  },
-  maximize: () => ipcRenderer.invoke('window:maximize'),
-  toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
-  setWindowInServer: (inServer) => ipcRenderer.invoke('window:set-in-server', inServer),
-  fitHomeWindowToContent: (contentHeight) => ipcRenderer.invoke('window:fit-home-content', contentHeight),
-  close: () => ipcRenderer.invoke('window:close'),
-  getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+    invoke('screen-pip:open', requestId, requireInactive, aspectRatio),
+  returnFromScreenPictureInPicture: () => invoke('screen-pip:return'),
+  onWindowInactive: callback => subscribe('window:inactive', callback),
+  onWindowActive: callback => subscribe('window:active', callback),
+  maximize: () => invoke('window:maximize'),
+  toggleMaximize: () => invoke('window:toggle-maximize'),
+  setWindowInServer: inServer => invoke('window:set-in-server', inServer),
+  fitHomeWindowToContent: contentHeight => invoke('window:fit-home-content', contentHeight),
+  close: () => invoke('window:close'),
+  getAppVersion: () => invoke('app:get-version'),
   signalRendererReady: () => {
-    ipcRenderer.send('app:renderer-ready');
-    void ipcRenderer.invoke(CRASH_RECOVERY_IPC.ready).catch((error: unknown) => {
+    send(APP_RENDERER_READY);
+    void invoke(CRASH_RECOVERY_IPC.ready).catch((error: unknown) => {
       console.error('[Bootstrap] Could not acknowledge renderer readiness', error);
     });
   },
-  reportFatalBootstrap: (failure) => ipcRenderer.invoke(CRASH_RECOVERY_IPC.bootstrapFailed, failure),
-  checkForUpdates: (requestId) => ipcRenderer.invoke(UPDATER_IPC.check, requestId),
-  downloadUpdate: (expectedVersion, requestId) => ipcRenderer.invoke(UPDATER_IPC.download, expectedVersion, requestId),
-  cancelUpdate: (requestId) => ipcRenderer.invoke(UPDATER_IPC.cancel, requestId),
-  checkUpdateCompatibility: (version, requestId) => ipcRenderer.invoke(UPDATER_IPC.preflight, version, requestId),
-  installUpdate: () => ipcRenderer.invoke(UPDATER_IPC.install),
-  setUpdateChannel: (allowBeta) => ipcRenderer.invoke(UPDATER_IPC.setChannel, allowBeta),
-  getUpdateOutcome: () => ipcRenderer.invoke(UPDATER_IPC.outcome),
-  getReleaseNotes: (tag) => ipcRenderer.invoke(UPDATER_IPC.releaseNotes, tag),
-  getReleaseHistory: (page, before) => ipcRenderer.invoke(UPDATER_IPC.releaseHistory, page, before),
-  onUpdateProgress: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, percent: number) => cb(percent);
-    ipcRenderer.on('updater:progress', listener);
-    return () => {
-      ipcRenderer.removeListener('updater:progress', listener);
-    };
-  },
-  onUpdateDownloaded: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, info: { manual: boolean }) => cb(info);
-    ipcRenderer.on('updater:downloaded', listener);
-    return () => {
-      ipcRenderer.removeListener('updater:downloaded', listener);
-    };
-  },
-  onUpdateError: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, message: string) => cb(message);
-    ipcRenderer.on('updater:error', listener);
-    return () => {
-      ipcRenderer.removeListener('updater:error', listener);
-    };
-  },
-  openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
-  editorCommand: (command) => ipcRenderer.invoke(EDITOR_COMMAND_IPC, command),
-  fetchLinkPreview: (url) => ipcRenderer.invoke('link-preview:fetch', url),
-  downloadFile: (url, fileName) => ipcRenderer.invoke('app:download-file', url, fileName),
-  downloadFiles: (request) => ipcRenderer.invoke(FILE_BATCH_DOWNLOAD_IPC, request),
-  saveRecentSound: (input) => ipcRenderer.invoke('app:save-recent-sound', input),
-  saveCsvFile: (content, fileName) => ipcRenderer.invoke('app:save-csv-file', content, fileName),
-  saveEventCalendar: (input) => ipcRenderer.invoke(EVENT_CALENDAR_IPC, input),
-  saveHostingSkill: (id) => ipcRenderer.invoke(HOSTING_SKILL_IPC, id),
-  probeServer: (host, port) => ipcRenderer.invoke('net:probe-server', host, port),
-  updateTrayVoiceStatus: (status) => ipcRenderer.invoke('tray:update-voice-status', status),
-  onAppBeforeQuit: (cb) => {
-    const listener = (_event: Electron.IpcRendererEvent, request: AppShutdownRequest) => cb(request);
-    ipcRenderer.on(APP_SHUTDOWN_EVENT, listener);
-    return () => {
-      ipcRenderer.removeListener(APP_SHUTDOWN_EVENT, listener);
-    };
-  },
-  notifyLeaveComplete: request => ipcRenderer.invoke(APP_SHUTDOWN_IPC.acknowledge, request),
-  onTrayToggleMute: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on('tray:toggle-mute', listener);
-    return () => {
-      ipcRenderer.removeListener('tray:toggle-mute', listener);
-    };
-  },
-  onTrayToggleDeafen: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on('tray:toggle-deafen', listener);
-    return () => {
-      ipcRenderer.removeListener('tray:toggle-deafen', listener);
-    };
-  },
-  onTrayLeaveCall: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on('tray:leave-call', listener);
-    return () => {
-      ipcRenderer.removeListener('tray:leave-call', listener);
-    };
-  },
-  getAutoStart: () => ipcRenderer.invoke('app:get-auto-start'),
-  setAutoStart: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-start', enabled),
-  setMinimizeToTray: (enabled: boolean) => ipcRenderer.invoke('app:set-minimize-to-tray', enabled),
-  // Sobreposição de Tela (Overlay) (#169)
-  setGamePresenceEnabled: (enabled) => ipcRenderer.invoke('game-presence:set-enabled', enabled),
-  getCurrentGameActivity: () => ipcRenderer.invoke('game-presence:get-current'),
-  findGameWindows: () => ipcRenderer.invoke('game-share:find-windows'),
-  getSystemIdleSeconds: () => ipcRenderer.invoke('system:get-idle-seconds'),
-  onGamePresenceChanged: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, activity: UserActivity | null) => cb(activity);
-    ipcRenderer.on('game-presence:changed', listener);
-    return () => {
-      ipcRenderer.removeListener('game-presence:changed', listener);
-    };
-  },
-  openOverlay: (config) => ipcRenderer.invoke('overlay:open', config),
-  closeOverlay: () => ipcRenderer.invoke('overlay:close'),
-  isOverlayOpen: () => ipcRenderer.invoke('overlay:is-open'),
-  getOverlayConfig: () => ipcRenderer.invoke('overlay:get-config'),
-  setOverlayConfig: (config) => ipcRenderer.invoke('overlay:set-config', config),
-  saveOverlayBounds: (bounds) => ipcRenderer.invoke('overlay:save-bounds', bounds),
-  resetOverlayBounds: () => ipcRenderer.invoke('overlay:reset-bounds'),
-  layoutOverlayCards: (layout) => ipcRenderer.invoke('overlay:layout-cards', layout),
-  sendOverlaySignal: (payload) => ipcRenderer.invoke('overlay:send-signal', payload),
-  sendOverlaySyncState: (state) => ipcRenderer.invoke('overlay:send-sync-state', state),
-  onOverlayStateChanged: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, isOpen: boolean) => cb(isOpen);
-    ipcRenderer.on('overlay:state-changed', listener);
-    return () => {
-      ipcRenderer.removeListener('overlay:state-changed', listener);
-    };
-  },
-  onOverlayConfigUpdated: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, config: OverlayConfig) => cb(config);
-    ipcRenderer.on('overlay:config-updated', listener);
-    return () => {
-      ipcRenderer.removeListener('overlay:config-updated', listener);
-    };
-  },
-  onOverlaySignalReceived: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, signal: OverlaySignal) => cb(signal);
-    ipcRenderer.on('overlay:signal-received', listener);
-    return () => {
-      ipcRenderer.removeListener('overlay:signal-received', listener);
-    };
-  },
-  onOverlaySyncStateReceived: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, state: OverlaySyncState) => cb(state);
-    ipcRenderer.on('overlay:sync-state-received', listener);
-    return () => {
-      ipcRenderer.removeListener('overlay:sync-state-received', listener);
-    };
-  },
-  onOverlayCloseRequested: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on('overlay:close-requested', listener);
-    return () => {
-      ipcRenderer.removeListener('overlay:close-requested', listener);
-    };
-  },
-  onOverlayHoverChanged: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, hovered: boolean, point?: { x: number; y: number }) => cb(hovered, point);
-    ipcRenderer.on('overlay:hover-changed', listener);
-    return () => {
-      ipcRenderer.removeListener('overlay:hover-changed', listener);
-    };
-  },
-  onOverlayResizeStateChanged: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, resizing: boolean) => cb(resizing);
-    ipcRenderer.on('overlay:resize-state-changed', listener);
-    return () => ipcRenderer.removeListener('overlay:resize-state-changed', listener);
-  },
+  reportFatalBootstrap: failure => invoke(CRASH_RECOVERY_IPC.bootstrapFailed, failure),
+  checkForUpdates: requestId => invoke(UPDATER_IPC.check, requestId),
+  downloadUpdate: (expectedVersion, requestId) => invoke(UPDATER_IPC.download, expectedVersion, requestId),
+  cancelUpdate: requestId => invoke(UPDATER_IPC.cancel, requestId),
+  checkUpdateCompatibility: (version, requestId) => invoke(UPDATER_IPC.preflight, version, requestId),
+  installUpdate: () => invoke(UPDATER_IPC.install),
+  setUpdateChannel: allowBeta => invoke(UPDATER_IPC.setChannel, allowBeta),
+  getUpdateOutcome: () => invoke(UPDATER_IPC.outcome),
+  getReleaseNotes: tag => invoke(UPDATER_IPC.releaseNotes, tag),
+  getReleaseHistory: (page, before) => invoke(UPDATER_IPC.releaseHistory, page, before),
+  onUpdateProgress: callback => subscribe('updater:progress', callback),
+  onUpdateDownloaded: callback => subscribe('updater:downloaded', callback),
+  onUpdateError: callback => subscribe('updater:error', callback),
+  openExternal: url => invoke('app:open-external', url),
+  editorCommand: command => invoke(EDITOR_COMMAND_IPC, command),
+  fetchLinkPreview: url => invoke('link-preview:fetch', url),
+  downloadFile: (url, fileName) => invoke('app:download-file', url, fileName),
+  downloadFiles: request => invoke(FILE_BATCH_DOWNLOAD_IPC, request),
+  saveRecentSound: input => invoke('app:save-recent-sound', input),
+  saveCsvFile: (content, fileName) => invoke('app:save-csv-file', content, fileName),
+  saveEventCalendar: input => invoke(EVENT_CALENDAR_IPC, input),
+  saveHostingSkill: id => invoke(HOSTING_SKILL_IPC, id),
+  probeServer: (host, port) => invoke('net:probe-server', host, port),
+  updateTrayVoiceStatus: status => invoke('tray:update-voice-status', status),
+  onAppBeforeQuit: callback => subscribe(APP_SHUTDOWN_EVENT, callback),
+  notifyLeaveComplete: request => invoke(APP_SHUTDOWN_IPC.acknowledge, request),
+  onTrayToggleMute: callback => subscribe('tray:toggle-mute', callback),
+  onTrayToggleDeafen: callback => subscribe('tray:toggle-deafen', callback),
+  onTrayLeaveCall: callback => subscribe('tray:leave-call', callback),
+  getAutoStart: () => invoke('app:get-auto-start'),
+  setAutoStart: enabled => invoke('app:set-auto-start', enabled),
+  setMinimizeToTray: enabled => invoke('app:set-minimize-to-tray', enabled),
+  setGamePresenceEnabled: enabled => invoke('game-presence:set-enabled', enabled),
+  getCurrentGameActivity: () => invoke('game-presence:get-current'),
+  findGameWindows: () => invoke('game-share:find-windows'),
+  getSystemIdleSeconds: () => invoke('system:get-idle-seconds'),
+  onGamePresenceChanged: callback => subscribe('game-presence:changed', callback),
+  openOverlay: config => invoke('overlay:open', config),
+  closeOverlay: () => invoke('overlay:close'),
+  isOverlayOpen: () => invoke('overlay:is-open'),
+  getOverlayConfig: () => invoke('overlay:get-config'),
+  setOverlayConfig: config => invoke('overlay:set-config', config),
+  saveOverlayBounds: bounds => invoke('overlay:save-bounds', bounds),
+  resetOverlayBounds: () => invoke('overlay:reset-bounds'),
+  layoutOverlayCards: layout => invoke('overlay:layout-cards', layout),
+  sendOverlaySignal: payload => invoke('overlay:send-signal', payload),
+  sendOverlaySyncState: state => invoke('overlay:send-sync-state', state),
+  onOverlayStateChanged: callback => subscribe('overlay:state-changed', callback),
+  onOverlayConfigUpdated: callback => subscribe('overlay:config-updated', callback),
+  onOverlaySignalReceived: callback => subscribe('overlay:signal-received', callback),
+  onOverlaySyncStateReceived: callback => subscribe('overlay:sync-state-received', callback),
+  onOverlayCloseRequested: callback => subscribe('overlay:close-requested', callback),
+  onOverlayHoverChanged: callback => subscribe('overlay:hover-changed', callback),
+  onOverlayResizeStateChanged: callback => subscribe('overlay:resize-state-changed', callback),
 
   // Client Logging (#444)
-  writeClientLog: (entry) => ipcRenderer.invoke('client-log:write', entry),
-  getClientLogConfig: () => ipcRenderer.invoke('client-log:get-config'),
-  setClientLogConfig: (config) => ipcRenderer.invoke('client-log:set-config', config),
-  exportClientLogs: () => ipcRenderer.invoke('client-log:export'),
-  getClientLogSize: () => ipcRenderer.invoke('client-log:get-size'),
-  clearClientLogs: () => ipcRenderer.invoke('client-log:clear'),
+  writeClientLog: entry => invoke('client-log:write', entry),
+  getClientLogConfig: () => invoke('client-log:get-config'),
+  setClientLogConfig: config => invoke('client-log:set-config', config),
+  exportClientLogs: () => invoke('client-log:export'),
+  getClientLogSize: () => invoke('client-log:get-size'),
+  clearClientLogs: () => invoke('client-log:clear'),
   platform: process.platform,
 };
 

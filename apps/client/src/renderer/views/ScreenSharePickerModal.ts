@@ -20,7 +20,7 @@ import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { nativeScreenProfile } from '../core/webrtc/NativeScreenController';
 import { GameCaptureGuideModal } from './GameCaptureGuideModal';
-import { smoothScrollIntoView } from '../utils/scroll';
+import { focusItem, nextIndex } from '../utils/rovingFocus';
 
 type SourceLoadState =
   | { status: 'loading' }
@@ -839,17 +839,12 @@ export class ScreenSharePickerModal {
       }
       const buttons = [...modal.querySelectorAll<HTMLButtonElement>('[data-audience-id]')]
         .filter(button => !button.hidden && !button.disabled);
-      if (!buttons.length) return;
       const index = buttons.findIndex(button => button === event.target);
-      let next: HTMLButtonElement | undefined;
-      if (event.key === 'ArrowDown') next = buttons[(index + 1) % buttons.length];
-      else if (event.key === 'ArrowUp') next = index < 0 ? buttons[buttons.length - 1] : buttons[(index - 1 + buttons.length) % buttons.length];
-      else if (index >= 0 && event.key === 'Home') next = buttons[0];
-      else if (index >= 0 && event.key === 'End') next = buttons[buttons.length - 1];
-      if (!next) return;
+      // Home and End stay with the search field until an option has focus.
+      const next = index < 0 && (event.key === 'Home' || event.key === 'End') ? null : nextIndex(event.key, index, buttons.length);
+      if (next === null) return;
       event.preventDefault();
-      next.focus({ preventScroll: true });
-      smoothScrollIntoView(next, { block: 'nearest' });
+      focusItem(buttons[next]);
     }, options);
     modal.querySelector('#modal-close')?.addEventListener('click', () => this.close(), options);
     modal.querySelector('#btn-cancel')?.addEventListener('click', () => this.close(), options);
@@ -873,13 +868,9 @@ export class ScreenSharePickerModal {
         if (this.isStarting || event.altKey || event.ctrlKey || event.metaKey) return;
         const available = SOURCE_TABS.filter(item => this.supportsTab(item.id));
         const index = available.findIndex(item => item.id === tab.id);
-        if (index < 0) return;
-        let next: typeof available[number] | undefined;
-        if (event.key === 'ArrowRight') next = available[(index + 1) % available.length];
-        else if (event.key === 'ArrowLeft') next = available[(index + available.length - 1) % available.length];
-        else if (event.key === 'Home') next = available[0];
-        else if (event.key === 'End') next = available[available.length - 1];
-        if (!next) return;
+        const step = index < 0 ? null : nextIndex(event.key, index, available.length, { orientation: 'horizontal' });
+        if (step === null) return;
+        const next = available[step];
         event.preventDefault();
         this.selectTab(next.id);
         modal.querySelector<HTMLButtonElement>(`#share-tab-${next.id}`)?.focus();
@@ -893,13 +884,10 @@ export class ScreenSharePickerModal {
         const available = this.windowCaptureMethods.filter(item => this.supportsCaptureKind(item.id));
         const index = available.findIndex(item => item.id === method.id);
         if (index < 0) return;
-        let next: typeof available[number] | undefined;
-        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = available[(index + 1) % available.length];
-        else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = available[(index + available.length - 1) % available.length];
-        else if (event.key === 'Home') next = available[0];
-        else if (event.key === 'End') next = available[available.length - 1];
-        else if (event.key === 'Enter' || event.key === ' ') next = method;
-        if (!next) return;
+        const step = event.key === 'Enter' || event.key === ' ' ? index
+          : nextIndex(event.key, index, available.length, { orientation: 'both' });
+        if (step === null) return;
+        const next = available[step];
         event.preventDefault();
         this.selectWindowCaptureMethod(next.id);
         modal.querySelector<HTMLButtonElement>(`#share-method-${next.id}`)?.focus();

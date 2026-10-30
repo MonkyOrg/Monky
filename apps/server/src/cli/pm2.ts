@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ANSI, color } from './constants';
 import { t } from './i18n/index';
-import { commandSucceeds, runSync } from './process';
+import { commandInstalled, commandSucceeds, runSync } from './process';
 import { canonicalDataDir, LEGACY_PM2_PROCESS_NAME, serverIdFor } from './registry';
 import { resolveInterpreter } from './health';
 import { LIMITS } from '@monky/shared';
@@ -26,6 +26,20 @@ export function getPm2ProcessName(dataDir: string): string {
 
 export function getUpdaterProcessName(dataDir: string): string {
   return `${UPDATER_PROCESS_PREFIX}-${serverIdFor(dataDir)}`;
+}
+
+/**
+ * Whether PM2 can be used. `missing`: nothing named `pm2` is installed.
+ * `failing`: it was found, but `pm2 --version` did not succeed. Telling the two
+ * apart is what keeps the CLI from installing a second PM2 over one that
+ * another tool manages (Volta, pnpm, Yarn), and from treating the processes
+ * that PM2 may still run as gone.
+ */
+export type Pm2Availability = 'available' | 'missing' | 'failing';
+
+export function pm2Availability(): Pm2Availability {
+  if (commandSucceeds('pm2', ['--version'])) return 'available';
+  return commandInstalled('pm2') ? 'failing' : 'missing';
 }
 
 export function isPm2Available(): boolean {
@@ -139,24 +153,37 @@ export function findLegacyProcessFor(dataDir: string, processes: readonly Pm2Pro
   return legacyDataDir === canonicalDataDir(dataDir) ? legacy : null;
 }
 
+/**
+ * Installs PM2 when it is missing. A PM2 that is installed but fails is
+ * reported instead: installing over it would leave two copies.
+ */
 export function ensurePm2(): void {
-  if (!isPm2Available()) {
-    console.log(color(t('pm2.notFound'), ANSI.yellow));
-    const result = runSync('npm', ['install', '-g', 'pm2'], { stdio: 'inherit' });
-    if (result.error || result.status !== 0) {
-      throw new Error(t('pm2.installFailed'));
-    }
+  const availability = pm2Availability();
+  if (availability === 'available') return;
+  if (availability === 'failing') {
+    throw new Error(`${t('pm2.failing', { action: t('action.start') })} ${t('pm2.failingHint')}`);
+  }
+  console.log(color(t('pm2.notFound'), ANSI.yellow));
+  const result = runSync('npm', ['install', '-g', 'pm2'], { stdio: 'inherit' });
+  if (result.error || result.status !== 0) {
+    throw new Error(t('pm2.installFailed'));
   }
 }
 
 /**
- * Reports PM2 as missing without installing it.
+ * Reports PM2 as missing, or as failing, without installing it.
  *
  * Only `monky start` needs PM2 badly enough to install it; reading status or
  * stopping a server should never install software as a side effect.
  */
 export function requirePm2(action: string): boolean {
-  if (isPm2Available()) return true;
+  const availability = pm2Availability();
+  if (availability === 'available') return true;
+  if (availability === 'failing') {
+    console.log(color(t('pm2.failing', { action }), ANSI.yellow));
+    console.log(color(t('pm2.failingHint'), ANSI.dim));
+    return false;
+  }
   console.log(color(t('pm2.notInstalled', { action }), ANSI.yellow));
   console.log(color(t('pm2.installHint'), ANSI.dim));
   return false;

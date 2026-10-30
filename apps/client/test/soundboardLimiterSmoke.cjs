@@ -101,6 +101,8 @@ if (!process.versions.electron) {
       await finish(0);
       return;
     }
+    const tabChecks = await window.webContents.executeJavaScript(`(${runShortcutTabSmoke.toString()})(${JSON.stringify({ folder })})`, true);
+    console.log(`Soundboard settings shortcuts and search: ${tabChecks} checks passed (shared dialog, conflicts by keys, persistent search field)`);
     await window.webContents.executeJavaScript(`(${setupModalSmoke.toString()})()`, true);
     window.focus();
     window.webContents.focus();
@@ -390,6 +392,134 @@ async function runSmoke(fixture) {
     soundboardService.stopSound();
     root.replaceChildren();
     window.AudioContext = originalContext;
+  }
+  return checks;
+}
+
+/** The settings tab's shortcuts and search: the shared dialog, conflicts by keys and a search field that is never replaced. */
+async function runShortcutTabSmoke(fixture) {
+  const [{ settingsStore }, { soundboardService }, { SoundboardTab }, language] = await Promise.all([
+    import('/stores/settingsStore.ts'), import('/core/SoundboardService.ts'),
+    import('/views/settings/tabs/SoundboardTab.ts'), import('/i18n/index.ts'),
+  ]);
+  let checks = 0;
+  const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  const until = async (probe, message) => {
+    const deadline = Date.now() + 5000;
+    while (!probe()) {
+      if (Date.now() > deadline) throw new Error(message);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  };
+  language.setLanguage('en');
+  const t = language.t;
+  const root = document.getElementById('fixture');
+  const tab = new SoundboardTab();
+  const previous = { api: window.api, shortcuts: settingsStore.soundboardShortcuts, save: settingsStore.save };
+  const registered = [];
+  const names = ['Airhorn', 'Bell', 'Clap', 'Drum', 'Echo'];
+  window.api = {
+    ...previous.api,
+    listSoundboardSounds: async () => names.map(name => ({
+      name, fileName: `${name}.wav`, filePath: `${fixture.folder}/${name}.wav`, sizeBytes: 16, ext: '.wav',
+    })),
+    registerSoundboardShortcuts: async list => { registered.push(list); return true; },
+  };
+  const dialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) [role="dialog"][aria-labelledby="sb-keybind-title"]');
+  const confirmation = () => document.querySelector('.modal-backdrop:not([data-ui-closing]):not([inert]) .dialog-card');
+  const row = name => root.querySelector(`.sb-shortcut-row[data-soundname="${name}"]`);
+  const chord = async ({ logical = false } = {}) => {
+    // The capture records the held keys and commits when every key is released. A virtual or
+    // remote keyboard sends no physical code: the key is then saved as typed ("Ctrl+Q").
+    const q = logical ? '' : 'KeyQ';
+    for (const [type, code, key] of [['keydown', 'ControlLeft', 'Control'], ['keydown', q, 'q'],
+      ['keyup', q, 'q'], ['keyup', 'ControlLeft', 'Control']]) {
+      window.dispatchEvent(new KeyboardEvent(type, { code, key, ctrlKey: type === 'keydown' || key === 'q', bubbles: true, cancelable: true }));
+    }
+    await until(() => !dialog(), 'The shortcut dialog did not close after the chord was released');
+  };
+  try {
+    // Saved by older versions: logical keys ("Control+Q"), and the same keys given to a second sound by
+    // the settings tab, which never checked. A capture now records them as Ctrl+code:KeyQ.
+    settingsStore.soundboardShortcuts = {
+      Bell: { accelerator: 'Control+Q', display: 'Ctrl + Q' },
+      Clap: { accelerator: 'Ctrl+code:KeyQ', display: 'Ctrl + Q' },
+    };
+    settingsStore.save();
+    await soundboardService.loadSounds();
+    root.innerHTML = tab.renderHtml();
+    tab.attachEvents(root);
+    check(names.every(name => row(name)), 'The settings list shows the library');
+
+    row('Airhorn').querySelector('.btn-bind-shortcut').click();
+    check(dialog()?.getAttribute('aria-modal') === 'true' && dialog().querySelector('#sb-keybind-title')?.textContent === t('soundboard.keybindTitle')
+      && dialog().querySelector('strong')?.textContent === 'Airhorn', 'The settings open the accessible shortcut dialog of the soundboard');
+    await chord({ logical: true });
+    await until(() => confirmation(), 'A shortcut already bound to another sound must ask before replacing it');
+    check(confirmation().querySelector('.dialog-message').textContent
+      === t('soundboard.shortcutInUseMessage', { combo: 'Ctrl + Q', sound: 'Bell, Clap' }),
+    'The conflict compares the keys, not how they were saved, and names every sound using them');
+    confirmation().querySelector('[data-action="cancel"]').click();
+    await until(() => !confirmation(), 'The conflict question did not close');
+    check(settingsStore.soundboardShortcuts.Bell?.accelerator === 'Control+Q' && settingsStore.soundboardShortcuts.Clap
+      && !settingsStore.soundboardShortcuts.Airhorn, 'Refusing the replacement keeps every sound as it was');
+
+    row('Airhorn').querySelector('.btn-bind-shortcut').click();
+    await chord();
+    await until(() => confirmation(), 'The conflict question did not open again');
+    const syncs = registered.length;
+    confirmation().querySelector('[data-action="confirm"]').click();
+    await until(() => settingsStore.soundboardShortcuts.Airhorn && registered.length > syncs, 'The replacement was not saved and registered');
+    check(!settingsStore.soundboardShortcuts.Bell && !settingsStore.soundboardShortcuts.Clap
+      && settingsStore.soundboardShortcuts.Airhorn.accelerator === 'Ctrl+code:KeyQ'
+      && JSON.stringify(registered.at(-1)) === JSON.stringify([{ soundName: 'Airhorn', accelerator: 'Ctrl+code:KeyQ' }]),
+    'Replacing takes the keys from every sound, so the global hook never fires two sounds at once');
+    check(JSON.parse(localStorage.getItem('monky_settings')).soundboardShortcuts.Airhorn?.accelerator === 'Ctrl+code:KeyQ',
+      'The replacement is persisted');
+    await until(() => row('Airhorn').querySelector('.sb-keybind-badge').textContent.trim() === 'Ctrl + Q',
+      'The settings list did not show the new shortcut');
+
+    settingsStore.save = () => { throw new Error('Modeled storage failure'); };
+    row('Airhorn').querySelector('.btn-clear-shortcut').click();
+    await until(() => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])'), 'A refused save must be explained in a toast');
+    check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])').textContent.includes(t('soundboard.shortcutSaveFailed'))
+      && settingsStore.soundboardShortcuts.Airhorn?.accelerator === 'Ctrl+code:KeyQ', 'A refused save keeps the previous shortcut');
+    document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-close')?.click();
+    settingsStore.save = previous.save;
+    row('Airhorn').querySelector('.btn-clear-shortcut').click();
+    await until(() => !settingsStore.soundboardShortcuts.Airhorn && registered.at(-1)?.length === 0, 'Removing the shortcut was not registered');
+
+    // Filtering re-renders the list, never the field: the cursor stays where the user is typing.
+    const search = root.querySelector('#sb-shortcuts-search-input');
+    check(search && !search.closest('[hidden]'), 'A library longer than three sounds offers the search');
+    search.focus();
+    search.value = 'Bll';
+    search.setSelectionRange(1, 1);
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    check(root.querySelector('#sb-shortcuts-search-input') === search && document.activeElement === search
+      && search.selectionStart === 1 && search.selectionEnd === 1 && !row('Bell'),
+    'Typing in the middle of the search keeps the same field, its focus and its cursor');
+    search.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    search.setRangeText('e', 1, 1, 'end');
+    search.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true, data: 'e' }));
+    search.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: 'e' }));
+    check(root.querySelector('#sb-shortcuts-search-input') === search && search.selectionStart === 2 && search.value === 'Bell'
+      && row('Bell') && !row('Airhorn'), 'A composition (dead key or IME) survives the filtering it triggers');
+    root.querySelector('#sb-settings-filter-favorites').click();
+    check(root.querySelector('#sb-shortcuts-search-input') === search
+      && root.querySelector('#sb-settings-filter-favorites').getAttribute('aria-pressed') === 'true'
+      && root.querySelector('#sb-settings-show-all'), 'The favorites filter updates in place and shows its empty state');
+    root.querySelector('#sb-settings-show-all').click();
+    check(root.querySelector('#sb-settings-filter-all').getAttribute('aria-pressed') === 'true' && row('Bell'),
+      'Showing every sound again restores the filtered list');
+  } finally {
+    tab.cleanup();
+    root.replaceChildren();
+    settingsStore.save = previous.save;
+    settingsStore.soundboardShortcuts = previous.shortcuts;
+    settingsStore.save();
+    window.api = previous.api;
+    await soundboardService.loadSounds();
   }
   return checks;
 }

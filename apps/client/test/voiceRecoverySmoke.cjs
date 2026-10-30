@@ -636,7 +636,7 @@ async function setupRenderer({ port, label, room, M }) {
   settings.inputMode = 'voice_activity';
   settings.vadSensitivity = 0;
   settings.pttSoundCue = false;
-  rtc.rtcConfig = { iceServers: [] };
+  rtc.p2p.rtcConfig = { iceServers: [] };
 
   // Replace only the physical acquisition boundary: every stream/track, the
   // production AudioProcessor graph and Chromium RTP sender/receiver are real.
@@ -700,7 +700,7 @@ async function setupRenderer({ port, label, room, M }) {
   await connection.openServerSession('127.0.0.1', port, { clientId: label, publicKey: `fixture-${label}` }, label);
   const session = sessionManager.getActive();
   if (!(session.client instanceof NetworkClient)) throw new Error('The fixture must use the production NetworkClient');
-  const engine = rtc.sfuEngine;
+  const engine = rtc.sfu.engine;
   const clearProbe = () => {
     if (!probe) return;
     try { probe.pipeline.gain.disconnect(probe.analyser); } catch {}

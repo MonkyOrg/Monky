@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
-const { redistributableCrt, transientNetworkFailure, withNetworkRetries } = require('../scripts/buildTools.cjs');
+const { redistributableCrt, transientNetworkFailure, withNetworkRetries, withBuildLock } = require('../scripts/buildTools.cjs');
 
 test('app-local CRT comes from the release redistributable, never System32 or debug_nonredist', t => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-screen-crt-'));
@@ -78,4 +78,49 @@ test('pinned source fetches on Windows and macOS go through the bounded network 
   const mac = fs.readFileSync(path.join(scripts, 'prepareMacRtc.cjs'), 'utf8');
   // capture: true puts git's stderr into the error so its transport failure can be classified.
   assert.match(mac, /withNetworkRetries\(\(\) => execute\('git', \['-C', directory, 'fetch'[\s\S]{0,120}capture: true/u);
+});
+
+test('a build lock records its owner and replaces only a lock whose build is gone', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-screen-lock-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const lock = path.join(directory, 'rtc.lock'), logs = [], running = new Set([4242]);
+  const options = { isRunning: pid => running.has(pid), log: line => logs.push(line) };
+
+  const owner = withBuildLock(lock, () => JSON.parse(fs.readFileSync(lock, 'utf8')), options);
+  assert.equal(owner.pid, process.pid);
+  assert.equal(fs.existsSync(lock), false, 'A finished build releases its lock.');
+  assert.throws(() => withBuildLock(lock, () => { throw new Error('Compiler failed.'); }, options), /Compiler failed/u);
+  assert.equal(fs.existsSync(lock), false, 'A failed build releases its lock.');
+
+  fs.writeFileSync(lock, JSON.stringify({ pid: 4242 }));
+  assert.throws(() => withBuildLock(lock, () => assert.fail('Two builds cannot share a directory.'), options),
+    /Another native build \(PID 4242\) holds/u);
+  assert.deepEqual(JSON.parse(fs.readFileSync(lock, 'utf8')), { pid: 4242 });
+
+  running.delete(4242);
+  assert.equal(withBuildLock(lock, () => 'built after Ctrl+C', options), 'built after Ctrl+C');
+  assert.equal(fs.existsSync(lock), false);
+  assert.match(logs.at(-1), /stale build lock .* of the finished PID 4242\.$/u);
+
+  // An older script left empty locks; a fresh one may still be getting its owner written.
+  fs.writeFileSync(lock, '');
+  const modified = fs.statSync(lock).mtimeMs;
+  assert.throws(() => withBuildLock(lock, () => assert.fail('A fresh unowned lock is held.'),
+    { ...options, now: () => modified + 5000 }), /Another native build holds/u);
+  assert.equal(withBuildLock(lock, () => 'built', { ...options, now: () => modified + 20000 }), 'built');
+  assert.equal(fs.existsSync(lock), false);
+
+  assert.throws(() => withBuildLock(lock, async () => 'not awaited', options), /synchronous build/u);
+  assert.equal(fs.existsSync(lock), false);
+});
+
+test('every native build and preparation takes its lock through withBuildLock', () => {
+  const scripts = path.join(__dirname, '..', 'scripts');
+  // buildThumbnails, buildMac and buildMacRtc keep their old lock: each built runtime pins their exact bytes
+  // (sourceRecipe), so editing them invalidates installed and cached runtimes. Move them with the next rebuild.
+  for (const name of ['buildRtc.cjs', 'buildCapture.cjs', 'prepareMacRtc.cjs']) {
+    const script = fs.readFileSync(path.join(scripts, name), 'utf8');
+    assert.match(script, /return withBuildLock\(path\.join\([^)]+\.lock'\), \(\) => \{/u, name);
+    assert.doesNotMatch(script, /openSync\(/u, name);
+  }
 });

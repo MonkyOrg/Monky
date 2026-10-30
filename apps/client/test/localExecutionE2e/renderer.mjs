@@ -143,7 +143,7 @@ export async function startRenderer({ port, nickname }) {
       rms = Math.sqrt(energy / probe.samples.length);
       frequency = crossings * probe.pipeline.gain.context.sampleRate / probe.samples.length;
     }
-    const peer = sessionId ? webRtcManager.peers.get(sessionId) : undefined;
+    const peer = sessionId ? webRtcManager.p2p.peers.get(sessionId) : undefined;
     const receiver = sessionId && pipeline ? webRtcManager.getReceiverForTrack(sessionId, pipeline.trackId) : null;
     const reports = receiver ? await receiver.getStats() : peer ? await peer.pc.getStats() : new Map();
     const isSfu = auth.server.voiceMode === 'sfu';

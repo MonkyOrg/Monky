@@ -32,14 +32,14 @@ export function bindDmNotifications(): () => void {
 
   const unsubscribers = [
     dmStore.bus.on('changed', syncBadge),
-    dmStore.bus.on<{ peer: string }>('incoming', ({ peer }) => {
+    dmStore.bus.on('incoming', ({ peer }) => {
       if (!reading(peer)) incoming.add(peer);
     }),
-    dmStore.bus.on<{ peer: string; nickname: string }>('friend-request', ({ peer, nickname: name }) => {
+    dmStore.bus.on('friend-request', ({ peer, nickname: name }) => {
       soundEffects.play('chat_message');
       showInfoToast(t('dm.friendRequestToast', { nickname: nickname(peer, name) }), 6000);
     }),
-    dmStore.bus.on<{ peer: string; nickname: string }>('friend-accepted', ({ peer, nickname: name }) => {
+    dmStore.bus.on('friend-accepted', ({ peer, nickname: name }) => {
       soundEffects.play('chat_message');
       showInfoToast(t('dm.friendAcceptedToast', { nickname: nickname(peer, name) }), 6000);
     }),

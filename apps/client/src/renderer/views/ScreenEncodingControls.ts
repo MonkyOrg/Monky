@@ -5,6 +5,7 @@ import { probeScreenEncoding, type ScreenEncodingPreferences } from '../core/scr
 import { webRtcManager } from '../core/WebRtcManager';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { nextIndex } from '../utils/rovingFocus';
 import { appEvents } from '../core/EventBus';
 import { FPS_OPTIONS } from './settings/qualityOptions';
 import { showInfoToast } from './CopyToast';
@@ -110,23 +111,25 @@ export class ScreenEncodingControls {
       if (this.active) void this.refresh();
     });
     this.unbindVoice = appEvents.on('voice.state_updated', () => this.resumeDeferredChoices());
-    for (const strategy of ['automatic', 'manual'] as const) {
+    const strategies = ['automatic', 'manual'] as const;
+    for (const strategy of strategies) {
       const button = container.querySelector<HTMLButtonElement>(`#screen-encoding-${strategy}`);
       button?.addEventListener('click', () => {
         if (this.preferences().encodingStrategy === strategy) return;
         this.requested = { ...this.savedPreferences(), encodingStrategy: strategy };
         void this.refresh();
       }, { signal: this.events.signal });
-      this.keyboard(button, strategy === 'automatic' ? 'manual' : 'automatic', 'automatic', 'manual');
+      this.keyboard(button, strategies, strategy);
     }
-    for (const mode of ['hardware', 'software'] as const) {
+    const modes = ['hardware', 'software'] as const;
+    for (const mode of modes) {
       const button = container.querySelector<HTMLButtonElement>(`#screen-encoding-${mode}`);
       button?.addEventListener('click', () => {
         if (button.disabled || this.preferences().encodingStrategy !== 'manual') return;
         this.requested = { ...this.preferences(), encodingMode: mode, codec: this.modeCodec(mode) };
         void this.refresh();
       }, { signal: this.events.signal });
-      this.keyboard(button, mode === 'hardware' ? 'software' : 'hardware', 'hardware', 'software');
+      this.keyboard(button, modes, mode);
     }
     const codec = container.querySelector<HTMLSelectElement>('#select-video-codec');
     codec?.addEventListener('change', () => {
@@ -160,17 +163,19 @@ export class ScreenEncodingControls {
     this.selectionKey = null;
   }
 
-  private keyboard(button: HTMLButtonElement | null, other: string, first: string, last: string): void {
+  /** Each row of cards is one choice: the arrows, Home and End move to a card and choose it. */
+  private keyboard(button: HTMLButtonElement | null, group: readonly string[], id: string): void {
     button?.addEventListener('keydown', event => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         button.click();
-      } else if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-        event.preventDefault();
-        const next = this.container?.querySelector<HTMLButtonElement>(
-          `#screen-encoding-${event.key === 'Home' ? first : event.key === 'End' ? last : other}`);
-        if (next && !next.disabled) { next.focus(); next.click(); }
+        return;
       }
+      const index = nextIndex(event.key, group.indexOf(id), group.length, { orientation: 'horizontal' });
+      if (index === null) return;
+      event.preventDefault();
+      const next = this.container?.querySelector<HTMLButtonElement>(`#screen-encoding-${group[index]}`);
+      if (next && !next.disabled) { next.focus(); next.click(); }
     }, { signal: this.events?.signal });
   }
 

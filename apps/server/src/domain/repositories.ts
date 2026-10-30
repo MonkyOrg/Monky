@@ -1,4 +1,4 @@
-import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NativePollRecord, NativePollVoterRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NativePollRecord, NativePollVoterRecord, NewServerRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
 import type { BotSelector } from '@monky/shared';
 import type { BotSettingsRecord } from './entities';
 
@@ -57,7 +57,7 @@ export interface IBotSelectorRepository {
 
 export interface IServerRepository {
   getServer(): Promise<ServerRecord | null>;
-  createServer(server: ServerRecord): Promise<void>;
+  createServer(server: NewServerRecord): Promise<void>;
   updateServer(server: Partial<ServerRecord>): Promise<void>;
 }
 

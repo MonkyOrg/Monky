@@ -1,5 +1,5 @@
 import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, VoiceRestrictions, canAccessChannel, hasPermission } from '@monky/shared';
-import { appEvents, EventBus } from '../core/EventBus';
+import { appEvents, type AppEventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
 import type { ChannelCategory } from '@monky/shared';
@@ -11,7 +11,7 @@ export class ServerStore {
    * the app-wide bus; the others hold a silent one so their updates stay
    * invisible until the user switches to them (#400).
    */
-  public bus: EventBus = appEvents;
+  public bus: AppEventBus = appEvents;
   public serverDetails: ServerDetails | null = null;
   public currentUser: UserSummary | null = null;
   public voiceRestrictions: VoiceRestrictions = { serverMuted: false, serverDeafened: false, permissionMuted: false };

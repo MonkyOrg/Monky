@@ -4,7 +4,10 @@ import {
   AuthConnectPayload,
   AuthFailedPayload,
   AuthSuccessPayload,
+  type ClientMessageArgs,
+  type ClientMessageType,
   MessageType,
+  type NativeScreenRpcMethod,
   ProtocolMessage,
   PROTOCOL_VERSION,
   ProtocolErrorCode,
@@ -15,7 +18,8 @@ import {
   ServerShutdownPayload,
   serverShutdownSchema,
 } from '@monky/shared';
-import { appEvents } from './EventBus';
+import { appEvents, type EventArgs, type EventName } from './EventBus';
+import type { AppEvents } from './appEventMap';
 import { createActiveProxy } from './activeProxy';
 import { emitOutsideRouting, routeSessionEvent } from './sessionRouting';
 import { clientLog } from './ClientLogService';
@@ -64,9 +68,24 @@ export class ProtocolRequestError extends Error {
 }
 
 export interface PendingRequest {
-  resolve: (value: any) => void;
-  reject: (reason: any) => void;
-  timer: any;
+  /** Settles with the reply's payload; `sendRequest` hands it to its caller. */
+  resolve: (payload: unknown) => void;
+  reject: (reason: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/** `[type, payload]` of a message, then its request id: the payload is checked against the type. */
+export type OutgoingMessage = [...ClientMessageArgs, requestId?: string];
+/** A request: a message, then how long to wait for the answer. */
+export type OutgoingRequest = [...ClientMessageArgs, requestId?: string, timeoutMs?: number];
+
+/**
+ * `send` as `request` calls it, with a type and a payload it already holds
+ * apart. Every message leaves through `send`, which is where tests and
+ * observers watch the wire.
+ */
+interface MessageWriter {
+  send(type: ClientMessageType, payload: unknown, requestId?: string): void;
 }
 
 interface ClientIdentity {
@@ -190,12 +209,13 @@ export class NetworkClient {
 
   private async diagnoseConnectionFailure(host: string, port: number): Promise<Error> {
     clientLog.warn('NETWORK', `Diagnosing connection failure to ${host}:${port}`);
-    const probe = (window as any).api?.probeServer;
+    // Outside Electron (tests, a page opened without the preload) there is no probe.
+    const probe = window.api?.probeServer;
     if (typeof probe !== 'function') {
       return new Error(t('network.genericConnectError'));
     }
     try {
-      const result: { reachable: boolean; reason: string } = await probe(host, port);
+      const result = await probe(host, port);
       switch (result.reason) {
         case 'online':
           return new Error(t('network.notMonkyServer', { host, port }));
@@ -266,14 +286,25 @@ export class NetworkClient {
    * session manager can point the stores at the right bundle before handlers
    * run (#400).
    */
-  private emitScoped(event: string, data?: unknown, requestId?: string): void {
-    if (event === 'network.status') this.notifyEventListeners(event, data, requestId);
+  private emitScoped<K extends EventName<AppEvents>>(event: K, ...args: EventArgs<AppEvents[K]>): void {
+    const [data] = args;
+    if (event === 'network.status') this.notifyEventListeners(event, data);
     if (event === 'network.server_shutdown') {
-      emitOutsideRouting(() => appEvents.emit(event, data));
+      emitOutsideRouting(() => appEvents.emit(event, ...args));
     } else {
-      routeSessionEvent(this.sessionKey, event, () => appEvents.emit(event, data));
+      routeSessionEvent(this.sessionKey, event, () => appEvents.emit(event, ...args));
     }
-    if (event !== 'network.status') this.notifyEventListeners(event, data, requestId);
+    if (event !== 'network.status') this.notifyEventListeners(event, data);
+  }
+
+  /**
+   * A server message on the app bus, as `message.<TYPE>`, routed like any other
+   * event of this server. `onEvent` listeners also get its request id.
+   */
+  private emitServerMessage(type: MessageType, payload: unknown, requestId?: string): void {
+    const event = `message.${type}` as const;
+    routeSessionEvent(this.sessionKey, event, () => appEvents.emit(event, payload));
+    this.notifyEventListeners(event, payload, requestId);
   }
 
   private notifyEventListeners(event: string, data: unknown, requestId?: string): void {
@@ -502,7 +533,7 @@ export class NetworkClient {
     }
   }
 
-  public send(type: MessageType, payload: any, requestId?: string): void {
+  public send(...[type, payload, requestId]: OutgoingMessage): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn(`Cannot send message ${type}, socket is not open.`);
       return;
@@ -516,10 +547,9 @@ export class NetworkClient {
     };
 
     this.ws.send(JSON.stringify(message));
-    const leave: unknown = payload;
-    if (type === MessageType.VOICE_LEAVE && leave !== null && typeof leave === 'object'
-      && 'channelId' in leave && typeof leave.channelId === 'string') {
-      this.localVoiceLeaves.set(id, leave.channelId);
+    if (type === MessageType.VOICE_LEAVE && payload !== null && typeof payload === 'object'
+      && 'channelId' in payload && typeof payload.channelId === 'string') {
+      this.localVoiceLeaves.set(id, payload.channelId);
       if (this.localVoiceLeaves.size > 256) {
         const first = this.localVoiceLeaves.keys().next().value;
         if (first !== undefined) this.localVoiceLeaves.delete(first);
@@ -527,14 +557,31 @@ export class NetworkClient {
     }
   }
 
-  public sendRequest<T = any>(type: MessageType, payload: any, customRequestId?: string, timeoutMs: number = 8000): Promise<T> {
+  /**
+   * Sends a message and settles with the payload of the server's answer. `T`
+   * names what the caller expects back; the answer is not validated here, so
+   * a caller that trusts its shape less parses it with the schema it knows.
+   */
+  public sendRequest<T = unknown>(...[type, payload, requestId, timeoutMs]: OutgoingRequest): Promise<T> {
+    return this.request<T>(type, payload, requestId, timeoutMs);
+  }
+
+  /**
+   * Forwards an SFU request the native screen runtime built: this app neither
+   * writes nor reads its payload, which the server validates like any other.
+   */
+  public relayRequest<T = unknown>(type: NativeScreenRpcMethod, payload: Readonly<Record<string, unknown>>): Promise<T> {
+    return this.request<T>(type, payload);
+  }
+
+  private request<T>(type: ClientMessageType, payload: unknown, customRequestId?: string, timeoutMs = 8000): Promise<T> {
     if (this.getStatus() !== 'CONNECTED' || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       clientLog.warn('NETWORK', `Cannot request ${type}: server is not connected`);
       return Promise.reject(new Error(t('network.connectionClosed')));
     }
     const requestId = customRequestId || uuidv4();
 
-    return new Promise((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pendingRequests.has(requestId)) {
           this.pendingRequests.delete(requestId);
@@ -543,9 +590,11 @@ export class NetworkClient {
         }
       }, timeoutMs);
 
-      this.pendingRequests.set(requestId, { resolve, reject, timer });
+      // The one place an answer becomes the type its caller asked for.
+      this.pendingRequests.set(requestId, { resolve: reply => resolve(reply as T), reject, timer });
+      const writer: MessageWriter = this;
       try {
-        this.send(type, payload, requestId);
+        writer.send(type, payload, requestId);
       } catch (error) {
         clearTimeout(timer);
         this.pendingRequests.delete(requestId);
@@ -649,7 +698,7 @@ export class NetworkClient {
       pending.resolve(payload);
     }
 
-    this.emitScoped(`message.${type}`, payload, requestId);
+    this.emitServerMessage(type, payload, requestId);
   }
 
   private captureServerName(value: unknown): void {

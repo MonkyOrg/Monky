@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { isPrereleaseVersion } from '@monky/shared';
 import { ANSI, color } from './constants';
 import { resolveInterpreter } from './health';
 import { t } from './i18n/index';
@@ -14,7 +15,7 @@ import {
 import { runSync } from './process';
 import { ask, askChoice, PromptCancelledError } from './prompts';
 import { getRegistryDir, listServers } from './registry';
-import { getLocalVersion, parseSemver } from './commands/update';
+import { getLocalVersion } from './commands/update';
 
 /**
  * One updater for the whole machine. The CLI is a global package shared by
@@ -159,7 +160,7 @@ export async function enableAutoUpdate(schedule: AutoUpdateSchedule): Promise<vo
   ensurePm2();
 
   const scriptPath = getAutoUpdaterScriptPath();
-  const beta = parseSemver(getLocalVersion()).isBeta;
+  const beta = isPrereleaseVersion(getLocalVersion());
   await fs.promises.mkdir(path.dirname(scriptPath), { recursive: true });
   await fs.promises.writeFile(
     scriptPath,

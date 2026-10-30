@@ -276,6 +276,22 @@ if (!process.versions.electron) {
         points.channel,
         '[data-category-id="destination"] > .category-title',
         0.75,
+        true,
+        async () => {
+          // The list keeps the pointer while the dragged row is redrawn under it (R-SHELL-12).
+          const repaint = await browser.webContents.executeJavaScript(`(() => {
+            const list = document.querySelector('#channel-categories-list');
+            const before = document.querySelector('.channel-item[data-channel-id="voice"]');
+            const held = list.hasPointerCapture(1);
+            window.categoryRenameChannel('voice', 'voice repainted');
+            const after = document.querySelector('.channel-item[data-channel-id="voice"]');
+            return { held, replaced: !!after && after !== before, stillHeld: list.hasPointerCapture(1),
+              marked: !!document.querySelector('.channel-reorder-active .channel-dragging[data-channel-id="voice"]') };
+          })()`);
+          if (!repaint.held || !repaint.replaced || !repaint.stillHeld || !repaint.marked) {
+            throw new Error('Redrawing the dragged channel lost the drag: ' + JSON.stringify(repaint));
+          }
+        },
       );
       if (channelDragGeometry.targetAfter.top <= channelDragGeometry.targetBefore.top) {
         throw new Error('The Uncategorized target did not push existing categories down during channel drag: ' +
@@ -978,7 +994,7 @@ async function regression(locale) {
   store.setServerDetails(details, user);
   view.renderChannels();
 
-  // Reordering is a pointer drag: synthetic mouse events drive its real handlers,
+  // Reordering is a pointer drag: synthetic pointer events drive its real handlers,
   // aimed through elementFromPoint like a user would.
   const pointAt = (element, yRatio = 0.5) => {
     const box = element.getBoundingClientRect();
@@ -987,15 +1003,16 @@ async function regression(locale) {
     check(hit === element || element.contains(hit), `pointer target is covered by ${hit?.outerHTML.slice(0, 160)}`);
     return point;
   };
+  const mouse = { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true };
   const pressPointer = handle => {
     const start = pointAt(handle);
-    handle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, ...start }));
+    handle.dispatchEvent(new PointerEvent('pointerdown', { ...mouse, button: 0, buttons: 1, ...start }));
     // The drag starts only past its 6 px threshold.
-    window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true,
+    window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1,
       clientX: start.clientX + 7, clientY: start.clientY + 7 }));
   };
-  const movePointerTo = point => window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, ...point }));
-  const releasePointer = point => window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0, ...point }));
+  const movePointerTo = point => window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1, ...point }));
+  const releasePointer = point => window.dispatchEvent(new PointerEvent('pointerup', { ...mouse, button: 0, ...point }));
 
   // The creation form opened from the sidebar menu above is still showing; a user
   // closes it before dragging, otherwise it covers the sidebar.
@@ -1059,6 +1076,44 @@ async function regression(locale) {
   check(getComputedStyle(uncategorizedDropzone).display === 'none',
     'move-outside destination hides again after dragging');
 
+  // Escape ends a drag where it is: the marks go and the release that follows moves nothing (R-SHELL-12).
+  const requestsBeforeEscape = requests.length;
+  const escapedChannel = root.querySelector('.channel-item[data-channel-id="text"]');
+  pressPointer(escapedChannel);
+  movePointerTo(pointAt(uncategorizedDropzone));
+  check(uncategorizedDropzone.classList.contains('channel-category-drop-target'), 'the drag aims at a destination before Escape');
+  const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+  document.body.dispatchEvent(escape);
+  check(escape.defaultPrevented && !root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active')
+    && !root.querySelector('.channel-dragging, .channel-category-drop-target, .channel-drop-before, .channel-drop-after'),
+  'Escape cancels the channel drag and clears its marks');
+  movePointerTo(outsidePoint);
+  check(!root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
+    'a cancelled drag does not start again while the button is still held');
+  releasePointer(outsidePoint);
+  await flush();
+  check(requests.length === requestsBeforeEscape, 'releasing after Escape moves nothing');
+
+  // A mouse button held for push-to-talk turns the left press and release into moves (R-SHELL-12).
+  const SIDE = 8;
+  const requestsBeforeChord = requests.length;
+  const chorded = root.querySelector('.channel-item[data-channel-id="text"]');
+  const chordStart = pointAt(chorded);
+  chorded.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: 0, buttons: 1 | SIDE, ...chordStart }));
+  window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1 | SIDE,
+    clientX: chordStart.clientX + 7, clientY: chordStart.clientY + 7 }));
+  check(root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
+    'a left press made while another button is held starts the drag');
+  const chordTarget = pointAt(uncategorizedDropzone);
+  window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: -1, buttons: 1 | SIDE, ...chordTarget }));
+  window.dispatchEvent(new PointerEvent('pointermove', { ...mouse, button: 0, buttons: SIDE, ...chordTarget }));
+  await flush();
+  check(!root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active')
+    && requests.slice(requestsBeforeChord).some(({ type, payload }) =>
+      type === 'CHANNEL_UPDATE' && payload.channelId === 'text' && payload.categoryId === null),
+  'letting go of the left button drops at once, though the other button is still held');
+  window.dispatchEvent(new PointerEvent('pointerup', { ...mouse, button: 3, buttons: 0, ...chordTarget }));
+
   const off = appEvents.on('server.updated', () => view.renderChannels());
   root.querySelector('[data-collapse-category="category"]').click();
   check(store.isCategoryCollapsed('category'), 'pointer collapses and persists');
@@ -1079,7 +1134,7 @@ async function regression(locale) {
     edit.open('text');
   };
   window.categoryTestMouseEvents = [];
-  for (const type of ['mousedown', 'mousemove', 'mouseup']) {
+  for (const type of ['pointerdown', 'pointermove', 'pointerup']) {
     document.addEventListener(type, event => {
       window.categoryTestMouseEvents.push({
         type,
@@ -1112,4 +1167,10 @@ async function regression(locale) {
   };
   // Kept for the real key event dispatched from Electron after returning.
   window.categoryTestCleanup = () => { off(); view.destroy(); };
+  // A background event redrawing the row being dragged, as a voice or unread update would (R-SHELL-12).
+  window.categoryRenameChannel = (id, name) => {
+    store.setServerDetails({ ...store.serverDetails, channels: store.serverDetails.channels
+      .map(item => item.id === id ? { ...item, name } : item) }, user);
+    view.renderChannels();
+  };
 }

@@ -108,6 +108,24 @@ lógico, não uma única store compartilhando dados de todos os servidores:
 
 </div>
 
+Os eventos do barramento são tipados em `core/appEventMap.ts`: cada nome
+declara o que carrega, e quem emite ou assina com outro formato não compila. As
+mensagens do servidor chegam como `message.<TIPO>`, com o payload do mapa do
+protocolo (`ServerToClientPayloads`, no `@monky/shared`). As stores seguem três
+formatos:
+
+- **Por sessão** (`serverStore`, `chatStore`, `botScreenStore` e
+  `ParticipantManager`): emitem no próprio `bus`, que é o `appEvents` na sessão
+  visível e o barramento silencioso nas demais. O resto do app as usa por um
+  proxy que aponta para a sessão ativa.
+- **Globais** (`settingsStore`, `connectionStore` e `voiceStore`): emitem direto
+  no `appEvents`, e o evento diz o que mudou; o `settings.updated`, por exemplo,
+  traz as chaves alteradas. A `voiceStore` também muda durante eventos de outros
+  servidores, por isso notifica por `emitOutsideRouting`.
+- **Modelos de tela** (`favoritesStore` e `CommunityFeed`): avisam as telas
+  que os usam por um `subscribe()` próprio. A `dmStore` tem um barramento só
+  dela, tipado por `DmEvents`.
+
 ### Os serviços
 
 Cada responsabilidade grande do cliente vive em uma classe própria, em
@@ -625,11 +643,20 @@ Monky tem um módulo nativo em C++:
 | **macOS** | ScreenCaptureKit (macOS 13+ para áudio; caminho de vídeo nativo requer 14+), com áudio do sistema ou do aplicativo inteiro selecionado, mediante confirmação |
 | **Outras** | Não suportado — o app segue funcionando, só sem áudio de tela |
 
-Se o módulo não carregar, nada quebra: o compartilhamento continua funcionando
-sem som e o app avisa.
+No Windows, o mesmo módulo também identifica as janelas e os monitores do
+seletor, lê o layout do teclado para os atalhos e limita o redimensionamento do
+overlay. Por isso ele embute o runtime do Visual C++ em vez de depender do
+redistribuível instalado no sistema, e o empacotamento recusa um build que volte
+a exigi-lo. Se mesmo assim o módulo não carregar, o processo principal registra
+a causa no log do app, e as funções que dependem dele falham com essa causa, em
+vez de devolverem listas vazias: no Windows, o seletor não consegue listar
+janelas nem monitores. No macOS, o compartilhamento continua funcionando sem som
+e o app avisa.
 
 Cada compartilhamento com som abre a própria sessão de captura. O módulo aceita
-até 8 sessões ao mesmo tempo, uma para cada tela permitida por pessoa. Quais
+até 8 sessões ao mesmo tempo, uma para cada tela permitida por pessoa. Cada
+sessão roda numa thread própria, que avisa o loop do Node ao terminar; nenhuma
+ocupa o pool de threads do libuv, que atende arquivos, DNS e criptografia. Quais
 sons podem coexistir é decidido no processo
 principal, que repete as checagens do seletor: o som de um monitor (e, no macOS,
 o de qualquer fonte, porque o ScreenCaptureKit entrega a mistura do sistema) não

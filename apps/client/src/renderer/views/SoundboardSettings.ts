@@ -1,8 +1,25 @@
 import { appEvents } from '../core/EventBus';
+import { soundboardService } from '../core/SoundboardService';
 import { t } from '../i18n';
 import { settingsStore } from '../stores/settingsStore';
 import { escapeHtml } from '../utils/html';
 import { bindSoundboardLimiterControls, renderSoundboardLimiterControls } from './SoundboardLimiterControls';
+
+/**
+ * The soundboard's volume, in the soundboard and in the settings: every step is
+ * heard at once and the value is saved where the slider stops.
+ */
+export function bindSoundboardVolumeSlider(slider: HTMLInputElement | null, label: Element | null): void {
+  slider?.addEventListener('input', () => {
+    const value = parseInt(slider.value, 10);
+    slider.style.setProperty('--slider-progress', `${value}%`);
+    if (label) label.textContent = `${value}%`;
+    settingsStore.soundboardVolume = value;
+    soundboardService.applyVolume();
+    settingsStore.saveSoon();
+  });
+  slider?.addEventListener('change', () => settingsStore.save());
+}
 
 export function renderSoundboardSettings(): string {
   return `

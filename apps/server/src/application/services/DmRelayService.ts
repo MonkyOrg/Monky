@@ -4,7 +4,7 @@ import {
   ProtocolErrorCode,
   type DmRelayDeliverPayload,
   type DmRelaySendPayload,
-  type ProtocolMessage,
+  type ServerMessage,
   dmRelaySendSchema,
   normalizePublicKeyHex,
 } from '@monky/shared';
@@ -24,7 +24,7 @@ export interface DmRelaySession {
 
 export interface DmRelayTransport<TSession extends DmRelaySession> {
   isCurrent(session: TSession): boolean;
-  send(session: TSession, message: ProtocolMessage): void;
+  send(session: TSession, message: ServerMessage): void;
 }
 
 export interface DmRelayError {

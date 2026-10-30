@@ -10,7 +10,8 @@ const { FileMatcher, getNodeModuleFileMatcher } = require('app-builder-lib/out/f
 const { computeNodeModuleFileSets } = require('app-builder-lib/out/util/appFileCopier');
 const { root: nativeRoot } = require('../scripts/buildTools.cjs');
 const {
-  RENDERER_ONLY_PACKAGES, requiredApplicationFiles, runtimeSourceFiles, verifyApplicationContents, verifyPackagedRuntimeSources,
+  RENDERER_ONLY_PACKAGES, NODE_GYP_ADDONS, requiredApplicationFiles, runtimeSourceFiles, verifyApplicationContents,
+  verifyNativeAddonBuilds, verifyPackagedRuntimeSources, verifyScreenAudioAddon, windowsImportedLibraries,
 } = require('../scripts/checkPackage.cjs');
 const { packageRootOf, renderNotices, thirdPartyNotices } = require('../../../scripts/thirdPartyNotices.cjs');
 const { build, dependencies, devDependencies } = require('../../../package.json');
@@ -46,6 +47,24 @@ function copiesDependency(relative) {
   }
   return filter(path.join(root, ...parts), { isDirectory: () => false });
 }
+
+/** What node-gyp leaves beside an addon: MSBuild on Windows, make on macOS, and on either a Debug build. */
+function nodeGypLeftovers(target) {
+  return [
+    `build/${target}.vcxproj`, `build/${target}.vcxproj.filters`, 'build/binding.sln', 'build/config.gypi',
+    `build/Release/${target}.iobj`, `build/Release/${target}.ipdb`, `build/Release/${target}.pdb`,
+    `build/Release/${target}.lib`, `build/Release/${target}.exp`, `build/Release/obj/${target}/${target}.node.recipe`,
+    `build/Release/obj/${target}/${target}.tlog/CL.read.1.tlog`, `build/Release/obj/${target}/addon.obj`,
+    'build/Makefile', 'build/binding.Makefile', `build/${target}.target.mk`, 'build/gyp-mac-tool',
+    `build/Release/.deps/Release/obj.target/${target}/addon.o.d`, `build/Release/obj.target/${target}/addon.o`,
+    'build/node_gyp_bins/python3', 'build/Release/.forge-meta', `build/Debug/${target}.node`,
+  ];
+}
+
+const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const SCREEN_AUDIO_RUNTIME = ['index.js', 'native_binding.js', 'package.json', 'packet_capture.js'];
+const UIOHOOK_RUNTIME = ['LICENSE', 'dist/index.js', 'libuiohook/src/windows/input_hook.c', 'package.json',
+  'prebuilds/darwin-arm64/uiohook-napi.node', 'prebuilds/win32-x64/uiohook-napi.node', 'src/lib/addon.c'];
 
 test('renderer-only packages stay out of the production dependencies electron-builder packages', () => {
   for (const name of RENDERER_ONLY_PACKAGES) {
@@ -103,6 +122,55 @@ test('every runtime file afterPack compares survives build.files in both workspa
       assert.equal(copiesDependency(`${layout}/${relative}`), true, `afterPack compares ${relative}, but build.files drops it`);
 });
 
+test('build.files keeps only the addon from the build folder of each node-gyp module, in both workspace layouts', () => {
+  for (const [root, target] of [['native/screen-audio', 'screen_audio'], ['node_modules/@monky/screen-audio', 'screen_audio'],
+    ['node_modules/uiohook-napi', 'uiohook_napi']]) {
+    assert.equal(copiesDependency(`${root}/build/Release/${target}.node`), true, root);
+    for (const leftover of nodeGypLeftovers(target))
+      assert.equal(copiesDependency(`${root}/${leftover}`), false, `${root}/${leftover}`);
+  }
+  for (const root of ['native/screen-audio', 'node_modules/@monky/screen-audio']) {
+    for (const relative of SCREEN_AUDIO_RUNTIME) assert.equal(copiesDependency(`${root}/${relative}`), true, `${root}/${relative}`);
+    for (const relative of ['src/packet_capture.cpp', 'src/mac/packet_source.mm', 'test/packetCapture.test.cjs'])
+      assert.equal(copiesDependency(`${root}/${relative}`), false, `${root}/${relative}`);
+  }
+  for (const relative of UIOHOOK_RUNTIME)
+    assert.equal(copiesDependency(`node_modules/uiohook-napi/${relative}`), true, relative);
+});
+
+test('the real packager ships only the addon of each node-gyp build folder on Windows and macOS', async t => {
+  const directory = temporary(t, 'monky-node-gyp-');
+  const app = path.join(directory, 'apps', 'client');
+  const screenAudio = { name: '@monky/screen-audio', target: 'screen_audio', runtime: SCREEN_AUDIO_RUNTIME,
+    sources: ['index.d.ts', 'binding.gyp', 'src/packet_capture.cpp', 'src/mac/packet_source.mm', 'test/README.md'] };
+  const modules = [
+    { ...screenAudio, dir: path.join(app, 'native', 'screen-audio') },
+    { ...screenAudio, dir: path.join(directory, 'node_modules', '@monky', 'screen-audio') },
+    { name: 'uiohook-napi', target: 'uiohook_napi', runtime: UIOHOOK_RUNTIME, sources: ['binding.gyp'],
+      dir: path.join(directory, 'node_modules', 'uiohook-napi') },
+  ];
+  for (const { dir, target, runtime, sources } of modules)
+    for (const relative of [...runtime, ...sources, `build/Release/${target}.node`, ...nodeGypLeftovers(target)]) write(dir, relative);
+  const info = {
+    config: build, appInfo: { type: 'commonjs' }, debugLogger: { isEnabled: false },
+    getNodeDependencyInfo: () => ({ value: Promise.resolve(modules.map(({ name, dir }) => ({ name, dir }))) }),
+  };
+  const matcher = getNodeModuleFileMatcher(app, path.join(directory, 'output'), value => value, {}, info);
+  for (const platform of [Platform.WINDOWS, Platform.MAC]) {
+    const sets = await computeNodeModuleFileSets({ info, config: build, platform }, matcher);
+    const shipped = sets.map((set, index) =>
+      set.files.map(file => path.relative(modules[index].dir, file).split(path.sep).join('/')).sort());
+    for (const [index, { target, runtime }] of modules.entries())
+      assert.deepEqual(shipped[index], [...runtime, `build/Release/${target}.node`].sort(), `${platform.name}: ${modules[index].dir}`);
+    for (const layout of [0, 1]) {
+      const packaged = path.join(directory, 'packaged', platform.name, String(layout));
+      for (const index of [layout, 2])
+        for (const relative of shipped[index]) write(path.join(packaged, 'node_modules', ...modules[index].name.split('/')), relative);
+      verifyNativeAddonBuilds(packaged);
+    }
+  }
+});
+
 test('afterPack accepts the runtime the real packager copies for Windows and macOS', async t => {
   const directory = temporary(t, 'monky-packaged-runtime-');
   const app = path.join(directory, 'apps', 'client');
@@ -143,6 +211,31 @@ test('the afterPack guard accepts a complete application on every platform', t =
     'node_modules/@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2',
     'node_modules/mediasoup/worker/src/Utils/README_BASE64_UTILS', 'dist/THIRD_PARTY_NOTICES.txt'])
     assert.ok(requiredApplicationFiles('win32').includes(relative), relative);
+  for (const platform of ['win32', 'darwin'])
+    for (const relative of ['node_modules/@monky/screen-audio/build/Release/screen_audio.node',
+      'node_modules/uiohook-napi/build/Release/uiohook_napi.node'])
+      assert.ok(requiredApplicationFiles(platform).includes(relative), `${platform}: ${relative}`);
+});
+
+test('the afterPack guard requires each node-gyp addon and rejects anything else in its build folder', t => {
+  const app = packagedApplication(t, 'win32');
+  for (const [name, addon] of Object.entries(NODE_GYP_ADDONS)) {
+    const module = path.join(app, 'node_modules', ...name.split('/'));
+    for (const leftover of nodeGypLeftovers(addon.slice(0, -'.node'.length))) {
+      write(module, leftover);
+      assert.throws(() => verifyApplicationContents(app, 'win32'), new RegExp(
+        `node_modules/${escapeRegExp(name)}/build must hold only Release/${escapeRegExp(addon)}; `
+        + `build\\.files let through ${escapeRegExp(leftover.slice('build/'.length))}(?:\\n|$)`), leftover);
+      fs.rmSync(path.join(module, ...leftover.split('/')));
+    }
+  }
+  verifyApplicationContents(app, 'win32');
+  for (const [name, addon] of Object.entries(NODE_GYP_ADDONS)) {
+    const missing = packagedApplication(t, 'darwin');
+    fs.rmSync(path.join(missing, 'node_modules', ...name.split('/'), 'build', 'Release', addon));
+    assert.throws(() => verifyApplicationContents(missing, 'darwin'),
+      new RegExp(`Missing packaged file: node_modules/${escapeRegExp(name)}/build/Release/${escapeRegExp(addon)}`));
+  }
 });
 
 test('the afterPack guard rejects returning renderer packages, missing runtime files and incomplete notices', t => {
@@ -159,6 +252,55 @@ test('the afterPack guard rejects returning renderer packages, missing runtime f
   }
   write(app, 'dist/THIRD_PARTY_NOTICES.txt', 'qrcode-terminal 1.0.0\n@tensorflow/tfjs-core-extra 1.0.0\n');
   assert.throws(() => verifyApplicationContents(app, 'win32'), /notices omit @codemirror\/commands/);
+});
+
+/** A minimal PE32+ image whose import directory names the given libraries. */
+function peImage(libraries) {
+  const image = Buffer.alloc(0x600);
+  const header = 0x80, optional = header + 24, section = optional + 240, raw = 0x400, rva = 0x1000;
+  image.writeUInt32LE(header, 0x3c);
+  image.writeUInt32LE(0x4550, header);
+  image.writeUInt16LE(1, header + 6);
+  image.writeUInt16LE(240, header + 20);
+  image.writeUInt16LE(0x20b, optional);
+  for (const [field, value] of [[8, 0x200], [12, rva], [16, 0x200], [20, raw]]) image.writeUInt32LE(value, section + field);
+  if (!libraries.length) return image;
+  image.writeUInt32LE(rva, optional + 112 + 8);
+  let name = raw + (libraries.length + 1) * 20;
+  libraries.forEach((library, index) => {
+    image.writeUInt32LE(rva + name - raw, raw + index * 20 + 12);
+    name += image.write(`${library}\0`, name, 'latin1');
+  });
+  return image;
+}
+
+test('the afterPack guard reads the libraries a Windows binary needs at load time', () => {
+  assert.deepEqual(windowsImportedLibraries(peImage(['KERNEL32.dll', 'VCRUNTIME140_1.dll'])), ['KERNEL32.dll', 'VCRUNTIME140_1.dll']);
+  assert.deepEqual(windowsImportedLibraries(peImage([])), []);
+  assert.throws(() => windowsImportedLibraries(Buffer.alloc(0x200)), /Not a Windows PE image/);
+});
+
+test('the packaged audio addon must not need a Visual C++ runtime that Windows and Electron do not ship', t => {
+  const app = temporary(t, 'monky-packaged-addon-');
+  const addon = 'node_modules/@monky/screen-audio/build/Release/screen_audio.node';
+  for (const runtime of ['MSVCP140.dll', 'VCRUNTIME140.dll', 'vcruntime140_1.dll', 'CONCRT140.dll']) {
+    write(app, addon, peImage(['KERNEL32.dll', runtime, 'api-ms-win-crt-runtime-l1-1-0.dll']));
+    assert.throws(() => verifyScreenAudioAddon(app), new RegExp(`statically: ${runtime.replace('.', '\\.')}`));
+  }
+  write(app, addon, peImage(['KERNEL32.dll', 'USER32.dll', 'api-ms-win-core-winrt-l1-1-0.dll']));
+  verifyScreenAudioAddon(app);
+});
+
+const builtAddon = path.join(__dirname, '..', '..', 'screen-audio', 'build', 'Release', 'screen_audio.node');
+test('the locally built audio addon passes the same Visual C++ runtime check as the packaged one', {
+  skip: (process.platform !== 'win32' || !fs.existsSync(builtAddon)) && 'Needs the addon built on Windows',
+}, t => {
+  const bytes = fs.readFileSync(builtAddon);
+  assert.ok(windowsImportedLibraries(bytes).includes('KERNEL32.dll'), 'The PE reader must see the real imports');
+  // The afterPack check itself, so a build from before binding.gyp switched to /MT fails with its rebuild hint.
+  const app = temporary(t, 'monky-local-addon-');
+  write(app, 'node_modules/@monky/screen-audio/build/Release/screen_audio.node', bytes);
+  verifyScreenAudioAddon(app);
 });
 
 test('renderer notices are keyed by the package directory of each bundled module', () => {

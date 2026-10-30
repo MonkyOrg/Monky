@@ -1,9 +1,6 @@
-import { settingsStore } from '../stores/settingsStore';
 import { t } from '../i18n';
-import { normalizeAudioOutputId } from '../utils/audioPreferences';
 import { setAudioOutputSink } from './AudioOutputSink';
-
-let pendingDeviceId: string | null = null;
+import { effectiveAudioOutput, registerAudioOutputConsumer } from './audioOutputRouting';
 
 function showOutputError(media: HTMLMediaElement, error: unknown | null): void {
   const player = media.closest<HTMLElement>('.chat-video-player, .chat-audio-player');
@@ -22,11 +19,10 @@ function showOutputError(media: HTMLMediaElement, error: unknown | null): void {
   }
 }
 
-export async function routeChatMedia(media: HTMLMediaElement, deviceId?: string): Promise<void> {
+export async function routeChatMedia(media: HTMLMediaElement): Promise<void> {
   media.dataset.audioOutput = 'media';
-  const sinkId = normalizeAudioOutputId(deviceId ?? pendingDeviceId ?? settingsStore.getAudioOutputDeviceId('media'));
   try {
-    await setAudioOutputSink(media, sinkId);
+    await setAudioOutputSink(media, effectiveAudioOutput('media'));
     showOutputError(media, null);
   } catch (error) {
     media.pause();
@@ -41,12 +37,8 @@ export async function playChatMedia(media: HTMLMediaElement): Promise<void> {
   await media.play();
 }
 
-export async function setChatMediaOutputDeviceId(deviceId: string): Promise<void> {
-  pendingDeviceId = normalizeAudioOutputId(deviceId);
+// Every chat player in the page, inline or in the lightbox, follows the media output.
+registerAudioOutputConsumer(async () => {
   const media = document.querySelectorAll<HTMLMediaElement>('[data-audio-output="media"]');
-  await Promise.all(Array.from(media, (element) => routeChatMedia(element, deviceId)));
-}
-
-export function finishChatMediaOutputSelection(): void {
-  pendingDeviceId = null;
-}
+  await Promise.all(Array.from(media, routeChatMedia));
+});

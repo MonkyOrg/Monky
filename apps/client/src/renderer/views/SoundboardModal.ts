@@ -10,21 +10,21 @@ import { sessionManager } from '../core/SessionManager';
 import { favoritesStore, soundFavoriteKey } from '../stores/favoritesStore';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
-import { getLanguage, t, tCount } from '../i18n';
-import { captureShortcut, shortcutIdentity } from '../utils/keybind';
+import { t, tCount } from '../i18n';
 import { showAlert, showConfirm, showConfirmWithText } from './Dialog';
 import { SoundboardPlayersBar } from './SoundboardPlayersBar';
 import { SoundboardEditor } from './SoundboardEditor';
 import { ContextMenu } from './ContextMenu';
-import { finishSoundboardMutation, soundboardFileValue, validateSoundboardName, SoundboardLibraryError } from '../core/SoundboardLibrary';
+import {
+  finishSoundboardMutation, soundboardFileValue, validateSoundboardName, visibleSounds, SoundboardLibraryError,
+} from '../core/SoundboardLibrary';
+import { clearSoundShortcut, openSoundShortcutDialog } from './SoundboardShortcutDialog';
 import { enableBackdropClose } from '../utils/modal';
-import { matchesSearch as matchesSoundSearch } from '../utils/search';
-import { sortFavoritesFirst } from '../utils/favoriteOrder';
 import { setButtonLoading } from '../utils/buttonLoading';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
-import { bindSoundboardSettings, renderSoundboardSettings } from './SoundboardSettings';
+import { bindSoundboardSettings, bindSoundboardVolumeSlider, renderSoundboardSettings } from './SoundboardSettings';
 
 export class SoundboardModal {
   private modalEl: HTMLElement | null = null;
@@ -201,12 +201,7 @@ export class SoundboardModal {
     this.refreshGrid();
   }
 
-  private filterSounds(sounds: SoundItem[]): SoundItem[] {
-    return sounds.filter(sound => (!this.favoritesOnly || favoritesStore.isSoundFavorite(sound.filePath))
-      && (!this.searchQuery.trim() || matchesSoundSearch(sound.name, this.searchQuery)));
-  }
-
-  private renderSoundsGrid(sounds: SoundItem[], activeSoundName: string | null = null): string {
+  private renderSoundsGrid(sounds: SoundItem[], filteredSounds: SoundItem[], activeSoundName: string | null = null): string {
     if (!settingsStore.soundboardFolderPath) {
       return `
         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 180px; text-align: center; color: var(--text-muted); gap: 12px;">
@@ -247,12 +242,6 @@ export class SoundboardModal {
         <button type="button" id="sb-show-all" class="btn btn-secondary">${t('favorites.showAll')}</button>
       </div>`;
     }
-
-    const filteredSounds = sortFavoritesFirst(this.filterSounds(sounds), sound => ({
-      favorite: favoritesStore.isSoundFavorite(sound.filePath),
-      name: sound.name,
-      identity: soundFavoriteKey(sound.filePath),
-    }), getLanguage());
 
     if (filteredSounds.length === 0) {
       return `
@@ -412,7 +401,7 @@ export class SoundboardModal {
       const focusedKey = focusedFavorite?.dataset.favoriteKey;
       const sounds = soundboardService.getSounds();
       const currentPlayback = soundboardService.getCurrentPlayback();
-      const filteredSounds = this.filterSounds(sounds);
+      const filteredSounds = visibleSounds(sounds, this.searchQuery, this.favoritesOnly);
 
       if (countBadge) {
         if ((this.favoritesOnly || this.searchQuery.trim()) && filteredSounds.length !== sounds.length) {
@@ -422,7 +411,7 @@ export class SoundboardModal {
         }
       }
 
-      container.innerHTML = this.renderSoundsGrid(sounds, currentPlayback.soundName);
+      container.innerHTML = this.renderSoundsGrid(sounds, filteredSounds, currentPlayback.soundName);
       this.attachSoundClickEvents();
       this.updateActiveButtons();
       scroller.scrollTop = scrollTop;
@@ -561,103 +550,9 @@ export class SoundboardModal {
     }
   }
 
-  private async openKeyCaptureModal(soundName: string): Promise<void> {
-    const backdrop = document.createElement('div');
-    backdrop.className = 'modal-backdrop';
-    backdrop.style.zIndex = '10000';
-    backdrop.innerHTML = `
-      <div class="modal-card" style="width: 380px; max-width: 90vw; text-align: center;" role="dialog" aria-modal="true" aria-labelledby="sb-keybind-title">
-        <div class="modal-header" style="justify-content: center; position: relative;">
-          <div class="modal-title" style="display: flex; align-items: center; gap: 8px; font-size: 15px;">
-            <span class="material-symbols-outlined" style="color: var(--accent-primary);" aria-hidden="true">keyboard</span>
-            <span id="sb-keybind-title">${t('soundboard.keybindTitle')}</span>
-          </div>
-          <button type="button" id="sb-keybind-modal-close" class="modal-close-btn" style="position: absolute; right: 16px; top: 16px;" aria-label="${t('common.close')}">&times;</button>
-        </div>
-        <div style="padding: 16px 20px 20px;">
-          <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px; word-break: break-word;">
-            ${t('soundboard.keybindPrompt', { sound: `<strong style="color: var(--text-primary);">${escapeHtml(soundName)}</strong>` })}
-          </div>
-          <div id="sb-keybind-box" style="padding: 24px 16px; background: var(--bg-input); border: 2px dashed var(--accent-primary); border-radius: var(--radius-md); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 0 16px rgba(88, 101, 242, 0.25);">
-            <span class="material-symbols-outlined" style="font-size: 32px; color: var(--accent-primary); animation: pulse 1.5s infinite;">keyboard</span>
-            <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);">${t('soundboard.keybindWaiting')}</div>
-            <div style="font-size: 11px; color: var(--text-muted);">${t('soundboard.keybindExamples')}</div>
-          </div>
-        </div>
-        <div class="modal-footer" style="justify-content: space-between; padding: 12px 20px;">
-          <button type="button" id="sb-keybind-btn-clear" class="btn btn-secondary" style="font-size: 12px; color: var(--danger);">${t('soundboard.removeShortcutButton')}</button>
-          <button type="button" id="sb-keybind-btn-cancel" class="btn btn-secondary" style="font-size: 12px;">${t('soundboard.cancelEsc')}</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(backdrop);
-    enterModal(backdrop);
-
-    let isClosed = false;
-    const cleanup = async () => {
-      if (isClosed) return;
-      isClosed = true;
-      this.closeShortcutCapture = null;
-      disposeCapture();
-      exitModal(backdrop);
-    };
-
-    const disposeCapture = captureShortcut(backdrop, backdrop.querySelector('#sb-keybind-box'), async (combo) => {
-      await cleanup();
-
-      // Check if this shortcut is already in use by another sound
-      const existingConflict = Object.entries(settingsStore.soundboardShortcuts || {}).find(
-        ([name, data]) => data && shortcutIdentity(data.accelerator) === combo.accelerator && name !== soundName
-      );
-
-      if (existingConflict) {
-        const [conflictSoundName] = existingConflict;
-        const confirm = await showConfirm({
-          title: t('soundboard.shortcutInUseTitle'),
-          message: t('soundboard.shortcutInUseMessage', { combo: combo.display, sound: conflictSoundName }),
-          confirmLabel: t('soundboard.replace'),
-          cancelLabel: t('common.cancel'),
-          variant: 'warning',
-        });
-
-        if (!confirm) {
-          await soundboardService.syncShortcuts();
-          return; // Cancelled by user
-        }
-
-        // Remove from old sound
-        delete settingsStore.soundboardShortcuts[conflictSoundName];
-      }
-
-      // Assign to current sound
-      if (!settingsStore.soundboardShortcuts) {
-        settingsStore.soundboardShortcuts = {};
-      }
-      settingsStore.soundboardShortcuts[soundName] = combo;
-      settingsStore.save();
-      await soundboardService.syncShortcuts();
-
-      this.refreshGrid();
-    }, () => { void cleanup(); }, this.modalEl ?? backdrop);
-
-    backdrop.querySelector('#sb-keybind-modal-close')?.addEventListener('click', () => cleanup());
-    backdrop.querySelector('#sb-keybind-btn-cancel')?.addEventListener('click', () => cleanup());
-    backdrop.querySelector('#sb-keybind-btn-clear')?.addEventListener('click', async () => {
-      await cleanup();
-      if (settingsStore.soundboardShortcuts) {
-        delete settingsStore.soundboardShortcuts[soundName];
-        settingsStore.save();
-        await soundboardService.syncShortcuts();
-        this.refreshGrid();
-      }
-    });
-
-    backdrop.addEventListener('mousedown', (e) => {
-      if (e.target === backdrop) cleanup();
-    });
-
-    this.closeShortcutCapture = () => { void cleanup(); };
+  private openShortcutDialog(soundName: string): void {
+    if (!this.modalEl) return;
+    this.closeShortcutCapture = openSoundShortcutDialog(soundName, this.modalEl, () => this.refreshGrid());
   }
 
   private attachEvents(): void {
@@ -738,16 +633,7 @@ export class SoundboardModal {
       }
     });
 
-    // Every step is heard at once; the volume is saved where the slider stops.
-    sliderVol?.addEventListener('input', () => {
-      const val = parseInt(sliderVol.value, 10);
-      if (volLabel) volLabel.textContent = `${val}%`;
-      sliderVol.style.setProperty('--slider-progress', `${val}%`);
-      settingsStore.soundboardVolume = val;
-      soundboardService.applyVolume();
-      settingsStore.saveSoon();
-    });
-    sliderVol?.addEventListener('change', () => settingsStore.save());
+    bindSoundboardVolumeSlider(sliderVol, volLabel);
   }
 
   private attachSoundClickEvents(): void {
@@ -841,22 +727,17 @@ export class SoundboardModal {
       trigger.addEventListener('click', (e) => {
         e.stopPropagation();
         const soundName = trigger.getAttribute('data-soundname');
-        if (soundName) this.openKeyCaptureModal(soundName);
+        if (soundName) this.openShortcutDialog(soundName);
       });
     });
 
     // Remove shortcut click
     const removeButtons = this.modalEl.querySelectorAll('.sb-btn-remove-shortcut');
     removeButtons.forEach((btn) => {
-      btn.addEventListener('click', async (e) => {
+      btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const soundName = btn.getAttribute('data-soundname');
-        if (soundName && settingsStore.soundboardShortcuts) {
-          delete settingsStore.soundboardShortcuts[soundName];
-          settingsStore.save();
-          await soundboardService.syncShortcuts();
-          this.refreshGrid();
-        }
+        if (soundName) void clearSoundShortcut(soundName, () => this.refreshGrid());
       });
     });
   }

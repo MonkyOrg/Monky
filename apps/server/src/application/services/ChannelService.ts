@@ -47,6 +47,28 @@ export interface ChannelAccessContext {
   isBot?: boolean;
 }
 
+/** A stored channel as members receive it. Every channel summary comes from here (S-APP-10). */
+export function toChannelSummary(record: ChannelRecord): ChannelSummary {
+  return {
+    permissionOverwrites: record.permissionOverwrites,
+    forumId: record.forumId ?? null,
+    forumLocked: record.forumLocked ?? false,
+    forumClosed: record.forumClosed ?? false,
+    categoryId: record.categoryId ?? null,
+    inheritCategoryPermissions: record.inheritCategoryPermissions ?? true,
+    id: record.id,
+    serverId: record.serverId,
+    name: record.name,
+    type: record.type,
+    position: record.position,
+    createdAt: record.createdAt,
+    maxParticipants: record.maxParticipants,
+    isPrivate: record.isPrivate,
+    botCommandsEnabled: record.botCommandsEnabled,
+    allowedRoleIds: record.allowedRoleIds,
+  };
+}
+
 /**
  * Channel access answers for one operation (S-APP-5). Each member and each
  * channel is read once, then every question is answered in memory by
@@ -92,27 +114,6 @@ export class ChannelService {
    */
   public rulesFor<T extends ChannelAccessRules & { id: string }>(channel: T, context: ChannelAccessContext): ChannelAccessRules {
     return !context.isBot && this.voicePresence(context.userId, channel.id) ? withVoicePresence(channel, context.userId) : channel;
-  }
-
-  private toSummary(record: ChannelRecord): ChannelSummary {
-    return {
-      permissionOverwrites: record.permissionOverwrites,
-      forumId: record.forumId ?? null,
-      forumLocked: record.forumLocked ?? false,
-      forumClosed: record.forumClosed ?? false,
-      categoryId: record.categoryId ?? null,
-      inheritCategoryPermissions: record.inheritCategoryPermissions ?? true,
-      id: record.id,
-      serverId: record.serverId,
-      name: record.name,
-      type: record.type,
-      position: record.position,
-      createdAt: record.createdAt,
-      maxParticipants: record.maxParticipants,
-      isPrivate: record.isPrivate,
-      botCommandsEnabled: record.botCommandsEnabled,
-      allowedRoleIds: record.allowedRoleIds,
-    };
   }
 
   /**
@@ -179,7 +180,7 @@ export class ChannelService {
 
   public async getAccessContext(userId: string, channelId?: string): Promise<ChannelAccessContext> {
     const context: ChannelAccessContext = this.botContext(userId) ?? await this.permissionService.getMemberAccess(userId);
-    return channelId ? this.restrictTo(context, await this.getChannelSummary(channelId)) : context;
+    return channelId ? this.withinChannel(context, await this.getChannelSummary(channelId)) : context;
   }
 
   /** A bot is judged by its approved capabilities, never by server roles. Undefined for people. */
@@ -223,8 +224,8 @@ export class ChannelService {
       hasChannelPermission(rules, context.permissions, context.roleIds, permission, context.isBot, context.userId);
   }
 
-  /** The permissions a member holds inside one channel; none when it does not exist. */
-  private restrictTo(context: ChannelAccessContext, channel: (ChannelAccessRules & { id: string }) | null): ChannelAccessContext {
+  /** The permissions a member holds inside one channel; none when it does not exist. Reads nothing. */
+  public withinChannel(context: ChannelAccessContext, channel: (ChannelAccessRules & { id: string }) | null): ChannelAccessContext {
     if (!channel) return { ...context, permissions: 0 };
     // Bots never enter a private channel, and their capabilities cap what a channel grants.
     if (context.isBot) return { ...context, permissions: channel.isPrivate ? 0 : getChannelPermissions(channel, context.permissions, [], true) };
@@ -259,7 +260,7 @@ export class ChannelService {
           : { userId, permissions: context.permissions, roleIds: context.roleIds };
       }),
       channel: (channelId) => once(summaries, channelId, () => this.getChannelSummary(channelId)),
-      channelContext: async (userId, channelId) => this.restrictTo(await scope.context(userId), await scope.channel(channelId)),
+      channelContext: async (userId, channelId) => this.withinChannel(await scope.context(userId), await scope.channel(channelId)),
       can: async (userId, channelId, permission = Permission.VIEW_CHANNEL) => {
         const channel = await scope.channel(channelId);
         return !!channel && this.allows(channel, await scope.context(userId), permission);
@@ -273,7 +274,7 @@ export class ChannelService {
     if (!server) return [];
 
     const channels = await this.channelRepo.listByServerId(server.id);
-    return channels.map((c) => this.toSummary(c));
+    return channels.map(toChannelSummary);
   }
 
   public async canUserAccessChannel(userId: string, channelId: string, permission: Permission = Permission.VIEW_CHANNEL): Promise<boolean> {
@@ -294,7 +295,7 @@ export class ChannelService {
   /** Visibility metadata for one channel, used to scope broadcasts (#384). */
   public async getChannelSummary(channelId: string): Promise<ChannelSummary | null> {
     const channel = await this.channelRepo.findById(channelId);
-    return channel ? this.toSummary(channel) : null;
+    return channel ? toChannelSummary(channel) : null;
   }
 
   public async createChannel(
@@ -353,7 +354,7 @@ export class ChannelService {
 
     return {
       success: true,
-      channel: this.toSummary(await this.channelRepo.findById(channelRecord.id) ?? channelRecord),
+      channel: toChannelSummary(await this.channelRepo.findById(channelRecord.id) ?? channelRecord),
     };
   }
 
@@ -443,7 +444,7 @@ export class ChannelService {
 
     return {
       success: true,
-      channel: this.toSummary(await this.channelRepo.findById(channelId) ?? {
+      channel: toChannelSummary(await this.channelRepo.findById(channelId) ?? {
         ...existing,
         name: name ?? existing.name,
         maxParticipants: maxParticipants ?? existing.maxParticipants,

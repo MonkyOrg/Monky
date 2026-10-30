@@ -9,19 +9,36 @@ const vm = require('node:vm');
 const shared = require('@monky/shared');
 const { unzipSync } = require(require.resolve('fflate', { paths: [path.dirname(require.resolve('@monky/shared'))] }));
 
-function load(directory, dialogs) {
-  const handlers = new Map();
-  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'fileBatchDownloadIpc.ts'), 'utf8');
-  const output = ts.transpileModule(source, {
+function transpiled(name) {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', `${name}.ts`), 'utf8');
+  return ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
+}
+
+/** The real ZIP writer, which needs nothing from Electron. */
+function loadZipWriter() {
   const exports = {};
-  vm.runInNewContext(output, {
+  vm.runInNewContext(transpiled('zipWriter'), {
+    exports, Buffer, Error,
+    require: (name) => {
+      if (['node:fs', 'node:zlib'].includes(name)) return require(name);
+      throw new Error(`Unexpected import: ${name}`);
+    },
+  });
+  return exports;
+}
+
+function load(directory, dialogs) {
+  const handlers = new Map();
+  const exports = {};
+  vm.runInNewContext(transpiled('fileBatchDownloadIpc'), {
     exports, Buffer, console, Error,
     require: (name) => {
       if (name === '@monky/shared') return shared;
       if (name === './i18n') return { mt: (key) => key };
-      if (['node:fs', 'node:path', 'node:zlib'].includes(name)) return require(name);
+      if (name === './zipWriter') return loadZipWriter();
+      if (['node:fs', 'node:path'].includes(name)) return require(name);
       if (name === 'electron') return {
         app: { getPath: (kind) => path.join(directory, kind) },
         dialog: {

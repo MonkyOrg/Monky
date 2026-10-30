@@ -1,8 +1,9 @@
 import {
   MessageType, Permission, SERVER_MONITOR_LIMITS, serverMonitorSnapshotSchema,
-  type LogEntry, type ServerDetails, type ServerMonitorGetPayload, type ServerMonitorStats, type ServerStats, type UserSummary,
+  type LogEntry, type ServerDetails, type ServerMonitorGetPayload, type ServerMonitorLogLine, type ServerMonitorStats,
+  type ServerStats, type UserSummary,
 } from '@monky/shared';
-import type { ElectronApi } from '../../preload/preload';
+import type { ElectronApi } from '../../preload/api';
 import type { NetworkClient } from './NetworkClient';
 
 export type ServerMonitorFailure =
@@ -18,7 +19,7 @@ export class ServerMonitorError extends Error {
 
 export interface MonitorUpdate {
   stats: ServerMonitorStats;
-  entries: LogEntry[];
+  entries: ServerMonitorLogLine[];
   replaceLogs: boolean;
   dropped: number;
 }

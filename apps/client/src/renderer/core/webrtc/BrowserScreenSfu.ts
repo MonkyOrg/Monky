@@ -1,11 +1,11 @@
 import { Device, type types as SfuTypes } from 'mediasoup-client';
 import {
-  MessageType, nativeScreenProducerSchema, screenShareProfileKey, getScreenH264ProfileLevelId,
+  MessageType, nativeScreenProducerSchema, screenShareProfileKey,
   type NativeScreenCall, type NativeScreenProducer, type NativeScreenRpcMethod, type NativeScreenSource,
   type NativeScreenVideoProfile, type SfuConsumedPayload, type SfuProducerClosedPayload,
   type SfuProducersListPayload, type SfuRouterRtpCapabilitiesPayload, type SfuWebRtcTransportCreatedPayload,
 } from '@monky/shared';
-import { BrowserScreenCodecError, supportsBrowserAv1Level } from './browserScreenCodecs';
+import { BrowserScreenCodecError, h264MaxReceiveLevel, supportsBrowserAv1Level } from './browserScreenCodecs';
 
 export type BrowserScreenRpc = <T>(method: NativeScreenRpcMethod, payload: Record<string, unknown>) => Promise<T>;
 type RouterResponse = Omit<SfuRouterRtpCapabilitiesPayload, 'rtpCapabilities'> & { rtpCapabilities: SfuTypes.RtpCapabilities };
@@ -158,13 +158,10 @@ export class BrowserScreenSfu {
       || selectedCodecs?.includes(codec)
       || (codec.mimeType.toLowerCase() === 'video/rtx' && typeof codec.parameters?.apt === 'number'
         && selectedPayloads.has(codec.parameters.apt)));
-    const receiveLevel = getScreenH264ProfileLevelId(this.options.profile).slice(2);
     for (const codec of capabilities.codecs ?? []) {
-      const profile = codec.parameters?.['profile-level-id'];
-      if (selectedMime === 'video/h264' && codec.mimeType.toLowerCase() === 'video/h264' && typeof profile === 'string'
-        && /^4d[0-9a-f]{4}$/i.test(profile)
-        && Number.parseInt(profile.slice(4), 16) < Number.parseInt(receiveLevel.slice(2), 16))
-        codec.parameters = { ...codec.parameters, 'max-recv-level': receiveLevel };
+      const maxReceiveLevel = selectedMime === 'video/h264' && codec.mimeType.toLowerCase() === 'video/h264'
+        ? h264MaxReceiveLevel(codec.parameters?.['profile-level-id'], this.options.profile) : null;
+      if (maxReceiveLevel) codec.parameters = { ...codec.parameters, 'max-recv-level': maxReceiveLevel };
     }
     const consumed = await rpc<ConsumerResponse | SfuProducerClosedPayload>(MessageType.SFU_CONSUME, {
       channelId: call.channelId, transportId: transport.id, producerId: producer.producerId,

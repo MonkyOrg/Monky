@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { RoleRecord } from '../../domain/entities';
+import { ADMIN_ROLE_NAME, customRoleRecord, parseNewRole, roleNameProblem, type RoleProblem } from '../../domain/roles';
 import { ANSI, color, PERMISSION_OPTIONS } from '../constants';
 import { CliContext } from '../context';
 import {
@@ -72,14 +73,24 @@ export async function listRoles(ctx: CliContext): Promise<void> {
   }
 }
 
+/** The CLI's words for a role the server rules refuse. */
+function describeRoleProblem(problem: RoleProblem): string {
+  if (problem.code === 'reserved-name') return t('roles.nameReserved', { name: ADMIN_ROLE_NAME });
+  if (problem.field === 'name') return t('roles.nameInvalid');
+  return t('roles.invalid', { reason: problem.message });
+}
+
+/** Creates a custom role by the same rules as the server (`domain/roles`). */
 export async function createRoleInteractive(ctx: CliContext, args: string[]): Promise<void> {
   const inlineName = args[0];
   const inlineColor = args[1];
   const inlinePermissions = args.slice(2).join(' ');
 
   const name = inlineName?.trim() || (await ask(t('roles.askName')));
-  if (name.trim().length < 2) {
-    throw new Error(t('roles.nameTooShort'));
+  // Refused before the remaining questions are asked.
+  const nameProblem = roleNameProblem(name);
+  if (nameProblem) {
+    throw new Error(describeRoleProblem(nameProblem));
   }
 
   const colorInput = inlineColor !== undefined ? inlineColor : await ask(t('roles.askColor'));
@@ -98,15 +109,11 @@ export async function createRoleInteractive(ctx: CliContext, args: string[]): Pr
         selectedPermissions.map((entry) => (entry.includes('(') ? entry.slice(0, entry.indexOf(' (')) : entry))
       );
 
-  const role: RoleRecord = {
-    id: uuidv4(),
-    name: name.trim(),
-    color: roleColor,
-    position: Date.now(),
-    permissions,
-    isDefault: false,
-    createdAt: Date.now(),
-  };
+  const parsed = parseNewRole({ name, color: roleColor, permissions });
+  if (!parsed.ok) {
+    throw new Error(describeRoleProblem(parsed.problem));
+  }
+  const role = customRoleRecord(parsed.role, parsed.role.permissions, uuidv4(), Date.now());
 
   await ctx.roleRepo.create(role);
   console.log(color(t('roles.created', { name: role.name }), ANSI.green));

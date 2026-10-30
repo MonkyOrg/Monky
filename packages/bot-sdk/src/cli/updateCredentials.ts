@@ -1,12 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import type { BotProject } from '../tooling/config';
 import { isRecord } from '../tooling/config';
 import { type CliContext, validateTokenEnv } from './config';
 import { CliError, cliText } from './locale';
 import { askCliValue } from './prompts';
-import { readJsonFile, writePrivateJson } from './fs';
+import { readOptionalPrivateJson, writePrivateJsonAtomic } from './fs';
 import { projectForUpdates } from './updateConfiguration';
 import { validateUpdateToken, GITHUB_TOKEN_CREATION_URL } from './updateReleases';
 
@@ -14,16 +13,14 @@ function credentialFile(context: CliContext): string { return path.join(context.
 
 function savedToken(context: CliContext): { repository: string; token: string } | undefined {
   try {
-    const file = credentialFile(context);
-    if (!fs.lstatSync(file).isFile()) throw new Error('Not a regular credential file.');
-    const value = readJsonFile(file, 'Update credential', 16_384);
+    const value = readOptionalPrivateJson(credentialFile(context), 'Update credential', 16_384);
+    if (value === undefined) return undefined;
     if (!isRecord(value) || Object.keys(value).sort().join(',') !== 'repository,token' ||
         typeof value.repository !== 'string' || !/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/.test(value.repository)) {
       throw new Error('Invalid update credential.');
     }
     return { repository: value.repository, token: validateUpdateToken(value.token) };
-  } catch (error: unknown) {
-    if (isRecord(error) && error.code === 'ENOENT') return undefined;
+  } catch {
     throw new CliError('Não foi possível ler a credencial de atualização. Use config update-token para substituir ou --clear para remover.',
       'Could not read the update credential. Use config update-token to replace it or --clear to remove it.');
   }
@@ -44,14 +41,10 @@ export function saveUpdateCredential(context: CliContext, project: BotProject, v
   const source = project.definition.releases;
   if (!source) throw new CliError('Configure uma origem GitHub antes de salvar o token.', 'Configure a GitHub source before saving a token.');
   const token = validateUpdateToken(value);
-  const pending = path.join(context.homeDir, `.update-credentials-${randomUUID()}.pending`);
   try {
-    writePrivateJson(pending, { repository: source.repository, token });
-    fs.renameSync(pending, credentialFile(context));
+    writePrivateJsonAtomic(credentialFile(context), { repository: source.repository, token });
   } catch {
     throw new CliError('Não foi possível salvar a credencial de atualização.', 'Could not save the update credential.');
-  } finally {
-    fs.rmSync(pending, { force: true });
   }
 }
 

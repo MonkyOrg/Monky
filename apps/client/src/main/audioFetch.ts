@@ -1,9 +1,10 @@
 import { Resolver } from 'node:dns/promises';
 import type { IncomingHttpHeaders } from 'node:http';
 import https from 'node:https';
-import { BlockList, isIP } from 'node:net';
+import { isIP } from 'node:net';
 import type { Readable } from 'node:stream';
 import { LIMITS, type SoundDownloadFailureReason } from '@monky/shared';
+import { isLocalHost, isPublicAddress } from './net/addressPolicy';
 import { isSoundAudio, isSoundFileName, isSoundMime, soundFileNameForMime, soundMimeType } from './soundAudioValidation';
 
 export class SoundDownloadError extends Error {
@@ -18,37 +19,12 @@ export interface SoundDownloadTransport {
   }>;
 }
 
-const blocked = new BlockList();
-for (const [subnet, prefix] of [
-  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
-  ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
-  ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24],
-  ['224.0.0.0', 4], ['240.0.0.0', 4],
-] as const) blocked.addSubnet(subnet, prefix, 'ipv4');
-for (const [subnet, prefix] of [
-  ['::', 96], ['64:ff9b::', 96], ['64:ff9b:1::', 48], ['100::', 64],
-  ['2001::', 23], ['2001:db8::', 32], ['2002::', 16], ['3fff::', 20],
-  ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8],
-] as const) blocked.addSubnet(subnet, prefix, 'ipv6');
-
-export function isPublicSoundAddress(address: string): boolean {
-  const family = isIP(address);
-  if (!family || address.includes('%')) return false;
-  // Reject transition/mapped addresses rather than letting a private IPv4 hide in IPv6.
-  if (family === 6 && (!/^[23]/i.test(address) || /^::ffff:/i.test(address))) return false;
-  return !blocked.check(address, family === 4 ? 'ipv4' : 'ipv6');
-}
-
 export function soundDownloadUrl(value: string): URL {
   let url: URL;
   try { url = new URL(value); } catch { throw new SoundDownloadError('invalid_url'); }
   if (url.protocol !== 'https:' || url.username || url.password || url.hash || !url.hostname ||
       (url.port && url.port !== '443')) throw new SoundDownloadError('blocked_url');
-  const host = url.hostname.replace(/^\[|\]$/g, '');
-  if (isIP(host) && !isPublicSoundAddress(host)) throw new SoundDownloadError('blocked_url');
-  if (host === 'localhost' || /\.(?:localhost|local|internal|home\.arpa)\.?$/i.test(host)) {
-    throw new SoundDownloadError('blocked_url');
-  }
+  if (isLocalHost(url.hostname)) throw new SoundDownloadError('blocked_url');
   return url;
 }
 
@@ -99,7 +75,7 @@ export async function fetchSoundAudio(
     const host = url.hostname.replace(/^\[|\]$/g, '');
     const addresses = await transport.resolve(host, signal);
     signal.throwIfAborted();
-    if (!addresses.length || addresses.some((address) => !isPublicSoundAddress(address.address))) {
+    if (!addresses.length || addresses.some((address) => !isPublicAddress(address.address))) {
       throw new SoundDownloadError('blocked_url');
     }
     const response = await transport.request(url, addresses[0], signal);

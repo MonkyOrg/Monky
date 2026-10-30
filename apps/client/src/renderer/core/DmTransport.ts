@@ -11,6 +11,7 @@ import {
 import { clientLog } from './ClientLogService';
 import { RelayPacer } from './dmRelayPacer';
 import { sessionManager, type ServerSession } from './SessionManager';
+import { resolveImageUrl } from '../utils/avatar';
 
 const TICK_MS = 3_000;
 const OUTGOING_EVERY_MS = 20_000;
@@ -408,9 +409,7 @@ export class DmTransport {
       const identity = identityOf(member);
       // Not cached until the main process has a record, or the first look would be lost.
       if (!identity || identity === this.me || !this.known.has(identity)) continue;
-      const avatar = member.avatarUrl
-        ? (member.avatarUrl.startsWith('/') && base ? `${base}${member.avatarUrl}` : member.avatarUrl)
-        : null;
+      const avatar = resolveImageUrl(member.avatarUrl, base);
       const signature = `${member.nickname}\n${avatar ?? ''}`;
       if (link.observed.get(identity) === signature) continue;
       link.observed.set(identity, signature);

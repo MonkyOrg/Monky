@@ -7,10 +7,9 @@ import type { SqliteMessageSearchRepository, SearchPosition } from '../../infras
 import type { ChannelService } from './ChannelService';
 import type { PermissionService } from './PermissionService';
 import type { ChatService } from './ChatService';
+import { ServiceError } from '../errors';
 
-export class MessageSearchError extends Error {
-  constructor(public readonly code: ProtocolErrorCode, message: string) { super(message); }
-}
+export class MessageSearchError extends ServiceError {}
 
 export class MessageSearchService {
   private readonly cursorKey = randomBytes(32);

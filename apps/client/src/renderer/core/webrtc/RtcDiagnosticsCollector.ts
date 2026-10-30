@@ -4,7 +4,7 @@ import {
   RtcDiagnosticsReportPayload,
 } from '@monky/shared';
 import type { NetworkClient } from '../NetworkClient';
-import type { PeerSession } from '../WebRtcManager';
+import type { PeerLink } from './p2p/PeerLink';
 import { diagnosticCandidateRoute, type CandidateEndpoint } from './rtcStats';
 
 function candidateInfo(candidate: CandidateEndpoint | null): RtcCandidateInfo | null {
@@ -24,7 +24,7 @@ function candidateInfo(candidate: CandidateEndpoint | null): RtcCandidateInfo | 
 export class RtcDiagnosticsCollector {
   public async sendDiagnosticsReport(
     peerSessionId: string,
-    session: PeerSession | undefined,
+    session: PeerLink | undefined,
     signalClient: NetworkClient
   ): Promise<void> {
     let localCandidate: RtcCandidateInfo | null = null;

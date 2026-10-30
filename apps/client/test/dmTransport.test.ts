@@ -17,6 +17,7 @@ import {
   type UserSummary,
 } from '@monky/shared';
 import { DmTransport } from '../src/renderer/core/DmTransport';
+import { ownAvatarSource } from '../src/renderer/core/profileSync';
 import { sessionManager, type ServerSession } from '../src/renderer/core/SessionManager';
 import { DmStore } from '../src/renderer/stores/dmStore';
 
@@ -77,6 +78,48 @@ function seed(session: ServerSession, signedInAs: string, friend: string): void 
     channels: [], myPermissions: 0, protocol: { ...createProtocolOffer('client'), version: PROTOCOL_VERSION },
   }, me);
 }
+
+test('friends seen on a server keep only avatar files that server stores, resolved against it (R-COMMUNITY-11)', async (context) => {
+  const me = newIdentity();
+  const friend = newIdentity();
+  const hostile = newIdentity();
+  const avatars = new Map<string, string | null | undefined>();
+  const api = fakeApi({ observePeer: async (observed) => { avatars.set(observed.publicKey, observed.avatar); return done(); } });
+  const session = sessionManager.create('dm-avatars', 7821, 'me');
+  const self = member(me, 'me');
+  session.serverStore.setServerDetails({
+    id: session.key, name: 'Server', createdAt: 1, maxUsers: 10, voiceStates: {}, channels: [], myPermissions: 0,
+    protocol: { ...createProtocolOffer('client'), version: PROTOCOL_VERSION },
+    members: [self, { ...member(friend, 'friend'), avatarUrl: '/avatars/friend.png' },
+      // Glued to the base, "@host" turned the server's address into credentials for another host.
+      { ...member(hostile, 'hostile'), avatarUrl: '@tracker.example/pixel.png' }],
+  }, self);
+  context.mock.method(session.client, 'getStatus', () => 'CONNECTED');
+  context.mock.method(session.client, 'getHttpBaseUrl', () => 'http://dm-avatars.test:7821');
+  context.mock.method(session.client, 'send', () => undefined);
+  const transport = new DmTransport(api);
+  context.after(async () => { transport.stop(); await sessionManager.removeAll(); });
+  transport.setIdentity(me, [friend, hostile]);
+  transport.start();
+  await setImmediate();
+  assert.equal(avatars.get(friend), 'http://dm-avatars.test:7821/avatars/friend.png');
+  assert.equal(avatars.get(hostile), null, 'An address the server never stores is no avatar');
+});
+
+test('my own avatar comes from a server only when it is a file that server stores (R-COMMUNITY-11)', async (context) => {
+  context.after(async () => { await sessionManager.removeAll(); });
+  const me = newIdentity();
+  for (const [host, port, avatarUrl] of [['own-hostile', 7831, '@tracker.example/me.png'], ['own-honest', 7832, '/avatars/me.png']] as const) {
+    const session = sessionManager.create(host, port, 'me');
+    const self = { ...member(me, 'me'), avatarUrl };
+    session.serverStore.setServerDetails({
+      id: session.key, name: 'Server', createdAt: 1, maxUsers: 10, members: [self], voiceStates: {}, channels: [], myPermissions: 0,
+      protocol: { ...createProtocolOffer('client'), version: PROTOCOL_VERSION },
+    }, self);
+    context.mock.method(session.client, 'getHttpBaseUrl', () => `http://${host}.test:${port}`);
+  }
+  assert.equal(ownAvatarSource(), 'http://own-honest.test:7832/avatars/me.png');
+});
 
 test('after an identity import, DMs only travel through sessions signed in as the new identity', async (context) => {
   const previous = newIdentity();

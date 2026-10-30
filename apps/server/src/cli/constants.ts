@@ -28,8 +28,14 @@ export const CONFIG_KEYS = [
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 
+/**
+ * Permissions a role can grant. ADMINISTRATOR is not one of them: admin rights
+ * come only from the built-in Admin role, given with `monky admin add` (#277).
+ * A role created with it lost the bit on the next start, which also promoted
+ * every member holding the role to Admin.
+ */
 export const PERMISSION_OPTIONS = Object.keys(Permission)
-  .filter((key) => Number.isNaN(Number(key)))
+  .filter((key) => Number.isNaN(Number(key)) && key !== 'ADMINISTRATOR')
   .map((key) => ({ name: key as keyof typeof Permission, value: Permission[key as keyof typeof Permission] as number }));
 
 export const ANSI = {

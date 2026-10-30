@@ -11,23 +11,59 @@ import {
   ProtocolErrorCode,
   ServerDetails,
   UserSummary,
-  VoiceMode,
   authChallengeResponseSchema,
   authConnectSchema,
   canAccessChannel,
   deriveClientIdFromPublicKey,
-  isAfkTimeoutSeconds,
   normalizePublicKeyHex,
+  type ServerSettingsUpdatedPayload,
 } from '@monky/shared';
-import { ServerRecord, UserRecord } from '../../domain/entities';
+import type { ServerRecord, UserRecord } from '../../domain/entities';
+import { planServerSettingsUpdate, type ServerSettingsPatch, type ServerSettingsProblem } from '../../domain/serverSettings';
 import { CapacityEstimator } from '../../domain/services/CapacityEstimator';
 import { ICategoryRepository, IChannelRepository, IMentionRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
-import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
+import { AvatarStorageService, publicImageUrl } from '../../infrastructure/security/AvatarStorageService';
 import { PasswordService } from '../../infrastructure/security/PasswordService';
 import { Logger } from '../../infrastructure/logger/Logger';
 import { AttachmentService } from './AttachmentService';
+import { toChannelSummary } from './ChannelService';
 import { PermissionService } from './PermissionService';
 import { RoleService } from './RoleService';
+import { toUserSummary } from './UserService';
+
+/** The settings the login snapshot and a settings change both carry (S-APP-10). */
+export type ServerSettingsPayload = Required<Pick<ServerSettingsUpdatedPayload,
+  'name' | 'hasPassword' | 'maxUsers' | 'maxMessageLength' | 'allowSoundboard' | 'dmRelayEnabled' |
+  'recentSoundCacheEnabled' | 'recentSoundCacheLimit' | 'allowEveryoneMention' | 'allowMessageEdit' |
+  'messageDeleteUndoSeconds' | 'showRoleBadgesToEveryone' | 'voiceMode' | 'iconUrl' | 'attachmentStorage' |
+  'turnEnabled' | 'afkTimeoutSeconds'>>;
+
+export type ServerSettingsUpdateResult =
+  | { success: true; settings: ServerSettingsPayload }
+  | { success: false; errorMessage: string };
+
+/** Members see each setting as the stored server holds it, at login and after every change. */
+export function serverSettingsPayload(server: ServerRecord, attachmentStorage: AttachmentStorageInfo): ServerSettingsPayload {
+  return {
+    name: server.name,
+    hasPassword: Boolean(server.passwordHash),
+    maxUsers: server.maxUsers,
+    maxMessageLength: server.maxMessageLength,
+    allowSoundboard: server.allowSoundboard,
+    dmRelayEnabled: server.dmRelayEnabled,
+    recentSoundCacheEnabled: server.recentSoundCacheEnabled,
+    recentSoundCacheLimit: server.recentSoundCacheLimit,
+    allowEveryoneMention: server.allowEveryoneMention,
+    allowMessageEdit: server.allowMessageEdit,
+    messageDeleteUndoSeconds: server.messageDeleteUndoSeconds,
+    showRoleBadgesToEveryone: server.showRoleBadgesToEveryone,
+    voiceMode: server.voiceMode,
+    iconUrl: publicImageUrl(server.iconPath),
+    attachmentStorage,
+    turnEnabled: server.turnEnabled,
+    afkTimeoutSeconds: server.afkTimeoutSeconds,
+  };
+}
 
 export interface AuthResult {
   success: boolean;
@@ -66,40 +102,28 @@ interface PendingAuthChallenge {
   customStatus?: CustomStatus;
 }
 
-/**
- * Decides what happens to the TURN relay when voice settings are saved.
- *
- * TURN and SFU are mutually exclusive: the SFU already receives and forwards
- * every stream, so it *is* the relay. Keeping coturn on would burn a second
- * relay hop, hand out credentials nobody uses and fight the SFU for UDP
- * ports (#515).
- *
- * Pure and exported because the interesting case is not the obvious one. The
- * desktop submits the current voice mode on *every* save, so `turnEnabled:
- * true` arriving next to `voiceMode: 'sfu'` is the ordinary "admin whose relay
- * was already on picks SFU" migration — not a contradiction. Refusing it there
- * would make the P2P+TURN → SFU upgrade impossible from the UI, which is
- * exactly the most common upgrade path. Only switching the relay on against a
- * server that is *staying* in SFU is a genuine contradiction.
- *
- * `turnEnabled: undefined` in the result means "leave the stored value alone".
- */
-export function resolveTurnSfuExclusion(
-  current: { voiceMode?: string | null; turnEnabled?: boolean | null },
-  requested: { voiceMode?: 'p2p' | 'sfu'; turnEnabled?: boolean }
-): { rejected: boolean; turnEnabled: boolean | undefined } {
-  const effectiveVoiceMode = requested.voiceMode ?? current.voiceMode ?? 'p2p';
-  const switchingIntoSfu = requested.voiceMode === 'sfu' && current.voiceMode !== 'sfu';
-
-  if (requested.turnEnabled === true && effectiveVoiceMode === 'sfu' && !switchingIntoSfu) {
-    return { rejected: true, turnEnabled: undefined };
+/** The words clients have always received for a refused settings change. */
+function describeSettingsProblem(problem: ServerSettingsProblem): string {
+  switch (problem.code) {
+    case 'afk-timeout':
+      return 'Escolha 1, 5, 15, 30 ou 60 minutos de inatividade para o canal AFK.';
+    case 'delete-undo-seconds':
+      return 'O prazo para desfazer deve ser um inteiro entre 1 e 86400 segundos.';
+    case 'max-message-length':
+      return 'O limite de caracteres deve ser um inteiro positivo ou zero (sem limite).';
+    case 'attachment-limits':
+      return 'Os limites de armazenamento devem ser positivos.';
+    case 'attachment-file-over-total':
+      return 'O limite por arquivo não pode exceder o total do servidor.';
+    case 'max-users':
+      return 'O limite de membros deve ser um número positivo.';
+    case 'members-over-limit':
+      return `O servidor já tem ${problem.memberCount} membros. Remova membros antes de definir um limite menor.`;
+    case 'recent-sound-cache-limit':
+      return `O cache de áudios deve manter entre ${LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT} e ${LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT} itens.`;
+    case 'turn-in-sfu':
+      return 'O relay TURN não pode ser ativado no modo SFU: o próprio SFU já faz o papel de relay.';
   }
-
-  let turnEnabled = requested.turnEnabled;
-  if (effectiveVoiceMode === 'sfu' && (turnEnabled || current.turnEnabled)) {
-    turnEnabled = false;
-  }
-  return { rejected: false, turnEnabled };
 }
 
 export class AuthService {
@@ -381,7 +405,7 @@ export class AuthService {
       rolesChanged = true;
     }
 
-    const userSummary = this.toUserSummary(userRecord, 'ONLINE', now, {
+    const userSummary = toUserSummary(userRecord, 'ONLINE', now, {
       sessionId: `${userRecord.id}:${pending.deviceId}`,
       connectedAt: now,
     });
@@ -417,7 +441,7 @@ export class AuthService {
     }
     const knownMembers: UserSummary[] = allUsers.map((user) => {
       const online = onlineByUserId.get(user.id);
-      return online ?? this.toUserSummary(user, 'DISCONNECTED', user.lastSeenAt);
+      return online ?? toUserSummary(user, 'DISCONNECTED', user.lastSeenAt);
     });
     if (!knownMembers.some((m) => m.id === userSummary.id)) {
       knownMembers.push(userSummary);
@@ -434,47 +458,15 @@ export class AuthService {
       canAccessChannel(category, myPermissions, myRoleIds, false, userRecord.id) || visibleChannels.some((channel) => channel.categoryId === category.id));
 
     const serverDetails: ServerDetails = {
+      ...await this.settingsFor(server),
       everyonePermissions: roleState.everyonePermissions,
       id: server.id,
-      name: server.name,
       createdAt: server.createdAt,
-      maxUsers: server.maxUsers,
-      maxMessageLength: server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
-      hasPassword: !!(server.passwordHash && server.passwordHash.length > 0),
-      allowSoundboard: server.allowSoundboard !== false,
-      dmRelayEnabled: server.dmRelayEnabled !== false,
-      recentSoundCacheEnabled: Boolean(server.recentSoundCacheEnabled),
-      recentSoundCacheLimit: server.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
-      allowEveryoneMention: server.allowEveryoneMention !== false,
-      allowMessageEdit: server.allowMessageEdit !== false,
-      messageDeleteUndoSeconds: server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
-      showRoleBadgesToEveryone: server.showRoleBadgesToEveryone !== false,
-      voiceMode: server.voiceMode || 'p2p',
       afkChannelId: server.afkChannelId && channels.some((channel) => channel.id === server.afkChannelId && channel.type === 'VOICE')
         ? server.afkChannelId : null,
-      afkTimeoutSeconds: server.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS,
       hostSpecs: CapacityEstimator.getHostSpecs(),
-      turnEnabled: Boolean(server.turnEnabled),
-      maxBots: server.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
-      iconUrl: this.avatarStorage.getPublicUrl(server.iconPath),
-      channels: visibleChannels.map((c) => ({
-        permissionOverwrites: c.permissionOverwrites,
-        categoryId: c.categoryId ?? null,
-        forumId: c.forumId ?? null,
-        forumLocked: c.forumLocked ?? false,
-        forumClosed: c.forumClosed ?? false,
-        inheritCategoryPermissions: c.inheritCategoryPermissions ?? true,
-        id: c.id,
-        serverId: c.serverId,
-        name: c.name,
-        type: c.type,
-        position: c.position,
-        createdAt: c.createdAt,
-        maxParticipants: c.maxParticipants,
-        isPrivate: c.isPrivate,
-        botCommandsEnabled: c.botCommandsEnabled,
-        allowedRoleIds: c.allowedRoleIds,
-      })),
+      maxBots: server.maxBots,
+      channels: visibleChannels.map(toChannelSummary),
       categories,
       members,
       knownMembers,
@@ -482,9 +474,8 @@ export class AuthService {
       voiceStates: {},
       roles: roleState.roles,
       userRoles: roleState.userRoles,
-      ownerId: server.ownerUserId ?? null,
+      ownerId: server.ownerUserId,
       myPermissions,
-      attachmentStorage: await this.attachmentService.getStorageInfo(),
     };
 
     return {
@@ -499,23 +490,12 @@ export class AuthService {
     };
   }
 
-  private toUserSummary(
-    user: UserRecord,
-    status: UserSummary['status'],
-    joinedAt: number,
-    session?: { sessionId: string; connectedAt: number }
-  ): UserSummary {
-    return {
-      id: user.id,
-      clientId: user.clientId,
-      publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,
-      nickname: user.nickname,
-      avatarUrl: this.avatarStorage.getPublicUrl(user.avatarPath),
-      status,
-      joinedAt,
-      sessionId: session?.sessionId,
-      connectedAt: session?.connectedAt,
-    };
+  /**
+   * The settings the login snapshot and a settings change both carry, read
+   * from the stored server in one place so the two never disagree (S-APP-10).
+   */
+  private async settingsFor(server: ServerRecord): Promise<ServerSettingsPayload> {
+    return serverSettingsPayload(server, await this.attachmentService.getStorageInfo());
   }
 
   private getNodePublicKey(publicKeyHex: string) {
@@ -526,110 +506,20 @@ export class AuthService {
     });
   }
 
-  public async updateServerSettings(payload: {
-    maxMessageLength?: number;
-    name?: string;
+  public async updateServerSettings(payload: ServerSettingsPatch & {
     password?: string | null;
-    allowSoundboard?: boolean;
-    dmRelayEnabled?: boolean;
-    recentSoundCacheEnabled?: boolean;
-    recentSoundCacheLimit?: number;
-    allowEveryoneMention?: boolean;
-    allowMessageEdit?: boolean;
-    messageDeleteUndoSeconds?: number;
-    showRoleBadgesToEveryone?: boolean;
-    voiceMode?: VoiceMode;
     iconBase64?: string | null;
-    maxAttachmentFileBytes?: number;
-    maxAttachmentStorageBytes?: number;
-    maxUsers?: number;
-    turnEnabled?: boolean;
-    afkTimeoutSeconds?: number;
-  }): Promise<{
-    maxMessageLength?: number;
-    success: boolean;
-    name?: string;
-    hasPassword?: boolean;
-    allowSoundboard?: boolean;
-    dmRelayEnabled?: boolean;
-    recentSoundCacheEnabled?: boolean;
-    recentSoundCacheLimit?: number;
-    allowEveryoneMention?: boolean;
-    allowMessageEdit?: boolean;
-    messageDeleteUndoSeconds?: number;
-    showRoleBadgesToEveryone?: boolean;
-    voiceMode?: VoiceMode;
-    iconUrl?: string | null;
-    attachmentStorage?: AttachmentStorageInfo;
-    maxUsers?: number;
-    turnEnabled?: boolean;
-    afkTimeoutSeconds?: number;
-    errorMessage?: string;
-  }> {
+  }): Promise<ServerSettingsUpdateResult> {
     const server = await this.serverRepo.getServer();
     if (!server) {
       return { success: false, errorMessage: 'Servidor não encontrado' };
     }
 
-    const updates: Partial<ServerRecord> = {};
-    if (payload.afkTimeoutSeconds !== undefined) {
-      if (!isAfkTimeoutSeconds(payload.afkTimeoutSeconds)) {
-        return { success: false, errorMessage: 'Escolha 1, 5, 15, 30 ou 60 minutos de inatividade para o canal AFK.' };
-      }
-      updates.afkTimeoutSeconds = payload.afkTimeoutSeconds;
+    const plan = planServerSettingsUpdate(server, payload, await this.userRepo.count());
+    if (!plan.ok) {
+      return { success: false, errorMessage: describeSettingsProblem(plan.problem) };
     }
-    if (payload.messageDeleteUndoSeconds !== undefined) {
-      if (!Number.isSafeInteger(payload.messageDeleteUndoSeconds) || payload.messageDeleteUndoSeconds < 1
-        || payload.messageDeleteUndoSeconds > LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS) {
-        return { success: false, errorMessage: 'O prazo para desfazer deve ser um inteiro entre 1 e 86400 segundos.' };
-      }
-      updates.messageDeleteUndoSeconds = payload.messageDeleteUndoSeconds;
-    }
-    if (payload.maxMessageLength !== undefined) {
-      if (!Number.isSafeInteger(payload.maxMessageLength) || payload.maxMessageLength < 0) {
-        return { success: false, errorMessage: 'O limite de caracteres deve ser um inteiro positivo ou zero (sem limite).' };
-      }
-      updates.maxMessageLength = payload.maxMessageLength;
-    }
-
-    if (payload.name && payload.name.trim().length >= 2) {
-      updates.name = payload.name.trim();
-    }
-
-    if (payload.maxAttachmentFileBytes !== undefined || payload.maxAttachmentStorageBytes !== undefined) {
-      const currentFile = server.maxAttachmentFileBytes ?? LIMITS.MAX_ATTACHMENT_FILE_SIZE_DEFAULT;
-      const currentTotal = server.maxAttachmentStorageBytes ?? LIMITS.MAX_ATTACHMENT_STORAGE_TOTAL_DEFAULT;
-      const nextFile = payload.maxAttachmentFileBytes ?? currentFile;
-      const nextTotal = payload.maxAttachmentStorageBytes ?? currentTotal;
-      if (!Number.isFinite(nextFile) || !Number.isFinite(nextTotal) || nextFile < 1 || nextTotal < 1) {
-        return { success: false, errorMessage: 'Os limites de armazenamento devem ser positivos.' };
-      }
-      if (nextFile > nextTotal) {
-        return { success: false, errorMessage: 'O limite por arquivo não pode exceder o total do servidor.' };
-      }
-      if (payload.maxAttachmentFileBytes !== undefined) updates.maxAttachmentFileBytes = Math.floor(nextFile);
-      if (payload.maxAttachmentStorageBytes !== undefined) updates.maxAttachmentStorageBytes = Math.floor(nextTotal);
-    }
-
-    if (payload.maxUsers !== undefined) {
-      const nextMax = Math.floor(payload.maxUsers);
-      if (!Number.isFinite(nextMax) || nextMax < LIMITS.MAX_USERS_UNLIMITED) {
-        return { success: false, errorMessage: 'O limite de membros deve ser um número positivo.' };
-      }
-      // Refusing to drop below the current membership keeps the server out of an
-      // "over the limit" state we would have no safe way to resolve — kicking
-      // members automatically is never acceptable (#403).
-      if (nextMax > LIMITS.MAX_USERS_UNLIMITED) {
-        const memberCount = await this.userRepo.count();
-        if (nextMax < memberCount) {
-          return {
-            success: false,
-            errorMessage: `O servidor já tem ${memberCount} membros. Remova membros antes de definir um limite menor.`,
-          };
-        }
-      }
-      updates.maxUsers = nextMax;
-    }
+    const updates = plan.updates;
 
     if (payload.password !== undefined) {
       if (payload.password === null || payload.password === '') {
@@ -639,57 +529,6 @@ export class AuthService {
       }
     }
 
-    if (payload.allowSoundboard !== undefined) {
-      updates.allowSoundboard = Boolean(payload.allowSoundboard);
-      if (!updates.allowSoundboard) updates.recentSoundCacheEnabled = false;
-    }
-    if (payload.dmRelayEnabled !== undefined) {
-      updates.dmRelayEnabled = Boolean(payload.dmRelayEnabled);
-    }
-    if (payload.recentSoundCacheEnabled !== undefined) {
-      updates.recentSoundCacheEnabled = Boolean(payload.recentSoundCacheEnabled);
-    }
-    if (payload.recentSoundCacheLimit !== undefined) {
-      if (!Number.isSafeInteger(payload.recentSoundCacheLimit)
-        || payload.recentSoundCacheLimit < LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT
-        || payload.recentSoundCacheLimit > LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT) {
-        return {
-          success: false,
-          errorMessage: `O cache de áudios deve manter entre ${LIMITS.RECENT_SOUND_CACHE_MIN_LIMIT} e ${LIMITS.RECENT_SOUND_CACHE_MAX_LIMIT} itens.`,
-        };
-      }
-      updates.recentSoundCacheLimit = payload.recentSoundCacheLimit;
-    }
-    if (payload.allowEveryoneMention !== undefined) {
-      updates.allowEveryoneMention = Boolean(payload.allowEveryoneMention);
-    }
-    if (payload.allowMessageEdit !== undefined) {
-      updates.allowMessageEdit = Boolean(payload.allowMessageEdit);
-    }
-    if (payload.showRoleBadgesToEveryone !== undefined) {
-      updates.showRoleBadgesToEveryone = Boolean(payload.showRoleBadgesToEveryone);
-    }
-    if (payload.voiceMode !== undefined) {
-      updates.voiceMode = payload.voiceMode === 'sfu' ? 'sfu' : 'p2p';
-    }
-
-    const decision = resolveTurnSfuExclusion(
-      { voiceMode: server.voiceMode, turnEnabled: server.turnEnabled },
-      {
-        voiceMode: updates.voiceMode,
-        turnEnabled: payload.turnEnabled === undefined ? undefined : Boolean(payload.turnEnabled),
-      }
-    );
-    if (decision.rejected) {
-      return {
-        success: false,
-        errorMessage: 'O relay TURN não pode ser ativado no modo SFU: o próprio SFU já faz o papel de relay.',
-      };
-    }
-    if (decision.turnEnabled !== undefined) {
-      updates.turnEnabled = decision.turnEnabled;
-    }
-
     // Mint the shared secret the first time the relay is switched on, and
     // keep it afterwards: rotating it would invalidate every credential
     // already handed out, dropping the calls currently being relayed.
@@ -697,55 +536,20 @@ export class AuthService {
       updates.turnSecret = randomBytes(32).toString('hex');
     }
 
-    if (payload.iconBase64 !== undefined) {
-      if (!payload.iconBase64 || payload.iconBase64.trim() === '') {
-        if (server.iconPath) {
-          this.avatarStorage.deleteAvatar(server.iconPath);
-        }
-        updates.iconPath = null;
-      } else {
-        let rawBase64 = payload.iconBase64;
-        if (payload.iconBase64.includes(',')) {
-          rawBase64 = payload.iconBase64.split(',')[1];
-        }
-        const buffer = Buffer.from(rawBase64, 'base64');
-        const validation = this.avatarStorage.validateAvatarBuffer(buffer);
-        if (!validation.isValid || !validation.extension) {
-          return {
-            success: false,
-            errorMessage: validation.error || 'Formato de imagem inválido para o ícone do servidor.',
-          };
-        }
-        if (server.iconPath) {
-          this.avatarStorage.deleteAvatar(server.iconPath);
-        }
-        const newFilename = await this.avatarStorage.saveAvatar(buffer, validation.extension);
-        updates.iconPath = newFilename;
-      }
+    // The new icon is recorded with the rest of the change, and the old file
+    // only goes once that write succeeded (S-APP-9).
+    const removeIcon = payload.iconBase64 !== undefined && (!payload.iconBase64 || payload.iconBase64.trim() === '');
+    if (payload.iconBase64 && !removeIcon) {
+      const icon = this.avatarStorage.decodeImage(payload.iconBase64);
+      if (!icon.ok) return { success: false, errorMessage: icon.message };
+      await this.avatarStorage.replaceImage(server.iconPath, icon,
+        (iconPath) => this.serverRepo.updateServer({ ...updates, iconPath }));
+    } else {
+      if (removeIcon) updates.iconPath = null;
+      await this.serverRepo.updateServer(updates);
+      if (removeIcon && server.iconPath) this.avatarStorage.deleteAvatar(server.iconPath);
     }
-
-    await this.serverRepo.updateServer(updates);
-    const updatedServer = await this.serverRepo.getServer();
-
-    return {
-      success: true,
-      name: updatedServer?.name || server.name,
-      hasPassword: !!(updatedServer?.passwordHash && updatedServer.passwordHash.length > 0),
-      allowSoundboard: updatedServer?.allowSoundboard !== false,
-      dmRelayEnabled: updatedServer?.dmRelayEnabled !== false,
-      recentSoundCacheEnabled: Boolean(updatedServer?.recentSoundCacheEnabled),
-      recentSoundCacheLimit: updatedServer?.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT,
-      allowEveryoneMention: updatedServer?.allowEveryoneMention !== false,
-      allowMessageEdit: updatedServer?.allowMessageEdit !== false,
-      messageDeleteUndoSeconds: updatedServer?.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
-      showRoleBadgesToEveryone: updatedServer?.showRoleBadgesToEveryone !== false,
-      voiceMode: updatedServer?.voiceMode || 'p2p',
-      iconUrl: this.avatarStorage.getPublicUrl(updatedServer?.iconPath),
-      attachmentStorage: await this.attachmentService.getStorageInfo(),
-      maxUsers: updatedServer?.maxUsers ?? server.maxUsers,
-      maxMessageLength: updatedServer?.maxMessageLength ?? server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
-      turnEnabled: Boolean(updatedServer?.turnEnabled),
-      afkTimeoutSeconds: updatedServer?.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS,
-    };
+    const updatedServer = await this.serverRepo.getServer() ?? server;
+    return { success: true, settings: await this.settingsFor(updatedServer) };
   }
 }

@@ -16,9 +16,11 @@ import type { ChannelAccessScope, ChannelService } from './ChannelService';
 import { audienceAllows, revealsAudience, type PermissionService } from './PermissionService';
 import type { BotSelectorService } from './BotSelectorService';
 import type { NativePollService } from './NativePollService';
+import { ServiceError } from '../errors';
+import { Logger } from '../../infrastructure/logger/Logger';
 
-export class CommunityError extends Error {
-  constructor(message: string, readonly code = ProtocolErrorCode.COMMUNITY_INVALID) { super(message); }
+export class CommunityError extends ServiceError {
+  constructor(message: string, code: ProtocolErrorCode = ProtocolErrorCode.COMMUNITY_INVALID) { super(code, message); }
 }
 
 const DAY = 86_400_000;
@@ -772,7 +774,9 @@ export class CommunityService {
         this.images.deleteAvatar(asset.path);
         this.stagedImages.delete(ref);
       }
-      throw new CommunityError(error instanceof Error ? error.message : 'Could not store image.');
+      // The words of a disk error name paths on the server: they go to the log only (S-APP-8).
+      Logger.error('NETWORK', 'Could not store community images.', error);
+      throw new CommunityError('Could not store image.');
     }
     for (const { ref } of assets) this.stagedImages.delete(ref);
     return promoted.map(path => this.images.getPublicUrl(path)!);
@@ -788,10 +792,8 @@ export class CommunityService {
 
   private async saveImage(input: string | null, prefix = ''): Promise<string | null> {
     if (input === null) return null;
-    const encoded = input.replace(/^data:image\/(?:png|jpeg|webp);base64,/, '');
-    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new CommunityError('Invalid image.');
-    const result = this.images.validateAvatarBuffer(Buffer.from(encoded, 'base64'));
-    if (!result.isValid || !result.buffer || !result.extension) throw new CommunityError(result.error ?? 'Invalid image.');
-    return this.images.saveAvatar(result.buffer, result.extension, prefix);
+    const image = this.images.decodeImage(input);
+    if (!image.ok) throw new CommunityError(image.message);
+    return this.images.saveAvatar(image.buffer, image.extension, prefix);
   }
 }

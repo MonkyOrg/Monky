@@ -1,12 +1,10 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
 const { test } = require('node:test');
 const ts = require('typescript');
-const shared = require('@monky/shared');
+const { loadPreload } = require('./preloadFixture.cjs');
 
-const filename = path.resolve(__dirname, '..', 'src', 'preload', 'preload.ts');
 const mainRoot = path.resolve(__dirname, '..', 'src', 'main');
 
 /**
@@ -50,57 +48,6 @@ test('opening Monky never loads the hosted server, electron-updater or the whole
     assert.ok(!packages.has(lazy), `${packages.get(lazy)} loads ${lazy} at startup; load it when it is first used`);
   }
 });
-
-/** Runs the real preload against fake Electron and Node APIs, recording every module it requires. */
-function loadPreload() {
-  const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
-    fileName: filename,
-  }).outputText;
-  const requested = [];
-  const rendererCalls = [];
-  const marks = [];
-  let api = null;
-  const screenRenderer = {
-    createNativeScreenPresentation() {
-      rendererCalls.push('presentation');
-      return { attach: async () => {}, attachPreview: async () => {}, stop: async () => {}, sample: async () => null, close: async () => {} };
-    },
-    registerNativeAudioPortReceiver() {
-      rendererCalls.push('audio');
-      return { getStats: () => ({}), dispose: async () => {} };
-    },
-  };
-  const modules = new Map([
-    ['electron', {
-      contextBridge: { exposeInMainWorld: (key, value) => { if (key === 'api') api = value; } },
-      ipcRenderer: { invoke: async () => null, send() {}, on() {}, removeListener() {} },
-      sharedTexture: {},
-    }],
-    ['node:fs', { readFileSync: () => 'registerProcessor("fixture", class {});' }],
-    ['@monky/shared', shared],
-    ['@monky/screen-share/renderer', screenRenderer],
-  ]);
-  function fakeRequire(request) {
-    requested.push(request);
-    if (modules.has(request)) return modules.get(request);
-    throw new Error(`The preload required an unexpected module: ${request}`);
-  }
-  fakeRequire.resolve = request => {
-    assert.equal(request, '@monky/screen-share/runtime/nativePcmPlayout.worklet.js');
-    return path.join('C:\\', 'fixture', 'nativePcmPlayout.worklet.js');
-  };
-  const module = { exports: {} };
-  vm.runInNewContext(code, {
-    module, exports: module.exports, require: fakeRequire, console, Blob,
-    process: { argv: [], platform: 'win32' },
-    window: { localStorage: { getItem: () => null }, addEventListener() {} },
-    document: {},
-    performance: { mark: name => marks.push(name) },
-    URL: { createObjectURL: () => 'blob:fixture-worklet', revokeObjectURL() {} },
-  }, { filename });
-  return { api, requested, rendererCalls, marks };
-}
 
 test('the preload leaves the native screen runtime unloaded until its window watches a native screen (E-MAIN-8)', async () => {
   const preload = loadPreload();

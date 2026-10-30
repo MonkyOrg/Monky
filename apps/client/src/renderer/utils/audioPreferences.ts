@@ -12,6 +12,21 @@ export function restoreNoiseSuppressionMode(mode: unknown, legacyEnabled: unknow
   return legacyEnabled === false ? 'browser' : 'rnnoise';
 }
 
+/**
+ * How every microphone is opened, so the settings preview hears the input the
+ * call sends. Only the browser mode asks Chromium to suppress noise; the other
+ * engines process the capture afterwards.
+ */
+export function microphoneConstraints(deviceId: string, mode: NoiseSuppressionMode): MediaTrackConstraints {
+  return {
+    deviceId: deviceId ? { exact: deviceId } : undefined,
+    channelCount: 1,
+    echoCancellation: true,
+    noiseSuppression: mode === 'browser',
+    autoGainControl: true,
+  };
+}
+
 export const AUDIO_OUTPUT_CATEGORIES = ['voice', 'screen', 'media'] as const;
 export type AudioOutputCategory = typeof AUDIO_OUTPUT_CATEGORIES[number];
 export type AudioOutputDevices = Record<AudioOutputCategory, string | null>;

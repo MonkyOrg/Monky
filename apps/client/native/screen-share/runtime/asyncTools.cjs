@@ -1,20 +1,23 @@
 'use strict';
 
-/** Settles like `promise`, or rejects with `message` once `milliseconds` pass. */
-async function within(promise, milliseconds, message) {
+/**
+ * Settles like `promise`, or rejects once `milliseconds` pass: with `new Error(timeout)`, or with the
+ * error a `timeout` function returns at that moment. `timers` replaces the global clock in tests.
+ */
+function within(promise, milliseconds, timeout, { timers = globalThis } = {}) {
   // A swapped (promise, message, ms) call would otherwise time out immediately.
   if (!Number.isFinite(milliseconds) || milliseconds < 0) {
-    throw new TypeError(`Invalid deadline for "${message}": ${String(milliseconds)}.`);
+    const label = typeof timeout === 'function' ? 'custom timeout' : timeout;
+    return Promise.reject(new TypeError(`Invalid deadline for "${label}": ${String(milliseconds)}.`));
   }
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), milliseconds); }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
+  return new Promise((resolve, reject) => {
+    const timer = timers.setTimeout(() => {
+      try { reject(typeof timeout === 'function' ? timeout() : new Error(timeout)); }
+      catch (error) { reject(error); }
+    }, milliseconds);
+    Promise.resolve(promise).then(value => { timers.clearTimeout(timer); resolve(value); },
+      error => { timers.clearTimeout(timer); reject(error); });
+  });
 }
 
 /**

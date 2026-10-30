@@ -813,13 +813,14 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   const [{ openServerSession, joinCallOnSession, leaveCurrentCall }, { sessionManager }, { webRtcManager },
     { videoService }, { voiceStore }, { settingsStore }, { stopLocalScreenShares },
     { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService },
-    { applyAudioDevice, applyAudioOutputPreferences }, { audioProcessor }] = await Promise.all([
+    { applyAudioDevice }, { routeAudioOutputs }, { audioProcessor }] = await Promise.all([
     import('/core/serverConnection.ts'), import('/core/SessionManager.ts'), import('/core/WebRtcManager.ts'),
     import('/core/VideoService.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/core/screenShareControls.ts'), import('/i18n/index.ts'),
     import('/core/EventBus.ts'), import('/@fs/' + globalThis.monkyAppSharedPath),
     import('/core/OverlayBridgeService.ts'),
     import('/core/applyAudioDevice.ts'),
+    import('/core/audioOutputRouting.ts'),
     import('/core/AudioProcessor.ts'),
   ]);
   setLanguage('en');
@@ -1154,9 +1155,10 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     async output(sinkId) {
       const next = { selectedSpeakerId: sinkId, advancedAudioOutputs: false,
         audioOutputDevices: { ...settingsStore.audioOutputDevices } };
-      await applyAudioOutputPreferences(next);
-      Object.assign(settingsStore, next);
-      settingsStore.save();
+      await routeAudioOutputs(next, { commit: () => {
+        Object.assign(settingsStore, next);
+        settingsStore.save();
+      } });
     },
     inputDevice() {
       return audioProcessor.getRawMicrophoneStream()?.getAudioTracks()[0]?.getSettings().deviceId;
