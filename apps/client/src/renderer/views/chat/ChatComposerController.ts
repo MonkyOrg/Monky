@@ -218,6 +218,11 @@ export class ChatComposerController {
     this.syncPermissionState();
     this.updateCounter();
     this.renderBlocks();
+    this.refreshMentions(input);
+  }
+
+  /** The open mention list follows who may read the channel now. */
+  public refreshMentions(input: MarkdownInput | null): void {
     if (input && (this.ctx.mentions.isOpen || input.hasFocus)) this.ctx.mentions.update(input);
   }
 

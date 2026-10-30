@@ -4,7 +4,7 @@ import { appEvents } from '../core/EventBus';
 import { getActiveNetworkClient, networkClient } from '../core/NetworkClient';
 import { t } from '../i18n';
 import { chatStore, getActiveChatStore } from '../stores/chatStore';
-import { getActiveServerStore, serverStore } from '../stores/serverStore';
+import { channelViewSignature, getActiveServerStore, serverStore } from '../stores/serverStore';
 import { escapeHtml } from '../utils/html';
 import { cancelSurfaceMotion } from '../utils/surfaceMotion';
 import { cancelVisibilityMotion } from '../utils/surfaceVisibility';
@@ -41,6 +41,8 @@ export class ChatView implements ChatContext {
   private unbindEvents: Array<() => void> = [];
   /** Whether the member could read the channel when its permissions were last looked at. */
   private couldRead = false;
+  /** What the open channel's composer was last brought up to date with (see `channelViewSignature`). */
+  private settingsSignature = '';
 
   constructor(public readonly container: HTMLElement) {
     this.feed = new ChatFeedController(this);
@@ -178,16 +180,16 @@ export class ChatView implements ChatContext {
     const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     const channelId = this.currentChannelId;
     this.couldRead = !!channelId && this.server.hasPermission(Permission.READ_MESSAGES, channelId);
+    this.settingsSignature = channelViewSignature(this.server, channelId);
     const refreshSettings = () => this.refreshSettings(input);
     this.unbindEvents.push(
       this.composer.bind(input),
       this.feed.bindListeners(),
       this.actions.copy.bind(),
       this.commands.bindDropup(input),
+      // The server re-sends the role list whenever anyone logs in, and `server.updated`
+      // follows each one: only a real change for this channel reaches the composer, once (#850).
       appEvents.on('server.updated', refreshSettings),
-      // The server re-sends the role list whenever anyone logs in. Reloading the
-      // history on every one of them rebuilt the feed and threw the reader back
-      // to the bottom; a real change of read access is handled in refreshSettings.
       appEvents.on('server.roles_updated', refreshSettings),
       appEvents.on('chat.message_added', (message: ChatMessage) => {
         if (message.channelId !== this.currentChannelId) return;
@@ -232,6 +234,13 @@ export class ChatView implements ChatContext {
   /** The server's settings or the member's permissions changed. */
   private refreshSettings(input: MarkdownInput | null): void {
     const channelId = this.currentChannelId;
+    const signature = channelViewSignature(this.server, channelId);
+    if (signature === this.settingsSignature) {
+      // Who may be mentioned also follows other members' roles.
+      this.composer.refreshMentions(input);
+      return;
+    }
+    this.settingsSignature = signature;
     const canRead = !!channelId && this.server.hasPermission(Permission.READ_MESSAGES, channelId);
     if (canRead !== this.couldRead) {
       this.couldRead = canRead;

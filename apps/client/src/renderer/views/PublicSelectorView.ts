@@ -4,7 +4,7 @@ import {
 import { appEvents } from '../core/EventBus';
 import type { NetworkClient } from '../core/NetworkClient';
 import { currentEventOrigin } from '../core/sessionRouting';
-import type { ServerStore } from '../stores/serverStore';
+import { channelViewSignature, type ServerStore } from '../stores/serverStore';
 import { getLanguage, t } from '../i18n';
 import { reportError } from '../utils/feedback';
 import { escapeHtml } from '../utils/html';
@@ -35,6 +35,8 @@ export class PublicSelectorView {
   private destroyed = false;
   private loading = false;
   private loadErrorShown = false;
+  /** The channel and access the selectors were last listed with; empty while no list succeeded. */
+  private listedWith = '';
 
   constructor(
     private feed: HTMLElement,
@@ -57,8 +59,8 @@ export class PublicSelectorView {
       }),
       appEvents.on('network.connected', () => { if (this.isOrigin()) void this.load(); }),
       appEvents.on('network.status', () => { if (this.isOrigin()) { audioPreviewService.release(this.feed); this.refresh(); } }),
-      appEvents.on('server.updated', () => { if (this.isOrigin()) { this.refresh(); void this.load(); } }),
-      appEvents.on('server.roles_updated', () => { if (this.isOrigin()) { this.refresh(); void this.load(); } }),
+      appEvents.on('server.updated', () => this.serverChanged()),
+      appEvents.on('server.roles_updated', () => this.serverChanged()),
     );
     this.observer = new MutationObserver((records) => {
       if (records.some((record) => [...record.addedNodes].some((node) =>
@@ -74,15 +76,30 @@ export class PublicSelectorView {
     return origin === null || origin === this.client.sessionKey;
   }
 
+  /**
+   * Only a change to this channel or to the member's access to it changes its selectors (#850);
+   * after a failed list, every update tries again.
+   */
+  private serverChanged(): void {
+    if (!this.isOrigin() || channelViewSignature(this.server, this.channelId) === this.listedWith) return;
+    this.refresh();
+    void this.load();
+  }
+
   private async load(): Promise<void> {
     if (this.destroyed || this.loading || this.client.getStatus() !== 'CONNECTED') return;
+    const signature = channelViewSignature(this.server, this.channelId);
     // Without reading there are no messages to attach controls to, and the
     // server would refuse the listing anyway.
-    if (!this.server.hasPermission(Permission.READ_MESSAGES, this.channelId)) return;
+    if (!this.server.hasPermission(Permission.READ_MESSAGES, this.channelId)) {
+      this.listedWith = signature;
+      return;
+    }
     this.loading = true;
     try {
       const result = await this.client.sendRequest<{ selectors: unknown[] }>(MessageType.SELECTOR_LIST, { channelId: this.channelId });
       if (this.destroyed || !Array.isArray(result.selectors)) return;
+      this.listedWith = signature;
       this.loadErrorShown = false;
       this.snapshots.clear();
       for (const entry of result.selectors) {
@@ -92,6 +109,7 @@ export class PublicSelectorView {
       this.refresh();
     } catch (error: unknown) {
       if (!this.destroyed) {
+        this.listedWith = '';
         console.warn('Could not restore public bot selectors.', error);
         // Retries follow every server update; one toast per outage is enough.
         if (!this.loadErrorShown) showErrorToast(t('botSelector.loadError'));
@@ -99,6 +117,11 @@ export class PublicSelectorView {
       }
     } finally {
       this.loading = false;
+      // The channel or the access changed while the list was on its way: it is asked for again.
+      if (!this.destroyed && this.listedWith && channelViewSignature(this.server, this.channelId) !== this.listedWith) {
+        this.refresh();
+        void this.load();
+      }
     }
   }
 

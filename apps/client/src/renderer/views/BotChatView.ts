@@ -22,7 +22,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { appEvents } from '../core/EventBus';
 import { type NetworkClient } from '../core/NetworkClient';
 import { getActiveChatStore, type BotInvocation, type ChatStore, type CommandDraft } from '../stores/chatStore';
-import { type ServerStore } from '../stores/serverStore';
+import { channelViewSignature, type ServerStore } from '../stores/serverStore';
 import { t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
@@ -204,6 +204,8 @@ export class BotChatView {
   private autocompletePaged = false;
   private queuedAutocompleteEnter: { fieldName: string; query: string; userGesture: boolean } | null = null;
   private composing = false;
+  /** What the composer and the bot cards were last drawn with (see `channelViewSignature`). */
+  private permissionSignature = '';
   private deferredRender = false;
   private submitGesture = false;
   private settingsRevisions = new Map<string, string>();
@@ -343,6 +345,7 @@ export class BotChatView {
       })
     );
     this.store.expireInvocations();
+    this.permissionSignature = channelViewSignature(this.server, this.channelId);
     this.renderComposer();
     this.scheduleExpiry();
   }
@@ -577,6 +580,11 @@ export class BotChatView {
   private refreshPermissions(): void {
     if (!this.isCurrent()) return;
     this.refreshVoiceEligibility();
+    // Most server updates (another channel, the categories, someone else's roles) change
+    // nothing drawn here: redrawing the composer and every card then cost a forced layout (#850).
+    const signature = channelViewSignature(this.server, this.channelId);
+    if (signature === this.permissionSignature) return;
+    this.permissionSignature = signature;
     this.renderComposer();
     for (const invocation of this.store.getInvocations(this.channelId)) this.onInvocationChanged(invocation);
     audioPreviewService.prune(this.feed);
