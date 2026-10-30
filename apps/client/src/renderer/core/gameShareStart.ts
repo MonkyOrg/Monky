@@ -1,4 +1,3 @@
-import { screenAudioService } from './ScreenAudioService';
 import { captureScreenShareCall, notifyScreenShareState, stopLocalScreenShares } from './screenShareControls';
 import { videoService } from './VideoService';
 import { webRtcManager } from './WebRtcManager';
@@ -21,8 +20,7 @@ export async function startGameShare(sourceId: string, claim: (shareId: string) 
   const call = captureScreenShareCall();
   const capabilities = await webRtcManager.getNativeScreenCapabilities();
   // Better a silent stream than none: audio is dropped, never the share.
-  const shareAudio = !voiceStore.permissionMuted && capabilities.captureAudio === true
-    && !screenAudioService.getIsTestTone() && !screenAudioService.getIsCapturing();
+  const shareAudio = !voiceStore.permissionMuted && capabilities.captureAudio === true;
   let stream: MediaStream | null = null;
   let published = false;
   const isWanted = () => call.isCurrent() && !voiceStore.isScreenSharing;
@@ -32,10 +30,7 @@ export async function startGameShare(sourceId: string, claim: (shareId: string) 
     if (!isWanted()) return;
     stream = await webRtcManager.startNativeScreenShare(sourceId, shareAudio, isWanted, 'window', true);
     if (!isWanted()) throw new DOMException('Screen share was cancelled', 'AbortError');
-    if (shareAudio) {
-      await screenAudioService.stop();
-      voiceStore.addScreenAudioShare(stream.id);
-    }
+    if (shareAudio) voiceStore.addScreenAudioShare(stream.id);
     claim(stream.id);
     voiceStore.addScreenShare(stream.id);
     notifyScreenShareState(call);
@@ -43,7 +38,7 @@ export async function startGameShare(sourceId: string, claim: (shareId: string) 
   } catch (error) {
     if (stream && !published && videoService.getScreenStream(stream.id) === stream) {
       try {
-        if (call.isCurrent()) await stopLocalScreenShares(screenAudioService, { shareIds: [stream.id] });
+        if (call.isCurrent()) await stopLocalScreenShares({ shareIds: [stream.id] });
         else videoService.stopScreenShare(stream.id);
       } catch (cleanupError) {
         console.warn('[GameShare] Failed to clean up the cancelled game share', cleanupError);

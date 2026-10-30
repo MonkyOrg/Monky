@@ -2,20 +2,14 @@
 
 const { NativeAudioOutputOwner } = require('./nativeAudioOutputOwner.cjs');
 const { NativeAudioPortMain } = require('./nativeAudioPortMain.cjs');
+const { notifyObserver } = require('./asyncTools.cjs');
 
 function createNativeAudioOutput({
   engine, commands, webContents, frame, expectedUrl, sessionId, protocol, createMessageChannel, onError,
   timeoutMs = 5000,
 }) {
   if (typeof onError !== 'function') throw new Error('Native audio output requires its Root error observer.');
-  const report = (error, context) => {
-    try {
-      const observed = onError(error, Object.freeze({ ...context }));
-      if (typeof observed?.then === 'function') void Promise.resolve(observed).catch(observerError => {
-        console.error('Native audio Root error observer failed:', observerError);
-      });
-    } catch (observerError) { console.error('Native audio Root error observer failed:', observerError); }
-  };
+  const report = (error, context) => notifyObserver('Native audio Root error observer', onError, error, Object.freeze({ ...context }));
   let owner;
   const renderer = new NativeAudioPortMain({
     webContents, frame, expectedUrl, sessionId, protocol, createMessageChannel,

@@ -255,8 +255,8 @@ function fixture(language = 'en') {
   const capabilities = { capture: true, captureAudio: true, receive: true, captureKinds: ['window', 'monitor', 'game'], backend: 'libobs-amf', reason: null };
   const controls = {
     capabilities: async () => capabilities, sources: async () => sources,
-    current: true, confirm: true, capturingAudio: false, settingsError: null, appliedShares: 0, screenPermission: async () => true,
-    start: null, stop: null, reapply: async () => {},
+    current: true, confirm: true, settingsError: null, appliedShares: 0, screenPermission: async () => true,
+    start: null, stop: null,
     openExternal: async () => ({ success: true }),
     encoding: async input => ({
       selection: { mode: input.encodingStrategy === 'automatic' ? 'hardware' : input.encodingMode,
@@ -267,7 +267,7 @@ function fixture(language = 'en') {
       hardware: { available: true, reason: null }, fallback: false,
     }),
   };
-  let saves = 0, enumerations = 0, cancelled = 0, sequence = 0, permissionChecks = 0;
+  let saves = 0, enumerations = 0, sequence = 0, permissionChecks = 0;
   const listeners = new Map();
   const appEvents = {
     on(event, listener) {
@@ -301,20 +301,13 @@ function fixture(language = 'en') {
     addScreenAudioShare(id) { if (!this.screenAudioShareIds.includes(id)) this.screenAudioShareIds.push(id); },
     removeScreenAudioShare(id) { this.screenAudioShareIds = this.screenAudioShareIds.filter(value => value !== id); },
   };
-  const screenAudioService = {
-    getIsCapturing: () => controls.capturingAudio, getIsTestTone: () => false,
-    stop: async () => { traces.push(['audio-stop']); controls.capturingAudio = false; },
-    start: async () => { throw new Error('Browser audio fallback must not run'); },
-  };
   const videoService = {
     getActiveSourceIds: () => new Set([...captures.values()].map(capture => capture.desktopSourceId)),
     getProfile: () => settingsStore.qualityPreset === 'CUSTOM' ? settingsStore.customProfile : shared.QUALITY_PRESETS[settingsStore.qualityPreset],
     getScreenStream: id => streams.get(id),
     getNativeScreenCapture: id => captures.get(id),
     getNativeScreenCaptures: () => [...captures.values()],
-    cancelPendingScreenShare: () => { cancelled++; },
     stopScreenShare: id => { traces.push(['video-stop', id]); streams.delete(id); captures.delete(id); labels.delete(id); },
-    startScreenShare: async () => { throw new Error('Chromium capture fallback must not run'); },
     setScreenShareLabel: (id, label) => { if (streams.has(id)) labels.set(id, label); },
     getScreenShareLabel: id => labels.get(id) ?? null,
   };
@@ -347,9 +340,8 @@ function fixture(language = 'en') {
       if (controls.settingsError) throw controls.settingsError;
     },
     setQualityPreset: value => { traces.push(['preset', value]); return Promise.resolve(controls.appliedShares); },
-    reapplyCodecPreferences: () => controls.reapply(),
   };
-  const stopLocalScreenShares = async (_, { shareIds, notify }) => {
+  const stopLocalScreenShares = async ({ shareIds, notify }) => {
     traces.push(['stop-shares', [...shareIds], notify]);
     if (controls.stop) await controls.stop(shareIds);
     for (const id of shareIds) {
@@ -391,7 +383,6 @@ function fixture(language = 'en') {
   const stubs = {
     'core/NetworkClient': { networkClient: { getHttpBaseUrl: () => 'http://127.0.0.1:9999' } },
     'core/EventBus': { appEvents },
-    'core/ScreenAudioService': { screenAudioService },
     'core/VideoService': { videoService },
     'core/WebRtcManager': { webRtcManager },
     'stores/settingsStore': { settingsStore },
@@ -512,7 +503,7 @@ function fixture(language = 'en') {
       showAlert: stubs['views/Dialog'].showAlert,
     }),
     settingsStore, serverStore, voiceStore, streams, captures, labels, chooser, capabilities, createStream, traces, alerts, confirms, warnings, events, observers, mediaQuery,
-    get saves() { return saves; }, get enumerations() { return enumerations; }, get cancelled() { return cancelled; },
+    get saves() { return saves; }, get enumerations() { return enumerations; },
     get permissionChecks() { return permissionChecks; },
     close() { picker.close(); quality.cleanup(); document.body.replaceChildren(); },
   };

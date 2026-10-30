@@ -29,7 +29,7 @@ const { NativeSfuBroker } = require('../runtime/nativeSfuBroker.cjs');
 const { NativeSfuTransport } = require('../runtime/nativeSfuTransport.cjs');
 const { NativeScreenRoutes } = require('../runtime/nativeScreenRoutes.cjs');
 const { LiveSenderFlow } = require('../runtime/encodedSender.cjs');
-const { within } = require('../runtime/nativeDeadline.cjs');
+const { within } = require('../runtime/asyncTools.cjs');
 const { createSfuFixture } = require('./sfuFixture.cjs');
 const directory = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);
 const mode = process.argv.find(value => value.startsWith('--mode='))?.slice('--mode='.length) ?? 'p2p';

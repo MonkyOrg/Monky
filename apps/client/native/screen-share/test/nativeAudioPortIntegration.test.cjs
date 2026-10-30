@@ -12,7 +12,7 @@ const { NativeAudioPortMain } = require('../runtime/nativeAudioPortMain.cjs');
 const { NativeAudioPortRenderer, registerNativeAudioPortReceiver } = require('../runtime/nativeAudioPortRenderer.cjs');
 const { createNativeAudioOutput } = require('../runtime/nativeAudioOutput.cjs');
 const { NativeRtcCommands } = require('../runtime/nativeRtcCommands.cjs');
-const { boundedCleanup } = require('../runtime/frameSink.cjs');
+const { within } = require('../runtime/asyncTools.cjs');
 const protocol = require('@monky/shared');
 
 const config = epoch => ({ epoch, sinkId: 'chosen-output', sampleRate: 48000, channels: 2 });
@@ -187,7 +187,7 @@ function fixture(t, options = {}) {
   t.after(async () => {
     for (const name of ['sinkGate', 'configureGate', 'closeGate']) options[name]?.resolve();
     if (owner && !owner.getStats().stopped) {
-      try { await boundedCleanup(owner.stop(), 'Fixture global audio did not stop.', 1000); }
+      try { await within(owner.stop(), 1000, 'Fixture global audio did not stop.'); }
       catch {
         destroyed = true;
         contents.emit('destroyed');
@@ -195,7 +195,7 @@ function fixture(t, options = {}) {
       }
     }
     if (main.current) {
-      try { await boundedCleanup(main.stop(main.current.config.epoch), 'Fixture output did not stop.', 1000); }
+      try { await within(main.stop(main.current.config.epoch), 1000, 'Fixture output did not stop.'); }
       catch {
         destroyed = true;
         contents.emit('destroyed');
@@ -592,7 +592,7 @@ test('ambiguous port transfer failure is not proof of absent Renderer resources'
   const f = fixture(t, { transferFailure: new Error('Transfer failed after an unknown point.') });
   await assert.rejects(f.main.start(config(1)), /unknown point/);
   const stop = f.main.stop(1);
-  await assert.rejects(boundedCleanup(stop, 'Renderer receipt was not observed.', 10), /not observed/);
+  await assert.rejects(within(stop, 10, 'Renderer receipt was not observed.'), /not observed/);
   assert.equal(f.main.getStats().retiredThrough, 0);
   f.destroy();
   await stop;

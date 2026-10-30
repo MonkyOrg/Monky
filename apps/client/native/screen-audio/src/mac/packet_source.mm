@@ -338,3 +338,9 @@ void RunPacketCapture(const PacketCaptureSelection& selection, std::atomic<bool>
   }
 }
 }
+
+// Timestamped ScreenCaptureKit audio, which RunPacketCapture requires, starts at macOS 13.
+bool platform_is_supported() {
+  if (@available(macOS 13.0, *)) return true;
+  return false;
+}

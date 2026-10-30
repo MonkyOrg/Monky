@@ -177,7 +177,7 @@ async function runDropdownSmoke() {
   const originals = {
     save: settings.save, preset: settings.qualityPreset, codec: settings.preferredVideoCodec,
     profile: { ...settings.customProfile }, microphone: settings.selectedMicrophoneId,
-    setPreset: rtc.setQualityPreset, reapply: rtc.reapplyCodecPreferences, api: window.api,
+    setPreset: rtc.setQualityPreset, api: window.api,
   };
   window.api = { ...originals.api, nativeScreenCommand: async command => {
     if (command.action === 'cancel-encoding-probe') return { kind: 'ok' };
@@ -193,7 +193,6 @@ async function runDropdownSmoke() {
   let applies = 0;
   settings.save = () => { saves++; };
   rtc.setQualityPreset = async () => { applies++; return 0; };
-  rtc.reapplyCodecPreferences = async () => {};
   settings.qualityPreset = 'NORMAL';
   language.setLanguage('en');
   service.init();
@@ -421,7 +420,6 @@ async function runDropdownSmoke() {
     settings.customProfile = originals.profile;
     settings.selectedMicrophoneId = originals.microphone;
     rtc.setQualityPreset = originals.setPreset;
-    rtc.reapplyCodecPreferences = originals.reapply;
     window.api = originals.api;
   }
   // Keep a real settings fixture for trusted-input checks and the screenshot.

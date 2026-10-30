@@ -9,7 +9,6 @@ import { audioProcessor } from './AudioProcessor';
 import { appEvents } from './EventBus';
 import { t } from '../i18n';
 import { videoService } from './VideoService';
-import { screenAudioService } from './ScreenAudioService';
 import { currentEventOrigin } from './sessionRouting';
 import { stopLocalScreenShares } from './screenShareControls';
 import { afkChannelIdOf } from '../utils/voiceRooms';
@@ -220,7 +219,7 @@ export function leaveCurrentCall(notifyServer = true): void {
   if (sessionId) session.participants.removeVoiceState(sessionId);
   audioProcessor.stopMicrophone();
   videoService.stopCamera();
-  void stopLocalScreenShares(screenAudioService, { teardown: true }).catch((error: unknown) => {
+  void stopLocalScreenShares({ teardown: true }).catch((error: unknown) => {
     clientLog.error('SCREEN_SHARE', 'Failed to stop screen sharing after leaving voice', {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -309,7 +308,7 @@ export async function joinCallOnSession(
   audioProcessor.setMuted(true);
   audioProcessor.stopMicrophone();
   webRtcManager.suspendForVoiceReconnect(true);
-  const stoppedScreens = changingChannel ? stopLocalScreenShares(screenAudioService, { teardown: true }) : null;
+  const stoppedScreens = changingChannel ? stopLocalScreenShares({ teardown: true }) : null;
   // The camera belongs to the room it was turned on in. Stopping it while the
   // old call is still current lets the publication binding announce it off to
   // that room before the departure, and drops the cached track so admission
@@ -442,7 +441,7 @@ export async function joinCallOnSession(
     session.client.send(MessageType.VOICE_LEAVE, { channelId });
     session.participants.removeVoiceState(mySessionId);
     audioProcessor.stopMicrophone();
-    const stoppedScreens = stopLocalScreenShares(screenAudioService, { teardown: true });
+    const stoppedScreens = stopLocalScreenShares({ teardown: true });
     videoService.stopCamera();
     webRtcManager.closeAllPeers();
     voiceStore.reset();

@@ -57,7 +57,6 @@ import type {
   OverlaySyncState,
   PttConfig,
   PttKeyBinding,
-  ScreenAudioDiagnostics,
   ServerProbeResult,
   ServerInviteResult,
   ServerStats,
@@ -245,13 +244,6 @@ export interface ElectronApi {
   saveEventCalendar: (input: IpcInvokeChannels['community:save-event-calendar']['args'][0]) => Promise<IpcInvokeChannels['community:save-event-calendar']['returnType']>;
   saveHostingSkill: (id: IpcInvokeChannels['onboarding:save-hosting-skill']['args'][0]) => Promise<IpcInvokeChannels['onboarding:save-hosting-skill']['returnType']>;
   probeServer: (host: string, port: number) => Promise<ServerProbeResult>;
-  screenAudioSupported: () => Promise<boolean>;
-  screenAudioDiagnose: () => Promise<ScreenAudioDiagnostics>;
-  screenAudioStart: (sourceId?: string) => Promise<{ success: boolean; error?: string }>;
-  screenAudioStop: () => Promise<{ success: boolean }>;
-  onScreenAudioFrame: (cb: (buffer: ArrayBuffer | Uint8Array) => void) => () => void;
-  removeScreenAudioFrameListener: () => void;
-  onScreenAudioError: (cb: (errorMsg: string) => void) => () => void;
   updateTrayVoiceStatus: (status: TrayVoiceStatus) => Promise<void>;
   // Encerramento gracioso: sair das chamadas antes do processo morrer (#458)
   onAppBeforeQuit: (cb: (request: AppShutdownRequest) => void) => () => void;
@@ -643,25 +635,6 @@ const api: ElectronApi = {
   saveEventCalendar: (input) => ipcRenderer.invoke(EVENT_CALENDAR_IPC, input),
   saveHostingSkill: (id) => ipcRenderer.invoke(HOSTING_SKILL_IPC, id),
   probeServer: (host, port) => ipcRenderer.invoke('net:probe-server', host, port),
-  screenAudioSupported: () => ipcRenderer.invoke('screen-audio:is-supported'),
-  screenAudioDiagnose: () => ipcRenderer.invoke('screen-audio:diagnose'),
-  screenAudioStart: (sourceId) => ipcRenderer.invoke('screen-audio:start', sourceId),
-  screenAudioStop: () => ipcRenderer.invoke('screen-audio:stop'),
-  onScreenAudioFrame: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, buffer: ArrayBuffer | Uint8Array) => cb(buffer);
-    ipcRenderer.on('screen-audio:frame', listener);
-    return () => {
-      ipcRenderer.removeListener('screen-audio:frame', listener);
-    };
-  },
-  removeScreenAudioFrameListener: () => ipcRenderer.removeAllListeners('screen-audio:frame'),
-  onScreenAudioError: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, errorMsg: string) => cb(errorMsg);
-    ipcRenderer.on('screen-audio:error', listener);
-    return () => {
-      ipcRenderer.removeListener('screen-audio:error', listener);
-    };
-  },
   updateTrayVoiceStatus: (status) => ipcRenderer.invoke('tray:update-voice-status', status),
   onAppBeforeQuit: (cb) => {
     const listener = (_event: Electron.IpcRendererEvent, request: AppShutdownRequest) => cb(request);

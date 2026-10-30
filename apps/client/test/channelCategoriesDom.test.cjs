@@ -963,18 +963,40 @@ async function regression(locale) {
   store.setServerDetails(details, user);
   view.renderChannels();
 
-  const moveToCategory = new DataTransfer();
-  const looseChannel = root.querySelector('[data-channel-id="loose"]');
+  // Reordering is a pointer drag: synthetic mouse events drive its real handlers,
+  // aimed through elementFromPoint like a user would.
+  const pointAt = (element, yRatio = 0.5) => {
+    const box = element.getBoundingClientRect();
+    const point = { clientX: Math.round(box.left + Math.min(80, box.width / 2)), clientY: Math.round(box.top + box.height * yRatio) };
+    const hit = document.elementFromPoint(point.clientX, point.clientY);
+    check(hit === element || element.contains(hit), `pointer target is covered by ${hit?.outerHTML.slice(0, 160)}`);
+    return point;
+  };
+  const pressPointer = handle => {
+    const start = pointAt(handle);
+    handle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, ...start }));
+    // The drag starts only past its 6 px threshold.
+    window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true,
+      clientX: start.clientX + 7, clientY: start.clientY + 7 }));
+  };
+  const movePointerTo = point => window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, ...point }));
+  const releasePointer = point => window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0, ...point }));
+
+  // The creation form opened from the sidebar menu above is still showing; a user
+  // closes it before dragging, otherwise it covers the sidebar.
+  field('.create-channel-modal #modal-close')?.click();
+  const looseChannel = root.querySelector('.channel-item[data-channel-id="loose"]');
   const destinationTitle = root.querySelector('[data-category-id="destination"] > .category-title');
-  looseChannel.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: moveToCategory }));
+  pressPointer(looseChannel);
   check(root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
     'channel dragging reveals category drop surfaces');
-  destinationTitle.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: moveToCategory }));
+  const destinationPoint = pointAt(destinationTitle);
+  movePointerTo(destinationPoint);
   check(destinationTitle.classList.contains('channel-category-drop-target'),
     'destination category uses the highlighted move target');
   check(!destinationTitle.nextElementSibling.classList.contains('channel-category-drop-target'),
     'highlighting a category title does not outline its channel list');
-  destinationTitle.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: moveToCategory }));
+  releasePointer(destinationPoint);
   await flush();
   check(requests.some(({ type, payload }) =>
     type === 'CHANNEL_UPDATE' && payload.channelId === 'loose' && payload.categoryId === destination.id),
@@ -982,7 +1004,8 @@ async function regression(locale) {
   const destinationOrder = requests.findLast(({ type }) => type === 'CHANNEL_REORDER')?.payload.orderedIds ?? [];
   check(destinationOrder.length === 1 && destinationOrder[0] === 'loose',
     'reordering the sidebar excludes forum threads from the payload');
-  looseChannel.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: moveToCategory }));
+  check(!root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
+    'releasing the pointer ends the channel drag');
 
   store.setServerDetails({ ...details, channels: details.channels.filter(item => item.id !== 'loose') }, user);
   view.renderChannels();
@@ -992,12 +1015,11 @@ async function regression(locale) {
     'the uncategorized destination remains mounted when empty');
   check(getComputedStyle(uncategorizedDropzone).display === 'none',
     'the empty uncategorized destination stays out of the normal layout');
-  const moveOutside = new DataTransfer();
   const groupedChannel = root.querySelector('.channel-item[data-channel-id="voice"]');
   check(store.myPermissions === permissions, 'management permission survives the empty destination fixture');
   check(groupedChannel.classList.contains('channel-reorder-handle'),
     'channels retain their pointer reorder handle after the sidebar rerenders');
-  groupedChannel.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: moveOutside }));
+  pressPointer(groupedChannel);
   check(root.querySelector('#channel-categories-list').classList.contains('channel-reorder-active'),
     'dragging from a category activates move-outside surfaces');
   check(getComputedStyle(uncategorizedDropzone).display === 'flex',
@@ -1006,21 +1028,19 @@ async function regression(locale) {
   check(firstCategoryTop >= uncategorizedDropzone.getBoundingClientRect().bottom,
     'the move-outside destination occupies layout space above existing categories');
   const siblingChannel = root.querySelector('.channel-item[data-channel-id="text"]');
-  siblingChannel.dispatchEvent(new DragEvent('dragover', {
-    bubbles: true, cancelable: true, clientY: siblingChannel.getBoundingClientRect().top, dataTransfer: moveOutside,
-  }));
+  movePointerTo(pointAt(siblingChannel, 0.25));
   check(siblingChannel.classList.contains('channel-drop-before') &&
     !siblingChannel.closest('[data-category-channels]').classList.contains('channel-category-drop-target'),
   'hovering a channel shows only the insertion line, without outlining the category body');
-  uncategorizedDropzone.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: moveOutside }));
-  check(uncategorizedDropzone.classList.contains('channel-category-drop-target'),
+  const outsidePoint = pointAt(uncategorizedDropzone);
+  movePointerTo(outsidePoint);
+  check(uncategorizedDropzone.classList.contains('channel-category-drop-target') && !siblingChannel.classList.contains('channel-drop-before'),
     'move-outside destination uses the highlighted move target');
-  uncategorizedDropzone.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: moveOutside }));
+  releasePointer(outsidePoint);
   await flush();
   check(requests.some(({ type, payload }) =>
     type === 'CHANNEL_UPDATE' && payload.channelId === 'voice' && payload.categoryId === null),
   'a channel can move outside every category');
-  groupedChannel.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: moveOutside }));
   check(getComputedStyle(uncategorizedDropzone).display === 'none',
     'move-outside destination hides again after dragging');
 

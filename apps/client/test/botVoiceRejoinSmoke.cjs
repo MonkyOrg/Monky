@@ -366,7 +366,7 @@ if (!process.versions.electron) {
     await until(() => run(guest, 'window.voiceFixture.mediaReleased()'), 'guest media release');
     phase = 'one-way media authorization';
     check(await run(window, 'window.voiceFixture.verifyOneWayPublication()'),
-      'Changing microphone, camera, screen video and screen audio cannot publish a track to the bot');
+      'Changing microphone and camera cannot publish a track to the bot');
     for (let round = 0; round < 5; round++) {
       phase = `leave ${round + 1}`;
       await run(window, 'window.voiceFixture.leave()');
@@ -593,24 +593,18 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
       const original = webRtcManager.localAudioTrack;
       if (!original) throw new Error('The real microphone capture must be active for this check');
       const microphone = original.clone();
-      const desktopAudio = original.clone();
       const canvas = document.createElement('canvas');
       canvas.width = canvas.height = 32;
       canvas.getContext('2d').fillRect(0, 0, 32, 32);
       const camera = canvas.captureStream(5);
-      const screen = canvas.captureStream(5);
       try {
         await webRtcManager.setLocalAudioTrack(microphone);
         await webRtcManager.setLocalCameraTrack(camera.getVideoTracks()[0]);
-        await webRtcManager.addLocalScreenTrack(screen);
-        await webRtcManager.setLocalScreenAudioTrack(desktopAudio);
         return this.noPublicationToBot();
       } finally {
-        await webRtcManager.setLocalScreenAudioTrack(null);
-        await webRtcManager.removeLocalScreenTrack(screen.id);
         await webRtcManager.setLocalCameraTrack(null);
         await webRtcManager.setLocalAudioTrack(original);
-        for (const track of [microphone, desktopAudio, ...camera.getTracks(), ...screen.getTracks()]) track.stop();
+        for (const track of [microphone, ...camera.getTracks()]) track.stop();
       }
     },
     async receivedPackets() {

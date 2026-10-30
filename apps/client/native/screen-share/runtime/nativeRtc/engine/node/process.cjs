@@ -4,11 +4,6 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { fork } = require('node:child_process');
 const { encode, decode, fromError, MAX_ORDINARY_CALLS, MAX_RETIREMENT_CALLS } = require('./wire.cjs');
-const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-};
 const hostFailure = (message, detail = {}) => Object.assign(new Error(message), {
   code: 'ERR_RTC_HOST_EXIT', status: 7, hresult: 0, terminal: true, ...detail,
 });
@@ -47,8 +42,8 @@ class ProcessEngine {
     this.encodedPending = 0;
     this.audioPending = 0;
     this.lastSnapshot = null;
-    this.readyState = deferred();
-    this.exitState = deferred();
+    this.readyState = Promise.withResolvers();
+    this.exitState = Promise.withResolvers();
     this.ready = this.readyState.promise;
     void this.ready.catch(() => {});
     const transport = spawnHost(hostFile);
@@ -110,7 +105,7 @@ class ProcessEngine {
         const lease = this.surfaceOutput
           ? this.surfaces.receiveSurface(event.data.frameId, event.data.codedWidth, event.data.codedHeight)
           : this.handles.duplicate(info.handle.ntHandle);
-        this.leases.set(event.data.frameId, { handle: lease, released: deferred(), proof: null });
+        this.leases.set(event.data.frameId, { handle: lease, released: Promise.withResolvers(), proof: null });
         // Electron accepts an IOSurfaceRef local to Main, never the child's pointer or numeric ID.
         info.handle = this.surfaceOutput ? { ioSurface: lease.handle } : { ntHandle: lease.handle };
         this.emit(event);
@@ -247,7 +242,7 @@ class ProcessEngine {
       || (method === 'submitEncodedFrame' && this.encodedPending >= 16)
       || (method === 'submitAudioPacket' && this.audioPending >= 8)
       || (inputKey && this.inputFrames.size >= 16)) throw queueFull();
-    const id = ++this.nextId, record = { ...deferred(), method, bytes: bytes.length };
+    const id = ++this.nextId, record = { ...Promise.withResolvers(), method, bytes: bytes.length };
     record.retirementOperation = retirement;
     if (retirement) {
       this.retirementPending++;

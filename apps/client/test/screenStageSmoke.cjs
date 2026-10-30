@@ -76,7 +76,6 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
   const modeCalls = [];
   replace(videoService, 'getScreenStream', id => streams.get(id) ?? null);
   replace(videoService, 'getScreenShareIds', () => [...streams.keys()]);
-  replace(videoService, 'getScreenShareCount', () => streams.size);
   replace(videoService, 'getNativeScreenCapture', id => captures.get(id) ?? null);
   replace(rtc, 'getScreenCaptureMode', (sessionId, shareId) => {
     modeCalls.push([sessionId, shareId]);

@@ -64,11 +64,6 @@ interface NativeWindowOwner {
 
 // Screen audio native module (compiled only on CI — graceful fallback)
 let screenAudio: {
-  isSupported: () => boolean;
-  start: (opts: any, cb: (buf: Buffer) => void) => { success: boolean; error?: string };
-  stop: () => { success: boolean };
-  getLastError: () => string;
-  getStatus: () => number;
   listWindowOwners?: () => NativeWindowOwner[];
   listWindows?: () => NativeWindowInfo[];
   getWindowState?: (hwnd: number) => NativeWindowState | null;
@@ -1485,106 +1480,6 @@ export function setupIpcHandlers(
     );
   });
 
-  // Screen Audio Capture (native module)
-  ipcMain.handle('screen-audio:is-supported', () => {
-    return screenAudio ? screenAudio.isSupported() : false;
-  });
-
-  ipcMain.handle('screen-audio:diagnose', () => {
-    const os = require('os');
-    const release = os.release();
-    return {
-      nativeModuleLoaded: screenAudio !== null,
-      platformSupported: screenAudio ? screenAudio.isSupported() : false,
-      osVersion: `${os.platform()} ${release}`,
-      pid: process.pid,
-      captureStatus: screenAudio ? screenAudio.getStatus() : -1,
-      lastError: screenAudio ? screenAudio.getLastError() : 'Module not loaded',
-    };
-  });
-
-  // Screen Audio buffer aggregation (batching) to avoid IPC message saturation (#55)
-  let audioBufferAccumulator: Buffer[] = [];
-  let accumulatedBytes = 0;
-  let audioFlushTimer: NodeJS.Timeout | null = null;
-
-  const flushScreenAudioFrames = (): void => {
-    if (audioBufferAccumulator.length === 0) return;
-    const merged = Buffer.concat(audioBufferAccumulator, accumulatedBytes);
-    audioBufferAccumulator = [];
-    accumulatedBytes = 0;
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('screen-audio:frame', merged);
-    }
-  };
-
-  const clearAudioBufferAccumulator = (): void => {
-    if (audioFlushTimer) {
-      clearTimeout(audioFlushTimer);
-      audioFlushTimer = null;
-    }
-    audioBufferAccumulator = [];
-    accumulatedBytes = 0;
-  };
-
-  ipcMain.handle('screen-audio:start', (_event, sourceId?: string) => {
-    if (!screenAudio || !screenAudio.isSupported()) {
-      return { success: false, error: 'Not supported on this platform' };
-    }
-    clearAudioBufferAccumulator();
-    const excludePid = process.pid;
-    // Electron encodes a window source id as `window:<id>:<n>` — the HWND on
-    // Windows, the CGWindowID on macOS. When the user shares a single application
-    // window, capture only that app's audio instead of the whole machine (#298).
-    let includeWindowId = 0;
-    if (sourceId && sourceId.startsWith('window:')) {
-      const parsed = Number.parseInt(sourceId.split(':')[1] ?? '', 10);
-      if (Number.isFinite(parsed) && parsed > 0) includeWindowId = parsed;
-    }
-    const opts: Record<string, number> = { excludePid, sampleRate: 48000, channels: 2 };
-    if (includeWindowId) opts.includeWindowId = includeWindowId;
-    console.log(`[ScreenAudio:Main] Starting capture (excludePid=${excludePid}, includeWindowId=${includeWindowId || 'none'}, source=${sourceId ?? 'screen'})`);
-    const result = screenAudio.start(
-      opts,
-      (buffer: Buffer) => {
-        if (!buffer || buffer.length === 0) {
-          console.warn('[ScreenAudio:Main] Native capture stream error detected (0-byte frame).');
-          const lastErr = screenAudio?.getLastError() || 'Audio device invalidated or disconnected';
-          clearAudioBufferAccumulator();
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('screen-audio:error', lastErr);
-          }
-          return;
-        }
-
-        audioBufferAccumulator.push(buffer);
-        accumulatedBytes += buffer.length;
-
-        // Flush when we accumulate ~16KB of PCM (~40ms) or via timer every ~35ms
-        if (accumulatedBytes >= 16384) {
-          if (audioFlushTimer) {
-            clearTimeout(audioFlushTimer);
-            audioFlushTimer = null;
-          }
-          flushScreenAudioFrames();
-        } else if (!audioFlushTimer) {
-          audioFlushTimer = setTimeout(() => {
-            audioFlushTimer = null;
-            flushScreenAudioFrames();
-          }, 35);
-        }
-      }
-    );
-    console.log(`[ScreenAudio:Main] start() result:`, result);
-    return result;
-  });
-
-  ipcMain.handle('screen-audio:stop', () => {
-    clearAudioBufferAccumulator();
-    if (!screenAudio) return { success: false };
-    return screenAudio.stop();
-  });
-
   // Client Logging (#444)
   const logger = options?.clientLogger;
   if (logger) {
@@ -1616,11 +1511,6 @@ export function setupIpcHandlers(
     disposeDirectMessages();
     for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
     ipcMain.removeHandler('app:save-csv-file');
-    clearAudioBufferAccumulator();
-    // Recovery keeps Main alive after the renderer is retired (#454).
-    try { screenAudio?.stop(); } catch (error: unknown) {
-      console.error('[ScreenAudio:Main] Could not stop capture after window destruction', error);
-    }
     void lanDiscovery.stop();
     globalInputHook.destroy();
   });

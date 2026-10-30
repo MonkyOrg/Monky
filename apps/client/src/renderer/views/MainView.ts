@@ -1844,16 +1844,14 @@ export class MainView {
   }
 
   /**
-   * A single channel drag kind supports mixed categories without interfering
-   * with voice-member dragging or attachment drops.
+   * Channels are reordered by a pointer drag, so it mixes categories without
+   * interfering with the native voice-member or attachment drags.
    */
   private setupChannelReorder(): void {
     if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
 
     const categoryList = this.container.querySelector<HTMLElement>('#channel-categories-list');
-    const lists = Array.from(this.container.querySelectorAll<HTMLElement>('[data-category-channels]'))
-      .map((el) => ({ el, categoryId: el.dataset.categoryChannels || null }));
-    const mime = 'text/monky-channel';
+    const lists = Array.from(this.container.querySelectorAll<HTMLElement>('[data-category-channels]'));
     const treeOrder = serverStore.hasChannelTreeOrder;
     const clearDropTargets = () => {
       categoryList?.classList.remove('channel-reorder-active');
@@ -1940,8 +1938,7 @@ export class MainView {
       target.targetRow?.classList.add(target.after ? 'channel-drop-after' : 'channel-drop-before');
     };
 
-    for (const { el: listEl, categoryId } of lists) {
-      if (!listEl) continue;
+    for (const listEl of lists) {
       // A voice channel and its participants live in a wrapper; a text channel
       // is the item itself. Dragging and dropping act on whichever is the direct
       // child of the list, so the participants travel with their channel.
@@ -1953,29 +1950,10 @@ export class MainView {
         const channelId = handle.getAttribute('data-channel-id');
         if (!channelId || !serverStore.hasPermission(Permission.MANAGE_CHANNELS)) continue;
 
-        handle.draggable = false;
         handle.classList.add('channel-reorder-handle');
         // Dragging is invisible without a hint, and the row has no title of its
         // own to lose.
         if (!handle.title) handle.title = t('main.channelReorderHint');
-        handle.addEventListener('dragstart', (e: Event) => {
-          const de = e as DragEvent;
-          if ((de.target as Element | null)?.closest('button')) {
-            de.preventDefault();
-            return;
-          }
-          de.dataTransfer?.setData(mime, channelId);
-          de.dataTransfer!.effectAllowed = 'move';
-          row.classList.add('channel-dragging');
-          categoryList?.classList.add('channel-reorder-active');
-        });
-        handle.addEventListener('dragend', () => {
-          row.classList.remove('channel-dragging');
-          listEl.querySelectorAll('.channel-drop-before, .channel-drop-after').forEach((n) => {
-            n.classList.remove('channel-drop-before', 'channel-drop-after');
-          });
-          clearDropTargets();
-        });
 
         let pointer: { startX: number; startY: number; active: boolean } | null = null;
         let suppressClick = false;
@@ -2034,96 +2012,14 @@ export class MainView {
           window.addEventListener('mouseup', stopPointer);
           window.addEventListener('blur', cancelPointer);
         });
-
-        row.addEventListener('dragover', (e: Event) => {
-          const de = e as DragEvent;
-          if (!de.dataTransfer?.types.includes(mime)) return;
-          de.preventDefault();
-          de.stopPropagation();
-          de.dataTransfer.dropEffect = 'move';
-          const rect = row.getBoundingClientRect();
-          const after = de.clientY > rect.top + rect.height / 2;
-          row.classList.toggle('channel-drop-before', !after);
-          row.classList.toggle('channel-drop-after', after);
-        });
-        row.addEventListener('dragleave', (e: Event) => {
-          const next = (e as DragEvent).relatedTarget as Node | null;
-          if (next && row.contains(next)) return;
-          row.classList.remove('channel-drop-before', 'channel-drop-after');
-        });
-        row.addEventListener('drop', (e: Event) => {
-          const de = e as DragEvent;
-          const draggedId = de.dataTransfer?.getData(mime);
-          const after = row.classList.contains('channel-drop-after');
-          row.classList.remove('channel-drop-before', 'channel-drop-after');
-          listEl.classList.remove('channel-category-drop-target');
-          if (!draggedId) return;
-          de.preventDefault();
-          de.stopPropagation();
-          if (draggedId === channelId) return;
-          void this.commitChannelOrder(categoryId, draggedId, { kind: 'channel', id: channelId }, after);
-        });
       }
-
-      // Dropping on the empty space below the list sends the channel to the end.
-      listEl.addEventListener('dragover', (e: Event) => {
-        const de = e as DragEvent;
-        if (!de.dataTransfer?.types.includes(mime)) return;
-        de.preventDefault();
-        de.dataTransfer.dropEffect = 'move';
-      });
-      listEl.addEventListener('dragleave', (e: Event) => {
-        const next = (e as DragEvent).relatedTarget as Node | null;
-        if (next && listEl.contains(next)) return;
-        listEl.classList.remove('channel-category-drop-target');
-      });
-      listEl.addEventListener('drop', (e: Event) => {
-        const de = e as DragEvent;
-        const draggedId = de.dataTransfer?.getData(mime);
-        listEl.classList.remove('channel-category-drop-target');
-        if (!draggedId) return;
-        de.preventDefault();
-        de.stopPropagation();
-        // A root group ends before the next category, not at the end of the root.
-        const lastId = treeOrder && categoryId === null
-          ? listEl.querySelector<HTMLElement>(':scope > :last-child .channel-item[data-channel-id], :scope > .channel-item[data-channel-id]:last-child')?.dataset.channelId
-          : undefined;
-        void this.commitChannelOrder(categoryId, draggedId, lastId && lastId !== draggedId ? { kind: 'channel', id: lastId } : null, true);
-      });
     }
-
-    this.container.querySelectorAll<HTMLElement>('[data-category-dropzone]').forEach((dropzone) => {
-      const categoryId = dropzone.dataset.categoryDropzone || null;
-      dropzone.addEventListener('dragover', (e: Event) => {
-        const de = e as DragEvent;
-        if (!de.dataTransfer?.types.includes(mime)) return;
-        de.preventDefault();
-        de.stopPropagation();
-        de.dataTransfer.dropEffect = 'move';
-        dropzone.classList.add('channel-category-drop-target');
-      });
-      dropzone.addEventListener('dragleave', (e: Event) => {
-        const next = (e as DragEvent).relatedTarget as Node | null;
-        if (next && dropzone.contains(next)) return;
-        dropzone.classList.remove('channel-category-drop-target');
-      });
-      dropzone.addEventListener('drop', (e: Event) => {
-        const de = e as DragEvent;
-        const draggedId = de.dataTransfer?.getData(mime);
-        dropzone.classList.remove('channel-category-drop-target');
-        if (!draggedId) return;
-        de.preventDefault();
-        de.stopPropagation();
-        void this.commitChannelOrder(categoryId, draggedId, null, true);
-      });
-    });
   }
 
   private setupCategoryReorder(): void {
     if (!serverStore.hasPermission(Permission.MANAGE_CHANNELS)) return;
     const categoryList = this.container.querySelector<HTMLElement>('#channel-categories-list');
     if (!categoryList) return;
-    const mime = 'text/monky-category';
     const sections = Array.from(categoryList.querySelectorAll<HTMLElement>(
       '.channel-category[data-category-id]:not(.channel-category--uncategorized)'
     ));
@@ -2173,19 +2069,7 @@ export class MainView {
       const categoryId = section.dataset.categoryId;
       const title = section.querySelector<HTMLElement>(':scope > .category-title');
       if (!categoryId || !title) continue;
-      title.draggable = false;
       title.classList.add('category-reorder-handle');
-      title.addEventListener('dragstart', event => {
-        if ((event.target as Element | null)?.closest('.category-add-btn')) {
-          event.preventDefault();
-          return;
-        }
-        event.dataTransfer?.setData(mime, categoryId);
-        if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-        section.classList.add('category-dragging');
-        categoryList.classList.add('category-reorder-active');
-      });
-      title.addEventListener('dragend', clear);
       let pointer: { startX: number; startY: number; active: boolean } | null = null;
       let suppressClick = false;
       title.addEventListener('click', event => {
@@ -2238,30 +2122,6 @@ export class MainView {
         window.addEventListener('mousemove', movePointer);
         window.addEventListener('mouseup', stopPointer);
         window.addEventListener('blur', cancelPointer);
-      });
-      title.addEventListener('dragover', event => {
-        if (!event.dataTransfer?.types.includes(mime)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = 'move';
-        const rect = title.getBoundingClientRect();
-        const after = event.clientY > rect.top + rect.height / 2;
-        section.classList.toggle('category-drop-before', !after);
-        section.classList.toggle('category-drop-after', after);
-      });
-      title.addEventListener('dragleave', event => {
-        const next = event.relatedTarget as Node | null;
-        if (next && title.contains(next)) return;
-        section.classList.remove('category-drop-before', 'category-drop-after');
-      });
-      title.addEventListener('drop', event => {
-        const draggedId = event.dataTransfer?.getData(mime);
-        const after = section.classList.contains('category-drop-after');
-        section.classList.remove('category-drop-before', 'category-drop-after');
-        if (!draggedId) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (draggedId !== categoryId) this.commitCategoryOrder(draggedId, { kind: 'category', id: categoryId }, after);
       });
     }
   }

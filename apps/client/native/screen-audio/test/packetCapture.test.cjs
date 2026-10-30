@@ -41,8 +41,7 @@ function assertOwnedCleanup(trace, packets = 1) {
     'queuedAtFinish', 'pendingAtFinish', 'gateErrors', 'earlyFinish']) {
     assert.equal(trace[point], 0, point);
   }
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0, 'The session returned its capture slot');
 }
 
 function createDoubleWorker() {
@@ -210,8 +209,7 @@ test('startup error rejects ready, closes, and releases its packet session', asy
   assert.equal(closed.error.code, 'ERR_AUDIO_STARTUP');
   assert.equal(binding.activeWorkers(), 0);
   assert.deepEqual(events, ['error', 'closed']);
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0);
 });
 
 test('invalid selected window and unsupported actual format never become success-shaped', async () => {
@@ -399,14 +397,13 @@ test('stop cancels a full admission wait without requiring callback promises to 
   binding.releaseGate();
   await filled;
   assert.equal(session.getStats().queuedPackets, 32);
-  assert.equal(binding.legacyStart(), false);
+  assert.equal(binding.captureLeases(), 1);
   const stopped = await session.stop();
   assert.equal(stopped.state, 'closed');
   assert.equal(stopped.queuedPackets, 0);
   assert.equal(stopped.overflowCount, 0);
   assert.equal(binding.activeWorkers(), 0);
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0);
   for (const resolve of pending) resolve();
   await wait(1);
   assert.equal(session.getStats().queuedPackets, 0, 'Late receipts must not release capture credits twice.');
@@ -550,29 +547,22 @@ test('a refilled real TSFN is not a bounded callback burst: PCM waits for downst
   assertOwnedCleanup(binding.trace(), 96);
 });
 
-test('packet sessions coexist while legacy capture stays exclusive on the real production lease', async () => {
+test('independent packet sessions coexist on the real production lease', async () => {
   binding.configure(4);
-  assert.equal(binding.legacyStart(), true);
-  const busy = binding.createPacketCapture({}, () => {});
-  await assert.rejects(busy.ready, { code: 'ERR_AUDIO_BUSY' });
-  await busy.closed;
-  assert.equal(binding.legacyStart(), false);
-  binding.legacyStop();
   const session = binding.createPacketCapture({}, () => {});
   await session.ready;
-  assert.equal(binding.legacyStart(), false);
-  binding.legacyStop(); // An unowned legacy stop must not stop packet acquisition.
+  assert.equal(binding.captureLeases(), 1);
   assert.equal(binding.activeWorkers(), 1);
   // Each shared application owns its own packet session (#253).
   const second = binding.createPacketCapture({}, () => {});
   await second.ready;
   assert.equal(binding.activeWorkers(), 2);
-  assert.equal(binding.legacyStart(), false);
+  assert.equal(binding.captureLeases(), 2);
   await second.stop();
   assert.equal(binding.activeWorkers(), 1, 'Stopping one session leaves the other capturing');
+  assert.equal(binding.captureLeases(), 1);
   await session.stop();
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0);
 });
 
 test('packet sessions are bounded and a released slot is reusable', async () => {
@@ -590,8 +580,7 @@ test('packet sessions are bounded and a released slot is reusable', async () => 
   await reused.ready;
   for (const session of [...sessions, reused]) await session.stop();
   assert.equal(binding.activeWorkers(), 0);
-  assert.equal(binding.legacyStart(), true);
-  binding.legacyStop();
+  assert.equal(binding.captureLeases(), 0);
 });
 
 test('runtime failure and callback exception close only after the worker and queue drain', async () => {
@@ -646,8 +635,7 @@ test('environment teardown cancels a live double without orphaned work or shared
     assert.equal(binding.activeWorkers(), 1);
     await worker.terminate();
     assert.equal(binding.activeWorkers(), 0);
-    assert.equal(binding.legacyStart(), true);
-    binding.legacyStop();
+    assert.equal(binding.captureLeases(), 0);
   }
 });
 

@@ -1,6 +1,6 @@
 'use strict';
 
-const { boundedCleanup } = require('./frameSink.cjs');
+const { within, notifyObserver } = require('./asyncTools.cjs');
 
 const positive = value => Number.isSafeInteger(value) && value > 0;
 const nonnegative = value => Number.isFinite(value) && value >= 0;
@@ -51,8 +51,7 @@ class NativeAudioClockClient {
     const error = value instanceof Error ? value : new Error(String(value));
     this.errors.push(error);
     this.stop();
-    try { this.onError(error); }
-    catch (observerError) { console.error('Native clock error observer failed:', observerError); }
+    notifyObserver('Native clock error observer', this.onError, error);
   }
 
   async start() {
@@ -110,7 +109,7 @@ class NativeAudioClockClient {
     this.stats.probes++;
     const pendingProbe = this.requestProbe({ epoch: this.epoch, probeId });
     if (typeof pendingProbe?.then !== 'function') throw new Error('Native clock probe must return the actual roundtrip Promise.');
-    const probe = await boundedCleanup(pendingProbe, 'Native clock probe did not complete.', this.timeoutMs);
+    const probe = await within(pendingProbe, this.timeoutMs, 'Native clock probe did not complete.');
     const rendererAfterUs = this.nowUs();
     if (this.stopped) throw aborted();
     if (probe?.epoch !== this.epoch || probe.probeId !== probeId
@@ -135,7 +134,7 @@ class NativeAudioClockClient {
     // Only the renderer bracket crosses back; the native side owns its RTC observations.
     const pendingCalibration = this.calibrate({ epoch: this.epoch, probeId, rendererBeforeUs, rendererAfterUs });
     if (typeof pendingCalibration?.then !== 'function') throw new Error('Native calibration must return its actual result Promise.');
-    const result = await boundedCleanup(pendingCalibration, 'Native clock calibration did not complete.', this.timeoutMs);
+    const result = await within(pendingCalibration, this.timeoutMs, 'Native clock calibration did not complete.');
     const receivedAtUs = this.nowUs();
     if (this.stopped) throw aborted();
     if (result?.epoch !== this.epoch || !positive(result.calibrationId)

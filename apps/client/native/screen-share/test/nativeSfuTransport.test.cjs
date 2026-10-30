@@ -197,7 +197,7 @@ test('SFU audio publication is opt-in and a fabricated readiness-shaped broker c
   for (const audioPublication of [true, 1, 'true']) {
     assert.throws(() => new NativeSfuTransport({
       ...f.broker, audioPublicationEnabled: true,
-      registerAudioSource() {}, async publishAudio() {}, async removeAudioSource() {}, async rebindAudioSource() {},
+      registerAudioSource() {}, async publishAudio() {}, async removeAudioSource() {},
     }, () => {}, { audioPublication }), /complete native SFU broker/u);
   }
   assert.deepEqual(f.calls, []);
@@ -207,13 +207,11 @@ test('audio-only facade operations cannot retire or reinterpret a video source',
   const f = fixture();
   await f.facade.addSource(source());
   await assert.rejects(f.facade.removeAudioSource(1), /own source ID/u);
-  await assert.rejects(f.facade.rebindAudioSource(1, { screenAudioShareId: 'screen-1', syncGroup: 'group-1' }), /own PCM source/u);
-  await assert.rejects(f.facade.rebindAudioSource(1, {}, {}), /cancellation signal/u);
   assert.equal(f.sources.has(1), true);
   await f.facade.close();
 });
 
-test('invalid facade deadlines cannot turn a missing target into an unbounded rebind reservation', () => {
+test('invalid facade deadlines are rejected before any source work', () => {
   const f = fixture();
   for (const timeoutMs of [0, -1, 60001, 0.5, NaN, Infinity, '20']) {
     assert.throws(() => new NativeSfuTransport(f.broker, () => {}, { timeoutMs }), /complete native SFU broker/u);

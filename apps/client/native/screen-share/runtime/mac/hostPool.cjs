@@ -2,15 +2,9 @@
 
 const assert = require('node:assert/strict');
 const { MacNativeHost, failure } = require('./host.cjs');
-const { within } = require('../nativeDeadline.cjs');
+const { within, notifyObserver } = require('../asyncTools.cjs');
 const entries = new Map();
 const mediaMethods = new Set(['media.start', 'media.stop', 'media.stats', 'media.bitrate', 'media.keyframe']);
-const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  void promise.catch(() => {});
-  return { promise, resolve, reject };
-};
 
 function createEntry(filename, previous) {
   const entry = { filename, clients: new Set(), sequence: 0, host: null, closing: null };
@@ -23,10 +17,7 @@ function createEntry(filename, previous) {
       }
     }
     entry.host = new MacNativeHost(filename, { multiplexed: true, onError: error => {
-      for (const client of entry.clients) {
-        try { client.onError(error); }
-        catch (observerError) { console.error('[MacNativeHost] Client failure observer threw:', observerError); }
-      }
+      for (const client of entry.clients) notifyObserver('[MacNativeHost] Client failure observer', client.onError, error);
     } });
     await entry.host.ready;
   })();
@@ -45,8 +36,11 @@ class MacHostLease {
       if (options.onVideo) {
         assert.ok(Number.isSafeInteger(++entry.sequence));
         this.captureId = entry.sequence;
+        // The host rejects it on exit even when no retirement awaits it.
+        const finished = Promise.withResolvers();
+        void finished.promise.catch(() => {});
         this.session = { child: entry.host.child, onVideo: options.onVideo, onError: error => this.fail(error),
-          mediaSequence: 0, finished: deferred() };
+          mediaSequence: 0, finished };
         entry.host.sessions.set(this.captureId, this.session);
       }
     });
@@ -61,8 +55,7 @@ class MacHostLease {
   fail(error) {
     if (this.localFailure) return;
     this.localFailure = error;
-    try { this.onError(error); }
-    catch (observerError) { console.error('[MacNativeHost] Client failure observer threw:', observerError); }
+    notifyObserver('[MacNativeHost] Client failure observer', this.onError, error);
     void this.close().catch(retirementError => {
       console.error('[MacNativeHost] Failed to retire a cancelled owner:', retirementError);
     });

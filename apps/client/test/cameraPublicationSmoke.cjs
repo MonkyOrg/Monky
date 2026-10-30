@@ -404,32 +404,23 @@ async function runCameraPublicationSmoke(filter) {
   };
   video.setQualityPreset('CUSTOM');
 
-  const makePeer = (id = 'fixture-peer', direction = 'sendrecv', screenFirst = false) => {
+  const makePeer = (id = 'fixture-peer', direction = 'sendrecv') => {
     const connection = pc();
     const audio = mic();
-    const screen = source('#eecc00').track;
     const audioSender = connection.addTrack(audio, new MediaStream([audio]));
-    const screenTransceiver = screenFirst
-      ? connection.addTransceiver(screen, { direction: 'sendonly' }) : null;
     const camera = connection.addTransceiver('video', { direction });
-    const screenSender = screenTransceiver?.sender
-      ?? connection.addTransceiver(screen, { direction: 'sendonly' }).sender;
     const session = {
       peerSessionId: id, pc: connection, audioSender,
-      remoteStream: new MediaStream(), remoteScreenStreams: new Map(),
-      screenVideoSenders: new Map([['fixture-screen', screenSender]]),
-      screenSubscriptionId: crypto.randomUUID(), remoteSubscriptionId,
-      screenWatchState: new Map([['fixture-screen', { watching: true, revision: 1 }]]),
+      remoteStream: new MediaStream(), subscriptionId: crypto.randomUUID(),
       candidateQueue: [], isPolite: true, makingOffer: false,
       iceRestartAttempts: 0, reconnectAttempts: 0, isRecovering: false,
     };
     rtc.peers.set(id, session);
-    return { session, camera, audio, audioSender, screen, screenSender };
+    return { session, camera, audio, audioSender };
   };
   const preserveOtherMedia = peer => check(
-    peer.audioSender.track === peer.audio && peer.audio.readyState === 'live'
-      && peer.screenSender.track === peer.screen && peer.screen.readyState === 'live',
-    'Camera operation preserves the microphone and dedicated screen sender',
+    peer.audioSender.track === peer.audio && peer.audio.readyState === 'live',
+    'Camera operation preserves the microphone sender',
   );
   const receiveVideo = (track, label) => {
     const element = document.createElement('video');
@@ -465,7 +456,6 @@ async function runCameraPublicationSmoke(filter) {
       nickname: 'Loopback camera fixture', status: 'CONNECTED',
     });
     participants.updateVoiceState({ sessionId: session.peerSessionId, channelId: voice.currentVoiceChannelId });
-    session.remoteSubscriptionId = remoteSubscriptionId;
     const remote = pc();
     const route = { remote, candidates: [], videos: new Map() };
     routes.set(session.peerSessionId, route);
@@ -721,7 +711,6 @@ async function runCameraPublicationSmoke(filter) {
         await bounded(signalQueue, 'signaling teardown');
         rtc.closeAllPeers();
         rtc.localCameraTrack = rtc.localAudioTrack = null;
-        rtc.clearLocalScreenTracks();
         for (const connection of resources.pcs) connection.close();
         routes.clear();
         participants.clear();
@@ -821,10 +810,7 @@ async function runCameraPublicationSmoke(filter) {
       await rtc.connectToPeer('fixture-peer', false);
       const session = rtc.peers.get('fixture-peer');
       const camera = session.pc.getTransceivers().find(entry => entry.receiver.track.kind === 'video');
-      const screen = source('#eecc00').track;
-      const screenSender = session.pc.addTransceiver(screen, { direction: 'sendonly' }).sender;
-      session.screenVideoSenders.set('fixture-screen', screenSender);
-      const peer = { session, camera, audio: rtc.localAudioTrack, audioSender: session.audioSender, screen, screenSender };
+      const peer = { session, camera, audio: rtc.localAudioTrack, audioSender: session.audioSender };
       check(camera.sender.track === null, 'Production connectToPeer creates an initially idle primary video transceiver');
       const route = loopback(session);
       await rtc.sendOffer(session);
@@ -856,13 +842,13 @@ async function runCameraPublicationSmoke(filter) {
       preserveOtherMedia(peer);
     });
 
-    await run('p2p-screen-exclusion-and-replace-failure', async () => {
-      const good = makePeer('good', 'sendrecv', true);
+    await run('p2p-replace-failure', async () => {
+      const good = makePeer('good');
       const bad = makePeer('bad');
       const raw = source().track;
       await rtc.setLocalCameraTrack(raw);
-      check(good.session.videoSender === good.camera.sender && good.screenSender.track === good.screen,
-        'An earlier screen transceiver is never mistaken for the idle camera');
+      check(good.session.videoSender === good.camera.sender && good.camera.sender.track === raw,
+        'The idle camera transceiver receives the published camera');
       const processed = source('#2020ee').track;
       raw.stop();
       const calls = [];
@@ -991,23 +977,15 @@ async function runCameraPublicationSmoke(filter) {
         let peer;
         let route;
         let micProducer;
-        let screenProducer;
         let sfuConnection;
         let decoded;
         if (transportMode === 'p2p') {
           peer = makePeer('fixture-fps-peer', 'recvonly');
-          rtc.localScreenShares.set('fixture-screen', {
-            track: peer.screen, stream: new MediaStream([peer.screen]), pending: false,
-          });
           route = loopback(peer.session);
         } else {
           const engine = rtc.sfuEngine;
           sfuConnection = installSfuTransport(engine).connection;
           micProducer = await engine.produceMic(mic());
-          screenProducer = await engine.sendTransport.produce({
-            track: source('#eecc00').track, stopTracks: false, appData: { mediaType: 'screen_video' },
-          });
-          engine.producers.set('screen_video:fixture-screen', screenProducer);
         }
         rtc.setQualityPreset('CUSTOM');
         await video.setCameraEffects({ mode: 'chroma', backgroundColor: '#1122dd', limitQuality: false });
@@ -1033,13 +1011,10 @@ async function runCameraPublicationSmoke(filter) {
         }
         const getDecoded = () => peer ? route.videos.get(peer.camera.mid) : decoded;
         await until(() => sender.getParameters().encodings[0]?.maxFramerate === 60,
-          `${transportMode} applies the selected profile FPS to the camera encoder`);
+          `${transportMode} applies the selected camera FPS, never the screen-share profile FPS, to the camera encoder`);
         check(video.cameraProcessor.targetFps === 60 && captureRequests.at(-1).video.frameRate.exact === 60
           && captureRequests.at(-1).video.width.exact === 1920 && captureRequests.at(-1).video.height.exact === 1080,
         'Uncapped effects and hardware capture request the full selected resolution/FPS profile');
-        const screenSender = peer?.screenSender ?? screenProducer.rtpSender;
-        check(screenSender.getParameters().encodings[0]?.maxFramerate === 45,
-          'Camera profile FPS stays distinct from the screen-share profile');
         await decodedColor(getDecoded, [17, 34, 221], 'Both native transports deliver the actual processed chroma composite');
         const expectSize = async (width, height, label) => {
           await until(() => {
@@ -1084,8 +1059,7 @@ async function runCameraPublicationSmoke(filter) {
         'Off keeps ordinary camera profile behavior even if the effect-only cap preference is enabled');
         await expectSize(1920, 1080, 'Off ignores the combined limit and transmits the ordinary full-resolution source');
         if (peer) preserveOtherMedia(peer);
-        else check(!micProducer.closed && !screenProducer.closed,
-          'Effect FPS changes leave SFU microphone and screen producers intact');
+        else check(!micProducer.closed, 'Effect FPS changes leave the SFU microphone producer intact');
       });
     }
 
@@ -1094,10 +1068,7 @@ async function runCameraPublicationSmoke(filter) {
       const engine = rtc.sfuEngine;
       const fixture = installSfuTransport(engine);
       const microphone = mic();
-      const screen = source('#eecc00').track;
       const micProducer = await engine.produceMic(microphone);
-      const screenProducer = await engine.sendTransport.produce({ track: screen, stopTracks: false, appData: { mediaType: 'screen_video' } });
-      engine.producers.set('screen_video:fixture-screen', screenProducer);
       const original = (await video.startCamera()).getVideoTracks()[0];
       await rtc.setLocalCameraTrack(original);
       const producer = engine.producers.get('camera');
@@ -1113,8 +1084,7 @@ async function runCameraPublicationSmoke(filter) {
       await rtc.setLocalCameraTrack(null);
       check(producer.closed && engine.getCameraTrack() === null && rtc.localCameraTrack === null, 'SFU camera stop closes only its producer and clears the cache');
       check(original.readyState === 'live' && newer.readyState === 'live', 'Replacing and closing a producer never stop VideoService-owned tracks');
-      check(!micProducer.closed && micProducer.track === microphone && !screenProducer.closed
-        && screenProducer.track === screen, 'SFU camera stop leaves microphone and screen producers intact');
+      check(!micProducer.closed && micProducer.track === microphone, 'SFU camera stop leaves the microphone producer intact');
       video.stopCamera();
       check(original.readyState === 'ended' && captures[0].track.readyState === 'ended', 'VideoService, not mediasoup, stops the physical-capture substitute and its published clone');
     });

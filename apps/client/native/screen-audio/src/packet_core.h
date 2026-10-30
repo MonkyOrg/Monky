@@ -28,26 +28,18 @@ struct Failure : std::runtime_error {
       : std::runtime_error(message), code(code) {}
 };
 
-enum class CaptureOwner { none, legacy, packet };
-// Legacy capture keeps process-wide state, so it excludes every other capture. Packet captures are
-// independent sessions: several applications may share their own audio at once (#253). The bound
-// matches the screens one session may publish; which sources may coexist is decided by the caller.
+// Packet captures are independent sessions: several applications may share their own audio at once
+// (#253). The bound matches the screens one session may publish; which sources may coexist is decided
+// by the caller.
 constexpr int kMaxPacketCaptures = 8;
-constexpr int kLegacyOwner = -1;
-// kLegacyOwner while legacy capture runs, otherwise the number of packet sessions.
-inline std::atomic<int> captureOwners{0};
+inline std::atomic<int> packetCaptures{0};
 
 class CaptureLease {
  public:
-  explicit CaptureLease(CaptureOwner owner) : owner_(owner) {
-    int current = captureOwners.load();
-    if (owner == CaptureOwner::legacy) {
-      current = 0;
-      held_ = captureOwners.compare_exchange_strong(current, kLegacyOwner);
-      return;
-    }
-    while (current >= 0 && current < kMaxPacketCaptures) {
-      if (captureOwners.compare_exchange_weak(current, current + 1)) { held_ = true; return; }
+  CaptureLease() {
+    int current = packetCaptures.load();
+    while (current < kMaxPacketCaptures) {
+      if (packetCaptures.compare_exchange_weak(current, current + 1)) { held_ = true; return; }
     }
   }
   ~CaptureLease() { Release(); }
@@ -56,12 +48,10 @@ class CaptureLease {
   bool held() const { return held_; }
   void Release() {
     if (!held_) return;
-    if (owner_ == CaptureOwner::legacy) captureOwners.store(0);
-    else captureOwners.fetch_sub(1);
+    packetCaptures.fetch_sub(1);
     held_ = false;
   }
  private:
-  CaptureOwner owner_;
   bool held_ = false;
 };
 

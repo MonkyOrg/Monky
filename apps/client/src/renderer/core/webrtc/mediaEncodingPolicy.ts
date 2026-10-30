@@ -1,6 +1,6 @@
 import { isMotionQualityPreset, type QualityPresetType, type QualityProfile } from '@monky/shared';
 
-export type OutboundMediaKind = 'audio' | 'camera' | 'screen';
+export type OutboundMediaKind = 'audio' | 'camera';
 
 export interface MediaEncodingPolicy {
   encoding: Pick<RTCRtpEncodingParameters, 'maxBitrate' | 'maxFramerate'>;
@@ -14,12 +14,8 @@ export function getMediaEncodingPolicy(
   profile: Readonly<QualityProfile>,
 ): MediaEncodingPolicy {
   if (kind === 'audio') return { encoding: { maxBitrate: profile.audioBitrateKbps * 1000 } };
-  const screen = kind === 'screen';
   return {
-    encoding: {
-      maxBitrate: (screen ? profile.screenBitrateKbps : profile.cameraBitrateKbps) * 1000,
-      maxFramerate: screen ? profile.screenFps : profile.cameraFps,
-    },
+    encoding: { maxBitrate: profile.cameraBitrateKbps * 1000, maxFramerate: profile.cameraFps },
     degradationPreference: isMotionQualityPreset(preset) ? 'maintain-framerate' : 'maintain-resolution',
   };
 }

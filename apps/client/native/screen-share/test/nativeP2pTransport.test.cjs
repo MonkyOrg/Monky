@@ -17,8 +17,7 @@ const source = (sourceId = 10) => ({
 const audioSource = (sourceId = 20, screenAudioShareId = 'screen-10') => ({
   sourceId, screenAudioShareId, syncGroup: 'call-group', maxBitrateBps: 128000,
 });
-function fixture({ connectGate, publishGate, audioPublishGate, audioPublication = false,
-  rebindGate, rebindResult = result => result, timeoutMs = 12000, preparePeer = null } = {}) {
+function fixture({ connectGate, publishGate, audioPublishGate, audioPublication = false, preparePeer = null } = {}) {
   const calls = [], registered = new Set(), audio = new Set(), connected = new Set(), errors = [];
   const metadata = new Map(), audioPublications = [], liveAudio = new Map();
   let failRemove = false, failClose = false, closed = false;
@@ -54,15 +53,6 @@ function fixture({ connectGate, publishGate, audioPublishGate, audioPublication 
       liveAudio.set(peer, publication);
       audioPublications.push(publication);
     },
-    async rebindAudioSource(id, selection) {
-      calls.push(['rebind-audio', id, selection]);
-      for (const [peer, publication] of liveAudio) if (publication.sourceId === id) liveAudio.delete(peer);
-      if (rebindGate) await rebindGate.promise;
-      selection.signal.throwIfAborted();
-      const result = { sourceId: id, screenAudioShareId: selection.screenAudioShareId, syncGroup: selection.syncGroup };
-      metadata.set(id, result);
-      return rebindResult(result);
-    },
     async removeSource(id) {
       calls.push(['remove', id]);
       if (failRemove) throw new Error('Retirement failed');
@@ -86,7 +76,7 @@ function fixture({ connectGate, publishGate, audioPublishGate, audioPublication 
     async finishAfterEngineClose(proof) { await proof; calls.push(['native-retired']); registered.clear(); connected.clear(); },
   };
   const transport = new NativeP2pTransport(broker, (error, context) => errors.push({ error, context }),
-    { audioPublication, timeoutMs, preparePeer });
+    { audioPublication, preparePeer });
   return {
     transport, broker, calls, registered, audio, connected, errors, metadata, audioPublications, liveAudio,
     failRemove: value => { failRemove = value; }, failClose: value => { failClose = value; },
@@ -318,258 +308,27 @@ test('aborting pending audio publication retires only audio without waiting for 
   await f.transport.close();
 });
 
-test('rebind capability is optional for basic send and required only by an explicit reassociation', async () => {
-  const f = fixture({ audioPublication: true });
-  delete f.broker.rebindAudioSource;
-  await f.transport.addSource(source());
-  await f.transport.addAudioSource(audioSource());
-  await assert.rejects(f.transport.rebindAudioSource(20, {
-    screenAudioShareId: 'screen-10', syncGroup: 'call-group',
-  }), /broker capability/u);
-  assert.equal(f.transport.sources.get(20).active, true);
-  await f.transport.close();
-});
-
-test('an explicit rebind preserves the PCM source and deliberately publishes only after the real broker acknowledgement', async () => {
-  const gate = deferred(), f = fixture({ audioPublication: true, rebindGate: gate });
-  await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await f.transport.addAudioSource(audioSource());
-  await f.transport.connect('remote', { connectionId: 'pair', generation: 1 });
-  const moving = f.transport.rebindAudioSource(20, { screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-  await tick();
-  assert.equal(f.liveAudio.size, 0);
-  assert.equal(f.transport.sources.get(20).shareId, 'screen-10');
-  assert.equal(f.audioPublications.length, 1);
-  gate.resolve();
-  assert.deepEqual(await moving, { sourceId: 20, screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-  assert.deepEqual(f.liveAudio.get('remote'), {
-    sourceId: 20, screenAudioShareId: 'screen-11', syncGroup: 'second-group', peer: 'remote',
-  });
-  assert.equal(f.calls.filter(call => call[0] === 'register-audio').length, 1);
-  assert.equal(f.calls.some(call => call[0] === 'remove'), false);
-  assert.equal(f.transport.sources.size, 3);
-  await f.transport.close();
-});
-
-test('new peers skip an in-flight association and all receive only its deliberately republished target group', async () => {
-  const gate = deferred(), f = fixture({ audioPublication: true, rebindGate: gate });
-  await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await f.transport.addAudioSource(audioSource());
-  const moving = f.transport.rebindAudioSource(20, { screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-  await tick();
-  await f.transport.connect('during-retirement', {});
-  assert.equal(f.audioPublications.length, 0);
-  const publishing = deferred(), original = f.broker.publishAudio;
-  f.broker.publishAudio = async (...args) => { await publishing.promise; return original(...args); };
-  gate.resolve();
-  await tick();
-  await f.transport.connect('during-republish', {});
-  publishing.resolve();
-  await moving;
-  assert.deepEqual([...f.liveAudio.keys()].sort(), ['during-republish', 'during-retirement']);
-  assert.ok(f.audioPublications.every(publication => publication.screenAudioShareId === 'screen-11'
-    && publication.syncGroup === 'second-group'));
-  await f.transport.close();
-});
-
-test('target setup is reserved before native registration so an arriving peer cannot receive the old audio group', async () => {
-  const f = fixture({ audioPublication: true });
-  await f.transport.addSource(source());
-  await f.transport.addAudioSource(audioSource());
-  const moving = f.transport.rebindAudioSource(20, { screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-  await f.transport.connect('early', {});
-  assert.equal(f.audioPublications.length, 0);
-  assert.equal(f.calls.some(call => call[0] === 'rebind-audio'), false);
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await moving;
-  assert.equal(f.liveAudio.get('early').syncGroup, 'second-group');
-  await f.transport.close();
-});
-
-test('a peer already waiting for its old associated video cannot publish stale audio after rebind starts', async () => {
-  const video = deferred(), f = fixture({ audioPublication: true, publishGate: video });
-  await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await f.transport.addAudioSource(audioSource());
-  const connecting = f.transport.connect('remote', {});
-  await tick();
-  const moving = f.transport.rebindAudioSource(20, { screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-  await tick();
-  video.resolve();
-  await Promise.all([connecting, moving]);
-  assert.ok(f.audioPublications.length > 0);
-  assert.ok(f.audioPublications.every(publication => publication.syncGroup === 'second-group'));
-  assert.equal(f.calls.some(call => call[0] === 'close-peer'), false);
-  await f.transport.close();
-});
-
-test('cancelling a native publication from the old association cannot close its concurrently connecting video peer', async () => {
+test('removing audio while a joining peer publishes it keeps that peer and its video', async () => {
   const publication = deferred(), started = deferred(), f = fixture({ audioPublication: true });
   await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
   await f.transport.addAudioSource(audioSource());
-  const publish = f.broker.publishAudio, rebind = f.broker.rebindAudioSource;
-  let first = true;
+  const publish = f.broker.publishAudio;
   f.broker.publishAudio = async (...args) => {
-    if (first) { first = false; started.resolve(); await publication.promise; }
+    started.resolve();
+    await publication.promise;
     return publish(...args);
-  };
-  f.broker.rebindAudioSource = (...args) => {
-    publication.reject(new DOMException('Old sender was retired.', 'AbortError'));
-    return rebind(...args);
   };
   const connecting = f.transport.connect('remote', {});
   await started.promise;
-  await f.transport.rebindAudioSource(20, { screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-  await connecting;
-  assert.equal(f.liveAudio.get('remote').syncGroup, 'second-group');
+  const removing = f.transport.removeAudioSource(20);
+  // The broker cancels the pending publication of a source being retired.
+  publication.reject(new DOMException('Publication was cancelled', 'AbortError'));
+  assert.equal(await connecting, 50);
+  await removing;
   assert.equal(f.calls.some(call => call[0] === 'close-peer'), false);
   assert.equal(f.connected.has('remote'), true);
-  await f.transport.close();
-});
-
-test('rebind rejects duplicate selections, wrong groups and invalid signals without silently changing ownership', async () => {
-  const gate = deferred(), f = fixture({ audioPublication: true, rebindGate: gate });
-  await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await f.transport.addAudioSource(audioSource());
-  await assert.rejects(f.transport.rebindAudioSource(10, {
-    screenAudioShareId: 'screen-11', syncGroup: 'second-group',
-  }), /active source/u);
-  await assert.rejects(f.transport.rebindAudioSource(20, {
-    screenAudioShareId: 'screen-11', syncGroup: 'wrong',
-  }), /exact selected/u);
-  await assert.rejects(f.transport.rebindAudioSource(20, {
-    screenAudioShareId: 'screen-11', syncGroup: 'second-group',
-  }, {}), /signal/u);
-  const moving = f.transport.rebindAudioSource(20, { screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-  await assert.rejects(f.transport.rebindAudioSource(20, {
-    screenAudioShareId: 'screen-10', syncGroup: 'call-group',
-  }), /active source/u);
-  gate.resolve();
-  await moving;
-  await f.transport.close();
-});
-
-for (const stop of ['audio', 'old-video', 'target-video', 'close']) {
-  test(`${stop} cancellation drains a raw rebind without awaiting its own catch-cleanup wrapper`, async () => {
-    const gate = deferred(), f = fixture({ audioPublication: true, rebindGate: gate });
-    await f.transport.addSource(source());
-    await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-    await f.transport.addAudioSource(audioSource());
-    await f.transport.connect('remote', {});
-    const moving = f.transport.rebindAudioSource(20, { screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-    const rejected = assert.rejects(moving);
-    await tick();
-    const stopping = stop === 'close' ? f.transport.close()
-      : stop === 'audio' ? f.transport.removeAudioSource(20)
-        : f.transport.removeSource(stop === 'old-video' ? 10 : 11);
-    await tick();
-    assert.equal(f.calls.some(call => call[0] === 'rebind-audio' && call[2].signal.aborted), true);
-    gate.resolve();
-    await stopping;
-    await rejected;
-    assert.equal(f.transport.sources.has(20), false);
-    assert.equal(f.liveAudio.size, 0);
-    if (stop !== 'close') {
-      assert.equal(f.transport.sources.has(stop === 'old-video' ? 11 : 10), true);
-      assert.equal(f.calls.some(call => call[0] === 'close-peer'), false);
-    }
-    await f.transport.close();
-  });
-}
-
-test('a mismatched native acknowledgement retires only audio and never republishes either association', async () => {
-  const f = fixture({ audioPublication: true, rebindResult: result => ({ ...result, sourceId: 999 }) });
-  await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await f.transport.addAudioSource(audioSource());
-  await f.transport.connect('remote', {});
-  await assert.rejects(f.transport.rebindAudioSource(20, {
-    screenAudioShareId: 'screen-11', syncGroup: 'second-group',
-  }), /acknowledgement/u);
-  assert.deepEqual([...f.registered], [10, 11]);
-  assert.equal(f.audioPublications.length, 1);
-  assert.equal(f.liveAudio.size, 0);
-  assert.equal(f.connected.has('remote'), true);
-  await f.transport.close();
-});
-
-test('failed republishing does not withdraw either video or close a peer', async () => {
-  const f = fixture({ audioPublication: true });
-  await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await f.transport.addAudioSource(audioSource());
-  await f.transport.connect('remote', {});
-  f.broker.publishAudio = async () => { throw new Error('Modeled replacement sender failed.'); };
-  await assert.rejects(f.transport.rebindAudioSource(20, {
-    screenAudioShareId: 'screen-11', syncGroup: 'second-group',
-  }), /publication failed/u);
-  assert.deepEqual([...f.registered], [10, 11]);
-  assert.equal(f.liveAudio.size, 0);
-  assert.equal(f.connected.has('remote'), true);
-  await f.transport.close();
-});
-
-test('a pending raw broker rebind survives bounded cleanup failure and is retired only after its late result', async () => {
-  const gate = deferred(), f = fixture({ audioPublication: true, rebindGate: gate, timeoutMs: 15 });
-  await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await f.transport.addAudioSource(audioSource());
-  await f.transport.connect('remote', {});
-  await assert.rejects(f.transport.rebindAudioSource(20, {
-    screenAudioShareId: 'screen-11', syncGroup: 'second-group',
-  }), /retirement failed/u);
-  const retained = f.transport.sources.get(20);
-  assert.ok(retained.rebind.raw);
-  assert.equal(retained.active, false);
-  await assert.rejects(f.transport.removeAudioSource(20), /source ownership is retained/u);
-  assert.equal(f.transport.sources.get(20), retained);
-  assert.equal(f.audioPublications.length, 1);
-  gate.resolve();
-  await tick();
-  await f.transport.removeAudioSource(20);
-  assert.deepEqual([...f.registered], [10, 11]);
-  assert.equal(f.liveAudio.size, 0);
-  await f.transport.close();
-});
-
-test('facade close retains pending rebind metadata boundedly instead of erasing its raw operation', async () => {
-  const gate = deferred(), f = fixture({ audioPublication: true, rebindGate: gate, timeoutMs: 15 });
-  await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await f.transport.addAudioSource(audioSource());
-  const moving = f.transport.rebindAudioSource(20, { screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-  const rejected = assert.rejects(moving);
-  await tick();
-  await assert.rejects(f.transport.close(), /source ownership is retained/u);
-  assert.ok(f.transport.sources.get(20).rebind.raw);
-  assert.equal(f.transport.sources.get(20).active, false);
-  gate.resolve();
-  await rejected;
-  await f.transport.close();
-  assert.equal(f.transport.sources.size, 0);
-  assert.equal(f.audioPublications.length, 0);
-});
-
-test('audio Stop during deliberate republish does not wait for an unrelated joining peer to finish opening', async () => {
-  const opening = deferred(), f = fixture({ audioPublication: true, connectGate: opening.promise });
-  await f.transport.addSource(source());
-  await f.transport.addSource({ ...source(11), syncGroup: 'second-group' });
-  await f.transport.addAudioSource(audioSource());
-  const connecting = f.transport.connect('slow-peer', {});
-  const moving = f.transport.rebindAudioSource(20, { screenAudioShareId: 'screen-11', syncGroup: 'second-group' });
-  const rejected = assert.rejects(moving);
-  await tick();
-  assert.equal(f.transport.sources.get(20).rebind.committed, true);
-  await f.transport.removeAudioSource(20);
-  await rejected;
-  assert.deepEqual([...f.registered], [10, 11]);
-  assert.ok(f.transport.peers.get('slow-peer').opening);
-  opening.resolve();
-  await connecting;
+  assert.ok(f.calls.some(call => call[0] === 'publish' && call[1] === 10 && call[2] === 'remote'));
+  assert.deepEqual([...f.registered], [10]);
   assert.equal(f.liveAudio.size, 0);
   await f.transport.close();
 });

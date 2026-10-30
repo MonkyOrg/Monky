@@ -175,29 +175,21 @@ int main() {
       }
     }
     {
-      CaptureLease legacy(CaptureOwner::legacy);
-      Require(legacy.held(), "Cannot acquire legacy lease");
-      CaptureLease conflict(CaptureOwner::packet);
-      Require(!conflict.held(), "Packet interrupted legacy ownership");
-    }
-    {
       // Each shared application owns an independent packet session (#253).
       std::vector<std::unique_ptr<CaptureLease>> packets;
       for (int i = 0; i < kMaxPacketCaptures; ++i) {
-        packets.push_back(std::make_unique<CaptureLease>(CaptureOwner::packet));
+        packets.push_back(std::make_unique<CaptureLease>());
         Require(packets.back()->held(), "Independent packet sessions must coexist");
       }
-      CaptureLease overflow(CaptureOwner::packet);
+      CaptureLease overflow;
       Require(!overflow.held(), "Packet sessions are unbounded");
-      CaptureLease conflict(CaptureOwner::legacy);
-      Require(!conflict.held(), "Legacy interrupted packet ownership");
       packets.front()->Release(); packets.front()->Release();
-      CaptureLease reused(CaptureOwner::packet);
+      CaptureLease reused;
       Require(reused.held(), "A released packet slot was leaked");
-      CaptureLease stillBusy(CaptureOwner::legacy);
-      Require(!stillBusy.held(), "Legacy started beside packet sessions");
+      CaptureLease stillFull;
+      Require(!stillFull.held(), "A double release freed two packet slots");
     }
-    Require(captureOwners.load() == 0, "Idempotent lease cleanup failed");
+    Require(packetCaptures.load() == 0, "Idempotent lease cleanup failed");
     const std::vector<std::pair<uint32_t, uint32_t>> parents{{10, 1}, {11, 10}, {12, 11}, {20, 1}, {1, 0}};
     ValidateIncludedProcess(20, 10, parents);
     Reject([&] { ValidateIncludedProcess(10, 10, parents); }, "ERR_AUDIO_TARGET");

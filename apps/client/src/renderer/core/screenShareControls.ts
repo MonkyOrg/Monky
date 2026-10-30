@@ -40,59 +40,41 @@ export function screenShareLimit(call: Pick<ScreenShareCall, 'serverStore'>): nu
 
 export function notifyScreenShareState(call: Pick<ScreenShareCall, 'client' | 'isCurrent'>): void {
   if (!call.isCurrent() || !call.client) return;
-  const screenShareIds = [...voiceStore.screenShareIds];
   call.client.send(MessageType.VOICE_STATE_UPDATE, webRtcManager.getLocalScreenState());
-  // Ordered signaling retires the old roster before replacement metadata has
-  // to fit the receiver's bounded cache. SDP may have announced it too early.
-  if (call.isCurrent()) webRtcManager.announcePublishedScreenSources(screenShareIds);
 }
 
-/**
- * Capture, transport and store cleanup share one boundary. Audio remains owned
- * by ScreenAudioService, passed explicitly to avoid its serverConnection cycle.
- */
-export async function stopLocalScreenShares(
-  audio: { stop(): Promise<void> },
-  options: StopScreenSharesOptions = {},
-): Promise<void> {
+/** Capture, transport and store cleanup share one boundary; native sources own their audio. */
+export async function stopLocalScreenShares(options: StopScreenSharesOptions = {}): Promise<void> {
   const call = captureScreenShareCall();
   const allShares = options.shareIds === undefined;
   const activeIds = new Set([...videoService.getScreenShareIds(), ...voiceStore.screenShareIds]);
   const shareIds = allShares ? [...activeIds] : [...new Set(options.shareIds)];
   const nativeIds = shareIds.filter(shareId => videoService.getNativeScreenCapture(shareId) !== null);
   const removedIds = new Set(shareIds);
-  // removeScreenShare clears this association, so decide before mutating it.
-  const stopAudio = allShares
-    || voiceStore.screenAudioShareIds.some(id => removedIds.has(id))
-    || (shareIds.some(id => activeIds.has(id)) && [...activeIds].every(id => removedIds.has(id)));
-  const audioStopped = stopAudio ? audio.stop() : Promise.resolve();
 
   if (allShares) {
     videoService.stopScreenShare();
     voiceStore.setScreenSharing(false);
   } else {
+    // removeScreenShare clears this association, so decide before mutating it.
+    const releasesAudio = voiceStore.screenAudioShareIds.some(id => removedIds.has(id))
+      || (shareIds.some(id => activeIds.has(id)) && [...activeIds].every(id => removedIds.has(id)));
     for (const shareId of shareIds) {
       videoService.stopScreenShare(shareId);
       voiceStore.removeScreenShare(shareId);
     }
     // With nothing left on air, no audio association may outlive its share.
-    if (stopAudio && !voiceStore.isScreenSharing) {
+    if (releasesAudio && !voiceStore.isScreenSharing) {
       for (const id of [...voiceStore.screenAudioShareIds]) voiceStore.removeScreenAudioShare(id);
     }
   }
 
-  // Closing calls already retire their transports. Do not negotiate or announce
-  // a late state update while a different channel is being admitted.
-  const detached = (async () => {
-    if (options.teardown) webRtcManager.clearLocalScreenTracks();
-    else for (const shareId of shareIds) await webRtcManager.removeLocalScreenTrack(shareId);
-  })();
+  // Closing calls already retire their transports. Do not announce a late
+  // state update while a different channel is being admitted.
   const notify = !options.teardown && options.notify !== false;
   if (notify && nativeIds.length === 0) notifyScreenShareState(call);
 
-  const results = await Promise.allSettled([
-    detached, audioStopped, ...nativeIds.map(shareId => webRtcManager.removeNativeScreenSource(shareId)),
-  ]);
+  const results = await Promise.allSettled(nativeIds.map(shareId => webRtcManager.removeNativeScreenSource(shareId)));
   // Native Closed/control messages still need the source's server-side leases.
   if (notify && nativeIds.length > 0) notifyScreenShareState(call);
   for (const result of results) {

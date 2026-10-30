@@ -163,10 +163,9 @@ frozen picture until you restore the window, and the broadcast resumes on its
 own. While the shared window is minimized or hidden, a yellow warning over your
 preview on the stage explains why. Only you see this warning.
 
-On the native path, the last viewer to stop also closes that profile's capture,
-encoder and sending pipeline, including the upload to the SFU.
-The source announcement remains available to watch again. The Chromium path
-preserves capture/preview and may continue uploading to the SFU.
+The last viewer to stop also closes that profile's capture, encoder and sending
+pipeline, including the upload to the SFU. The source announcement remains
+available to watch again.
 Signaling, connection control, voice and camera can still use the network.
 
 ### Native sharing and viewer quality

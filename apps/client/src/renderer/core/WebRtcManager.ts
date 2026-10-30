@@ -4,8 +4,7 @@ import {
   QUALITY_PRESETS,
   QualityPresetType,
   QualityProfile,
-  ScreenWatchSignalPayload,
-  screenWatchSignalSchema, screenViewersResultSchema,
+  screenViewersResultSchema,
   WebRtcSignalPayload,
   type NativeScreenCapabilities,
   type NativeScreenSource,
@@ -28,10 +27,7 @@ import { videoService } from './VideoService';
 import { RemoteMediaRouter } from './webrtc/RemoteMediaRouter';
 import { RemoteVadMonitor } from './webrtc/RemoteVadMonitor';
 import { RtcDiagnosticsCollector } from './webrtc/RtcDiagnosticsCollector';
-import {
-  applyVideoCodecPreferences, assertScreenCodecNegotiated, explicitScreenCodecMime, getScreenVideoCodecs,
-  getSdpVideoCodecOrder, ScreenCodecError, type PreferredVideoCodec,
-} from './webrtc/codecPreferences';
+import { applyVideoCodecPreferences, type PreferredVideoCodec } from './webrtc/codecPreferences';
 import { t } from '../i18n';
 import { SfuClientEngine, SfuConsumerTrackEvent } from './webrtc/SfuClientEngine';
 import { applyMediaEncodingPolicy, getMediaEncodingPolicy } from './webrtc/mediaEncodingPolicy';
@@ -42,14 +38,13 @@ import {
 } from './webrtc/NativeScreenController';
 import { overlayBridgeService } from './OverlayBridgeService';
 
-interface ScreenCodecNegotiation {
-  preferred: PreferredVideoCodec;
-}
-
-interface LocalScreenShare {
-  readonly stream: MediaStream;
-  readonly track: MediaStreamTrack;
-  pending: boolean;
+/**
+ * One offer/answer exchange with a peer. A newer exchange replaces it, so one
+ * that resumes after an await stops instead of applying a stale description.
+ */
+interface PeerNegotiation {
+  /** Camera codec preference this exchange applies (#526). */
+  readonly preferred: PreferredVideoCodec;
 }
 
 export interface PeerSession {
@@ -60,22 +55,17 @@ export interface PeerSession {
   peerSessionId: string;
   pc: RTCPeerConnection;
   remoteStream: MediaStream;
-  /** Remote screen streams keyed by share id (#253: up to SCREEN_SHARE_LIMITS.maximum per person). */
-  remoteScreenStreams: Map<string, MediaStream>;
   isPolite: boolean;
   makingOffer: boolean;
   candidateQueue: RTCIceCandidateInit[];
   audioSender?: RTCRtpSender | null;
   videoSender?: RTCRtpSender | null;
-  /** Dedicated screen video senders keyed by share id (#253). */
-  screenVideoSenders: Map<string, RTCRtpSender>;
-  screenSubscriptionId: string;
-  remoteSubscriptionId?: string;
-  screenWatchState: Map<string, { watching: boolean; revision: number }>;
-  screenNegotiation?: ScreenCodecNegotiation;
-  offeredScreenNegotiation?: ScreenCodecNegotiation;
-  negotiatedScreenNegotiation?: ScreenCodecNegotiation;
-  screenAudioSender?: RTCRtpSender | null;
+  /**
+   * Identity of this connection, sent with every offer and answer. The Light and
+   * the bot SDK tell a rebuilt connection from the same session apart by it.
+   */
+  subscriptionId: string;
+  negotiation?: PeerNegotiation;
   // Auto-recovery and retry management
   iceRestartAttempts: number;
   reconnectAttempts: number;
@@ -87,17 +77,6 @@ export interface PeerSession {
    * only writes (and logs) when the route actually changes (#466).
    */
   isRelayed?: boolean;
-  /**
-   * True once an audio track from this peer has been classified as the
-   * microphone (#467).
-   *
-   * The "second audio track is the screen" heuristic below normally reads this
-   * off `remoteStream`, but the microphone of our own other device never lands
-   * there — it is dropped on arrival. Without remembering that it came, the
-   * screen audio that follows would look like the first audio track and be
-   * mistaken for a microphone.
-   */
-  micTrackSeen?: boolean;
 }
 
 /**
@@ -146,10 +125,7 @@ export class WebRtcManager {
   private static readonly SFU_RECONNECT_WARN_AFTER = 3;
 
   private peers: Map<string, PeerSession> = new Map();
-  private codecUpdateTask: Promise<void> | null = null;
   private nativeTasks = new WeakMap<PeerSession, Promise<void>>();
-  private screenSubscriptionTasks = new WeakMap<PeerSession, Promise<void>>();
-  private remoteScreenSubscriptions = new Map<string, Map<string, { id: string; revision: number; published: boolean }>>();
   private mediaRouter: RemoteMediaRouter;
   private vadMonitor: RemoteVadMonitor;
   private diagnosticsCollector: RtcDiagnosticsCollector;
@@ -172,13 +148,6 @@ export class WebRtcManager {
    * finishing and reviving a session nobody is in.
    */
   private sfuJoinEpoch: number = 0;
-
-  private screenAudioStreamIds: Set<string> = new Set();
-  private screenVideoStreamIds: Set<string> = new Set();
-  // Tracks received before screen-audio-meta arrived, keyed by streamId
-  private pendingScreenAudioTracks: Map<string, { track: MediaStreamTrack; peerSessionId: string }> = new Map();
-  // Screen video tracks received before screen-video-meta arrived, keyed by streamId
-  private pendingScreenVideoTracks: Map<string, { track: MediaStreamTrack; peerSessionId: string }> = new Map();
 
   /**
    * One-shot timers that flag a peer as unreachable (#426).
@@ -209,16 +178,6 @@ export class WebRtcManager {
     channelId: string | null;
     sessionKey: string | null;
     task: Promise<void>;
-  } | null = null;
-  /** Desired publications survive transport rebuilds; VideoService owns capture. */
-  private localScreenShares = new Map<string, LocalScreenShare>();
-  private localScreenAudioTrack: MediaStreamTrack | null = null;
-  private screenAudioStream: MediaStream | null = null;
-  private screenAudioStreamId: string | null = null;
-  private sfuScreenAudioPublication: {
-    track: MediaStreamTrack;
-    epoch: number;
-    task: ReturnType<SfuClientEngine['produceScreenAudio']>;
   } | null = null;
   private currentPreset: QualityPresetType = settingsStore.qualityPreset;
   private qualityRevision = 0;
@@ -302,10 +261,8 @@ export class WebRtcManager {
             this.reconcileScreenSources();
           }
         },
-        isScreenWatched: (sessionId, shareId) => shareId
-          ? voiceStore.isWatchingScreen(sessionId, shareId) : voiceStore.isWatchingAnyScreen(sessionId),
         onConsumerTrack: (event) => this.handleSfuConsumerTrack(event),
-        onConsumerClosed: (sessionId, mediaType, shareId, track) => this.handleSfuConsumerClosed(sessionId, mediaType, shareId, track),
+        onConsumerClosed: (sessionId, mediaType, track) => this.handleSfuConsumerClosed(sessionId, mediaType, track),
         onConnectionFailed: (reason) => this.handleSfuConnectionFailure(reason),
         onConnected: () => this.handleSfuConnected(),
       }
@@ -377,7 +334,7 @@ export class WebRtcManager {
       .map(capture => voiceStore.permissionMuted ? { ...capture.source, audio: false } : capture.source)
       .filter(source => screenShareIds.includes(source.shareId));
     return { screenShareIds, nativeScreenShares, isScreenSharing: voiceStore.isScreenSharing,
-      isSharingScreenAudio: !voiceStore.permissionMuted && (this.localScreenAudioTrack !== null || nativeScreenShares.some(source => source.audio)) };
+      isSharingScreenAudio: !voiceStore.permissionMuted && nativeScreenShares.some(source => source.audio) };
   }
 
   public getNativeScreenCapabilities(): Promise<NativeScreenCapabilities> {
@@ -531,17 +488,15 @@ export class WebRtcManager {
       this.mediaRouter.applyUserVolumes();
     });
 
-    appEvents.on('voice.screen_watch_changed', (event: { sessionId: string; shareId: string }) => {
-      this.sendScreenWatch(event.sessionId, event.shareId);
-      void this.sfuEngine.syncScreenSubscriptions();
-      this.applyScreenAudioMute(event.sessionId);
+    appEvents.on('voice.screen_watch_changed', () => {
+      this.updateScreenAudio();
       void this.nativeScreens.sync().catch(error => this.nativeScreens.report(error));
     });
     appEvents.on('voice.screen_quality_changed', () => {
       void this.nativeScreens.sync().catch(error => this.nativeScreens.report(error));
     });
-    appEvents.on('voice.screen_audio_mute_changed', (event: { sessionId: string }) => {
-      this.applyScreenAudioMute(event.sessionId);
+    appEvents.on('voice.screen_audio_mute_changed', () => {
+      this.updateScreenAudio();
     });
 
     appEvents.on('server.meta_updated', () => {
@@ -732,14 +687,6 @@ export class WebRtcManager {
           }
         }
       }
-      await this.restoreSfuScreenShares(() => !this.isSfuJoinStale(epoch, channelId));
-      if (this.isSfuJoinStale(epoch, channelId)) {
-        this.sfuEngine.leave();
-        return;
-      }
-      if (this.localScreenAudioTrack) {
-        await this.publishSfuScreenAudio(this.localScreenAudioTrack);
-      }
 
       // A user may have changed the profile while publication was awaiting SDP.
       await this.applyBitrateConstraints();
@@ -800,7 +747,7 @@ export class WebRtcManager {
   }
 
   private handleSfuConsumerTrack(event: SfuConsumerTrackEvent): void {
-    const { producerSessionId, mediaType, track, shareId, rtpReceiver } = event;
+    const { producerSessionId, mediaType, track, rtpReceiver } = event;
     console.log(`[SFU Client] Routing consumer track: mediaType=${mediaType}, from session=${producerSessionId}, trackId=${track.id}, enabled=${track.enabled}, readyState=${track.readyState}`);
 
     if (this.isOwnOtherDevice(producerSessionId) && mediaType === 'mic') {
@@ -830,14 +777,10 @@ export class WebRtcManager {
         miniVideoEl.srcObject = stream;
         miniVideoEl.play().catch(() => {});
       }
-    } else if (mediaType === 'screen_video') {
-      this.routeScreenVideoTrack(producerSessionId, track, shareId || 'default');
-    } else if (mediaType === 'screen_audio') {
-      this.routeScreenAudioTrack(producerSessionId, track);
     }
   }
 
-  private handleSfuConsumerClosed(producerSessionId: string, mediaType: string, shareId?: string, track?: MediaStreamTrack): void {
+  private handleSfuConsumerClosed(producerSessionId: string, mediaType: string, track?: MediaStreamTrack): void {
     if (mediaType === 'camera') {
       const current = this.voiceParticipants.get(producerSessionId)?.remoteStream;
       if (current) {
@@ -847,13 +790,6 @@ export class WebRtcManager {
           current.removeTrack(t);
         });
       }
-    } else if (mediaType === 'screen_video') {
-      this.mediaRouter.cleanupScreenVideo(producerSessionId, shareId || 'default', track);
-    } else if (mediaType === 'screen_audio') {
-      // Only the screen audio goes: `cleanupPeerMedia` would also tear down the
-      // peer's voice <audio> element and its amplification pipeline, which is
-      // how ending a screen share used to mute the sharer for everyone else.
-      this.mediaRouter.cleanupScreenAudio(producerSessionId, track);
     }
   }
 
@@ -955,16 +891,10 @@ export class WebRtcManager {
   }
 
   /**
-   * Route a screen audio track to a dedicated <audio> element for a peer.
+   * Screen audio plays through the native screen owner, which mutes it for the
+   * user's own mute or deafen. Writing the playback state anywhere else races it.
    */
-  private routeScreenAudioTrack(peerSessionId: string, track: MediaStreamTrack): void {
-    this.mediaRouter.routeScreenAudioTrack(peerSessionId, track);
-    this.applyScreenAudioMute(peerSessionId);
-  }
-
-  private applyScreenAudioMute(peerSessionId: string): void {
-    this.mediaRouter.setScreenAudioMuted(peerSessionId,
-      !voiceStore.isWatchingAnyScreen(peerSessionId) || voiceStore.isScreenAudioMuted(peerSessionId));
+  private updateScreenAudio(): void {
     void this.nativeScreens.updateAudio().catch(error => this.nativeScreens.report(error));
   }
 
@@ -984,70 +914,7 @@ export class WebRtcManager {
           ? [[state.sessionId, state.screenShareIds ?? []] as const] : [];
       })
       : []));
-    for (const [sessionId, shares] of this.remoteScreenSubscriptions) {
-      const state = this.voiceParticipants.get(sessionId)?.voiceState;
-      for (const [shareId, subscription] of shares) {
-        if (state?.channelId === voiceStore.currentVoiceChannelId && state.screenShareIds?.includes(shareId)) {
-          subscription.published = true;
-        } else if (subscription.published || state?.channelId !== voiceStore.currentVoiceChannelId) {
-          shares.delete(shareId);
-          this.screenVideoStreamIds.delete(shareId);
-          const peer = this.peers.get(sessionId);
-          const stream = peer?.remoteScreenStreams.get(shareId);
-          peer?.remoteScreenStreams.delete(shareId);
-          stream?.getTracks().forEach(track => {
-            track.onended = null;
-            track.stop();
-          });
-          this.voiceParticipants.removeRemoteScreenStream(sessionId, shareId);
-        }
-      }
-      if (!shares.size) this.remoteScreenSubscriptions.delete(sessionId);
-    }
     void this.nativeScreens.sync().catch(error => this.nativeScreens.report(error));
-  }
-
-  private sendScreenWatch(peerSessionId: string, shareId: string): void {
-    if (this.getNativeScreenSource(peerSessionId, shareId)) return;
-    if (this.isSfuMode() || this.voiceReconnectSuspended || !this.isPeerInOurCall(peerSessionId)) return;
-    const subscription = this.remoteScreenSubscriptions.get(peerSessionId)?.get(shareId);
-    const session = this.peers.get(peerSessionId);
-    if (!subscription || !session || subscription.id !== session.remoteSubscriptionId) return;
-    this.signalClient.send(MessageType.RTC_SIGNAL, {
-      fromSessionId: this.currentSessionId, targetSessionId: peerSessionId,
-      signalType: 'screen-watch', streamId: shareId, subscriptionId: subscription.id,
-      watcherSubscriptionId: session.screenSubscriptionId,
-      subscriptionRevision: ++subscription.revision,
-      watching: voiceStore.isWatchingScreen(peerSessionId, shareId),
-    } satisfies ScreenWatchSignalPayload);
-  }
-
-  /**
-   * Route a screen video track into a per-share MediaStream so the stage can
-   * render it as a separate tile from the camera (#26) and from the peer's
-   * other screen share (#253).
-   */
-  private routeScreenVideoTrack(peerSessionId: string, track: MediaStreamTrack, shareId: string): void {
-    this.mediaRouter.routeScreenVideoTrack(peerSessionId, track, shareId, this.peers.get(peerSessionId));
-  }
-
-  /**
-   * True when the sender carries one of this peer's screen shares, so the
-   * camera-transceiver lookups never pick a screen m-line by mistake (#253).
-   */
-  private isScreenVideoSender(session: PeerSession, sender: RTCRtpSender): boolean {
-    for (const screenSender of session.screenVideoSenders.values()) {
-      if (screenSender === sender) return true;
-    }
-    return false;
-  }
-
-  /** True when the track is one of the local screen shares (#253). */
-  private isLocalScreenTrack(track: MediaStreamTrack): boolean {
-    for (const share of this.localScreenShares.values()) {
-      if (share.track === track) return true;
-    }
-    return false;
   }
 
   /**
@@ -1077,7 +944,7 @@ export class WebRtcManager {
    * True if any local sender track sits on a transceiver that has never been
    * negotiated (mid === null). This happens when an offer that would have
    * negotiated the track was discarded by an offer-collision rollback — leaving
-   * e.g. the screen-audio track added locally but never sent over the wire.
+   * e.g. a camera added locally but never sent over the wire.
    */
   private hasUnnegotiatedSenders(pc: RTCPeerConnection): boolean {
     return pc.getTransceivers().some((t) => !!t.sender.track && t.mid === null);
@@ -1085,9 +952,8 @@ export class WebRtcManager {
 
   /**
    * Re-send an offer when the connection is stable but still has a local track
-   * that was never negotiated (see hasUnnegotiatedSenders). This recovers the
-   * screen-audio track after a glare/rollback during screen sharing, where the
-   * video and audio renegotiations collide and the audio offer is dropped.
+   * that was never negotiated (see hasUnnegotiatedSenders), such as one whose
+   * offer was dropped by a glare/rollback.
    */
   private async renegotiateIfNeeded(session: PeerSession): Promise<void> {
     const pc = session.pc;
@@ -1443,10 +1309,9 @@ export class WebRtcManager {
   }
 
   /**
-   * Another device of our own in the same call. We still link up with it so
-   * camera and screen share work, and its screen audio is played like anyone
-   * else's (#467) — only the microphone is dropped, since playing it would
-   * feed the speakers of one device into the microphone of the other (#309).
+   * Another device of our own in the same call. We still link up with it so its
+   * camera works — only the microphone is dropped, since playing it would feed
+   * the speakers of one device into the microphone of the other (#309).
    */
   private isOwnOtherDevice(peerSessionId: string): boolean {
     const myUserId = this.voiceServerStore.currentUser?.id;
@@ -1517,13 +1382,10 @@ export class WebRtcManager {
       receiveOnly: botPeer && !isReceivingBotVoice(participant?.voiceState),
       pc,
       remoteStream,
-      remoteScreenStreams: new Map(),
       isPolite,
       makingOffer: false,
       candidateQueue: [],
-      screenVideoSenders: new Map(),
-      screenSubscriptionId: crypto.randomUUID(),
-      screenWatchState: new Map(),
+      subscriptionId: crypto.randomUUID(),
       iceRestartAttempts: 0,
       reconnectAttempts: 0,
       isRecovering: false,
@@ -1545,40 +1407,14 @@ export class WebRtcManager {
       pc.addTransceiver('audio', { direction: 'sendrecv' });
     }
 
-    // Setup Video Transceiver (Camera on the primary video m-line). Screen
-    // share now rides its own second sender (see below) so camera + screen can
-    // be sent simultaneously as two independent tiles (#26).
+    // Setup Video Transceiver (camera). Screens never ride this connection: the
+    // native screen owner publishes and receives them on its own (#689).
     if (!session.botPeer) {
       if (this.localCameraTrack) {
         session.videoSender = pc.addTrack(this.localCameraTrack, new MediaStream([this.localCameraTrack]));
       } else {
         pc.addTransceiver('video', { direction: 'sendrecv' });
       }
-    }
-
-    // Setup Screen Video Tracks as dedicated extra senders (if currently
-    // sharing). Announce each stream ID first so the receiver can tell them
-    // apart from the camera track and from each other (mirrors the
-    // screen-audio-meta mechanism) — #26, #253.
-    for (const [shareId, share] of this.localScreenShares) {
-      if (session.botPeer) break;
-      if (share.track.readyState === 'live') this.ensureP2pScreenSender(session, shareId, share);
-    }
-
-    // Setup Screen Audio Track (if currently sharing)
-    if (!session.botPeer && this.localScreenAudioTrack && this.screenAudioStream) {
-      // Announce stream ID before adding track
-      this.signalClient.send(MessageType.RTC_SIGNAL, {
-        targetSessionId: peerSessionId,
-        fromSessionId: this.currentSessionId,
-        signalType: 'screen-audio-meta',
-        streamId: this.screenAudioStreamId,
-        subscriptionId: session.screenSubscriptionId,
-      });
-      session.screenAudioSender = pc.addTransceiver('audio', {
-        direction: 'sendonly', streams: [this.screenAudioStream],
-        sendEncodings: [{ active: false }],
-      }).sender;
     }
 
     // ICE Candidate handler
@@ -1606,52 +1442,10 @@ export class WebRtcManager {
       }
       console.log(`[WebRTC] Received remote track (${event.track.kind}) from ${peerSessionId}`);
 
-      // Check if this is a screen audio track — either by known stream ID
-      // or by detecting it as a 2nd audio track (the first is the mic).
-      const incomingStreamId = event.streams?.[0]?.id;
-      const isKnownScreenAudio = event.track.kind === 'audio' && incomingStreamId && this.screenAudioStreamIds.has(incomingStreamId);
-      const existingMicAudio = remoteStream.getAudioTracks().length > 0 || session.micTrackSeen === true;
-      const isExtraAudioTrack = event.track.kind === 'audio' && existingMicAudio && incomingStreamId && !remoteStream.getTrackById(event.track.id);
-
-      if (isKnownScreenAudio || isExtraAudioTrack) {
-        console.log(`[WebRTC] Routing screen audio track from ${peerSessionId} (known=${isKnownScreenAudio}, extra=${isExtraAudioTrack}, streamId=${incomingStreamId})`);
-        // If meta hasn't arrived yet, store for potential reclassification
-        if (!isKnownScreenAudio && incomingStreamId) {
-          this.pendingScreenAudioTracks.set(incomingStreamId, { track: event.track, peerSessionId });
-        }
-        this.routeScreenAudioTrack(peerSessionId, event.track);
-        return;
-      }
-
-      // What is left of the audio is the microphone. Coming from our own other
-      // device it has to be dropped, or the speakers of one device feed the
-      // microphone of the other (#309) — but only the microphone: the screen
-      // audio classified above is a broadcast like anyone else's and is worth
-      // hearing from the machine sharing it (#467).
-      if (event.track.kind === 'audio') {
-        session.micTrackSeen = true;
-        if (this.isOwnOtherDevice(peerSessionId)) {
-          console.log(`[WebRTC] Dropping microphone from our own other device (${peerSessionId})`);
-          return;
-        }
-      }
-
-      // Check if this is a screen VIDEO track — either by known stream ID or by
-      // detecting it as a 2nd video track (the first is the camera). Screen
-      // video is announced via screen-video-meta before the track arrives, so
-      // isKnownScreenVideo is reliable even when the peer has no camera (#26).
-      const isKnownScreenVideo =
-        event.track.kind === 'video' && !!incomingStreamId && this.screenVideoStreamIds.has(incomingStreamId);
-      const existingCameraVideo = remoteStream.getVideoTracks().length > 0;
-      const isExtraVideoTrack =
-        event.track.kind === 'video' && existingCameraVideo && !!incomingStreamId && !remoteStream.getTrackById(event.track.id);
-
-      if (isKnownScreenVideo || isExtraVideoTrack) {
-        console.log(`[WebRTC] Routing screen video track from ${peerSessionId} (known=${isKnownScreenVideo}, extra=${isExtraVideoTrack}, streamId=${incomingStreamId})`);
-        if (!isKnownScreenVideo && incomingStreamId) {
-          this.pendingScreenVideoTracks.set(incomingStreamId, { track: event.track, peerSessionId });
-        }
-        this.routeScreenVideoTrack(peerSessionId, event.track, incomingStreamId!);
+      // The microphone of our own other device has to be dropped, or the
+      // speakers of one device feed the microphone of the other (#309).
+      if (event.track.kind === 'audio' && this.isOwnOtherDevice(peerSessionId)) {
+        console.log(`[WebRTC] Dropping microphone from our own other device (${peerSessionId})`);
         return;
       }
 
@@ -1679,7 +1473,7 @@ export class WebRtcManager {
           // Audio is routed exclusively through the dedicated <audio> element so
           // it can honour per-user volume, deafen and speaker selection. Keep
           // stage video elements muted to avoid a duplicate, un-deafenable
-          // audio path when a peer shares camera/screen.
+          // audio path when a peer shares its camera.
           videoEl.muted = true;
           videoEl.srcObject = remoteStream;
           videoEl.play().catch((e) => console.warn('[WebRTC] Video play error:', e));
@@ -1784,13 +1578,7 @@ export class WebRtcManager {
       }
     };
 
-    try {
-      applyVideoCodecPreferences(pc, settingsStore.preferredVideoCodec, session.screenVideoSenders.values());
-    } catch (error) {
-      for (const shareId of [...session.screenVideoSenders.keys()]) {
-        await this.failLocalScreenShare(shareId, error, !this.localScreenShares.get(shareId)?.pending, false);
-      }
-    }
+    applyVideoCodecPreferences(pc, settingsStore.preferredVideoCodec);
     if (this.peers.get(peerSessionId) !== session) return;
 
     // Watchdog to ensure connection establishes within a reasonable time
@@ -1811,17 +1599,12 @@ export class WebRtcManager {
     }
     const client = this.signalClient;
     const localSessionId = this.currentSessionId;
-    const preferred = settingsStore.preferredVideoCodec;
-    const qualityPreset = settingsStore.qualityPreset;
-    const negotiation = { preferred };
-    session.screenNegotiation = negotiation;
-    const isCurrent = () => this.isCurrentPeer(session) && session.screenNegotiation === negotiation;
+    const negotiation: PeerNegotiation = { preferred: settingsStore.preferredVideoCodec };
+    session.negotiation = negotiation;
+    const isCurrent = () => this.isCurrentPeer(session) && session.negotiation === negotiation;
     try {
       session.makingOffer = true;
-      this.announceScreenSources(session);
-      await this.prepareScreenEncodings(session, negotiation);
-      if (!isCurrent()) return;
-      applyVideoCodecPreferences(session.pc, preferred, session.screenVideoSenders.values());
+      applyVideoCodecPreferences(session.pc, negotiation.preferred);
       const offer = await session.pc.createOffer({
         ...(!session.botPeer ? { offerToReceiveAudio: true, offerToReceiveVideo: true } : {}),
         iceRestart,
@@ -1829,26 +1612,12 @@ export class WebRtcManager {
       if (!isCurrent()) return;
       await session.pc.setLocalDescription(offer);
       if (!isCurrent()) return;
-      session.offeredScreenNegotiation = negotiation;
-
-      const screenCodecs = [...session.screenVideoSenders].map(([shareId, sender]) => {
-        const mid = session.pc.getTransceivers().find((entry) => entry.sender === sender)?.mid;
-        return { shareId, mid, codecs: mid === null || mid === undefined ? [] : getSdpVideoCodecOrder(session.pc.localDescription?.sdp ?? '', mid) };
-      });
-      if (screenCodecs.length > 0) {
-        clientLog.info('WEBRTC', 'P2P offer video codec order', {
-          peer: session.peerSessionId,
-          preferred,
-          qualityPreset,
-          screenCodecs,
-        });
-      }
 
       client.send(MessageType.RTC_SIGNAL, {
         targetSessionId: session.peerSessionId,
         fromSessionId: localSessionId,
         signalType: 'offer',
-        subscriptionId: session.screenSubscriptionId,
+        subscriptionId: session.subscriptionId,
         sdp: session.pc.localDescription?.toJSON ? session.pc.localDescription.toJSON() : session.pc.localDescription,
       });
     } catch (err) {
@@ -1856,44 +1625,27 @@ export class WebRtcManager {
         error: err instanceof Error ? err.message : String(err),
       });
       console.error(`[WebRTC] Error sending offer to ${session.peerSessionId}:`, err);
-      if (err instanceof ScreenCodecError && isCurrent()) {
-        for (const shareId of [...session.screenVideoSenders.keys()]) {
-          await this.failLocalScreenShare(shareId, err, !this.localScreenShares.get(shareId)?.pending, false);
-        }
-        if (session.screenVideoSenders.size === 0 && session.pc.signalingState === 'stable') {
-          queueMicrotask(() => { void this.sendOffer(session); });
-        }
-      }
       if (propagateError) throw err;
     } finally {
-      if (session.screenNegotiation === negotiation) session.makingOffer = false;
+      if (session.negotiation === negotiation) session.makingOffer = false;
     }
   }
 
-  private async sendAnswer(session: PeerSession, negotiation: ScreenCodecNegotiation): Promise<boolean> {
+  private async sendAnswer(session: PeerSession, negotiation: PeerNegotiation): Promise<boolean> {
     const client = this.signalClient;
     const localSessionId = this.currentSessionId;
-    const isCurrent = () => this.isCurrentPeer(session) && session.screenNegotiation === negotiation;
+    const isCurrent = () => this.isCurrentPeer(session) && session.negotiation === negotiation;
     if (!isCurrent()) return false;
-    const { preferred } = negotiation;
-    this.announceScreenSources(session);
-    applyVideoCodecPreferences(session.pc, preferred, session.screenVideoSenders.values());
+    applyVideoCodecPreferences(session.pc, negotiation.preferred);
     const answer = await session.pc.createAnswer();
     if (!isCurrent()) return false;
-    const previousNegotiation = session.negotiatedScreenNegotiation;
-    session.negotiatedScreenNegotiation = negotiation;
-    try {
-      await session.pc.setLocalDescription(answer);
-    } catch (error) {
-      if (isCurrent()) session.negotiatedScreenNegotiation = previousNegotiation;
-      throw error;
-    }
+    await session.pc.setLocalDescription(answer);
     if (!isCurrent()) return false;
     client.send(MessageType.RTC_SIGNAL, {
       targetSessionId: session.peerSessionId,
       fromSessionId: localSessionId,
       signalType: 'answer',
-      subscriptionId: session.screenSubscriptionId,
+      subscriptionId: session.subscriptionId,
       sdp: answer,
     });
     return true;
@@ -1901,73 +1653,11 @@ export class WebRtcManager {
 
   private async handleIncomingSignal(payload: WebRtcSignalPayload): Promise<void> {
     if (this.voiceReconnectSuspended) return;
-    const { fromSessionId, signalType, streamId } = payload;
+    const { fromSessionId, signalType } = payload;
     if (!this.isPeerInOurCall(fromSessionId) || this.isSfuMode()) return;
-
-    if (signalType === 'screen-watch') {
-      const parsed = screenWatchSignalSchema.safeParse(payload);
-      const session = this.peers.get(fromSessionId);
-      if (!parsed.success || !session || parsed.data.subscriptionId !== session.screenSubscriptionId
-        || parsed.data.watcherSubscriptionId !== session.remoteSubscriptionId
-        || !this.localScreenShares.has(parsed.data.streamId)) return;
-      const previous = session.screenWatchState.get(parsed.data.streamId);
-      if (previous && previous.revision >= parsed.data.subscriptionRevision) return;
-      session.screenWatchState.set(parsed.data.streamId, {
-        watching: parsed.data.watching, revision: parsed.data.subscriptionRevision,
-      });
-      await this.syncPeerScreenSubscriptions(session);
-      if (parsed.data.watching && this.isCurrentPeer(session)) await this.renegotiateIfNeeded(session);
-      return;
-    }
-
-    // Handle screen-audio-meta: register the stream ID so ontrack can route it
-    if (signalType === 'screen-audio-meta') {
-      if (streamId) {
-        this.screenAudioStreamIds.add(streamId);
-        // If ontrack already fired before this meta arrived, reclassify the pending track
-        const pending = this.pendingScreenAudioTracks.get(streamId);
-        if (pending) {
-          console.log(`[WebRTC] Reclassifying pending track as screen audio for ${pending.peerSessionId}`);
-          this.pendingScreenAudioTracks.delete(streamId);
-          // Already routed by ontrack — no further action needed
-        }
-      }
-      return;
-    }
-
-    // Handle screen-video-meta: register the stream ID so ontrack can route it
-    // to the dedicated screen tile instead of the camera tile (#26).
-    if (signalType === 'screen-video-meta') {
-      if (streamId && payload.subscriptionId) {
-        const subscriptions = this.remoteScreenSubscriptions.get(fromSessionId)
-          ?? new Map<string, { id: string; revision: number; published: boolean }>();
-        const previous = subscriptions.get(streamId);
-        if (previous?.id !== payload.subscriptionId) {
-          const liveIds = this.voiceParticipants.get(fromSessionId)?.voiceState?.screenShareIds ?? [];
-          if (!previous && subscriptions.size >= 2) {
-            const obsolete = [...subscriptions.keys()].find(id => !liveIds.includes(id));
-            if (obsolete) {
-              subscriptions.delete(obsolete);
-              this.screenVideoStreamIds.delete(obsolete);
-            }
-            else return;
-          }
-          subscriptions.set(streamId, {
-            id: payload.subscriptionId, revision: 0, published: liveIds.includes(streamId),
-          });
-        }
-        this.remoteScreenSubscriptions.set(fromSessionId, subscriptions);
-        this.sendScreenWatch(fromSessionId, streamId);
-        this.screenVideoStreamIds.add(streamId);
-        const pending = this.pendingScreenVideoTracks.get(streamId);
-        if (pending) {
-          console.log(`[WebRTC] Reclassifying pending track as screen video for ${pending.peerSessionId}`);
-          this.pendingScreenVideoTracks.delete(streamId);
-          this.routeScreenVideoTrack(pending.peerSessionId, pending.track, streamId);
-        }
-      }
-      return;
-    }
+    // The protocol keeps the `screen-*` signals, but no client sends them since #689:
+    // native screens publish and negotiate through their own owner.
+    if (signalType !== 'offer' && signalType !== 'answer' && signalType !== 'candidate') return;
 
     let session = this.peers.get(fromSessionId);
     if (!session && signalType === 'offer') {
@@ -1992,27 +1682,15 @@ export class WebRtcManager {
 
     const peer = session;
     try {
-      if (signalType === 'offer' || signalType === 'answer') {
-        if (!payload.subscriptionId) return;
-        if (peer.remoteSubscriptionId !== payload.subscriptionId) {
-          peer.remoteSubscriptionId = payload.subscriptionId;
-          peer.screenWatchState.clear();
-          // The same device/session ID can reconnect with a new call. Its old
-          // consent must be revoked before SDP makes that connection usable.
-          await this.syncPeerScreenSubscriptions(peer);
-        }
-      }
+      // Every description names the connection it belongs to (PeerSession.subscriptionId).
+      if ((signalType === 'offer' || signalType === 'answer') && !payload.subscriptionId) return;
       const apply = () => this.applyIncomingSignal(peer, payload);
       const changed = signalType === 'offer' || signalType === 'answer'
         ? await this.runNativeTask(peer, apply) : await apply();
       if (!changed || !this.isCurrentPeer(peer)) return;
-      await this.checkSessionScreenCodecs(peer);
       this.applyBitrateConstraints();
       // Follow-up offers must run outside the incoming-description queue.
       await this.renegotiateIfNeeded(peer);
-      for (const shareId of this.remoteScreenSubscriptions.get(fromSessionId)?.keys() ?? []) {
-        this.sendScreenWatch(fromSessionId, shareId);
-      }
     } catch (error) {
       clientLog.error('WEBRTC', `Could not finish negotiation with ${fromSessionId}`, {
         signalType, error: error instanceof Error ? error.message : String(error),
@@ -2023,7 +1701,6 @@ export class WebRtcManager {
   private async applyIncomingSignal(session: PeerSession, payload: WebRtcSignalPayload): Promise<boolean> {
     if (!this.isCurrentPeer(session)) return false;
     const { fromSessionId, signalType, sdp, candidate } = payload;
-    const incomingNegotiation = { preferred: settingsStore.preferredVideoCodec };
     try {
       if (signalType === 'offer' && sdp) {
         const offerCollision =
@@ -2036,7 +1713,8 @@ export class WebRtcManager {
           }
           console.log(`[WebRTC] Polite peer rolling back for offer from ${fromSessionId}`);
         }
-        session.screenNegotiation = incomingNegotiation;
+        const negotiation: PeerNegotiation = { preferred: settingsStore.preferredVideoCodec };
+        session.negotiation = negotiation;
         session.makingOffer = false;
         if (offerCollision) {
           if (session.pc.signalingState === 'have-local-offer') {
@@ -2044,25 +1722,9 @@ export class WebRtcManager {
           }
         }
 
-        await this.prepareScreenEncodings(session, incomingNegotiation);
-        if (!this.isCurrentPeer(session) || session.screenNegotiation !== incomingNegotiation) return false;
+        if (!this.isCurrentPeer(session) || session.negotiation !== negotiation) return false;
         await session.pc.setRemoteDescription(new RTCSessionDescription(sdp));
-        if (!this.isCurrentPeer(session) || session.screenNegotiation !== incomingNegotiation) return false;
-        const { preferred } = incomingNegotiation;
-        if (preferred !== 'auto') {
-          for (const [shareId, sender] of [...session.screenVideoSenders]) {
-            const transceiver = session.pc.getTransceivers().find((entry) => entry.sender === sender);
-            if (transceiver?.mid === null || !transceiver) continue;
-            const offered = getSdpVideoCodecOrder(sdp.sdp ?? '', transceiver.mid);
-            if (!offered.includes(preferred)) {
-              // A rejected screen m-line must not strand the microphone in
-              // have-remote-offer. Stop this sender, then answer the other media.
-              await this.failLocalScreenShare(shareId,
-                new ScreenCodecError(preferred, 'incompatible'),
-                !this.localScreenShares.get(shareId)?.pending, false);
-            }
-          }
-        }
+        if (!this.isCurrentPeer(session) || session.negotiation !== negotiation) return false;
 
         // Flush any queued candidates
         while (session.candidateQueue.length > 0) {
@@ -2100,18 +1762,10 @@ export class WebRtcManager {
           }
         }
 
-        // 2. Ensure the primary (camera) local video track is attached in the
-        //    answer. The camera m-line is always created first, so the first
-        //    video transceiver that isn't the screen sender is the camera one.
-        //    Screen shares ride their own extra senders and are negotiated
-        //    separately (via screen-video-meta + renegotiateIfNeeded).
+        // 2. Ensure the camera local video track is attached in the answer, on
+        //    the connection's only video m-line.
         const cameraTrack = session.botPeer ? null : this.localCameraTrack;
-        const transceivers = session.pc.getTransceivers();
-        const videoTransceiver = transceivers.find(
-          (t) =>
-            (t.receiver.track.kind === 'video' || t.sender.track?.kind === 'video') &&
-            !this.isScreenVideoSender(session, t.sender)
-        );
+        const videoTransceiver = this.cameraTransceiver(session);
         if (videoTransceiver) {
           videoTransceiver.direction = session.botPeer ? 'inactive' : cameraTrack ? 'sendrecv' : 'recvonly';
           await videoTransceiver.sender.replaceTrack(cameraTrack);
@@ -2120,18 +1774,10 @@ export class WebRtcManager {
           session.videoSender = session.pc.addTrack(cameraTrack, new MediaStream([cameraTrack]));
         }
 
-        return await this.sendAnswer(session, incomingNegotiation);
+        return await this.sendAnswer(session, negotiation);
       } else if (signalType === 'answer' && sdp) {
         if (session.pc.signalingState === 'have-local-offer') {
-          const negotiation = session.offeredScreenNegotiation;
-          const previousNegotiation = session.negotiatedScreenNegotiation;
-          session.negotiatedScreenNegotiation = negotiation;
-          try {
-            await session.pc.setRemoteDescription(new RTCSessionDescription(sdp));
-          } catch (error) {
-            if (session.screenNegotiation === negotiation) session.negotiatedScreenNegotiation = previousNegotiation;
-            throw error;
-          }
+          await session.pc.setRemoteDescription(new RTCSessionDescription(sdp));
           if (!this.isCurrentPeer(session)) return false;
 
           // Flush queued candidates
@@ -2160,21 +1806,6 @@ export class WebRtcManager {
         error: err instanceof Error ? err.message : String(err),
       });
       console.error(`[WebRTC] Signal handling error from ${fromSessionId}:`, err);
-      if (err instanceof ScreenCodecError && this.isCurrentPeer(session)
-        && session.screenNegotiation === incomingNegotiation) {
-        for (const shareId of [...session.screenVideoSenders.keys()]) {
-          await this.failLocalScreenShare(shareId, err, !this.localScreenShares.get(shareId)?.pending, false);
-        }
-        if (session.pc.signalingState === 'have-remote-offer') {
-          try {
-            return await this.sendAnswer(session, incomingNegotiation);
-          } catch (answerError) {
-            clientLog.error('WEBRTC', 'Could not answer after rejecting an unsupported screen codec', {
-              error: answerError instanceof Error ? answerError.message : String(answerError),
-            });
-          }
-        }
-      }
     }
     return false;
   }
@@ -2242,7 +1873,7 @@ export class WebRtcManager {
           ensureCurrent();
           if (session.receiveOnly || session.pc.connectionState === 'closed') continue;
           const sender = session.audioSender ?? session.pc.getTransceivers().find(
-            (transceiver) => transceiver.receiver.track.kind === 'audio' && transceiver.sender !== session.screenAudioSender,
+            (transceiver) => transceiver.receiver.track.kind === 'audio',
           )?.sender;
           if (!sender) throw new Error('Microphone sender is unavailable');
           const oldTrack = sender.track;
@@ -2380,234 +2011,8 @@ export class WebRtcManager {
     }
   }
 
-  /** Preflight before requesting capture; each transport supplies its actual codec capabilities. */
-  public assertScreenShareSupported(): void {
-    if (this.voiceReconnectSuspended) throw new Error(t('screenCodec.reconnecting'));
-    if (this.isSfuMode()) this.sfuEngine.assertScreenShareSupported();
-    else getScreenVideoCodecs();
-  }
-
-  /** Common admission, cancellation and failure handling; only publication differs by transport. */
-  public async addLocalScreenTrack(stream: MediaStream): Promise<void> {
-    const track = stream.getVideoTracks()[0];
-    if (!track) return;
-    const shareId = stream.id;
-    const share: LocalScreenShare = { stream, track, pending: true };
-    const channelId = voiceStore.currentVoiceChannelId;
-    const sessionKey = voiceStore.voiceSessionKey;
-    const sfu = this.isSfuMode();
-    const isCurrent = () => voiceStore.currentVoiceChannelId === channelId
-      && voiceStore.voiceSessionKey === sessionKey && this.localScreenShares.get(shareId) === share
-      && track.readyState === 'live' && !this.voiceReconnectSuspended && this.isSfuMode() === sfu;
-    try {
-      if (this.voiceReconnectSuspended) throw new Error(t('screenCodec.reconnecting'));
-      this.localScreenShares.set(shareId, share);
-      for (const session of this.peers.values()) session.screenWatchState.delete(shareId);
-      let published: PreferredVideoCodec;
-      do {
-        if (sfu) published = await this.publishSfuScreenShare(shareId, share, isCurrent);
-        else {
-          await this.publishP2pScreenShare(shareId, share, isCurrent);
-          published = settingsStore.preferredVideoCodec;
-        }
-        if (!isCurrent()) throw new DOMException('Screen share was cancelled', 'AbortError');
-        await this.applyBitrateConstraints();
-        if (!isCurrent()) throw new DOMException('Screen share was cancelled', 'AbortError');
-      } while (sfu && published !== settingsStore.preferredVideoCodec);
-    } catch (error) {
-      if (this.localScreenShares.get(shareId) === share) {
-        await this.failLocalScreenShare(shareId, error, false);
-      } else if (!this.localScreenShares.has(shareId)
-        && videoService.getScreenStream(shareId)?.getVideoTracks()[0] === track) {
-        videoService.stopScreenShare(shareId);
-      }
-      if (this.localScreenShares.get(shareId)?.track !== track) track.stop();
-      throw error;
-    } finally {
-      if (this.localScreenShares.get(shareId) === share) share.pending = false;
-    }
-  }
-
-  private ensureP2pScreenSender(session: PeerSession, shareId: string, share: LocalScreenShare): RTCRtpSender {
-    this.signalClient.send(MessageType.RTC_SIGNAL, {
-      targetSessionId: session.peerSessionId, fromSessionId: this.currentSessionId,
-      signalType: 'screen-video-meta', streamId: shareId,
-      subscriptionId: session.screenSubscriptionId,
-    });
-    const existing = session.screenVideoSenders.get(shareId);
-    if (existing) return existing;
-    const policy = getMediaEncodingPolicy('screen', this.currentPreset, this.getQualityProfile());
-    // A dedicated sending m-line must never constrain an unrelated remote camera/screen.
-    const sender = session.pc.addTransceiver('video', {
-      direction: 'sendonly', streams: [share.stream],
-      sendEncodings: [{ ...policy.encoding, active: false }],
-    }).sender;
-    session.screenVideoSenders.set(shareId, sender);
-    return sender;
-  }
-
-  public announcePublishedScreenSources(shareIds: readonly string[]): void {
-    if (!voiceStore.currentVoiceChannelId || this.voiceReconnectSuspended || this.isSfuMode() || !shareIds.length) return;
-    for (const session of this.peers.values()) {
-      if (this.isCurrentPeer(session) && this.isPeerInOurCall(session.peerSessionId)) {
-        this.announceScreenSources(session, shareIds);
-      }
-    }
-  }
-
-  private announceScreenSources(
-    session: PeerSession,
-    shareIds: Iterable<string> = this.localScreenShares.keys(),
-  ): void {
-    if (session.botPeer) return;
-    for (const shareId of shareIds) {
-      const share = this.localScreenShares.get(shareId);
-      if (!share || share.track.readyState !== 'live') continue;
-      this.signalClient.send(MessageType.RTC_SIGNAL, {
-        targetSessionId: session.peerSessionId, fromSessionId: this.currentSessionId,
-        signalType: 'screen-video-meta', streamId: shareId, subscriptionId: session.screenSubscriptionId,
-      });
-    }
-    if (this.localScreenAudioTrack?.readyState === 'live' && this.screenAudioStreamId) {
-      this.signalClient.send(MessageType.RTC_SIGNAL, {
-        targetSessionId: session.peerSessionId, fromSessionId: this.currentSessionId,
-        signalType: 'screen-audio-meta', streamId: this.screenAudioStreamId,
-        subscriptionId: session.screenSubscriptionId,
-      });
-    }
-  }
-
-  private async publishP2pScreenShare(
-    shareId: string,
-    share: LocalScreenShare,
-    isCurrent: () => boolean,
-  ): Promise<void> {
-    // SFU validates its negotiated send capabilities instead of this P2P capability set.
-    getScreenVideoCodecs();
-    const { track } = share;
-    for (const session of [...this.peers.values()]) {
-      if (session.botPeer) continue;
-      try {
-        const stable = await this.waitForStable(session.pc);
-        if (!this.isCurrentPeer(session)) continue;
-        if (!stable) throw new Error(t('voiceReconnect.timeout'));
-        if (!isCurrent()) throw new DOMException('Screen share was cancelled', 'AbortError');
-        const existing = session.screenVideoSenders.get(shareId);
-        if (existing) {
-          for (let pending = this.nativeTasks.get(session); pending; pending = this.nativeTasks.get(session)) {
-            await pending;
-            if (!this.isCurrentPeer(session)) break;
-          }
-          if (!this.isCurrentPeer(session)) continue;
-          const negotiation = { preferred: settingsStore.preferredVideoCodec };
-          session.screenNegotiation = negotiation;
-          session.makingOffer = false;
-          await this.prepareScreenEncodings(session, negotiation);
-          if (!this.isCurrentPeer(session)) continue;
-          if (!isCurrent()) throw new DOMException('Screen share was cancelled', 'AbortError');
-          await existing.replaceTrack(this.peerWatchesScreen(session, shareId) ? track : null);
-          if (!this.isCurrentPeer(session)) continue;
-        }
-        this.ensureP2pScreenSender(session, shareId, share);
-        await this.sendOffer(session);
-        const answered = await this.waitForStable(session.pc);
-        if (!this.isCurrentPeer(session)) continue;
-        if (!answered) throw new Error(t('voiceReconnect.timeout'));
-        await this.renegotiateIfNeeded(session);
-        if (!this.isCurrentPeer(session)) continue;
-        const sender = session.screenVideoSenders.get(shareId);
-        const transceiver = session.pc.getTransceivers().find((entry) => entry.sender === sender);
-        if (!transceiver || !isCurrent()) throw new ScreenCodecError(settingsStore.preferredVideoCodec, 'incompatible');
-        if (session.pc.signalingState === 'stable' && session.negotiatedScreenNegotiation) {
-          assertScreenCodecNegotiated(transceiver, session.negotiatedScreenNegotiation.preferred, this.screenAnswerSdp(session.pc));
-        }
-      } catch (error) {
-        if (!this.isCurrentPeer(session)) continue;
-        throw error;
-      }
-    }
-  }
-
   private isCurrentPeer(session: PeerSession): boolean {
     return this.peers.get(session.peerSessionId) === session && session.pc.signalingState !== 'closed';
-  }
-
-  private peerWatchesScreen(session: PeerSession, shareId: string): boolean {
-    return this.isCurrentPeer(session) && session.screenWatchState.get(shareId)?.watching === true
-      && this.localScreenShares.get(shareId)?.track.readyState === 'live';
-  }
-
-  private peerWatchesAnyScreen(session: PeerSession): boolean {
-    return [...session.screenWatchState.keys()].some(shareId => this.peerWatchesScreen(session, shareId));
-  }
-
-  private async syncPeerScreenSubscriptions(session: PeerSession): Promise<void> {
-    const previous = this.screenSubscriptionTasks.get(session) ?? Promise.resolve();
-    const task = previous.then(async () => {
-      if (!this.isCurrentPeer(session)) return;
-      const updates: Promise<void>[] = [];
-      for (const [shareId, sender] of session.screenVideoSenders) {
-        const desired = () => this.peerWatchesScreen(session, shareId)
-          ? this.localScreenShares.get(shareId)?.track ?? null : null;
-        updates.push(this.syncScreenSender(session, sender, desired, false));
-      }
-      if (session.screenAudioSender) {
-        const desired = () => this.peerWatchesAnyScreen(session) ? this.localScreenAudioTrack : null;
-        updates.push(this.syncScreenSender(session, session.screenAudioSender, desired, true));
-      }
-      const results = await Promise.allSettled(updates);
-      await this.checkSessionScreenCodecs(session);
-      for (const result of results) if (result.status === 'rejected') throw result.reason;
-    });
-    const settled = task.catch(error => {
-      clientLog.error('WEBRTC', 'Could not update screen subscription', {
-        peerSessionId: session.peerSessionId, error: error instanceof Error ? error.message : String(error),
-      });
-    });
-    this.screenSubscriptionTasks.set(session, settled);
-    try { await settled; }
-    finally {
-      if (this.screenSubscriptionTasks.get(session) === settled) this.screenSubscriptionTasks.delete(session);
-    }
-  }
-
-  private async syncScreenSender(
-    session: PeerSession,
-    sender: RTCRtpSender,
-    desiredTrack: () => MediaStreamTrack | null,
-    audio: boolean,
-  ): Promise<void> {
-    if (!this.isCurrentPeer(session)) return;
-    try {
-      if (!desiredTrack() || sender.track !== desiredTrack()) {
-        await updateRtpSenderParameters(sender, parameters => {
-          for (const encoding of parameters.encodings) encoding.active = false;
-          return parameters.encodings.length > 0;
-        });
-        if (!this.isCurrentPeer(session)) return;
-        await sender.replaceTrack(desiredTrack());
-        if (!this.isCurrentPeer(session)) return;
-        // Stop may arrive while replaceTrack is pending. Never restore its track.
-        if (!desiredTrack() && sender.track) await sender.replaceTrack(null);
-      }
-      if (this.isCurrentPeer(session)) {
-        await updateRtpSenderParameters(sender, parameters => {
-          if (!this.isCurrentPeer(session)) return false;
-          applyMediaEncodingPolicy(parameters, getMediaEncodingPolicy(
-            audio ? 'audio' : 'screen', this.currentPreset, this.getQualityProfile()));
-          if (audio) for (const encoding of parameters.encodings) encoding.active = !!desiredTrack();
-          return parameters.encodings.length > 0;
-        });
-      }
-    } catch (error) {
-      // Failing setParameters/replaceTrack must fail closed, not keep sending.
-      if (this.isCurrentPeer(session)) {
-        session.pc.removeTrack(sender);
-        const transceiver = session.pc.getTransceivers().find(entry => entry.sender === sender);
-        if (transceiver) transceiver.direction = 'sendonly';
-      }
-      throw error;
-    }
   }
 
   private async runNativeTask<T>(key: PeerSession, operation: () => Promise<T>): Promise<T> {
@@ -2623,261 +2028,14 @@ export class WebRtcManager {
     }
   }
 
-  private async prepareScreenEncodings(session: PeerSession, negotiation: ScreenCodecNegotiation): Promise<void> {
-    for (const [shareId, sender] of [...session.screenVideoSenders]) {
-      const isCurrent = () => this.isCurrentPeer(session) && session.screenNegotiation === negotiation
-        && session.screenVideoSenders.get(shareId) === sender && this.localScreenShares.get(shareId)?.track.readyState === 'live';
-      if (!isCurrent()) continue;
-      try {
-        await updateRtpSenderParameters(sender, parameters => {
-          if (!isCurrent()) return false;
-          let changed = false;
-          for (const encoding of parameters.encodings) {
-            changed ||= encoding.active !== false || encoding.codec !== undefined;
-            encoding.active = false;
-            delete encoding.codec;
-          }
-          return changed;
-        });
-      } catch (error) {
-        if (isCurrent()) throw new ScreenCodecError(negotiation.preferred, 'notApplied', error);
-      }
-    }
-  }
-
-  private async checkSessionScreenCodecs(session: PeerSession): Promise<void> {
-    const negotiation = session.negotiatedScreenNegotiation;
-    if (!negotiation) return;
-    const { preferred } = negotiation;
-    const isCurrent = () => this.isCurrentPeer(session) && session.pc.signalingState === 'stable'
-      && session.screenNegotiation === negotiation && session.negotiatedScreenNegotiation === negotiation;
-    if (!isCurrent()) return;
-    for (const [shareId, sender] of [...session.screenVideoSenders]) {
-      if (!isCurrent()) return;
-      const isCurrentSender = () => isCurrent() && session.screenVideoSenders.get(shareId) === sender
-        && this.localScreenShares.get(shareId)?.track === sender.track && sender.track?.readyState === 'live';
-      if (!isCurrentSender()) continue;
-      const transceiver = session.pc.getTransceivers().find((entry) => entry.sender === sender);
-      if (!transceiver || transceiver.mid === null) continue;
-      try {
-        // A new preference belongs to the next negotiation, not this answer.
-        assertScreenCodecNegotiated(transceiver, preferred, this.screenAnswerSdp(session.pc));
-        const canActivate = () => isCurrentSender() && this.peerWatchesScreen(session, shareId)
-          && settingsStore.preferredVideoCodec === preferred;
-        const mime = explicitScreenCodecMime(preferred);
-        await updateRtpSenderParameters(sender, parameters => {
-          if (!canActivate()) return false;
-          const codec = mime ? parameters.codecs.find(entry => entry.mimeType.toLowerCase() === mime) : undefined;
-          if (mime && !codec) throw new ScreenCodecError(preferred, 'incompatible');
-          if (!parameters.encodings.length) throw new ScreenCodecError(preferred, 'notApplied');
-          // setCodecPreferences controls reception. Pin the actual encoder
-          // before resuming, even when a remote offer prefers another codec.
-          for (const encoding of parameters.encodings) {
-            if (codec) encoding.codec = codec;
-            else delete encoding.codec;
-            encoding.active = true;
-          }
-          return true;
-        }, parameters => {
-          if (canActivate() && parameters.encodings.some(encoding =>
-            mime ? encoding.codec?.mimeType.toLowerCase() !== mime : encoding.codec !== undefined)) {
-            throw new ScreenCodecError(preferred, 'notApplied');
-          }
-        });
-      } catch (error) {
-        if (!isCurrentSender() || settingsStore.preferredVideoCodec !== preferred) continue;
-        const failure = error instanceof ScreenCodecError ? error : new ScreenCodecError(preferred, 'notApplied', error);
-        await this.failLocalScreenShare(shareId, failure, !this.localScreenShares.get(shareId)?.pending);
-      }
-    }
-  }
-
-  private screenAnswerSdp(pc: RTCPeerConnection): string {
-    return pc.currentLocalDescription?.type === 'answer'
-      ? pc.currentLocalDescription.sdp : pc.currentRemoteDescription?.type === 'answer' ? pc.currentRemoteDescription.sdp : '';
-  }
-
-  private async failLocalScreenShare(shareId: string, reason: unknown, notify = true, renegotiate = true): Promise<void> {
-    const stream = this.localScreenShares.get(shareId)?.stream;
-    if (!stream) return;
-    const error = reason instanceof Error ? reason : new Error(String(reason));
-    clientLog.error('SCREEN_SHARE', 'Screen codec could not be honored', { shareId, error: error.message });
-    const stopAudio = voiceStore.screenAudioShareIds.includes(shareId);
-    videoService.stopScreenShare(shareId);
-    stream.getTracks().forEach((track) => track.stop());
-    voiceStore.removeScreenShare(shareId);
-    this.signalClient.send(MessageType.VOICE_STATE_UPDATE, {
-      isScreenSharing: voiceStore.isScreenSharing, screenShareIds: voiceStore.screenShareIds,
-    });
-    const removal = this.removeLocalScreenTrack(shareId, renegotiate);
-    appEvents.emit('screen.codec_failed', { error: error.message, notify, stopAudio });
-    await removal;
-  }
-
-  /**
-   * Remove one local screen share from every peer (#253).
-   */
-  public async removeLocalScreenTrack(shareId: string, renegotiate = true): Promise<void> {
-    this.localScreenShares.delete(shareId);
-    // Retire any actual publication, including one from the mode being replaced.
-    this.sfuEngine.closeProducer(`screen_video:${shareId}`);
-
-    for (const session of this.peers.values()) {
-      session.screenWatchState.delete(shareId);
-      void this.syncPeerScreenSubscriptions(session);
-      const sender = session.screenVideoSenders.get(shareId);
-      if (!sender) continue;
-      try {
-        session.pc.removeTrack(sender);
-        session.pc.getTransceivers().find((entry) => entry.sender === sender)?.stop();
-        session.screenVideoSenders.delete(shareId);
-        if (renegotiate && await this.waitForStable(session.pc)) await this.sendOffer(session);
-      } catch (err) {
-        console.warn(`[WebRTC] Error removing screen video track for ${session.peerSessionId}:`, err);
-      }
-    }
-  }
-
-  /**
-   * Tear down every local screen share (leaving the channel, camera swap, …).
-   */
-  public async removeAllLocalScreenTracks(): Promise<void> {
-    for (const shareId of [...this.localScreenShares.keys()]) {
-      await this.removeLocalScreenTrack(shareId);
-    }
-  }
-
-  /**
-   * Drops the local screen bookkeeping without renegotiating, for paths where
-   * the call itself is over and the peer connections are being torn down
-   * (leaving voice, kicked, socket dropped). Without this the stale tracks
-   * would be re-announced and re-added to every peer on the next join (#253).
-   * Note this must NOT run on reconnect, where the share is meant to survive.
-   */
-  public clearLocalScreenTracks(): void {
-    this.localScreenShares.clear();
-  }
-
   public removeNativeScreenSource(shareId: string): Promise<void> {
     return this.nativeScreens.removeSource(shareId);
   }
 
-  /**
-   * Set the call's screen audio source and announce its identity before attaching
-   * it to peers that explicitly watch at least one of our screens.
-   */
-  public async setLocalScreenAudioTrack(track: MediaStreamTrack | null): Promise<void> {
-    const stream = track ? new MediaStream([track]) : null;
-    this.localScreenAudioTrack = track;
-    // Desired audio and its stream identity belong to the share, not to P2P.
-    this.screenAudioStream = stream;
-    this.screenAudioStreamId = stream?.id ?? null;
-    if (!track) {
-      this.sfuScreenAudioPublication = null;
-      this.sfuEngine.closeProducer('screen_audio:default');
-    }
-    if (this.voiceReconnectSuspended) return;
-
-    const sfu = this.isSfuMode();
-    const isCurrent = () => this.localScreenAudioTrack === track && this.screenAudioStream === stream
-      && (!track || track.readyState === 'live') && !this.voiceReconnectSuspended && this.isSfuMode() === sfu;
-    if (sfu && track) {
-      const producer = await this.publishSfuScreenAudio(track);
-      if (!isCurrent()) throw new DOMException('Screen audio was cancelled', 'AbortError');
-      if (!producer) {
-        this.localScreenAudioTrack = null;
-        this.screenAudioStream = null;
-        this.screenAudioStreamId = null;
-        throw new Error(t('screenCodec.reconnecting'));
-      }
-      return;
-    }
-
-    if (track && stream) {
-      // Announce stream ID to all peers BEFORE adding the track
-      for (const session of this.peers.values()) {
-        if (session.botPeer) continue;
-        this.signalClient.send(MessageType.RTC_SIGNAL, {
-          targetSessionId: session.peerSessionId,
-          fromSessionId: this.currentSessionId,
-          signalType: 'screen-audio-meta',
-          streamId: this.screenAudioStreamId,
-          subscriptionId: session.screenSubscriptionId,
-        });
-      }
-
-      // Add track to all peers — wait for stable signaling state before
-      // renegotiating, since screen video may have just triggered an offer.
-      for (const session of this.peers.values()) {
-        if (session.botPeer) continue;
-        try {
-          const stable = await this.waitForStable(session.pc);
-          if (!this.isCurrentPeer(session)) continue;
-          if (!isCurrent()) throw new DOMException('Screen audio was cancelled', 'AbortError');
-          if (!stable) throw new Error(t('voiceReconnect.timeout'));
-          if (session.screenAudioSender) {
-            session.screenAudioSender.setStreams(stream);
-          } else {
-            const policy = getMediaEncodingPolicy('audio', this.currentPreset, this.getQualityProfile());
-            session.screenAudioSender = session.pc.addTransceiver('audio', {
-              direction: 'sendonly', streams: [stream],
-              sendEncodings: [{ ...policy.encoding, active: false }],
-            }).sender;
-          }
-          await this.syncPeerScreenSubscriptions(session);
-          if (!this.isCurrentPeer(session)) continue;
-          if (!isCurrent()) throw new DOMException('Screen audio was cancelled', 'AbortError');
-          await this.sendOffer(session);
-          // Wait for the answer, then verify the track was actually negotiated.
-          // If a glare/rollback dropped the offer, re-send it now.
-          await this.waitForStable(session.pc);
-          await this.renegotiateIfNeeded(session);
-        } catch (err) {
-          if (err instanceof Error && err.name === 'AbortError') throw err;
-          console.warn(`[WebRTC] Error adding screen audio track for ${session.peerSessionId}:`, err);
-        }
-      }
-      if (!isCurrent()) throw new DOMException('Screen audio was cancelled', 'AbortError');
-      await this.applyBitrateConstraints();
-    } else {
-      // Remove screen audio track from all peers
-      for (const session of this.peers.values()) {
-        if (session.screenAudioSender) {
-          const sender = session.screenAudioSender;
-          try {
-            await this.waitForStable(session.pc);
-            if (!this.isCurrentPeer(session) || this.localScreenAudioTrack
-              || session.screenAudioSender !== sender) continue;
-            session.pc.removeTrack(sender);
-            session.pc.getTransceivers().find(entry => entry.sender === sender)?.stop();
-            session.screenAudioSender = null;
-            await this.sendOffer(session);
-          } catch (err) {
-            console.warn(`[WebRTC] Error removing screen audio track for ${session.peerSessionId}:`, err);
-          }
-        }
-      }
-    }
-  }
-
-  private async publishSfuScreenAudio(track: MediaStreamTrack): ReturnType<SfuClientEngine['produceScreenAudio']> {
-    const pending = this.sfuScreenAudioPublication;
-    if (pending?.track === track && pending.epoch === this.sfuJoinEpoch) return pending.task;
-    const publication = {
-      track, epoch: this.sfuJoinEpoch, task: this.sfuEngine.produceScreenAudio(track, 'default'),
-    };
-    this.sfuScreenAudioPublication = publication;
-    try {
-      return await publication.task;
-    } finally {
-      if (this.sfuScreenAudioPublication === publication) this.sfuScreenAudioPublication = null;
-    }
-  }
-
+  /** The connection carries a single video m-line: the camera. */
   private cameraTransceiver(session: PeerSession): RTCRtpTransceiver | undefined {
     return session.pc.getTransceivers().find((transceiver) =>
-      (transceiver.receiver.track.kind === 'video' || transceiver.sender.track?.kind === 'video')
-      && !this.isScreenVideoSender(session, transceiver.sender));
+      transceiver.receiver.track.kind === 'video' || transceiver.sender.track?.kind === 'video');
   }
 
   private async updateVideoTrackAcrossPeers(track: MediaStreamTrack | null, ensureCurrent: () => void): Promise<void> {
@@ -2920,7 +2078,7 @@ export class WebRtcManager {
 
   public setScreenAudioMuted(peerSessionId: string, muted: boolean): void {
     voiceStore.setScreenAudioMuted(peerSessionId, muted);
-    this.applyScreenAudioMute(peerSessionId);
+    this.updateScreenAudio();
   }
 
   public async setSpeakerDeviceId(deviceId: string): Promise<void> {
@@ -2946,9 +2104,7 @@ export class WebRtcManager {
       for (const sender of session.pc.getSenders()) {
         if (revision !== this.qualityRevision) return;
         if (!sender.track) continue;
-        const kind = sender.track.kind === 'audio' ? 'audio'
-          : this.isLocalScreenTrack(sender.track) ? 'screen' : 'camera';
-        const policy = getMediaEncodingPolicy(kind, preset, profile);
+        const policy = getMediaEncodingPolicy(sender.track.kind === 'audio' ? 'audio' : 'camera', preset, profile);
         try {
           await updateRtpSenderParameters(sender, params =>
             revision === this.qualityRevision && this.isCurrentPeer(session) && !!sender.track
@@ -2988,27 +2144,9 @@ export class WebRtcManager {
   }
 
   /**
-   * Every sender publishing one local screen share — one per peer (#340).
-   * Scoping `getStats()` to these senders is what lets the stage report each
-   * share separately instead of merging both into the connection's totals.
-   */
-  public getScreenSendersForShare(shareId: string): RTCRtpSender[] {
-    if (this.isSfuMode()) {
-      const sender = this.sfuEngine.getScreenSender(shareId);
-      return sender ? [sender] : [];
-    }
-    const senders: RTCRtpSender[] = [];
-    for (const session of this.peers.values()) {
-      const sender = session.screenVideoSenders.get(shareId);
-      if (sender) senders.push(sender);
-    }
-    return senders;
-  }
-
-  /**
-   * Every sender publishing the local camera — one per peer. Same reasoning as
-   * `getScreenSendersForShare`: scoping `getStats()` to the camera senders
-   * keeps the screen shares out of the camera tile's numbers (#493).
+   * Every sender publishing the local camera — one per peer. Scoping
+   * `getStats()` to them keeps the rest of the call out of the camera tile's
+   * numbers (#493).
    */
   public getCameraSenders(): RTCRtpSender[] {
     if (this.isSfuMode()) {
@@ -3023,9 +2161,8 @@ export class WebRtcManager {
   }
 
   /**
-   * Receiver carrying a specific remote track, so the stage can read one
-   * screen share's inbound stats without picking up the peer's other share or
-   * their camera (#340).
+   * Receiver carrying a specific remote track, so the stage can read the camera's
+   * inbound stats without picking up the rest of the peer's media (#340).
    */
   public getReceiverForTrack(peerSessionId: string, trackId: string): RTCRtpReceiver | null {
     if (this.isSfuMode()) {
@@ -3044,112 +2181,11 @@ export class WebRtcManager {
     this.mediaRouter.applyUserVolumes();
   }
 
-  public async reapplyCodecPreferences(): Promise<void> {
-    this.assertScreenSharingSettings(this.getQualityProfile());
-    const previous = this.codecUpdateTask;
-    const channelId = voiceStore.currentVoiceChannelId;
-    const sessionKey = voiceStore.voiceSessionKey;
-    const sfu = this.isSfuMode();
-    const isCurrent = () => voiceStore.currentVoiceChannelId === channelId
-      && voiceStore.voiceSessionKey === sessionKey && this.isSfuMode() === sfu && !this.voiceReconnectSuspended;
-    const task = (async () => {
-      if (previous) await previous;
-      if (!isCurrent()) return;
-      if (sfu) await this.restoreSfuScreenShares(isCurrent);
-      else await this.reapplyP2PCodecPreferences();
-    })();
-    const settled = task.then(() => {}, () => {});
-    this.codecUpdateTask = settled;
-    try {
-      await task;
-    } finally {
-      if (this.codecUpdateTask === settled) this.codecUpdateTask = null;
-    }
-  }
-
-  private async restoreSfuScreenShares(isCurrent: () => boolean): Promise<void> {
-    for (const [shareId, share] of [...this.localScreenShares]) {
-      if (!isCurrent()) return;
-      // Startup owns its publication and already follows changes to the selected codec.
-      if (share.pending || this.localScreenShares.get(shareId) !== share || share.track.readyState !== 'live') continue;
-      const preferred = settingsStore.preferredVideoCodec;
-      try {
-        await this.publishSfuScreenShare(shareId, share, isCurrent);
-      } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') continue;
-        if (!isCurrent() || this.localScreenShares.get(shareId) !== share
-          || settingsStore.preferredVideoCodec !== preferred) continue;
-        await this.failLocalScreenShare(shareId, error, !share.pending);
-      }
-    }
-  }
-
-  private async publishSfuScreenShare(
-    shareId: string,
-    share: LocalScreenShare,
-    isContextCurrent: () => boolean,
-  ): Promise<PreferredVideoCodec> {
-    const isCurrent = () => isContextCurrent() && this.isSfuMode()
-      && this.localScreenShares.get(shareId) === share && share.track.readyState === 'live';
-    while (isCurrent()) {
-      const preferred = settingsStore.preferredVideoCodec;
-      try {
-        await this.sfuEngine.produceScreenVideo(share.track, shareId);
-      } catch (error) {
-        if (isCurrent() && settingsStore.preferredVideoCodec !== preferred) continue;
-        throw error;
-      }
-      if (isCurrent() && settingsStore.preferredVideoCodec === preferred) return preferred;
-    }
-    throw new DOMException('Screen share was cancelled', 'AbortError');
-  }
-
-  private async reapplyP2PCodecPreferences(): Promise<void> {
-    for (const session of [...this.peers.values()]) {
-      try {
-        const stable = await this.waitForStable(session.pc);
-        if (!this.isCurrentPeer(session)) continue;
-        if (!stable) throw new Error(t('voiceReconnect.timeout'));
-        if (this.localCameraTrack || this.localScreenShares.size > 0) {
-          await this.sendOffer(session);
-          const answered = await this.waitForStable(session.pc);
-          if (!this.isCurrentPeer(session)) continue;
-          if (!answered) throw new Error(t('voiceReconnect.timeout'));
-          await this.checkSessionScreenCodecs(session);
-        }
-      } catch (err) {
-        if (!this.isCurrentPeer(session)) continue;
-        for (const shareId of [...session.screenVideoSenders.keys()]) await this.failLocalScreenShare(shareId, err);
-      }
-    }
-  }
-
   public removePeer(peerSessionId: string, preserveWatchIntent = false): void {
     if (!preserveWatchIntent) voiceStore.retainScreenShares(peerSessionId, []);
-    this.remoteScreenSubscriptions.delete(peerSessionId);
     this.vadMonitor.cleanupRemoteVad(peerSessionId);
     this.forgetPeerFailureState(peerSessionId);
     this.clearPeerFailureCountdown(peerSessionId);
-
-    // Stop and clear any pending screen audio tracks for this peer
-    for (const [streamId, item] of this.pendingScreenAudioTracks.entries()) {
-      if (item.peerSessionId === peerSessionId) {
-        try {
-          item.track.stop();
-        } catch {}
-        this.pendingScreenAudioTracks.delete(streamId);
-      }
-    }
-
-    // Stop and clear any pending screen video tracks for this peer
-    for (const [streamId, item] of this.pendingScreenVideoTracks.entries()) {
-      if (item.peerSessionId === peerSessionId) {
-        try {
-          item.track.stop();
-        } catch {}
-        this.pendingScreenVideoTracks.delete(streamId);
-      }
-    }
 
     const session = this.peers.get(peerSessionId);
     if (session) {
@@ -3161,11 +2197,9 @@ export class WebRtcManager {
       session.pc.onicecandidate = null;
       session.pc.oniceconnectionstatechange = null;
       session.pc.onconnectionstatechange = null;
-      for (const stream of [session.remoteStream, ...session.remoteScreenStreams.values()]) {
-        for (const track of stream.getTracks()) {
-          track.onended = null;
-          track.onunmute = null;
-        }
+      for (const track of session.remoteStream.getTracks()) {
+        track.onended = null;
+        track.onunmute = null;
       }
     }
     this.mediaRouter.cleanupPeerMedia(peerSessionId, session);
@@ -3178,10 +2212,6 @@ export class WebRtcManager {
     if (preserveLocalTracks) return;
     this.localAudioTrack = null;
     this.localCameraTrack = null;
-    this.localScreenAudioTrack = null;
-    this.screenAudioStream = null;
-    this.screenAudioStreamId = null;
-    this.clearLocalScreenTracks();
   }
 
   public resumeAfterVoiceReconnect(): void {
@@ -3197,7 +2227,6 @@ export class WebRtcManager {
     void this.nativeScreens.close().catch(error => this.nativeScreens.report(error));
     this.cameraTrackRevision++;
     this.cameraTrackChange = null;
-    this.sfuScreenAudioPublication = null;
     this.voiceReconnectSuspended = false;
     this.abandonSfuSession();
     this.resetSfuReconnect();
@@ -3220,25 +2249,6 @@ export class WebRtcManager {
       clearInterval(timer);
     }
     this.relayMonitors.clear();
-
-    // Stop any remaining pending tracks
-    for (const item of this.pendingScreenAudioTracks.values()) {
-      try {
-        item.track.stop();
-      } catch {}
-    }
-    this.pendingScreenAudioTracks.clear();
-
-    for (const item of this.pendingScreenVideoTracks.values()) {
-      try {
-        item.track.stop();
-      } catch {}
-    }
-    this.pendingScreenVideoTracks.clear();
-
-    this.screenAudioStreamIds.clear();
-    this.screenVideoStreamIds.clear();
-    this.remoteScreenSubscriptions.clear();
 
     this.mediaRouter.closeAllMedia();
     this.vadMonitor.cleanupAll();

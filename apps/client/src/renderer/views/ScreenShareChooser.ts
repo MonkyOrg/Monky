@@ -1,6 +1,5 @@
 import type { NativeScreenCaptureKind } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
-import { screenAudioService } from '../core/ScreenAudioService';
 import { stopLocalScreenShares } from '../core/screenShareControls';
 import { videoService } from '../core/VideoService';
 import { t } from '../i18n';
@@ -243,5 +242,5 @@ export function chooseSharesToStop(anchor: HTMLElement): Promise<ScreenShareSele
 }
 
 export function stopChosenShares(selection: ScreenShareSelection): Promise<void> {
-  return stopLocalScreenShares(screenAudioService, 'shareId' in selection ? { shareIds: [selection.shareId] } : {});
+  return stopLocalScreenShares('shareId' in selection ? { shareIds: [selection.shareId] } : {});
 }

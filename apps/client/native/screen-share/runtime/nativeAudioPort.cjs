@@ -1,5 +1,7 @@
 'use strict';
 
+const { notifyObserver } = require('./asyncTools.cjs');
+
 const portError = (message, code = 'ERR_NATIVE_AUDIO_IPC') => Object.assign(new Error(message), { code });
 const errorData = value => ({
   code: (typeof value?.code === 'string' ? value.code.replaceAll('\0', '').slice(0, 128) : '') || 'ERR_NATIVE_AUDIO_IPC',
@@ -45,12 +47,7 @@ class NativeAudioPort {
     if (this.errors.length < 32) this.errors.push(error);
     if (this.failed) return;
     this.failed = true;
-    try {
-      const observed = this.onError(error);
-      if (typeof observed?.then === 'function') void observed.catch(observerError => {
-        console.error('Native audio port error observer failed:', observerError);
-      });
-    } catch (observerError) { console.error('Native audio port error observer failed:', observerError); }
+    notifyObserver('Native audio port error observer', this.onError, error);
   }
 
   listen(name, callback) {

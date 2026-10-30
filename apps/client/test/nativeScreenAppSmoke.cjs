@@ -17,7 +17,7 @@ const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { setTimeout: delay } = require('node:timers/promises');
 const { WebSocket } = require('ws');
-const { within } = require('../native/screen-share/runtime/nativeDeadline.cjs');
+const { within } = require('../native/screen-share/runtime/asyncTools.cjs');
 
 const repo = path.resolve(__dirname, '..', '..', '..');
 const clientRoot = path.join(repo, 'apps', 'client');
@@ -812,11 +812,11 @@ async function previewPixels(client, state, name) {
 async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60, screenCodec }) {
   const [{ openServerSession, joinCallOnSession, leaveCurrentCall }, { sessionManager }, { webRtcManager },
     { videoService }, { voiceStore }, { settingsStore }, { stopLocalScreenShares },
-    { screenAudioService }, { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService },
+    { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService },
     { applyAudioDevice, applyAudioOutputPreferences }, { audioProcessor }] = await Promise.all([
     import('/core/serverConnection.ts'), import('/core/SessionManager.ts'), import('/core/WebRtcManager.ts'),
     import('/core/VideoService.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
-    import('/core/screenShareControls.ts'), import('/core/ScreenAudioService.ts'), import('/i18n/index.ts'),
+    import('/core/screenShareControls.ts'), import('/i18n/index.ts'),
     import('/core/EventBus.ts'), import('/@fs/' + globalThis.monkyAppSharedPath),
     import('/core/OverlayBridgeService.ts'),
     import('/core/applyAudioDevice.ts'),
@@ -1374,7 +1374,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       unbindNativeErrors();
       unbind();
       await overlayBridgeService.deactivate();
-      await stopLocalScreenShares(screenAudioService);
+      await stopLocalScreenShares();
       await webRtcManager['nativeScreens'].close();
       leaveCurrentCall();
       settingsStore.screenSharePreviewPauseWhenUnfocused = initialPreviewPauseWhenUnfocused;

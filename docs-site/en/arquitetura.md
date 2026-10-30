@@ -118,8 +118,7 @@ Every large client responsibility lives in its own class, under
 | `WebRtcManager` | Shared media orchestration, local publications and P2P connections; delegates SFU transport |
 | `webrtc/SfuClientEngine` | SFU transport: negotiated capabilities, producers, consumers and reconnection |
 | `AudioProcessor` | Microphone, noise suppression, speech detection |
-| `VideoService` | Shared camera capture, local effects and screen capture |
-| `ScreenAudioService` | Bridges the native screen-audio module into WebRTC |
+| `VideoService` | Shared camera capture, local effects and the registry of published screens |
 | `ParticipantManager` | Who is online, in which channel and in what state |
 | `SoundboardService` | Soundboard clips and shortcuts |
 | `KeybindService` | Global shortcuts |
@@ -133,43 +132,35 @@ carry a second implementation of capture, quality preferences or codec rules.
 
 | Responsibility | Owner |
 |---|---|
-| Capture, preview and source shutdown | `VideoService`; audio capture belongs to `ScreenAudioService` |
+| Local registry of published screens and their previews | `VideoService`; capture, encoding and audio belong to the native source |
 | Stop/replace controls, associated audio and updating the correct session | `screenShareControls.ts`, used by the picker, views and call departure/switching |
-| Intended screen publications, cancellation and cleanup on failure | The `localScreenShares` registry and screen-sharing methods in `WebRtcManager` |
+| Starting, cancelling and retiring each source | `WebRtcManager`'s `startNativeScreenShare()` and `removeNativeScreenSource()`, carried out by `webrtc/NativeScreenController.ts` |
 | Viewing intent, independent of the view and mute preference | `VoiceStore`, owned by the call session and applied to both transports through `WebRtcManager` |
-| Bitrate/FPS limits and adaptation preference | `webrtc/mediaEncodingPolicy.ts`, used by P2P and SFU |
-| Codec-family selection and refusal of alternatives for explicit choices | `webrtc/codecPreferences.ts`, with capabilities supplied by each transport |
-| Serialized RTP parameter changes | `webrtc/rtpSenderParameters.ts`: quality and codec do not overwrite each other's transaction |
+| Screen codec and encoding mode | Quality preferences, probed by `core/screenEncoding.ts` and verified when the native source is admitted |
+| Microphone and camera bitrate/FPS limits and adaptation preference | `webrtc/mediaEncodingPolicy.ts`, used by P2P and SFU |
+| Camera codec preference order | `webrtc/codecPreferences.ts`, with capabilities supplied by each transport |
+| Serialized RTP parameter changes | `webrtc/rtpSenderParameters.ts`: overlapping updates do not overwrite each other's transaction |
 | Receiving and associating remote media with the UI | `webrtc/RemoteMediaRouter`, shared by both modes |
 | Native capture/encoding/transport and Main-process ownership | `nativeScreenSharing.ts` and `native/screen-share` |
 | Native-screen subscriptions/presentation or compatible Chromium reception | `webrtc/NativeScreenController.ts` and `webrtc/BrowserScreenSubscription.ts` |
 
-On the Chromium path, what **must** differ is the publishing mechanism. P2P has one sender per
-destination, SDP/ICE negotiation and a dedicated sending m-line per screen;
-the encoder is also selected through `encodings[].codec`. SFU has a producer
-on the sending transport, with its codec selected from capabilities negotiated
-with the server. SDP codec preferences do not replace pinning the P2P encoder,
-and the local capabilities used by P2P do not replace SFU capabilities.
+The renderer does not publish screens: the voice connection carries only the
+microphone and camera. Each screen is captured, encoded and sent by its native
+source over its own connections, in both P2P and SFU. Chromium only takes part
+as an optional receiver of those screens, when selected in settings
+(`BrowserScreenSubscription`, over P2P or SFU).
 
-On this path, capture and publication have separate lifetimes: rebuilding a transport in
-the same call preserves active capture, while leaving the call or stopping the
-share ends the source. A mode change requiring an authorized leave/rejoin
-performs the full call cleanup. SFU uses `stopTracks: false`, and screen audio and video share
-protection against late producers after cancellation or replacement. Changing
-the codec rebuilds publication, not capture.
-
-The picker calls `WebRtcManager.assertScreenShareSupported()` before requesting
-capture; `VideoService` does not depend on codecs or voice mode. Closing the
-picker cancels pending acquisition without ending already published screens.
-Audio startup can also be cancelled before native capture or during publication:
-stopping the screen must not produce a late audio-sharing announcement.
+The picker only uses native capture and explains why when it is unavailable:
+there is no fallback to Chromium capture. Closing the picker cancels pending
+acquisition without ending already published screens. Screen audio belongs to
+the native source that captures it, so stopping the screen must not produce a
+late audio-sharing announcement.
 The controls helper snapshots the call session instead of sending updates to
 whichever server happens to be visible when an asynchronous operation finishes.
 
 Profile values are **per-send ceilings**, not FPS guarantees or a total
 upload budget. P2P may send the same screen to several destinations; SFU
-normally sends it to the server once. `GAMING` prioritizes framerate; the
-other profiles prioritize resolution. These ceilings do not promise sustained
+normally sends it to the server once. These ceilings do not promise sustained
 1080p120.
 
 The native path uses **libobs/WGC → AMF H.264 → native WebRTC** on qualified
@@ -458,7 +449,7 @@ Excellent for small friend groups and lightweight/free VPS instances with low CP
 ### Topology 2: SFU (Selective Forwarding Unit)
 
 For the browser engine's SFU call, the client opens a pair of **WebRTC Transports** with the host server:
-- **`sendTransport`:** Transmits local audio and video tracks (microphone, camera, screen and system audio).
+- **`sendTransport`:** Transmits local audio and video tracks (microphone and camera).
 - **`recvTransport`:** Receives forwarded tracks from all other participants routed through the `mediasoup` worker.
 
 The server identifies this pair with purpose `call`, also used when `purpose`
@@ -573,17 +564,17 @@ button.
 
 The camera follows the resolution and FPS of the selected quality profile.
 
-Screen sharing is a track **separate** from the camera — you can transmit both at
-once. The source is announced in the call without requiring reception of its
-media. In P2P, negotiation and `screen-video-meta` associate the track with
-the correct screen, separately from the camera.
+Screen sharing is **separate** from the camera — you can transmit both at once.
+The source is announced in the call (`nativeScreenShares`) without requiring
+reception of its media, and each subscription uses its own connections,
+outside the voice connection.
 
 Each person can share **up to 8 screens at once**. The limit is per person,
 not per call: each screen costs the sharer another capture, another encoder and
 more upload, while viewers only receive the screens they chose to watch. That
 is why, from the third screen on, Monky asks for confirmation once per call.
-Each is identified by the id of its own `MediaStream`, and that id is what ties
-together the track, the sender and the tile on screen.
+Each is identified by its source id (`shareId`), which ties together the
+announcement, the subscriptions and the tile on screen.
 
 The `screen-shares-8` feature is negotiated. Servers without it accept 2 screens
 per person, so the client does not offer a third one on that server. Clients
@@ -597,11 +588,11 @@ to the recipient; `Stop watching` revokes it. The choice follows the same
 source through view and transport reconstruction, but a new broadcast does
 not inherit it merely because it has the same owner.
 
-In P2P, a `screen-watch` type `RTC_SIGNAL` sends intent to the publisher. On the Chromium path,
-Screen senders have no attached track/active encoding until subscribed;
-stopping affects only that peer. Publisher/viewer epochs and an increasing
-revision protect against old commands and negotiations. The server authenticates
-the sender and checks the channel and published source.
+`NATIVE_SCREEN_SIGNAL` carries intent to the publisher: `watch` and `stop` come
+from the viewer; `accepted`, `capture-mode` and `closed`, from the publisher.
+Each subscription has its own `subscriptionId` and names the source instance
+(`sourceInstanceId`); stopping affects only that subscription. The server
+authenticates the sender and checks the channel and published source.
 
 In SFU, the catalog remains available without automatically creating screen
 consumers. Screen/audio consumers start paused **on the server** and are
@@ -611,15 +602,10 @@ usage. Late responses must not reactivate a cancelled subscription.
 
 Screen audio is shared per publisher/recipient: it continues while that
 recipient watches at least one screen from that publisher. Microphone, camera,
-other viewers and mute preferences are independent. On the native path, the
-last subscription to a profile closes its capture, encoder and sending
-pipeline, including publisher-to-SFU upload. The Chromium path retains
-capture/preview and may keep uploading to the SFU. RTCP and
-signaling remain allowed; this does not promise zero bytes in the call.
+other viewers and mute preferences are independent. The last subscription to a
+profile closes its capture, encoder and sending pipeline, including
+publisher-to-SFU upload. RTCP and signaling remain allowed; this does not promise zero bytes in the call.
 The contracts require client and server to share the same `PROTOCOL_VERSION`.
-
-Monky also tags the track with a content hint: `motion` favours smoothness (good
-for games and video), `detail` favours sharpness (good for code and text).
 
 ### Screen audio: the native module
 
@@ -636,8 +622,7 @@ If the module fails to load, nothing breaks: sharing keeps working without sound
 and the app says so.
 
 Each share with sound opens its own capture session. The module accepts up to 8
-sessions at once, one for each screen a person may share, and keeps the legacy
-capture exclusive. The main process decides which sounds may coexist and repeats
+sessions at once, one for each screen a person may share. The main process decides which sounds may coexist and repeats
 the picker's checks: a monitor's sound (and, on macOS, any source's, because
 ScreenCaptureKit delivers the system mix) does not coexist with another, and two
 windows of the same process do not capture the same sound. Because process
@@ -652,9 +637,9 @@ sound.
 
 ### Quality and bandwidth
 
-Profiles control resolution, FPS and the bitrate ceiling. Chromium sending
-parameters use `RTCRtpSender.setParameters()`; native profiles configure
-the actual capture/encoder/transport pipeline:
+Profiles control resolution, FPS and the bitrate ceiling. The microphone and
+camera apply these ceilings with `RTCRtpSender.setParameters()`; for screens
+they configure the actual native capture/encoder/transport pipeline:
 
 | Profile | Audio | Camera | Screen |
 |---|---|---|---|
@@ -671,11 +656,10 @@ below 30fps. Ceilings sit above usual streaming values because capture encoders
 emit a keyframe every second. 4K at 120fps needs H.264 level 6.0 or AV1;
 when a profile is chosen, Monky checks the encoder and lowers the FPS if it refuses.
 
-In named profiles from 60fps up (Smooth to Extreme), the degradation preference
-becomes `maintain-framerate`: under tight bandwidth Monky sacrifices resolution
-to hold the frame rate, because in games and video smoothness matters more than
-sharpness. In the other profiles it is the opposite on the Chromium path. The
-native path requests the chosen real profile and does not hide degradation
+In named profiles from 60fps up (Smooth to Extreme), the camera's degradation
+preference becomes `maintain-framerate`: under tight bandwidth Monky sacrifices
+resolution to hold the frame rate; in the other profiles it is the opposite.
+Native screens request the chosen real profile and do not hide degradation
 behind an FPS setting.
 
 The Custom profile accepts up to 3840×2160 and 240 FPS (120 FPS at 4K).

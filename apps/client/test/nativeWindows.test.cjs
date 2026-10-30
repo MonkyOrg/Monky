@@ -137,6 +137,8 @@ test('the screen-audio package exposes every native function its types declare',
   const exported = require(path.join(root, 'index.js'));
   assert.deepEqual(declared.filter(name => typeof exported[name] !== 'function'), [],
     'A function declared for Main must also be re-exported by the package entry, not only by the binary');
+  assert.deepEqual(['start', 'stop', 'getLastError', 'getStatus'].filter(name => declared.includes(name) || name in exported), [],
+    'Audio is captured only through packet sessions owned by native screen sharing (#689)');
 });
 
 test('listed windows carry their process ancestry so related applications are not both captured with sound', () => {
@@ -155,33 +157,6 @@ test('listed windows carry their process ancestry so related applications are no
   ancestry = () => { throw new Error('modeled snapshot failure'); };
   assert.deepEqual(sources.listWindows().map(({ processAncestry }) => processAncestry), [undefined, undefined],
     'Without a snapshot the windows are still listed, and Main checks again before capturing');
-});
-
-test('legacy capture propagates rejected window preparation without acquiring or falling back', async () => {
-  const file = path.resolve(__dirname, '..', 'src', 'renderer', 'core', 'VideoService.ts');
-  const source = ts.createSourceFile(file, fs.readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
-  let method;
-  const visit = node => {
-    if (ts.isMethodDeclaration(node) && node.name.getText(source) === 'startScreenShare') method = node;
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  assert.ok(method);
-  const compiled = ts.transpileModule(`class CaptureFixture {
-    screenCaptureEpoch = 0;
-    getProfile() { return { screenWidth: 640, screenHeight: 360, screenFps: 30 }; }
-    ${method.getText(source)}
-  }; new CaptureFixture();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  const denied = new Error('Owned overlay cannot be shared');
-  const warnings = [];
-  const capture = vm.runInNewContext(compiled, {
-    window: { api: { prepareScreenShareWindow: async () => { throw denied; } } },
-    clientLog: { info() {}, warn: (...args) => warnings.push(args) },
-    navigator: { mediaDevices: { getUserMedia: () => assert.fail('A rejected source cannot be captured') } },
-    Error,
-  });
-  await assert.rejects(capture.startScreenShare('window:123:0'), denied);
-  assert.equal(warnings.length, 1, 'The rejection remains visible in standard capture diagnostics');
 });
 
 for (const platform of ['darwin', 'linux']) {

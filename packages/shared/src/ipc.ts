@@ -421,15 +421,6 @@ export interface ServerProbeResult {
   reason: 'online' | 'refused' | 'timeout' | 'unreachable';
 }
 
-export interface ScreenAudioDiagnostics {
-  nativeModuleLoaded: boolean;
-  platformSupported: boolean;
-  osVersion: string;
-  pid: number;
-  captureStatus?: number;
-  lastError?: string;
-}
-
 /**
  * Call state the renderer reports to the system shell: the tray icon and menu,
  * and the call buttons on the Windows taskbar thumbnail.
@@ -1079,12 +1070,6 @@ export interface IpcInvokeChannels {
   // Rede
   'net:probe-server': { args: [host: string, port: number]; returnType: ServerProbeResult };
 
-  // Áudio da Tela (Nativo)
-  'screen-audio:is-supported': { args: []; returnType: boolean };
-  'screen-audio:diagnose': { args: []; returnType: ScreenAudioDiagnostics };
-  'screen-audio:start': { args: [sourceId?: string]; returnType: { success: boolean; error?: string } };
-  'screen-audio:stop': { args: []; returnType: { success: boolean } };
-
   // Bandeja do Sistema (Tray)
   'tray:update-voice-status': { args: [status: TrayVoiceStatus]; returnType: void };
 
@@ -1131,9 +1116,6 @@ export interface IpcEvents {
   'shortcut:action-triggered': [action: string];
   'ptt:state-changed': [active: boolean];
   'ptt:captured': [binding: PttKeyBinding];
-  'screen-audio:frame': [buffer: ArrayBuffer | Uint8Array];
-  /** Falha assincrona da captura nativa (dispositivo caiu, stream derrubado pelo sistema). */
-  'screen-audio:error': [message: string];
   // Comandos de chamada vindos do sistema: menu da bandeja e miniatura da barra de tarefas (Windows).
   'tray:toggle-mute': [];
   'tray:toggle-deafen': [];

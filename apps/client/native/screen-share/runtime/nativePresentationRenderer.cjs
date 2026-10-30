@@ -4,16 +4,15 @@ const { nativeScreenPresentationSchema, nativeScreenPreviewInfoSchema, NATIVE_SC
 const { NativeVideoPresentationSink } = require('./presentationSink.cjs');
 const { registerTextureReceiver } = require('./textureReceiver.cjs');
 const { EncodedPreviewRenderer } = require('./encodedPreviewRenderer.cjs');
+const { notifyObserver } = require('./asyncTools.cjs');
 
 function createNativeScreenPresentation(textures, document, onError, ipcRenderer = require('electron').ipcRenderer) {
   if (typeof document?.getElementById !== 'function' || typeof document.querySelectorAll !== 'function'
     || typeof textures?.subtle?.finishTransferSharedTexture !== 'function' || typeof onError !== 'function')
     throw new Error('Native presentation needs its owned document, texture receiver and error observer.');
   const presentations = new Map();
-  const report = (presentationId, error) => {
-    try { onError(presentationId, error instanceof Error ? error : new Error(String(error))); }
-    catch (observerError) { console.error('Native presentation error observer failed:', observerError); }
-  };
+  const report = (presentationId, error) => notifyObserver('Native presentation error observer', onError,
+    presentationId, error instanceof Error ? error : new Error(String(error)));
   const detachTextures = registerTextureReceiver(textures, {
     getSink: metadata => {
       const entry = presentations.get(metadata.presentationId);

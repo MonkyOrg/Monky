@@ -2,7 +2,6 @@ import { QUALITY_PRESETS, QualityProfile, QualityPresetType, type NativeScreenSo
 import { appEvents } from './EventBus';
 import { settingsStore } from '../stores/settingsStore';
 import { clientLog } from './ClientLogService';
-import { getScreenVideoCodecs } from './webrtc/codecPreferences';
 import { cameraEffectsStore } from '../stores/cameraEffectsStore';
 import { CameraEffectProcessor } from './cameraEffects/CameraEffectProcessor';
 import {
@@ -32,21 +31,6 @@ export interface NativeScreenCapture {
   readonly audioBitrateKbps: number;
 }
 
-type DesktopCaptureConstraints = MediaStreamConstraints & {
-  video: MediaTrackConstraints & {
-    mandatory: {
-      chromeMediaSource: 'desktop';
-      chromeMediaSourceId: string;
-      minWidth?: number;
-      maxWidth: number;
-      minHeight?: number;
-      maxHeight: number;
-      minFrameRate?: number;
-      maxFrameRate: number;
-    };
-  };
-};
-
 export class VideoService {
   private cameraStream: MediaStream | null = null;
   private cameraRawStream: MediaStream | null = null;
@@ -65,12 +49,11 @@ export class VideoService {
   private cameraTrackEnded: (() => void) | null = null;
   private cameraCaptureEpoch = 0;
   private cameraSessionEpoch = 0;
-  private screenCaptureEpoch = 0;
   /**
    * Active screen shares keyed by share id (#253). The share id is the
-   * MediaStream id, which is also what gets announced to peers over
-   * `screen-video-meta`, so the same handle identifies the share locally,
-   * on the wire and in the remote UI.
+   * MediaStream id, which is also the native source id announced to the call,
+   * so the same handle identifies the share locally, on the wire and in the
+   * remote UI.
    */
   private screenStreams: Map<string, MediaStream> = new Map();
   /** Maps stream id → desktop source id so the picker can hide active shares. */
@@ -93,12 +76,12 @@ export class VideoService {
 
   /**
    * Applies the quality preset dynamically to current preset and updates
-   * constraints on any active camera or screen share tracks.
+   * constraints on an active camera. Native screen sources follow the profile
+   * through their own owner.
    */
   public async applyQualityPreset(preset: QualityPresetType): Promise<void> {
     this.currentPreset = preset;
     const profile = this.getProfile();
-    const isHighFps = profile.screenFps >= 60;
 
     this.cameraProcessor?.setProfile(profile);
     if (this.cameraRawStream) {
@@ -116,23 +99,6 @@ export class VideoService {
           });
         } catch (err) {
           clientLog.warn('VIDEO', 'Failed to apply constraints to camera track', { error: String(err) });
-        }
-      }
-    }
-
-    for (const [shareId, stream] of this.screenStreams.entries()) {
-      if (this.nativeScreenCaptures.has(shareId)) continue;
-      const screenTrack = stream.getVideoTracks()[0];
-      if (screenTrack && screenTrack.readyState === 'live') {
-        screenTrack.contentHint = isHighFps ? 'motion' : 'detail';
-        try {
-          await screenTrack.applyConstraints({
-            width: { max: profile.screenWidth },
-            height: { max: profile.screenHeight },
-            frameRate: { max: profile.screenFps },
-          });
-        } catch (err) {
-          clientLog.warn('SCREEN_SHARE', 'Failed to apply constraints to screen track', { shareId, error: String(err) });
         }
       }
     }
@@ -449,135 +415,6 @@ export class VideoService {
     }
   }
 
-  public async startScreenShare(sourceId?: string): Promise<MediaStream> {
-    const epoch = this.screenCaptureEpoch;
-    const assertCurrent = () => {
-      if (epoch !== this.screenCaptureEpoch) throw new DOMException('Screen capture was cancelled', 'AbortError');
-    };
-    const profile = this.getProfile();
-    clientLog.info('SCREEN_SHARE', 'Starting screen share', {
-      hasSourceId: !!sourceId,
-      resolution: `${profile.screenWidth}x${profile.screenHeight}@${profile.screenFps}fps`,
-    });
-    let stream: MediaStream;
-
-    if (sourceId) {
-      // A minimized window has no surface for the WGC capturer to start on, so a
-      // fullscreen game that got minimized when the user alt-tabbed to open the
-      // picker must be restored (foregrounded) before getUserMedia (#560).
-      if (sourceId.startsWith('window:')) {
-        try {
-          const restored = await window.api?.prepareScreenShareWindow?.(sourceId);
-          if (restored) await new Promise((resolve) => setTimeout(resolve, 350));
-        } catch (e) {
-          clientLog.warn('SCREEN_SHARE', 'Failed to restore window before capture', {
-            error: e instanceof Error ? e.message : String(e),
-          });
-          throw e;
-        }
-      }
-      assertCurrent();
-
-      // Electron desktopCapturer — try exact (min=max) first, fallback to max-only
-      const exactConstraints: DesktopCaptureConstraints = {
-        audio: false,
-        video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: sourceId,
-            minWidth: profile.screenWidth,
-            maxWidth: profile.screenWidth,
-            minHeight: profile.screenHeight,
-            maxHeight: profile.screenHeight,
-            minFrameRate: profile.screenFps,
-            maxFrameRate: profile.screenFps,
-          },
-        },
-      };
-      try {
-        stream = await navigator.mediaDevices.getUserMedia(exactConstraints);
-      } catch (error) {
-        assertCurrent();
-        if (error instanceof Error && (error.name === 'AbortError' || error.name === 'NotAllowedError')) throw error;
-        clientLog.info('SCREEN_SHARE', 'Exact screen constraints not met, falling back to max-only');
-        const fallbackConstraints: DesktopCaptureConstraints = {
-          audio: false,
-          video: {
-            mandatory: {
-              chromeMediaSource: 'desktop',
-              chromeMediaSourceId: sourceId,
-              maxWidth: profile.screenWidth,
-              maxHeight: profile.screenHeight,
-              maxFrameRate: profile.screenFps,
-            },
-          },
-        };
-        stream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
-      }
-    } else {
-      // Standard DisplayMedia fallback
-      try {
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { exact: profile.screenWidth },
-            height: { exact: profile.screenHeight },
-            frameRate: { exact: profile.screenFps },
-          },
-          audio: false,
-        });
-      } catch (error) {
-        assertCurrent();
-        if (error instanceof Error && (error.name === 'AbortError' || error.name === 'NotAllowedError')) throw error;
-        clientLog.info('SCREEN_SHARE', 'Exact display constraints not met, falling back to ideal');
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { ideal: profile.screenWidth },
-            height: { ideal: profile.screenHeight },
-            frameRate: { ideal: profile.screenFps, max: profile.screenFps },
-          },
-          audio: false,
-        });
-      }
-    }
-
-    if (epoch !== this.screenCaptureEpoch) {
-      stream.getTracks().forEach((track) => track.stop());
-      throw new DOMException('Screen capture was cancelled', 'AbortError');
-    }
-    const screenTrack = stream.getVideoTracks()[0];
-    if (!screenTrack || screenTrack.readyState !== 'live') {
-      stream.getTracks().forEach((track) => track.stop());
-      throw new DOMException('Screen capture ended before it could start', 'AbortError');
-    }
-    const shareId = stream.id;
-    this.screenStreams.set(shareId, stream);
-    if (sourceId) {
-      this.screenSourceIds.set(shareId, sourceId);
-    }
-
-    // Hint the encoder about the content type so it optimizes correctly:
-    // gaming / 60+ fps favors fluid motion, desktop sharing favors sharp detail.
-    screenTrack.contentHint = profile.screenFps >= 60 ? 'motion' : 'detail';
-
-    screenTrack.onended = () => {
-      screenTrack.onended = null;
-      // Fires only when the track ends on its own — e.g. the shared window/app
-      // was closed or the user pressed the OS "stop sharing" button — never
-      // when we call stopScreenShare() ourselves. Let listeners fully tear the
-      // share down (peers, WebRTC sender, UI) before we stop locally (#159).
-      appEvents.emit('local.screen_ended_externally', shareId);
-      this.stopScreenShare(shareId);
-    };
-
-    appEvents.emit('local.screen_started', { shareId, stream });
-    return stream;
-  }
-
-  /** Dismissing the picker must cancel acquisition without ending the current shares. */
-  public cancelPendingScreenShare(): void {
-    this.screenCaptureEpoch++;
-  }
-
   public registerNativeScreenShare(stream: MediaStream, capture: NativeScreenCapture): void {
     if (stream.id !== capture.source.shareId || stream.getTracks().length || this.screenStreams.has(stream.id))
       throw new Error('A native screen descriptor cannot replace a browser capture or a current source.');
@@ -605,19 +442,12 @@ export class VideoService {
    * Stops one screen share, or every active share when no id is given (#253).
    */
   public stopScreenShare(shareId?: string): void {
-    if (!shareId) this.cancelPendingScreenShare();
     const ids = shareId ? [shareId] : [...this.screenStreams.keys()];
     clientLog.info('SCREEN_SHARE', `Stopping screen share(s)`, { shareIds: ids });
     for (const id of ids) {
-      const stream = this.screenStreams.get(id);
-      if (!stream) continue;
-      // Drop the handler first: stopping the track fires `onended` on some
-      // platforms, which would re-enter this method and emit a bogus
-      // "ended externally" event (#159).
-      stream.getVideoTracks().forEach((t) => { t.onended = null; });
-      // Native preview tracks are borrowed from preload. Its presentation owner
-      // must stop decoder output and drain the writer before ending the generator.
-      if (!this.nativeScreenCaptures.has(id)) stream.getTracks().forEach((t) => t.stop());
+      if (!this.screenStreams.has(id)) continue;
+      // Native preview tracks are borrowed from preload: their presentation owner
+      // stops decoder output and drains the writer before ending the generator.
       this.screenStreams.delete(id);
       this.screenSourceIds.delete(id);
       this.screenLabels.delete(id);
@@ -636,10 +466,6 @@ export class VideoService {
 
   public getScreenShareIds(): string[] {
     return [...this.screenStreams.keys()];
-  }
-
-  public getScreenShareCount(): number {
-    return this.screenStreams.size;
   }
 
   /** Returns the set of desktop source ids currently being shared. */

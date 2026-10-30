@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
-const { within } = require('./nativeDeadline.cjs');
+const { within } = require('./asyncTools.cjs');
 class ObsHostBridge {
   constructor({ host, runtime, onError, protocol, argumentsForSource, validateRetirement,
     runId = randomBytes(16).toString('hex') }, dependencies = {}) {

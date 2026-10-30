@@ -1,6 +1,6 @@
 'use strict';
 
-const { boundedCleanup } = require('./frameSink.cjs');
+const { within, notifyObserver } = require('./asyncTools.cjs');
 const { NativeRtcCommands, isNativeRtcCommandsForEngine, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const { NativePcmCaptureHub } = require('./nativePcmCaptureHub.cjs');
 
@@ -14,11 +14,6 @@ const positive = value => unsigned(value) && value > 0;
 const text = value => typeof value === 'string' && Buffer.byteLength(value, 'utf8') > 0
   && Buffer.byteLength(value, 'utf8') <= 256 && !value.includes('\0');
 const cancellation = () => new DOMException('Native PCM capture was cancelled.', 'AbortError');
-const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-};
 
 function nativeFormat(format) {
   if (format?.encoding !== 'float32-interleaved' || !positive(format.sampleRate)
@@ -98,8 +93,7 @@ class NativePcmCaptureBridge {
     this.errors.push(error);
     this.stopAccepting(error);
     this.beginCaptureStop();
-    try { this.onError(error); }
-    catch (observerError) { console.error('Native PCM capture error observer failed:', observerError); }
+    notifyObserver('Native PCM capture error observer', this.onError, error);
   }
 
   async start(options, syncGroup, signal) {
@@ -117,7 +111,7 @@ class NativePcmCaptureBridge {
     }
     this.started = true;
     this.syncGroup = syncGroup;
-    this.startup = deferred();
+    this.startup = Promise.withResolvers();
     void this.startup.promise.catch(() => {});
     const abort = () => {
       this.stopAccepting(signal.reason ?? cancellation());
@@ -149,7 +143,7 @@ class NativePcmCaptureBridge {
         if (!this.stopping) this.report(new Error('Native PCM subscription detached unexpectedly.'));
       }, error => this.report(error));
       if (signal?.aborted) abort();
-      return await boundedCleanup(this.startup.promise, 'Native PCM capture startup timed out.', this.timeoutMs);
+      return await within(this.startup.promise, this.timeoutMs, 'Native PCM capture startup timed out.');
     } catch (error) {
       this.stopAccepting(error);
       try { await this.stop(); }
@@ -194,7 +188,7 @@ class NativePcmCaptureBridge {
   arm() {
     if (this.stopping || !positive(this.sourceId)) throw new Error('Native PCM source is unavailable.');
     if (!this.enabling) {
-      this.activation = deferred();
+      this.activation = Promise.withResolvers();
       this.enabling = this.activation.promise;
       void this.enabling.catch(() => {});
     }
@@ -204,8 +198,8 @@ class NativePcmCaptureBridge {
     try { this.arm(); }
     catch (error) { return Promise.reject(error); }
     if (!this.activationWait) {
-      this.activationWait = boundedCleanup(this.enabling,
-        'Native PCM activation needs its first actual capture epoch.', this.timeoutMs).catch(error => {
+      this.activationWait = within(this.enabling,
+        this.timeoutMs, 'Native PCM activation needs its first actual capture epoch.').catch(error => {
         if (!this.stopping) this.report(error);
         throw error;
       });
@@ -230,7 +224,7 @@ class NativePcmCaptureBridge {
     if (this.stopping || !this.enabling || this.sourceId === null) { this.dropped++; return; }
     if (this.packets.size >= MAX_PENDING_PACKETS)
       throw new Error('Native PCM admission exceeded its bounded capture burst and processing capacity.');
-    const retired = deferred();
+    const retired = Promise.withResolvers();
     const record = {
       key: `${packet.epoch}\0${packet.sequence}`, packet, sourceId: this.sourceId,
       epoch: packet.epoch, sequence: packet.sequence, frameIndex: packet.frameIndex, frames: packet.frames,
@@ -256,15 +250,15 @@ class NativePcmCaptureBridge {
     if (this.stopping) { this.retire(record); return; }
     const processing = [...this.packets.values()].filter(value => value.submitted);
     if (processing.length >= MAX_NATIVE_PACKETS) {
-      await boundedCleanup(Promise.race(processing.map(value => value.retired)),
-        'Native PCM processing did not return its admission credit.', this.timeoutMs);
+      await within(Promise.race(processing.map(value => value.retired)),
+        this.timeoutMs, 'Native PCM processing did not return its admission credit.');
       if (this.stopping) { this.retire(record); return; }
     }
     if (this.epoch !== record.epoch) {
       // Reset only at an actual capture epoch, after prior native processing is accounted for.
       const previous = [...this.packets.values()].filter(value => value.submitted && value.epoch !== record.epoch);
-      await boundedCleanup(Promise.all(previous.map(value => value.retired)),
-        'Prior native PCM processing has not retired.', this.timeoutMs);
+      await within(Promise.all(previous.map(value => value.retired)),
+        this.timeoutMs, 'Prior native PCM processing has not retired.');
       if (this.stopping) { this.retire(record); return; }
       const packet = record.packet;
       const result = await this.commands.request('source.beginAudioEpoch', record.sourceId, {
@@ -342,8 +336,7 @@ class NativePcmCaptureBridge {
       void stopping.catch(error => {
         if (this.captureStopping === stopping) this.captureStopping = null;
         this.errors.push(error instanceof Error ? error : new Error(String(error)));
-        try { this.onError(error); }
-        catch (observerError) { console.error('Native PCM stop observer failed:', observerError); }
+        notifyObserver('Native PCM stop observer', this.onError, error);
       });
     }
     return this.captureStopping ?? Promise.resolve();
@@ -363,15 +356,15 @@ class NativePcmCaptureBridge {
 
   async stop() {
     this.stopAccepting();
-    await boundedCleanup(this.beginCaptureStop(), 'Native PCM capture stop is still pending.', this.timeoutMs);
-    if (this.sourceCreation) await boundedCleanup(Promise.allSettled([this.sourceCreation]),
-      'Native audio source creation remains pending.', this.timeoutMs);
-    if (this.enabling) await boundedCleanup(Promise.allSettled([this.enabling]),
-      'Native audio source activation remains pending.', this.timeoutMs);
-    await boundedCleanup(this.closeSource(), 'Native audio source close remains pending.', this.timeoutMs);
-    await boundedCleanup(this.packetTail, 'Native PCM admission queue remains pending.', this.timeoutMs);
-    await boundedCleanup(Promise.all([...this.packets.values()].map(record => record.retired)),
-      'Native PCM processing retirement remains unproven.', this.timeoutMs);
+    await within(this.beginCaptureStop(), this.timeoutMs, 'Native PCM capture stop is still pending.');
+    if (this.sourceCreation) await within(Promise.allSettled([this.sourceCreation]),
+      this.timeoutMs, 'Native audio source creation remains pending.');
+    if (this.enabling) await within(Promise.allSettled([this.enabling]),
+      this.timeoutMs, 'Native audio source activation remains pending.');
+    await within(this.closeSource(), this.timeoutMs, 'Native audio source close remains pending.');
+    await within(this.packetTail, this.timeoutMs, 'Native PCM admission queue remains pending.');
+    await within(Promise.all([...this.packets.values()].map(record => record.retired)),
+      this.timeoutMs, 'Native PCM processing retirement remains unproven.');
     return this.getStats();
   }
 

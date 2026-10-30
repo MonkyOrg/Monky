@@ -949,9 +949,6 @@ export const ptBR = {
   'screenShare.extraScreensMessage': 'Você já está compartilhando {count} telas. Cada tela a mais usa mais processador, placa de vídeo e internet do seu computador, e pode deixar a chamada mais pesada. Dá para compartilhar até {max} telas ao mesmo tempo.',
   'screenShare.extraScreensConfirm': 'Compartilhar mesmo assim',
   'screenShare.errorMessage': 'Não foi possível iniciar o compartilhamento de tela: {error}',
-  'screenCodec.unsupported': 'O codec de tela selecionado ({codec}) não é compatível com este dispositivo ou servidor de voz. Escolha outro codec ou Automático; o Monky não substituirá o codec por outro.',
-  'screenCodec.incompatible': 'Não foi possível negociar o codec de tela selecionado ({codec}) com um participante ou servidor de voz. O compartilhamento foi encerrado em vez de usar outro codec. Escolha um codec compatível ou Automático.',
-  'screenCodec.notApplied': 'O navegador não conseguiu aplicar o codec de tela selecionado ({codec}). O compartilhamento foi encerrado; nenhum codec alternativo foi usado.',
   'screenCodec.reconnecting': 'Aguarde a reconexão da chamada de voz antes de compartilhar a tela.',
   'voiceReconnect.title': 'Reconectando sua chamada de voz',
   'voiceReconnect.notice': 'O servidor mudou de SFU para P2P. Sua chamada será desconectada brevemente e reconectada automaticamente ao mesmo canal. Câmera e compartilhamento de tela serão encerrados; você poderá ativá-los novamente após a reconexão.',
@@ -2219,8 +2216,6 @@ export const ptBR = {
   'chatSound.none': 'Silenciar',
   'channelMenu.notifications': 'Notificações de mensagem',
   'channelMenu.markAsRead': 'Marcar como lido',
-  'screenAudio.unsupportedWindows': 'Captura de áudio de tela não é suportada nesta versão do Windows (necessário build 19041+).',
-  'screenAudio.noFrames': 'Nenhum frame de áudio foi recebido. A captura nativa pode ter falhado. Verifique se o aplicativo/tela selecionado está realmente reproduzindo som.',
   'keybind.space': 'Espaço',
 
   // ── Onboarding Wizard ────────────────────────────────────────────────

@@ -4,6 +4,7 @@
 #include <audioclientactivationparams.h>
 #include <avrt.h>
 #include <tlhelp32.h>
+#include <winternl.h>
 #include <wrl/client.h>
 #include <wrl/implements.h>
 #include <memory>
@@ -185,3 +186,16 @@ void RunWasapiCapture(CaptureTarget target, std::atomic<bool>& stop, const Captu
 }
 
 }  // namespace screen_audio
+
+// Process loopback (AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK) requires Windows 10 2004, build 19041.
+bool platform_is_supported() {
+  OSVERSIONINFOEXW version{};
+  version.dwOSVersionInfoSize = sizeof(version);
+  using RtlGetVersionPtr = NTSTATUS(NTAPI*)(PRTL_OSVERSIONINFOW);
+  auto ntdll = GetModuleHandleW(L"ntdll.dll");
+  if (!ntdll) return false;
+  auto getVersion = reinterpret_cast<RtlGetVersionPtr>(GetProcAddress(ntdll, "RtlGetVersion"));
+  if (!getVersion) return false;
+  getVersion(reinterpret_cast<PRTL_OSVERSIONINFOW>(&version));
+  return version.dwMajorVersion > 10 || (version.dwMajorVersion == 10 && version.dwBuildNumber >= 19041);
+}

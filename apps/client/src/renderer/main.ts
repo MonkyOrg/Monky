@@ -66,7 +66,6 @@ import { addServerModal } from './views/addServer/AddServerModal';
 import { MainView } from './views/MainView';
 import { HomeView } from './views/home/HomeView';
 import { hasValidLocalProfile, showIdentityProfileStep } from './views/IdentityProfileStep';
-import { screenAudioService } from './core/ScreenAudioService';
 import { stopLocalScreenShares } from './core/screenShareControls';
 import { screenSharePickerModal } from './views/ScreenSharePickerModal';
 import { showAlert } from './views/Dialog';
@@ -124,7 +123,7 @@ class App {
       webRtcManager.suspendForVoiceReconnect();
       audioProcessor.stopMicrophone();
       videoService.stopCamera();
-      const stoppedScreens = stopLocalScreenShares(screenAudioService, { teardown: true });
+      const stoppedScreens = stopLocalScreenShares({ teardown: true });
       voiceStore.setCameraOn(false);
       voiceStore.setSpeaking(false);
       voiceStore.setReconnecting(true);
@@ -462,11 +461,6 @@ class App {
     void webRtcManager.syncMicrophonePublication().catch((error: unknown) => {
       clientLog.warn('AUDIO', 'Could not publish the microphone after Speak was allowed', { error: String(error) });
     });
-    if (voiceStore.permissionMuted && screenAudioService.getIsCapturing()) {
-      void screenAudioService.stop().catch((error: unknown) => {
-        clientLog.warn('SCREEN_SHARE', 'Could not stop screen audio after permission mute', { error: String(error) });
-      });
-    }
     if (voiceStore.permissionMuted && voiceStore.currentVoiceChannelId && voiceStore.isScreenSharing) {
       callClient().send(MessageType.VOICE_STATE_UPDATE, webRtcManager.getLocalScreenState());
     }
@@ -1063,7 +1057,7 @@ class App {
       if (!serverStore.isMySession(payload.targetSessionId) || !this.eventOwnsCall()) return;
       audioProcessor.stopMicrophone();
       videoService.stopCamera();
-      void stopLocalScreenShares(screenAudioService, { teardown: true }).catch((error: unknown) => {
+      void stopLocalScreenShares({ teardown: true }).catch((error: unknown) => {
         clientLog.error('SCREEN_SHARE', 'Failed to stop screen sharing after voice kick', { error: String(error) });
       });
       webRtcManager.closeAllPeers();
@@ -1104,21 +1098,6 @@ class App {
     appEvents.on('local.screen_started', () => {
       soundEffects.play('screen_share_start');
     });
-    appEvents.on('screen.codec_failed', (payload: { error: string; notify: boolean; stopAudio: boolean }) => {
-      if (payload.stopAudio || videoService.getScreenShareCount() === 0) {
-        void screenAudioService.stop().catch((error: unknown) => {
-          clientLog.error('SCREEN_SHARE', 'Failed to stop audio of a rejected screen', {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-      }
-      if (!payload.notify) return;
-      void showAlert({
-        title: t('screenShare.errorTitle'),
-        message: t('screenShare.errorMessage', { error: payload.error }),
-        variant: 'danger',
-      });
-    });
     appEvents.on('local.screen_stopped', () => {
       soundEffects.play('screen_share_stop');
     });
@@ -1148,7 +1127,7 @@ class App {
     // frozen frame and the local controls return to the idle state (#159, #253).
     appEvents.on('local.screen_ended_externally', (shareId: string) => {
       if (!voiceStore.screenShareIds.includes(shareId) && !videoService.getScreenStream(shareId)) return;
-      void stopLocalScreenShares(screenAudioService, { shareIds: [shareId] }).catch((error: unknown) => {
+      void stopLocalScreenShares({ shareIds: [shareId] }).catch((error: unknown) => {
         clientLog.error('SCREEN_SHARE', 'Failed to stop an ended screen share', { shareId, error: String(error) });
       });
     });

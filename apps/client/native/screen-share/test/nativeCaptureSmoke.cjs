@@ -38,7 +38,7 @@ const moduleDirectory = process.argv.find(value => value.startsWith('--module=')
 assert.ok(path.isAbsolute(moduleDirectory), 'The native module under test must have an absolute path.');
 const { loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription,
   NativeScreenPreviewBridge, createMacScreenProvider } = require(moduleDirectory);
-const { within } = require('../runtime/nativeDeadline.cjs');
+const { within } = require('../runtime/asyncTools.cjs');
 const { createSfuFixture } = require('./sfuFixture.cjs');
 
 const directory = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);

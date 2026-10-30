@@ -83,3 +83,29 @@ test('identity, backup, hosting, media files, downloads and auto-start are wired
     assert.equal(registrations.get(channel), 'handleFromMainFrame', `${channel} must only answer the main window`);
   }
 });
+
+test('no IPC channel, preload method or contract reaches the retired system-audio loopback', () => {
+  // Since #689 screen audio is captured per shared source by native screen sharing, behind its own
+  // confirmation. The old loopback answered any renderer frame, the overlay included, without checks.
+  const sources = {
+    main: path.join(main, 'ipcHandlers.ts'),
+    preload: path.join(main, '..', 'preload', 'preload.ts'),
+    overlay: path.join(main, '..', 'preload', 'overlayPreload.ts'),
+    contract: path.join(__dirname, '..', '..', '..', 'packages', 'shared', 'src', 'ipc.ts'),
+  };
+  for (const [label, filename] of Object.entries(sources)) {
+    const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.Latest, true);
+    const exposed = [];
+    const visit = (node) => {
+      if (ts.isStringLiteralLike(node) && node.text.startsWith('screen-audio:')) exposed.push(node.text);
+      if ((ts.isPropertyAssignment(node) || ts.isPropertySignature(node) || ts.isMethodDeclaration(node))
+        && /^(?:on|remove)?ScreenAudio|^screenAudio/u.test(node.name.getText(source))) exposed.push(node.name.getText(source));
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    assert.deepEqual(exposed, [], `${label} must not expose the legacy screen audio capture`);
+  }
+  const addon = require(path.join(__dirname, '..', 'native', 'screen-audio', 'index.js'));
+  assert.deepEqual(['start', 'stop', 'getLastError', 'getStatus'].filter(name => name in addon), [],
+    'The audio addon only captures through packet sessions');
+});

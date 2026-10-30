@@ -4,7 +4,6 @@ import { gamePresence } from './GamePresenceController';
 import { gameSessionKey, shouldSuggestGameShare } from './gameShareEligibility';
 import { gameShareRequests, type PendingGameShareRequest } from './GameShareRequests';
 import { startGameShare } from './gameShareStart';
-import { screenAudioService } from './ScreenAudioService';
 import { stopLocalScreenShares } from './screenShareControls';
 import { videoService } from './VideoService';
 import { voiceStore } from '../stores/voiceStore';
@@ -271,7 +270,7 @@ export class GameShareSuggestion {
     const shareId = this.liveShareId;
     if (!shareId) return;
     try {
-      await stopLocalScreenShares(screenAudioService, { shareIds: [shareId] });
+      await stopLocalScreenShares({ shareIds: [shareId] });
     } catch (error: unknown) {
       console.warn('[GameShare] Could not stop the game stream', error);
       showErrorToast(t('gameShare.stopFailed', { error: error instanceof Error ? error.message : String(error) }), 7000);

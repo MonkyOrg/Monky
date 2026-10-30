@@ -589,17 +589,12 @@ async function runReceiveRenderer(roster, humanId) {
           const video = canvas.captureStream(5);
           try {
             await rtc.setLocalCameraTrack(video.getVideoTracks()[0]);
-            await rtc.addLocalScreenTrack(video);
             check(pc.getTransceivers().length === 1 && pc.getSenders().every(sender => sender.track?.kind !== 'video'),
-              'Camera and screen sharing must never reach a listening bot');
+              'Camera must never reach a listening bot');
           } finally {
-            await rtc.removeLocalScreenTrack(video.id);
             await rtc.setLocalCameraTrack(null);
             for (const track of video.getTracks()) track.stop();
           }
-          await rtc.setLocalScreenAudioTrack(tones[1].track);
-          check(pc.getSenders().filter(sender => sender.track).length === 1, 'Screen audio must not be sent to the listening bot');
-          await rtc.setLocalScreenAudioTrack(null);
           await rtc.setLocalAudioTrack(tones[1].track);
           check(pc.getSenders()[0].track === tones[1].track, 'Microphone device replacement must reach authorized listening bots');
           await rtc.setLocalAudioTrack(null);

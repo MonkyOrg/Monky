@@ -229,7 +229,6 @@ function encoding(value, kind = 'video') {
  *   sole continuous PCM source with one registered video. publishAudio(id,
  *   {maxBitrateBps},signal?) starts disabled; only authenticated audio demand may enable.
  *   syncAudioProducer(id) applies the current aggregate authenticated demand.
- *   closeAudioProducer(nativeId) retires only that publication, retaining PCM.
  * - Audio registerRemoteProducer/consume use the same server schemas, with
  *   appData:{mediaType:'screen_audio',shareId}. Its trusted group must match a
  *   registered video from that publisher. Video and audio have separate routes;
@@ -239,10 +238,6 @@ function encoding(value, kind = 'video') {
  *   and setConsumerVolume(id,0..2) affect only that owned watched audio consumer.
  * - The adapter captures E before sfu.consume, including paused creation, and
  *   that same proof/E guards every activation. No admission failure is retried.
- * - rebindAudioSource(id,{screenAudioShareId,syncGroup,signal?}) retires the old
- *   native AND server producer before calling rebindAudioSourceGroup(context).
- *   The hook returns the actual {sourceId,syncGroup} ACK; republish explicitly.
- *   It never changes a live sender MSID, pauses PCM or chooses another screen.
  * The controller supplies an already-ready engine;
  * this module never loads addons, owns capture sources, or closes the engine.
  * commands must be a NativeRtcCommands instance privately bound to that engine.
@@ -327,7 +322,7 @@ class NativeSfuBroker {
   constructor({ engine, commands, rpc, channelId, publisherSessionId, isCurrent, isWatchCurrent, routes, onError,
     maximumResources = 32, maximumPendingOperations = 64, maximumRemoteProducers = 64,
     audio = null, callId, connectionId, generation, nativeCapabilities = null,
-    isAudioWatchCurrent = null, isAudioPublicationCurrent = null, rebindAudioSourceGroup = null,
+    isAudioWatchCurrent = null, isAudioPublicationCurrent = null,
     screenSessionId } = {}) {
     requireValue(typeof engine?.respond === 'function' && typeof engine?.cancel === 'function'
       && typeof commands?.request === 'function' && typeof commands?.getPendingRequest === 'function'
@@ -344,8 +339,7 @@ class NativeSfuBroker {
     }).success, 'CONFIG', 'Native SFU requires a valid screen engine identity.');
     requireValue(audio === null || (isNativeAudioReceiveAdapterForEngine(audio, engine, callId, channelId)
       && reference(callId) && reference(connectionId) && positiveId(generation) && audioCapabilities(nativeCapabilities)
-      && typeof isAudioWatchCurrent === 'function' && typeof isAudioPublicationCurrent === 'function'
-      && (rebindAudioSourceGroup === null || typeof rebindAudioSourceGroup === 'function')),
+      && typeof isAudioWatchCurrent === 'function' && typeof isAudioPublicationCurrent === 'function'),
     'CONFIG', `Native SFU audio requires its genuine same-engine receive adapter, revision${nativeContract.contractRevision} capabilities and dedicated audio authorization.`);
     Object.defineProperties(this, {
       engine: { value: engine }, commands: { value: commands },
@@ -356,7 +350,6 @@ class NativeSfuBroker {
       audioHooks: { value: audio === null ? null : nativeAudioSfuReceiveHooks(audio, engine, callId, channelId) },
       audioScope: { value: Object.freeze({ callId, connectionId, generation }) },
       isAudioWatchCurrent: { value: isAudioWatchCurrent }, isAudioPublicationCurrent: { value: isAudioPublicationCurrent },
-      rebindAudioSourceGroup: { value: rebindAudioSourceGroup },
     });
     if (audio !== null) audioBrokers.add(this);
     Object.assign(this, { rpc, routes, onError, maximumResources, maximumPendingOperations, maximumRemoteProducers });
@@ -464,7 +457,7 @@ class NativeSfuBroker {
     requireValue(this.resources.size + this.sources.size < this.maximumResources && this.sourceHistory.size < 64,
       'LIMIT', 'Native SFU source identity or resource limit reached.');
     const source = { sourceId: value.sourceId, shareId: value.screenAudioShareId, syncGroup: value.syncGroup,
-      kind: 'audio', associatedVideo, closing: false, publications: new Set(), publication: null, rebinding: null };
+      kind: 'audio', associatedVideo, closing: false, publications: new Set(), publication: null };
     this.sources.set(source.sourceId, source);
     this.sourceHistory.add(source.sourceId);
     return Object.freeze({ sourceId: source.sourceId, screenAudioShareId: source.shareId, syncGroup: source.syncGroup });
@@ -472,7 +465,7 @@ class NativeSfuBroker {
 
   assertAudioSource(source) {
     const videoSource = source.associatedVideo;
-    requireValue(this.audioPublicationEnabled && !source.rebinding && videoSource?.kind === 'video' && !videoSource.closing
+    requireValue(this.audioPublicationEnabled && videoSource?.kind === 'video' && !videoSource.closing
       && this.sources.get(videoSource.sourceId) === videoSource && videoSource.shareId === source.shareId
       && videoSource.syncGroup === source.syncGroup,
     'STALE', 'Native SFU audio no longer has its exact active screen association.');
@@ -718,15 +711,6 @@ class NativeSfuBroker {
         throw error;
       }).finally(() => { signal.removeEventListener('abort', abort); });
     } catch (error) { return Promise.reject(error); }
-  }
-
-  async closeAudioProducer(producerId) {
-    requireValue(positiveId(producerId), 'RESOURCE', 'Native SFU audio producer retirement requires its own ID.');
-    const record = [...this.resources].find(candidate => candidate.kind === 'producer' && candidate.nativeId === producerId);
-    if (!record) return;
-    requireValue(record.source.kind === 'audio', 'RESOURCE', 'Native SFU audio retirement cannot close a video producer.');
-    this.markClosing(record);
-    await this.retire(record);
   }
 
   consume(producerId, watchVersion) {
@@ -1453,10 +1437,6 @@ class NativeSfuBroker {
     const source = this.sources.get(sourceId);
     if (!source) return;
     source.closing = true;
-    source.rebindController?.abort();
-    for (const candidate of this.sources.values()) if (candidate.kind === 'audio' && candidate.rebindTarget === source) {
-      candidate.rebindController?.abort();
-    }
     const associatedAudio = source.kind === 'video'
       ? [...this.sources.values()].find(candidate => candidate.kind === 'audio' && candidate.associatedVideo === source) : null;
     const audioRetirement = associatedAudio ? this.removeSource(associatedAudio.sourceId) : null;
@@ -1472,7 +1452,6 @@ class NativeSfuBroker {
       const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
       if (errors.length) throw aggregate(errors, 'Native SFU associated source cleanup retains independent media ownership.');
     } else await retiring;
-    if (source.rebinding) await Promise.allSettled([source.rebinding]);
     if (source.publications.size === 0 && this.sources.get(sourceId) === source) this.sources.delete(sourceId);
   }
 
@@ -1481,61 +1460,6 @@ class NativeSfuBroker {
       return Promise.reject(failure('SOURCE', 'Native SFU audio retirement requires its own PCM source ID.'));
     }
     return this.removeSource(sourceId);
-  }
-
-  rebindAudioSource(sourceId, { screenAudioShareId, syncGroup, signal } = {}) {
-    try {
-      this.assertCurrent();
-      const source = this.sources.get(sourceId);
-      const videoSource = [...this.sources.values()].find(candidate => candidate.kind === 'video'
-        && !candidate.closing && candidate.shareId === screenAudioShareId && candidate.syncGroup === syncGroup);
-      requireValue(this.audioPublicationEnabled && source?.kind === 'audio' && !source.closing && !source.rebinding
-        && shareReference(screenAudioShareId) && videoSource && typeof this.rebindAudioSourceGroup === 'function'
-        && (signal === undefined || signal instanceof AbortSignal),
-      'SOURCE', 'Native SFU audio rebind needs its explicit active screen and source-owner hook.');
-      signal?.throwIfAborted();
-      const controller = new AbortController(), previousShareId = source.shareId;
-      const abort = () => controller.abort();
-      signal?.addEventListener('abort', abort, { once: true });
-      source.rebindController = controller;
-      source.rebindTarget = videoSource;
-      const current = () => {
-        try { this.assertCurrent(); } catch { return false; }
-        return !controller.signal.aborted && !source.closing && this.sources.get(sourceId) === source
-          && !videoSource.closing && this.sources.get(videoSource.sourceId) === videoSource;
-      };
-      const records = [...source.publications];
-      for (const record of records) this.markClosing(record);
-      let groupAttempted = false;
-      const workflow = Promise.resolve().then(async () => {
-        await this.retireMany(records);
-        requireValue(current(), 'STALE', 'Native SFU audio reassociation was cancelled before changing its source.');
-        groupAttempted = true;
-        const pending = this.rebindAudioSourceGroup(Object.freeze({
-          engine: this.engine, sourceId, previousShareId, screenAudioShareId, syncGroup,
-          callId: this.audioScope.callId, channelId: this.scope.channelId, signal: controller.signal, isCurrent: current,
-        }));
-        requireValue(pending && typeof pending.then === 'function', 'AUDIO', 'Native SFU source group hook must return its actual Promise.');
-        const result = await pending;
-        requireValue(exact(result, ['sourceId', 'syncGroup']) && result.sourceId === sourceId && result.syncGroup === syncGroup,
-          'ACK', 'Native SFU source group acknowledgement does not match its owned source and selected group.');
-        source.syncGroup = result.syncGroup;
-        requireValue(current(), 'STALE', 'Native SFU audio changed group after cancellation; explicit reassociation is required.');
-        source.shareId = screenAudioShareId;
-        source.associatedVideo = videoSource;
-        return Object.freeze({ sourceId, kind: 'audio', screenAudioShareId, syncGroup });
-      }).catch(error => {
-        if (groupAttempted) source.associatedVideo = null;
-        throw error;
-      }).finally(() => {
-        signal?.removeEventListener('abort', abort);
-        source.rebinding = null;
-        source.rebindController = null;
-        source.rebindTarget = null;
-      });
-      source.rebinding = workflow;
-      return workflow;
-    } catch (error) { return Promise.reject(error); }
   }
 
   async stopWatching(publisherSessionId, shareId, watchVersion) {
@@ -1708,7 +1632,7 @@ class NativeSfuBroker {
     record.parent?.children.delete(record);
     record.source?.publications.delete(record);
     if (record.source?.publication === record) record.source.publication = null;
-    if (record.source?.closing && !record.source.rebinding && record.source.publications.size === 0
+    if (record.source?.closing && record.source.publications.size === 0
       && this.sources.get(record.source.sourceId) === record.source) this.sources.delete(record.source.sourceId);
     if (record.watchKey) this.pruneWatch(record.watchKey);
   }
@@ -1722,10 +1646,7 @@ class NativeSfuBroker {
     this.closed = true;
     this.remoteProducers.clear();
     this.externalRequests.clear();
-    for (const source of this.sources.values()) {
-      source.closing = true;
-      source.rebindController?.abort();
-    }
+    for (const source of this.sources.values()) source.closing = true;
     for (const record of this.resources) this.markClosing(record);
   }
 
@@ -1761,8 +1682,7 @@ class NativeSfuBroker {
     if (this.closing) return this.closing;
     this.invalidateScope();
     const roots = [...this.resources].filter(record => !record.parent || !this.resources.has(record.parent));
-    this.closing = this.retireMany(roots).then(async () => {
-      await Promise.allSettled([...this.sources.values()].map(source => source.rebinding));
+    this.closing = this.retireMany(roots).then(() => {
       for (const [id, source] of this.sources) if (source.publications.size === 0) this.sources.delete(id);
       for (const key of this.watchVersions.keys()) this.pruneWatch(key);
     }).finally(() => { this.closing = null; });

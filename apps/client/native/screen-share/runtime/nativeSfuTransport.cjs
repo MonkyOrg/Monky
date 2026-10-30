@@ -1,27 +1,13 @@
 'use strict';
 
 const { isNativeSfuAudioBroker } = require('./nativeSfuBroker.cjs');
-const { boundedCleanup } = require('./frameSink.cjs');
+const { within, notifyObserver } = require('./asyncTools.cjs');
 
 const cancelled = () => new DOMException('Native SFU source was retired.', 'AbortError');
-const shareIdValid = value => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,64}$/u.test(value);
-const groupValid = value => typeof value === 'string' && Buffer.byteLength(value, 'utf8') > 0
-  && Buffer.byteLength(value, 'utf8') <= 256 && !value.includes('\0');
 const actualPromise = (value, operation) => {
   if (typeof value?.then !== 'function') throw new Error(`Native SFU ${operation} must return its actual Promise.`);
   return value;
 };
-
-async function waitForSetup(pending, signal) {
-  signal.throwIfAborted();
-  let abort;
-  try {
-    return await Promise.race([pending, new Promise((_resolve, reject) => {
-      abort = () => reject(signal.reason ?? cancelled());
-      signal.addEventListener('abort', abort, { once: true });
-    })]);
-  } finally { signal.removeEventListener('abort', abort); }
-}
 
 class NativeSfuTransport {
   constructor(broker, onError, { audioPublication = false, timeoutMs = 12000 } = {}) {
@@ -30,7 +16,7 @@ class NativeSfuTransport {
       || typeof audioPublication !== 'boolean' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000
       || (audioPublication && (!isNativeSfuAudioBroker(broker)
         || broker.audioPublicationEnabled !== true
-        || ['registerAudioSource', 'publishAudio', 'removeAudioSource', 'rebindAudioSource', 'closeAudioProducer']
+        || ['registerAudioSource', 'publishAudio', 'removeAudioSource']
           .some(name => typeof broker[name] !== 'function')))) {
       throw new Error('A complete native SFU broker and error observer are required.');
     }
@@ -43,12 +29,7 @@ class NativeSfuTransport {
   }
 
   report(error, shareId) {
-    try {
-      const observed = this.onError(error, Object.freeze({ shareId }));
-      if (typeof observed?.then === 'function') void Promise.resolve(observed).catch(observerError => {
-        console.error('Native SFU transport error observer failed:', observerError);
-      });
-    } catch (observerError) { console.error('Native SFU transport error observer failed:', observerError); }
+    notifyObserver('Native SFU transport error observer', this.onError, error, Object.freeze({ shareId }));
   }
 
   async addSource(source, signal) {
@@ -85,7 +66,7 @@ class NativeSfuTransport {
     }
     const record = { sourceId: source.sourceId, shareId: source.screenAudioShareId, syncGroup: source.syncGroup,
       kind: 'audio', associatedVideo: video, maxBitrateBps: source.maxBitrateBps,
-      active: true, opening: null, retiring: null, rebind: null, rebinding: null };
+      active: true, opening: null, retiring: null };
     this.broker.registerAudioSource({ sourceId: record.sourceId, screenAudioShareId: record.shareId, syncGroup: record.syncGroup });
     return this.attachSource(record, signal);
   }
@@ -93,17 +74,16 @@ class NativeSfuTransport {
   async attachSource(record, signal) {
     this.sources.set(record.sourceId, record);
     record.opening = Promise.resolve().then(async () => {
-      if (this.closing || !record.active || record.rebinding) throw cancelled();
+      if (this.closing || !record.active) throw cancelled();
       if (record.kind === 'audio') {
         await record.associatedVideo.opening;
-        if (this.closing || !record.active || !record.associatedVideo.active || record.rebinding) throw cancelled();
+        if (this.closing || !record.active || !record.associatedVideo.active) throw cancelled();
         return actualPromise(this.broker.publishAudio(record.sourceId, { maxBitrateBps: record.maxBitrateBps }), 'audio publish');
       }
       return actualPromise(this.broker.publish(record.sourceId, {
         maxBitrateBps: record.maxBitrateBps, maxFramerate: record.maxFramerate,
       }), 'publish');
     });
-    for (const source of this.sources.values()) source.rebind?.wake?.();
     const abort = () => {
       void this.removeSource(record.sourceId).catch(error => this.report(error, record.shareId));
     };
@@ -122,16 +102,10 @@ class NativeSfuTransport {
     const record = this.sources.get(sourceId);
     if (!record) return;
     record.active = false;
-    record.rebind?.abort.abort(cancelled());
-    const usesVideo = audio => audio.kind === 'audio' && (audio.associatedVideo === record
-      || audio.rebind?.previousVideo === record || audio.rebind?.shareId === record.shareId);
-    if (record.kind === 'video') for (const audio of this.sources.values()) {
-      if (usesVideo(audio)) audio.rebind?.abort.abort(cancelled());
-    }
     if (!record.retiring) {
       const retiring = Promise.resolve().then(async () => {
-        const audio = record.kind === 'video'
-          ? [...this.sources.values()].find(usesVideo) : null;
+        const audio = record.kind === 'video' ? [...this.sources.values()]
+          .find(candidate => candidate.kind === 'audio' && candidate.associatedVideo === record) : null;
         const audioRetirement = audio ? this.removeAudioSource(audio.sourceId) : null;
         const sourceRetirement = actualPromise(record.kind === 'audio' ? this.broker.removeAudioSource(sourceId) : this.broker.removeSource(sourceId),
           'source retirement');
@@ -140,12 +114,12 @@ class NativeSfuTransport {
           const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
           if (errors.length) throw new AggregateError(errors, 'Native SFU associated sources retain independent retirement obligations.');
         } else await sourceRetirement;
-        await Promise.allSettled([record.opening, record.rebinding]);
+        await Promise.allSettled([record.opening]);
       });
       record.retiring = retiring;
       void retiring.catch(() => { if (record.retiring === retiring) record.retiring = null; });
     }
-    await boundedCleanup(record.retiring, 'Native SFU source retirement is still pending; ownership is retained.', this.timeoutMs);
+    await within(record.retiring, this.timeoutMs, 'Native SFU source retirement is still pending; ownership is retained.');
     if (this.sources.get(sourceId) === record) this.sources.delete(sourceId);
   }
 
@@ -157,102 +131,17 @@ class NativeSfuTransport {
     await this.removeSource(sourceId);
   }
 
-  async rebindAudioSource(sourceId, { screenAudioShareId, syncGroup } = {}, signal) {
-    if (signal !== undefined && !(signal instanceof AbortSignal)) throw new Error('Invalid native SFU cancellation signal.');
-    signal?.throwIfAborted();
-    const record = this.sources.get(sourceId);
-    const selected = [...this.sources.values()].find(candidate => candidate.kind === 'video' && candidate.shareId === screenAudioShareId);
-    if (this.closing || !this.audioPublicationEnabled || record?.kind !== 'audio' || !record.active || record.rebinding
-      || !shareIdValid(screenAudioShareId) || !groupValid(syncGroup)
-      || (selected && (!selected.active || selected.syncGroup !== syncGroup))) {
-      throw new Error('Native SFU audio rebind needs its own PCM source and explicit active screen.');
-    }
-    const transition = { shareId: screenAudioShareId, syncGroup, previousVideo: record.associatedVideo,
-      video: selected ?? null, abort: new AbortController(), wake: null };
-    record.rebind = transition;
-    const abort = () => transition.abort.abort(signal?.reason ?? cancelled());
-    signal?.addEventListener('abort', abort, { once: true });
-    const raw = Promise.resolve().then(async () => {
-      await waitForSetup(record.opening, transition.abort.signal);
-      const video = await this.rebindVideo(record, transition);
-      this.assertRebindCurrent(record, transition);
-      const result = await actualPromise(this.broker.rebindAudioSource(sourceId,
-        { screenAudioShareId, syncGroup, signal: transition.abort.signal }), 'audio reassociation');
-      if (result?.sourceId !== sourceId || result.screenAudioShareId !== screenAudioShareId || result.syncGroup !== syncGroup) {
-        throw new Error('Native SFU audio reassociation acknowledgement changed its selected source or group.');
-      }
-      this.assertRebindCurrent(record, transition);
-      record.shareId = screenAudioShareId;
-      record.syncGroup = syncGroup;
-      record.associatedVideo = video;
-      const publication = await actualPromise(this.broker.publishAudio(sourceId,
-        { maxBitrateBps: record.maxBitrateBps }, transition.abort.signal), 'replacement audio publication');
-      this.assertRebindCurrent(record, transition);
-      if (publication?.sourceId !== sourceId || publication.screenAudioShareId !== screenAudioShareId
-        || publication.shareId !== screenAudioShareId || publication.syncGroup !== syncGroup
-        || publication.kind !== 'audio' || publication.enabled !== false) {
-        throw new Error('Native SFU replacement audio publication acknowledgement changed its selected source or group.');
-      }
-      return publication;
-    }).finally(() => {
-      record.rebinding = null;
-      record.rebind = null;
-    });
-    // Retirement drains only the raw workflow, never this wrapper that may itself
-    // await retirement after failure or timeout.
-    record.rebinding = raw;
-    try {
-      return await boundedCleanup(raw, 'Native SFU audio rebind is still pending; ownership is retained.', this.timeoutMs);
-    } catch (error) {
-      abort();
-      try { await this.removeAudioSource(sourceId); }
-      catch (cleanupError) {
-        throw new AggregateError([error, cleanupError], 'Native SFU audio rebind and retirement failed; ownership is retained.');
-      }
-      throw error;
-    } finally { signal?.removeEventListener('abort', abort); }
-  }
-
-  assertRebindCurrent(record, transition) {
-    if (this.closing || !record.active || record.rebind !== transition || transition.abort.signal.aborted
-      || this.sources.get(record.sourceId) !== record || !transition.previousVideo.active
-      || this.sources.get(transition.previousVideo.sourceId) !== transition.previousVideo
-      || (transition.video && (!transition.video.active || this.sources.get(transition.video.sourceId) !== transition.video
-        || transition.video.shareId !== transition.shareId || transition.video.syncGroup !== transition.syncGroup))) throw cancelled();
-  }
-
-  async rebindVideo(record, transition) {
-    while (true) {
-      this.assertRebindCurrent(record, transition);
-      const video = [...this.sources.values()].find(candidate => candidate.kind === 'video' && candidate.shareId === transition.shareId);
-      if (video) {
-        transition.video = video;
-        this.assertRebindCurrent(record, transition);
-        await waitForSetup(video.opening, transition.abort.signal);
-        this.assertRebindCurrent(record, transition);
-        return video;
-      }
-      // Root reserves before WGC/native creation registers the selected source.
-      try {
-        await waitForSetup(new Promise(resolve => { transition.wake = resolve; }), transition.abort.signal);
-      } finally { transition.wake = null; }
-    }
-  }
-
   async drainSources() {
-    await boundedCleanup(Promise.allSettled([...this.sources.values()]
-      .flatMap(record => [record.opening, record.rebinding, record.retiring]).filter(Boolean)),
-    'Native SFU source work is still pending; ownership is retained.', this.timeoutMs);
+    await within(Promise.allSettled([...this.sources.values()]
+      .flatMap(record => [record.opening, record.retiring]).filter(Boolean)),
+    this.timeoutMs, 'Native SFU source work is still pending; ownership is retained.');
   }
 
   handleEvent(event) { return this.broker.handleNativeEvent(event); }
 
   async close() {
     this.closing = true;
-    for (const record of this.sources.values()) {
-      record.active = false;
-      record.rebind?.abort.abort(cancelled());
-    }
+    for (const record of this.sources.values()) record.active = false;
     await actualPromise(this.broker.close(), 'call closure');
     await this.drainSources();
     this.sources.clear();
@@ -260,10 +149,7 @@ class NativeSfuTransport {
 
   async finishAfterEngineClose(realClosePromise) {
     this.closing = true;
-    for (const record of this.sources.values()) {
-      record.active = false;
-      record.rebind?.abort.abort(cancelled());
-    }
+    for (const record of this.sources.values()) record.active = false;
     await actualPromise(this.broker.finishAfterEngineClose(realClosePromise), 'engine retirement');
     await this.drainSources();
     this.sources.clear();

@@ -1,17 +1,9 @@
 'use strict';
 
-async function boundedCleanup(promise, description, timeoutMs = 5000) {
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(description)), timeoutMs); }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
+/**
+ * Writes frames to a track writer with at most one write in flight and only the
+ * newest pending frame kept. Subclasses admit frames through queueFrame().
+ */
 class VideoFrameSink {
   constructor() {
     this.stopping = false;
@@ -23,7 +15,6 @@ class VideoFrameSink {
     this.errors = [];
     this.framesSubmitted = 0;
     this.bridgeBusyDrops = 0;
-    this.lastSourceTimestampUs = null;
   }
 
   discardPendingFrame() {
@@ -36,28 +27,6 @@ class VideoFrameSink {
   stopAccepting() {
     this.stopping = true;
     this.discardPendingFrame();
-  }
-
-  async acceptFrame(frame, timestampUs) {
-    if (!this.writer || this.stopping) {
-      frame.close();
-      return false;
-    }
-    if (!Number.isSafeInteger(timestampUs) || timestampUs < 0
-      || (this.lastSourceTimestampUs !== null && timestampUs <= this.lastSourceTimestampUs)) {
-      frame.close();
-      throw new Error('Non-monotonic native capture timestamp.');
-    }
-    this.lastSourceTimestampUs = timestampUs;
-    let stamped;
-    try {
-      // NV12 already carries its import timestamp; RGB needs opaque alpha metadata.
-      stamped = frame.format === 'NV12' && frame.timestamp === timestampUs
-        ? frame : new VideoFrame(frame, { timestamp: timestampUs, alpha: 'discard' });
-    } finally {
-      if (stamped !== frame) frame.close();
-    }
-    return this.queueFrame(stamped);
   }
 
   queueFrame(frame) {
@@ -117,4 +86,4 @@ class VideoFrameSink {
   }
 }
 
-module.exports = { VideoFrameSink, boundedCleanup };
+module.exports = { VideoFrameSink };

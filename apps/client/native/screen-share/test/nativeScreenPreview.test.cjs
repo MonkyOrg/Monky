@@ -8,7 +8,7 @@ const { NATIVE_SCREEN_PREVIEW_IPC, nativeScreenPreviewPacketSchema } = require('
 const { NativeScreenPreviewBridge, MAX_PACKETS, MAX_BYTES } = require('../runtime/nativeScreenPreviewBridge.cjs');
 const { EncodedPreviewRenderer, h264Codec, av1Codec } = require('../runtime/encodedPreviewRenderer.cjs');
 const { createNativeScreenPresentation } = require('../runtime/nativePresentationRenderer.cjs');
-const { within } = require('../runtime/nativeDeadline.cjs');
+const { within } = require('../runtime/asyncTools.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -364,7 +364,7 @@ test('real VideoService source replacement does not stop the preload-owned gener
   const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.ES2022, true);
   const declaration = source.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'VideoService');
   const method = declaration?.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === 'stopScreenShare');
-  assert.ok(method, 'Exercise the actual native/browser track ownership boundary.');
+  assert.ok(method, 'Exercise the actual native track ownership boundary.');
   const compiled = ts.transpileModule(`class Owner { ${method.getText(source)} }; Owner;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText;
@@ -382,11 +382,6 @@ test('real VideoService source replacement does not stop the preload-owned gener
   await f.controller.stop(f.scope.presentationId);
   assert.equal(f.track.readyState, 'ended');
   assert.equal(f.platform.decoders[0].state, 'closed');
-  let browserStops = 0;
-  const browserTrack = { stop() { browserStops++; } };
-  owner.screenStreams.set('browser', { getVideoTracks: () => [browserTrack], getTracks: () => [browserTrack] });
-  Owner.prototype.stopScreenShare.call(owner, 'browser');
-  assert.equal(browserStops, 1, 'Browser captures remain owned and stopped by VideoService.');
 });
 
 test('live quality never applies browser constraints to a borrowed native preview track', async () => {
@@ -397,19 +392,15 @@ test('live quality never applies browser constraints to a borrowed native previe
   const compiled = ts.transpileModule(`class Owner { ${method.getText(source)} }; Owner;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText;
-  const warnings = [], constraints = [];
+  const warnings = [];
   const Owner = vm.runInNewContext(compiled, { clientLog: { warn: (...values) => warnings.push(values) } });
   const native = { readyState: 'live', applyConstraints() { throw new Error('Native generator is not a browser capture device.'); } };
-  const browser = { readyState: 'live', async applyConstraints(value) { constraints.push(value); } };
   await Owner.prototype.applyQualityPreset.call({
     getProfile: () => ({ screenWidth: 1920, screenHeight: 1080, screenFps: 120 }),
     nativeScreenCaptures: new Map([['native', {}]]),
-    screenStreams: new Map([['native', { getVideoTracks: () => [native] }], ['browser', { getVideoTracks: () => [browser] }]]),
+    screenStreams: new Map([['native', { getVideoTracks: () => [native] }]]),
   }, 'CUSTOM');
   assert.deepEqual(warnings, []);
-  assert.equal(constraints.length, 1);
-  assert.equal(constraints[0].frameRate.max, 120);
-  assert.equal(browser.contentHint, 'motion');
   assert.equal(native.contentHint, undefined);
 });
 

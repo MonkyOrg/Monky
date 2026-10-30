@@ -5,7 +5,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { once } = require('node:events');
 const { setTimeout: delay } = require('node:timers/promises');
-const { within } = require('../runtime/nativeDeadline.cjs');
+const { within } = require('../runtime/asyncTools.cjs');
 const directory = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);
 assert.equal(process.platform, 'darwin');
 assert.ok(directory && path.isAbsolute(directory) && !fs.existsSync(directory), 'Use a new isolated artifact directory.');

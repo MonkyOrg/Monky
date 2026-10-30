@@ -10,7 +10,6 @@ import {
 import { networkClient } from '../core/NetworkClient';
 import { callClient, leaveCurrentCall } from '../core/serverConnection';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
-import { screenAudioService } from '../core/ScreenAudioService';
 import { chooseSharesToStop, screenShareChooser, stopChosenShares, type ScreenShareSelection } from './ScreenShareChooser';
 import { getActiveServerStore, serverStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
@@ -498,7 +497,7 @@ export class VoiceStageView {
 
     const btnScreen = document.getElementById('stage-btn-screen');
     if (btnScreen) {
-      const hasScreenAudio = voiceStore.hasScreenAudio || screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.hasScreenAudio;
       btnScreen.className = `btn btn-icon ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}`;
       btnScreen.title = voiceStore.isScreenSharing
         ? (hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare'))
@@ -521,7 +520,7 @@ export class VoiceStageView {
     const btnLeave = document.getElementById('stage-btn-leave') as HTMLButtonElement | null;
 
     if (btnStopShare) {
-      const hasScreenAudio = voiceStore.hasScreenAudio || screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.hasScreenAudio;
       btnStopShare.style.display = voiceStore.isScreenSharing ? 'inline-flex' : 'none';
       btnStopShare.title = hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare');
       btnStopShare.setAttribute('aria-haspopup', voiceStore.screenShareIds.length > 1 ? 'menu' : 'false');
@@ -534,7 +533,7 @@ export class VoiceStageView {
     const bannerWrapper = document.getElementById('stage-broadcast-banner-wrapper');
     if (bannerWrapper) {
       const isBroadcasting = voiceStore.isCameraOn || voiceStore.isScreenSharing;
-      const hasScreenAudio = voiceStore.hasScreenAudio || screenAudioService.getIsCapturing();
+      const hasScreenAudio = voiceStore.hasScreenAudio;
       // Only touch the DOM when the banner's content would actually change, so
       // the live-pulse animation isn't restarted on every state update (#70).
       const signature = isBroadcasting
@@ -2078,9 +2077,7 @@ export class VoiceStageView {
 
     if (!track) return null;
     if (isLocal) {
-      const getSenders = (): RTCRtpSender[] => isCamera
-        ? webRtcManager.getCameraSenders()
-        : tile.shareId ? webRtcManager.getScreenSendersForShare(tile.shareId) : [];
+      const getSenders = (): RTCRtpSender[] => isCamera ? webRtcManager.getCameraSenders() : [];
       const streams = await Promise.all(getSenders().map(async sender => {
         targets.add(sender);
         const endpoint = this.telemetryEndpoint(sender);
@@ -2435,8 +2432,6 @@ export class VoiceStageView {
       this.syncTelemetryMonitor();
     });
 
-    const u8 = appEvents.on('local.screen_audio_started', () => this.updateControlsUI());
-    const u9 = appEvents.on('local.screen_audio_stopped', () => this.updateControlsUI());
     const u10 = appEvents.on('overlay.state_changed', () => this.updateControlsUI());
     // Arming "open on leaving the stage" turns the overlay on without opening a
     // window, so the stage controls have to follow the setting too (#169).
@@ -2481,7 +2476,7 @@ export class VoiceStageView {
       (release?: ScreenPictureInPictureRelease) => this.syncPictureInPictureTile(release));
     const u27 = appEvents.on('voice.screen_watch_handoff',
       (handoff: { sessionId: string; fromShareId: string; shareId: string }) => this.refocusScreenHandoff(handoff));
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27, u28);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27, u28);
     const inactive = () => {
       if (this.windowInactive) return;
       this.windowInactive = true;

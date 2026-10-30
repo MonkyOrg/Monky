@@ -764,11 +764,11 @@ async function setupFooterSmoke() {
 
 async function setupStageSmoke() {
   const [{ VoiceStageView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
-    { participantManager: participants }, { appEvents }, { screenAudioService },
+    { participantManager: participants }, { appEvents },
     { overlayBridgeService }, { overlayConfigModal }, { soundboardModal }, { sessionManager }, { VideoDiagnosticsSampler }] = await Promise.all([
     import('/views/VoiceStageView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/EventBus.ts'),
-    import('/core/ScreenAudioService.ts'), import('/core/OverlayBridgeService.ts'),
+    import('/core/OverlayBridgeService.ts'),
     import('/views/OverlayConfigModal.ts'), import('/views/SoundboardModal.ts'),
     import('/core/SessionManager.ts'),
     import('/core/webrtc/videoDiagnostics.ts'),
@@ -802,14 +802,11 @@ async function setupStageSmoke() {
       screenShareIds: user === remote ? ['remote-share', 'remote-share-two'] : [],
     });
   }
-  let capturing = false;
   let overlayActive = false;
-  const originalCapturing = screenAudioService.getIsCapturing;
   const originalOverlayActive = overlayBridgeService.isActive;
   const originalOverlayOpen = overlayConfigModal.open;
   const originalSoundboardOpen = soundboardModal.open;
   const actions = { camera: 0, picker: 0, overlay: 0, soundboard: 0, stop: 0, leave: 0, fullscreen: 0 };
-  screenAudioService.getIsCapturing = () => capturing;
   overlayBridgeService.isActive = () => overlayActive;
   overlayConfigModal.open = () => { actions.overlay++; };
   soundboardModal.open = () => { actions.soundboard++; };
@@ -964,8 +961,8 @@ async function setupStageSmoke() {
     },
     async shareAndWatch() {
       voice.isCameraOn = true;
-      capturing = true;
       overlayActive = true;
+      voice.screenAudioShareIds = ['local-share'];
       voice.addScreenShare('local-share');
       await delay();
       await finishAnimations(['#stage-btn-camera', '#stage-btn-screen', '#stage-btn-overlay']
@@ -1074,7 +1071,6 @@ async function setupStageSmoke() {
       const stop = button('#stage-btn-stop-share');
       enter(stop);
       voice.isCameraOn = false;
-      capturing = false;
       voice.setScreenSharing(false);
       await delay();
       check(animations(stop).length === 0 && !stop.querySelector('.control-motion-decoration'),
@@ -1173,7 +1169,6 @@ async function setupStageSmoke() {
       await delay();
       check(animations(control).length === 0, 'Destroy removes motion listeners and state observer');
       offPicker();
-      screenAudioService.getIsCapturing = originalCapturing;
       overlayBridgeService.isActive = originalOverlayActive;
       overlayConfigModal.open = originalOverlayOpen;
       soundboardModal.open = originalSoundboardOpen;

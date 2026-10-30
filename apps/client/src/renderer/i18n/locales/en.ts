@@ -987,9 +987,6 @@ export const en: TranslationMap = {
   'screenShare.extraScreensMessage': 'You are already sharing {count} screens. Each extra screen uses more of your computer\'s processor, graphics card and upload bandwidth, and can make the call heavier. You can share up to {max} screens at once.',
   'screenShare.extraScreensConfirm': 'Share anyway',
   'screenShare.errorMessage': 'Could not start screen sharing: {error}',
-  'screenCodec.unsupported': 'The selected screen codec ({codec}) is not supported by this device or voice server. Choose another codec or Automatic; Monky will not substitute a different codec.',
-  'screenCodec.incompatible': 'The screen share could not negotiate the selected codec ({codec}) with a participant or voice server. Sharing was stopped instead of using a different codec. Choose a compatible codec or Automatic.',
-  'screenCodec.notApplied': 'The browser could not apply the selected screen codec ({codec}). Sharing was stopped; no fallback codec was used.',
   'screenCodec.reconnecting': 'Wait for the voice connection to finish reconnecting before sharing your screen.',
   'voiceReconnect.title': 'Reconnecting your voice call',
   'voiceReconnect.notice': 'The server changed from SFU to P2P. Your call will briefly disconnect and reconnect automatically to the same channel. Camera and screen sharing will stop; you can enable them again after reconnecting.',
@@ -2257,8 +2254,6 @@ export const en: TranslationMap = {
   'chatSound.none': 'Mute',
   'channelMenu.notifications': 'Message notifications',
   'channelMenu.markAsRead': 'Mark as read',
-  'screenAudio.unsupportedWindows': 'Screen audio capture is not supported on this Windows version (build 19041+ required).',
-  'screenAudio.noFrames': 'No audio frames were received. Native capture may have failed. Check that the selected app/screen is actually playing sound.',
   'keybind.space': 'Space',
 
   // ── Onboarding Wizard ────────────────────────────────────────────────

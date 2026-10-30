@@ -1,6 +1,6 @@
 'use strict';
 
-const { boundedCleanup } = require('./frameSink.cjs');
+const { within } = require('./asyncTools.cjs');
 const { isPresentationId } = require('./presentationRoute.cjs');
 const { TextureTransferSender } = require('./textureTransfer.cjs');
 
@@ -222,8 +222,8 @@ class NativePresentationBridge {
       this.drainWork = work;
       void work.then(() => { if (this.drainWork === work) this.drainWork = null; });
     }
-    await boundedCleanup(this.drainWork,
-      'Native presentation cleanup timed out; GPU leases remain owned.', this.drainTimeoutMs);
+    await within(this.drainWork,
+      this.drainTimeoutMs, 'Native presentation cleanup timed out; GPU leases remain owned.');
     await this.textureSender.close();
     return this.getStats();
   }

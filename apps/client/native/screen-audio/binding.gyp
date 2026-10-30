@@ -28,7 +28,6 @@
               }
             },
             "sources": [
-              "src/win/wasapi_loopback.cpp",
               "src/win/wasapi_capture.cpp",
               "src/win/wasapi_format.cpp",
               "src/packet_capture.cpp",
@@ -64,7 +63,7 @@
         [
           "OS=='mac'",
           {
-            "sources": ["src/mac/sc_capture.mm", "src/mac/window_owners.mm", "src/packet_capture.cpp", "src/mac/packet_source.mm"],
+            "sources": ["src/mac/window_owners.mm", "src/packet_capture.cpp", "src/mac/packet_source.mm"],
             "xcode_settings": {
               "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
               "GCC_ENABLE_CPP_RTTI": "YES",

@@ -18,26 +18,6 @@ function isSupported() {
   return binding.isSupported();
 }
 
-function start(options, callback) {
-  if (!binding) return { success: false, error: 'Native module not available' };
-  return binding.start(options, callback);
-}
-
-function stop() {
-  if (!binding) return { success: false };
-  return binding.stop();
-}
-
-function getLastError() {
-  if (!binding) return '';
-  return binding.getLastError();
-}
-
-function getStatus() {
-  if (!binding) return 0;
-  return binding.getStatus();
-}
-
 const { createPacketCaptureFactory } = require('./packet_capture');
 const createPacketCapture = createPacketCaptureFactory(binding, process.platform);
 function isPacketCaptureSupported() {
@@ -116,7 +96,7 @@ function setWindowResizeAspect(handle, ratio, extraWidth, extraHeight) {
 }
 
 module.exports = {
-  isSupported, isPacketCaptureSupported, start, stop, getLastError, getStatus, createPacketCapture,
+  isSupported, isPacketCaptureSupported, createPacketCapture,
   listWindowOwners, listWindows, restoreWindow, getWindowState, getProcessAncestry, getWindowOcclusion, startWindowFrameProbe,
   getWindowFrameProbe, stopWindowFrameProbe, getKeyboardLayout, listMonitors,
   getMonitorState, setWindowResizeAspect,

@@ -1,7 +1,7 @@
 'use strict';
 
 const { nativeScreenPreviewPacketSchema } = require('@monky/shared');
-const { boundedCleanup } = require('./frameSink.cjs');
+const { within, notifyObserver } = require('./asyncTools.cjs');
 
 function h264Codec(data) {
   for (let index = 0; index + 7 < data.length; index++) {
@@ -179,8 +179,7 @@ class EncodedPreviewRenderer {
   }
 
   report(error) {
-    try { this.onError(error); }
-    catch (observerError) { console.error('Local preview error observer failed:', observerError); }
+    notifyObserver('Local preview error observer', this.onError, error);
   }
 
   async stop() {
@@ -191,8 +190,8 @@ class EncodedPreviewRenderer {
       this.port.removeEventListener('messageerror', this.messageError);
       this.port.close(); this.port = null;
     }
-    await boundedCleanup(this.tail, 'The local preview decoder did not finish configuration.');
-    await boundedCleanup(Promise.all([...this.operations]), 'The local preview frames did not retire.');
+    await within(this.tail, 5000, 'The local preview decoder did not finish configuration.');
+    await within(Promise.all([...this.operations]), 5000, 'The local preview frames did not retire.');
   }
 }
 

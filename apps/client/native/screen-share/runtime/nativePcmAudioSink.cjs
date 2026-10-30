@@ -1,6 +1,6 @@
 'use strict';
 
-const { boundedCleanup } = require('./frameSink.cjs');
+const { within, notifyObserver } = require('./asyncTools.cjs');
 const { NativeAudioOutputClock } = require('./nativeAudioOutputClock.cjs');
 const PLAYOUT_CAPACITY_FRAMES = 3840;
 const PLAYOUT_TARGET_FRAMES = 2880;
@@ -118,8 +118,7 @@ class NativePcmAudioSink {
     this.errors.push(error);
     if (this.stopping) return;
     this.stopping = true;
-    try { this.onError(error); }
-    catch (observerError) { console.error('Native audio error observer failed:', observerError); }
+    notifyObserver('Native audio error observer', this.onError, error);
     void this.stop().catch(cleanupError => {
       this.errors.push(cleanupError);
       console.error('Native audio cleanup failed:', cleanupError);
@@ -284,8 +283,8 @@ class NativePcmAudioSink {
   async cleanup() {
     const failures = [];
     if (this.sinkWork) {
-      try { await boundedCleanup(Promise.allSettled([this.sinkWork]),
-        'Native output device change did not retire.', this.timeoutMs); }
+      try { await within(Promise.allSettled([this.sinkWork]),
+        this.timeoutMs, 'Native output device change did not retire.'); }
       catch (error) { failures.push(error); }
     }
     if (this.node && !this.portClosed) {
@@ -304,8 +303,8 @@ class NativePcmAudioSink {
       this.context.removeEventListener('statechange', this.onStateChange);
       this.context.removeEventListener('sinkchange', this.onSinkChange);
       try {
-        if (this.context.state !== 'closed') await boundedCleanup(this.context.close(),
-          'Native AudioContext close timed out; output ownership is retained.', this.timeoutMs);
+        if (this.context.state !== 'closed') await within(this.context.close(),
+          this.timeoutMs, 'Native AudioContext close timed out; output ownership is retained.');
         if (this.context.state !== 'closed') throw new Error('Native AudioContext did not prove closed output.');
         this.contextClosed = true;
       } catch (error) { failures.push(error); }

@@ -1,6 +1,6 @@
 'use strict';
 
-const { boundedCleanup } = require('./frameSink.cjs');
+const { within } = require('./asyncTools.cjs');
 const { NativeRtcCommands, isNativeRtcCommandsForEngine, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 
 const owners = new WeakMap();
@@ -9,11 +9,6 @@ const positive = value => Number.isSafeInteger(value) && value > 0;
 const nonnegative = value => Number.isSafeInteger(value) && value >= 0;
 const thenable = value => value !== null && value !== undefined && typeof value.then === 'function';
 const asError = value => value instanceof Error ? value : new Error(String(value));
-const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-};
 const aborted = () => {
   const error = new Error('Native audio output was stopped; a new output epoch is required.');
   error.name = 'AbortError';
@@ -61,7 +56,7 @@ class NativeAudioOutputOwner {
   #retiredThrough = 0;
   #engineCloseRequested = false;
   #engineClosed = false;
-  #closed = deferred();
+  #closed = Promise.withResolvers();
   #errors = [];
   #lastClockRejection = null;
   #counts = {
@@ -143,7 +138,7 @@ class NativeAudioOutputOwner {
     if (!positive(this.#lastEpoch + 1)) throw new Error('Native audio output epochs are exhausted.');
     const record = {
       epoch: ++this.#lastEpoch, config: null, phase: 'starting', ready: false, stopping: false, retired: false,
-      controller: new AbortController(), cancellation: deferred(), abortReason: null, externalSignal: signal,
+      controller: new AbortController(), cancellation: Promise.withResolvers(), abortReason: null, externalSignal: signal,
       externalAbort: null, rendererStarted: false, rendererStart: null, rendererStartSettled: false,
       rendererStartDrain: null, rendererRetired: true, rendererStop: null,
       nativeConfig: null, nativeConfigDrain: null, nativeConfigSettled: false, prepareWork: null,
@@ -366,7 +361,7 @@ class NativeAudioOutputOwner {
           record.queuedFeedback.resolve(false);
           this.#counts.coalescedFeedback++;
         }
-        const queued = { ...deferred(), payload: { ...payload } };
+        const queued = { ...Promise.withResolvers(), payload: { ...payload } };
         record.queuedFeedback = queued;
         return queued.promise;
       }
@@ -447,7 +442,7 @@ class NativeAudioOutputOwner {
       this.#assertConfigured(record);
       if (packet.sequence !== record.nextSequence || packet.firstPlayoutFrame !== record.nextPlayoutFrame
         || record.creditFrames < 480 || record.enqueues.size >= 4) throw new Error('Discontinuous, uncredited or over-capacity native PCM packet.');
-      const entry = deferred();
+      const entry = Promise.withResolvers();
       record.enqueues.add(entry);
       record.creditFrames -= 480;
       record.nextSequence++;
@@ -536,7 +531,7 @@ class NativeAudioOutputOwner {
       this.#markStopping(record, aborted());
     }
     const work = Promise.resolve().then(async () => {
-      const proof = boundedCleanup(realClosePromise, 'Native engine close proof timed out; ownership is retained.', this.#timeoutMs)
+      const proof = within(realClosePromise, this.#timeoutMs, 'Native engine close proof timed out; ownership is retained.')
         .then(() => {
           assertNativeRtcEngineClosed(this.#commands, this.#engine);
           this.#engineClosed = true;
@@ -588,9 +583,9 @@ class NativeAudioOutputOwner {
   }
 
   #duringStartup(record, work, description) {
-    return boundedCleanup(Promise.race([
+    return within(Promise.race([
       work, record.cancellation.promise.then(error => { throw error; }),
-    ]), description, this.#timeoutMs);
+    ]), this.#timeoutMs, description);
   }
 
   #requireDirect(result, record, phase) {
@@ -687,14 +682,14 @@ class NativeAudioOutputOwner {
   async #retireRenderer(record) {
     const first = this.#beginRendererStop(record);
     const results = await Promise.allSettled([
-      ...(first ? [boundedCleanup(first.work, 'Renderer output stop timed out; ownership is retained.', this.#timeoutMs)] : []),
-      boundedCleanup(record.rendererStartDrain, 'Renderer startup has not drained; output ownership is retained.', this.#timeoutMs),
+      ...(first ? [within(first.work, this.#timeoutMs, 'Renderer output stop timed out; ownership is retained.')] : []),
+      within(record.rendererStartDrain, this.#timeoutMs, 'Renderer startup has not drained; output ownership is retained.'),
     ]);
     if (record.rendererStartSettled && record.rendererStarted && !record.rendererRetired
       && first?.settled && !first.afterStart) {
       const final = this.#beginRendererStop(record);
       results.push(...await Promise.allSettled([
-        boundedCleanup(final.work, 'Late renderer output stop timed out; ownership is retained.', this.#timeoutMs),
+        within(final.work, this.#timeoutMs, 'Late renderer output stop timed out; ownership is retained.'),
       ]));
     }
     const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
@@ -704,13 +699,13 @@ class NativeAudioOutputOwner {
   async #retireNative(record) {
     if (this.#engineClosed) { this.#retireNativeState(record); return; }
     if (record.awaitingEngineClose) {
-      await boundedCleanup(this.#closed.promise, 'Complete native engine closure is not proven.', this.#timeoutMs);
+      await within(this.#closed.promise, this.#timeoutMs, 'Complete native engine closure is not proven.');
       this.#retireNativeState(record);
       return;
     }
     if (record.nativeConfig) {
-      await boundedCleanup(Promise.race([record.nativeConfigDrain, this.#closed.promise]),
-        'Native output configuration has not drained; ownership is retained.', this.#timeoutMs);
+      await within(Promise.race([record.nativeConfigDrain, this.#closed.promise]),
+        this.#timeoutMs, 'Native output configuration has not drained; ownership is retained.');
     }
     if (this.#engineClosed) { this.#retireNativeState(record); return; }
     if (!record.nativeAttempted || record.nativeRetired) return;
@@ -729,13 +724,13 @@ class NativeAudioOutputOwner {
         error => { attempt.settled = true; this.#report(error, 'native.stop', record.epoch); },
       );
     }
-    await boundedCleanup(Promise.race([record.nativeStop.work, this.#closed.promise]),
-      'Native stopOutput timed out; ownership is retained.', this.#timeoutMs);
+    await within(Promise.race([record.nativeStop.work, this.#closed.promise]),
+      this.#timeoutMs, 'Native stopOutput timed out; ownership is retained.');
   }
 
   async #drainEnqueues(record) {
-    const results = await boundedCleanup(Promise.allSettled([...record.enqueues].map(entry => entry.promise)),
-      'Renderer FIFO enqueues have not drained; ownership is retained.', this.#timeoutMs);
+    const results = await within(Promise.allSettled([...record.enqueues].map(entry => entry.promise)),
+      this.#timeoutMs, 'Renderer FIFO enqueues have not drained; ownership is retained.');
     const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
     if (failures.length) throw new AggregateError(failures, 'Renderer FIFO enqueue retirement failed.');
   }

@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { assertNativeScreenEndpointLocallyClosed } = require('./nativeEndpoint.cjs');
+const { notifyObserver } = require('./asyncTools.cjs');
 const { randomUUID } = require('node:crypto');
 const {
   getScreenShareProfile, messageReferenceSchema, nativeScreenSignalSchema, nativeScreenSourceSchema,
@@ -40,8 +41,7 @@ class NativeScreenPublisher {
   }
 
   observe(error, scope) {
-    try { this.onError(error, scope); }
-    catch (observerError) { console.error('Native screen publisher error observer failed:', observerError); }
+    notifyObserver('Native screen publisher error observer', this.onError, error, scope);
   }
 
   track(work) {

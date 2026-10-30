@@ -166,10 +166,9 @@ transmissão volta sozinha. Enquanto a janela transmitida estiver minimizada ou
 oculta, um aviso amarelo sobre a sua prévia no palco explica o motivo. Só você
 vê esse aviso.
 
-No caminho nativo, a última pessoa que para de assistir encerra também o
-pipeline de captura, encoder e envio daquele perfil, inclusive ao SFU.
-O anúncio da fonte permanece disponível para voltar a assistir. O caminho
-Chromium preserva sua captura/prévia e pode continuar enviando ao SFU.
+A última pessoa que para de assistir encerra também o pipeline de captura,
+encoder e envio daquele perfil, inclusive ao SFU. O anúncio da fonte permanece
+disponível para voltar a assistir.
 Sinalização, controle da conexão, voz e câmera podem continuar usando a rede.
 
 ### Compartilhamento nativo e qualidade do espectador

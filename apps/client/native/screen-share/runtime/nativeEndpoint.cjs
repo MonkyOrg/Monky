@@ -21,7 +21,7 @@ const { NativePcmCaptureBridge } = require('./nativePcmCaptureBridge.cjs');
 const { createNativeAudioOutput } = require('./nativeAudioOutput.cjs');
 const { NativeAudioReceiveAdapter } = require('./nativeAudioReceiveAdapter.cjs');
 const { assertNativeAudioOutputStopped } = require('./nativeAudioOutputOwner.cjs');
-const { within } = require('./nativeDeadline.cjs');
+const { within, notifyObserver } = require('./asyncTools.cjs');
 const { rtpReports, decoderObservations, decoderFailureObservations } = require('./nativeVideoDiagnostics.cjs');
 
 const cancelled = () => new DOMException('The native screen endpoint was retired.', 'AbortError');
@@ -183,8 +183,7 @@ class NativeScreenEndpoint {
     if (this.reported.has(error)) return;
     this.reported.add(error);
     if (this.errors.length < 32) this.errors.push(error);
-    try { this.onError(error, context); }
-    catch (observerError) { console.error('Native screen error observer failed:', observerError); }
+    notifyObserver('Native screen error observer', this.onError, error, context);
   }
 
   observe(state) {

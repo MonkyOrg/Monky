@@ -7,7 +7,7 @@ const { spawn } = require('node:child_process');
 const { createInterface } = require('node:readline');
 const { randomBytes } = require('node:crypto');
 const { CaptureBridge, loadCaptureRuntime } = require('..');
-const { within } = require('../runtime/nativeDeadline.cjs');
+const { within } = require('../runtime/asyncTools.cjs');
 
 const artifacts = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);
 const contracts = process.argv.find(value => value.startsWith('--contracts='))?.slice('--contracts='.length)
