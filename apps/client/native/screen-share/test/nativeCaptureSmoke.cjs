@@ -179,7 +179,7 @@ async function runPreview(runtime) {
 
 async function runDemandControllers(runtime) {
   const channelId = randomUUID();
-  const source = { shareId: 'shared-profile', instanceId: randomUUID(), audio: false,
+  const source = { shareId: 'shared-profile', instanceId: randomUUID(), codec, audio: false,
     video: { width: 1920, height: 1080, fps: controllerFps, maxBitrateKbps: 20000 } };
   const sfu = mode === 'sfu' ? await createSfuFixture(channelId) : null;
   activeSfu = sfu;
@@ -204,6 +204,12 @@ async function runDemandControllers(runtime) {
         for (const producer of sfu.producers()) trackDelivery(recipient.addRemoteProducer(producer));
     });
   };
+  // The publisher creates its producer only when demand arrives, after accepting the
+  // viewer; the real server announces such late producers the same way.
+  sfu?.onProducer(producer => {
+    for (const subscription of subscriptions.values())
+      if (!subscription.closed) trackDelivery(subscription.addRemoteProducer(producer));
+  });
   const common = {
     runtime, textures: sharedTexture, mode, publisherSessionId: 'publisher', channelId,
     onDiagnostic: error => console.warn('Controller native diagnostic:', error.message),

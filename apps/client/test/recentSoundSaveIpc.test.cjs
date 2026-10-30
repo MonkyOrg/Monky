@@ -3,43 +3,25 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const ts = require('typescript');
-const vm = require('node:vm');
-const shared = require('@monky/shared');
+const { loadMain, fakeIpcMain } = require('./mainModules.cjs');
 
 test('recent sound save validates audio, supports confirmed overwrite and tears down', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-recent-sound-ipc-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const handlers = new Map();
+  const ipc = fakeIpcMain();
+  const handlers = ipc.handlers;
   const dialogs = [];
   let selection = { canceled: false, filePath: path.join(directory, 'saved.wav') };
-  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'recentSoundSaveIpc.ts'), 'utf8');
-  const compilerOptions = { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true };
-  const output = ts.transpileModule(source, { compilerOptions }).outputText;
-  const senders = {};
-  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ipcSender.ts'), 'utf8'),
-    { compilerOptions }).outputText, { exports: senders });
-  const exports = {};
-  vm.runInNewContext(output, {
-    exports, Buffer, console,
-    require: (name) => {
-      if (name === '@monky/shared') return shared;
-      if (name === 'node:fs/promises' || name === 'node:path') return require(name);
-      if (name === './ipcSender') return senders;
-      if (name === 'electron') return {
-        app: { getPath: () => directory },
-        dialog: { showSaveDialog: async (_window, options) => { dialogs.push(options); return selection; } },
-        ipcMain: {
-          handle: (channel, handler) => handlers.set(channel, handler),
-          removeHandler: channel => handlers.delete(channel),
-        },
-      };
-      throw new Error(`Unexpected import: ${name}`);
-    },
-  });
-  const contents = { mainFrame: {} };
+  const quiet = { globals: { console: { ...console, warn: () => {} } } };
+  const { registerRecentSoundSaveIpc } = loadMain('recentSoundSaveIpc', { ...quiet, packages: { electron: {
+    app: { getPath: () => directory },
+    dialog: { showSaveDialog: async (_window, options) => { dialogs.push(options); return selection; } },
+  } } });
+  const { IpcRegistry } = loadMain('ipc/registry', quiet);
+  const contents = { mainFrame: {}, isDestroyed: () => false };
+  const registry = new IpcRegistry(ipc, { main: () => contents, overlay: () => null });
   const owner = { sender: contents, senderFrame: contents.mainFrame };
-  const dispose = exports.setupRecentSoundSaveIpc({ webContents: contents, isDestroyed: () => false },
+  registerRecentSoundSaveIpc(registry, { webContents: contents, isDestroyed: () => false },
     (name) => path.basename(name).replace(/[^\w.-]/g, '_'));
   const handler = handlers.get('app:save-recent-sound');
   assert.equal(typeof handler, 'function');
@@ -69,6 +51,6 @@ test('recent sound save validates audio, supports confirmed overwrite and tears 
   assert.equal((await handler(owner, { ...input, mimeType: 'text/html' })).success, false);
   assert.equal((await handler(owner, { ...input, base64: 'not base64' })).success, false);
   assert.equal(dialogs.length, beforeInvalid);
-  dispose();
+  registry.dispose();
   assert.equal(handlers.size, 0);
 });

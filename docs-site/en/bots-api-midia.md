@@ -111,7 +111,7 @@ export interface BotScreenBridge {
 
 ## `BotScreenClient` {#botscreenclient}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/BotScreenClient.ts#L15)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/BotScreenClient.ts#L17)
 
 ```ts
 export class BotScreenClient {
@@ -304,7 +304,7 @@ export interface BotVoiceAudioReceiver {
 
 ## `BotVoiceConnection` {#botvoiceconnection}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/voice/BotVoiceConnection.ts#L32)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/voice/BotVoiceConnection.ts#L34)
 
 ```ts
 export class BotVoiceConnection {

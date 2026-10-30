@@ -13,6 +13,7 @@ import { showConfirm } from '../views/Dialog';
 import { activityIconSrc } from '../utils/activityIcon';
 import { setButtonLoading } from '../utils/buttonLoading';
 import { escapeHtml } from '../utils/html';
+import { screenShareFailureMessage } from '../utils/screenShareFailure';
 import { cancelSurfaceMotion } from '../utils/surfaceMotion';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { t } from '../i18n';
@@ -262,7 +263,7 @@ export class GameShareSuggestion {
       await startGameShare(sourceId, shareId => this.claimShare(shareId));
     } catch (error: unknown) {
       console.warn('[GameShare] Could not stream the game', error);
-      showErrorToast(t('gameShare.failed', { error: error instanceof Error ? error.message : String(error) }), 7000);
+      showErrorToast(screenShareFailureMessage(error, 'game-start'), 7000);
     }
   }
 
@@ -273,7 +274,7 @@ export class GameShareSuggestion {
       await stopLocalScreenShares({ shareIds: [shareId] });
     } catch (error: unknown) {
       console.warn('[GameShare] Could not stop the game stream', error);
-      showErrorToast(t('gameShare.stopFailed', { error: error instanceof Error ? error.message : String(error) }), 7000);
+      showErrorToast(screenShareFailureMessage(error, 'game-stop'), 7000);
     }
   }
 

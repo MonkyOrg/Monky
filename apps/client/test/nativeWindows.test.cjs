@@ -7,6 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 const shared = require('@monky/shared');
+const { loadMain } = require('./mainModules.cjs');
 const filename = path.resolve(__dirname, '..', 'src', 'main', 'nativeWindows.ts');
 const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -39,56 +40,52 @@ function fixture(module = moduleFor()) {
     setState: value => { state = value; } };
 }
 
+/** The real picker catalog (ipc/desktopSourcesIpc.ts) over `sources`, with Electron and the native capture modeled. */
 function desktopEnumerator(sources, { previewError, platform = 'win32', chromiumSources = [],
   isScreenShareSource = () => false } = {}) {
-  const handlerFile = path.resolve(__dirname, '..', 'src', 'main', 'ipcHandlers.ts');
-  const source = ts.createSourceFile(handlerFile, fs.readFileSync(handlerFile, 'utf8'), ts.ScriptTarget.Latest, true);
-  let declaration;
-  const find = node => {
-    if (ts.isFunctionDeclaration(node) && node.name?.text === 'enumerateDesktopSources') declaration = node;
-    ts.forEachChild(node, find);
-  };
-  find(source);
-  assert.ok(declaration, 'The actual IPC enumeration implementation must be tested.');
-  const body = ts.transpileModule(declaration.getText(source), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText;
   const calls = [], warnings = [], logs = [], captures = [];
-  const native = moduleFor();
-  const load = vm.runInThisContext(`(function(nativeSources, nativeMonitorDesktopSources,
-    nativeWindowIdFromSourceId, isGhostWindow, desktopCapturer, screen, resolveMacAppIcons,
-    resolveWindowsAppIcons, process, console, options, NativeThumbnailCapturer, loadThumbnailRuntime, overlayManager,
-    getMacSources, browserOcclusionEngine) {
-      let desktopSourcesFrozen = false, nativeThumbnails;
-      ${body}; return enumerateDesktopSources; })`, { filename: handlerFile });
-  const enumerate = load(sources, native.nativeMonitorDesktopSources, native.nativeWindowIdFromSourceId,
-    native.isGhostWindow, {
-      async getSources(options) {
-        calls.push(options);
-        if (platform === 'win32') throw new Error('Chromium must not enumerate or capture Windows picker sources');
-        return chromiumSources;
+  const { DesktopSourceCatalog } = loadMain('ipc/desktopSourcesIpc', {
+    packages: {
+      electron: {
+        // Windows reads executable icons natively; none exist in this model.
+        app: { getFileIcon: async () => ({ isEmpty: () => true }) },
+        desktopCapturer: {
+          async getSources(options) {
+            calls.push(options);
+            if (platform === 'win32') throw new Error('Chromium must not enumerate or capture Windows picker sources');
+            return chromiumSources;
+          },
+        },
+        dialog: {}, shell: {}, systemPreferences: {},
       },
-    }, {
-      getAllDisplays: () => assert.fail('Metadata listing must not inspect preview displays.'),
-      screenToDipRect: () => assert.fail('Metadata listing must not convert preview coordinates.'),
-    }, async () => new Map(), async () => new Map(), { platform, pid: 999 },
-    { warn: (...args) => warnings.push(args) }, { clientLogger: { write: entry => logs.push(entry) } },
-    class {
-      async capture(target) {
-        captures.push(target);
-        if (previewError) throw previewError;
-        return Buffer.from('owned-native-image');
-      }
-    }, () => ({}), { isScreenShareSource }, () => ({
-      listSources: async () => chromiumSources.map(({ id, name }) => ({
-        id, name, type: id.startsWith('window:') ? 'window' : 'screen', thumbnailDataUrl: '', thumbnailState: 'pending',
-      })),
-      thumbnail: async id => {
-        captures.push(id);
-        return Buffer.from('owned-native-image');
+      '@monky/screen-share': {
+        NativeThumbnailCapturer: class {
+          async capture(target) {
+            captures.push(target);
+            if (previewError) throw previewError;
+            return Buffer.from('owned-native-image');
+          }
+        },
+        loadThumbnailRuntime: () => ({}),
+        createMacScreenProvider: () => ({
+          listSources: async () => chromiumSources.map(({ id, name }) => ({
+            id, name, type: id.startsWith('window:') ? 'window' : 'screen', thumbnailDataUrl: '', thumbnailState: 'pending',
+          })),
+          thumbnail: async id => {
+            captures.push(id);
+            return Buffer.from('owned-native-image');
+          },
+        }),
       },
-    }), () => null);
-  return { enumerate, calls, warnings, logs, captures };
+      '@monky/screen-audio': {},
+    },
+    local: { i18n: { mt: key => key }, nativeWindows: moduleFor() },
+    globals: { process: { platform, pid: 999 }, console: { ...console, warn: (...args) => warnings.push(args) } },
+  });
+  const catalog = new DesktopSourceCatalog({
+    nativeSources: sources, isExcluded: isScreenShareSource, logger: { write: entry => logs.push(entry) },
+  });
+  return { enumerate: (...args) => catalog.enumerate(...args), calls, warnings, logs, captures };
 }
 
 test('Windows lists screens and windows and captures native previews without consulting Chromium', async () => {

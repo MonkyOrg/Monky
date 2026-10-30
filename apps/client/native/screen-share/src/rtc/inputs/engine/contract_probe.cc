@@ -6,28 +6,22 @@
 #include "receive_mid_checks.h"
 #include "receive_route_checks.h"
 #include "receiver_policy_checks.h"
+#include "receive_frame_policy_checks.h"
 #include "capture_clock_checks.h"
-#include "encoded_video.h"
+#include "encoded_video_checks.h"
 #include "av1_encoder_checks.h"
-#include "node/input_leases_checks.h"
 #include "node/event_queue_checks.h"
 #include "audio/foundation_checks.h"
 #include "audio/operational_checks.h"
-#if defined(_WIN32)
-#include "mf_rtc_timing_checks.h"
-#include "mf_rtc_configuration_checks.h"
-#include "mf_rtc_encoder_diagnostic_checks.h"
-#include "mf_rtc_encoder_submit_checks.h"
-#endif
 #include "rtc_send_diagnostics_checks.h"
 #if defined(_WIN32)
-#include "encoder_diagnostics_checks.h"
 #include "mf_rtc_decoder_diagnostic_checks.h"
 #include "mf_rtc_decoder_submit_checks.h"
 #include "decoder_diagnostics_checks.h"
 #endif
 #include "rtc_receive_diagnostics_checks.h"
 #include "rtc_receive_sdk_checks.h"
+#include "surface_recycler_checks.h"
 #if defined(_WIN32)
 #include "adapter_policy_probe.h"
 #endif
@@ -200,6 +194,7 @@ int main() {
     group("receiveMids", [] { parameters::RunReceiveMidChecks(Check); });
     group("receiveRoutes", [] { rtc::RunReceiveRouteChecks(Check); });
     group("receiverLifecycle", [] { rtc::receiver_policy::RunReceiverPolicyChecks(Check); });
+    group("receiveFramePolicy", [] { rtc::RunReceiveFramePolicyChecks(Check); });
     group("captureClock", [] { rtc::RunCaptureClockChecks(Check); });
     group("externalH264", [] { rtc::RunEncodedVideoChecks(Check); });
     group("softwareAV1", [] { rtc::RunAv1EncoderChecks(Check); });
@@ -273,20 +268,12 @@ int main() {
         Reject([&] { (void)rtc::peer_detail::SfuVideoCodecOptions(encoding); }, MONKY_ENGINE_INVALID);
       }
     });
-    group("inputLeases", [] { monky::native_rtc::node::RunInputLeaseChecks(Check); });
     group("nodeEventQueue", [] { monky::native_rtc::node::RunEventQueueChecks(Check); });
     group("audioFoundations", [] { rtc::audio::RunAudioFoundationChecks(Check); });
     group("audioOperationalPolicies", [] { rtc::audio::RunAudioOperationalChecks(Check); });
+    group("rtcSendDrops", [] { rtc::RunRtcSendDiagnosticChecks(Check); });
     // The Media Foundation adapters exist only on Windows; every other group also runs on macOS.
 #if defined(_WIN32)
-    group("encoderScheduling", [] { monky::native_rtc::mf::RunEncoderSchedulingChecks(Check); });
-    group("encoderConfiguration", [] { monky::native_rtc::mf::RunEncoderConfigurationChecks(Check); });
-    group("encoderDiagnostics", [] { monky::native_rtc::mf::RunEncoderDiagnosticChecks(Check); });
-    group("encoderSubmitBranches", [] { monky::native_rtc::mf::RunEncoderSubmitBranchChecks(Check); });
-#endif
-    group("rtcSendDrops", [] { rtc::RunRtcSendDiagnosticChecks(Check); });
-#if defined(_WIN32)
-    group("encoderDiagnosticJson", [] { rtc::RunEncoderJsonChecks(Check); });
     group("decoderDiagnostics", [] { monky::native_rtc::mf::RunDecoderDiagnosticChecks(Check); });
     group("decoderScheduling", [] { monky::native_rtc::mf::RunDecoderSchedulingChecks(Check); });
     group("decoderSubmitBranches", [] { monky::native_rtc::mf::RunDecoderSubmitBranchChecks(Check); });
@@ -295,6 +282,7 @@ int main() {
 #endif
     group("rtcReceiveDiagnostics", [] { rtc::RunRtcReceiveDiagnosticChecks(Check); });
     group("rtcReceiveSdk", [] { rtc::RunRtcReceiveSdkChecks(Check); });
+    group("surfaceRecycler", [] { monky::screen_video::RunSurfaceRecyclerChecks(Check); });
 #if defined(_WIN32)
     group("adapterPolicies", [] { monky::native_rtc::VerifyDeviceFreeAdapterPolicies(Check); });
 #endif
@@ -307,8 +295,6 @@ int main() {
       Check(sizeof(MonkyEngineEvent) == 48 && offsetof(MonkyEngineEvent, json) == 32,
             "C event POD layout changed");
       Check(sizeof(MonkyEngineCallbacks) == 24, "C callback POD layout changed");
-      Check(sizeof(MonkyEngineInputFrame) == 48 && offsetof(MonkyEngineInputFrame, texture_nt_handle) == 16,
-            "Input HANDLE POD layout changed");
       Check(sizeof(MonkyEngineFrameCom) == 72, "COM frame POD layout changed");
       Check(sizeof(MonkyEngineSharedFrame) == 64 &&
             offsetof(MonkyEngineSharedFrame, texture_nt_handle) == 8 &&

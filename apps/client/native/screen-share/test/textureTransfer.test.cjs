@@ -296,7 +296,7 @@ for (const surface of [false, true]) test(`presentation releases ${surface ? 'IO
   let releaseMain = 0, resolveRtc;
   const rtcRetired = new Promise(resolve => { resolveRtc = resolve; });
   const bridge = new NativePresentationBridge({
-    request() {}, submitFrame() {},
+    request() {},
     releaseFrame(frameId, reason) {
       assert.equal(f.gpuFinished, true);
       assert.equal(releaseMain, 1);

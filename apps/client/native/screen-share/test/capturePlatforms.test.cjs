@@ -261,6 +261,8 @@ test('source specializations preserve pinned vendors and bind before stock Game 
       assert.match(bound, /wc->window == monky_selected_window\(\) && \(wc->capture_winrt == NULL\)/u);
       assert.match(bound, /wc->window != monky_selected_window\(\)/u);
       assert.match(bound, /out int hwnd, out int process_id, out int process_creation/u);
+      assert.match(bound, /ms_fill_window_list\(p, INCLUDE_MINIMIZED, NULL\);/u);
+      assert.doesNotMatch(bound, /EXCLUDE_MINIMIZED/u);
     } else assert.match(bound, /monky_monitor_matches\(capture->handle, capture->monitor_id, capture->method\)/u);
     assert.throws(() => specialize(original.replace(name === 'game-capture'
       ? 'return open_process_proc(desired_access, inherit_handle, process_id);'
@@ -292,4 +294,14 @@ test('WGC cadence specialization covers creation and device recovery without cha
   assert.match(cadence, /IsPropertyPresent/u);
   assert.match(cadence, /video\.fps_den \/ video\.fps_num \/ 2/u);
   assert.match(cadence, /session\.MinUpdateInterval/u);
+});
+
+test('both Windows helpers resolve monitors through the shared identity and never re-read interfaces per frame', () => {
+  const read = relative => fs.readFileSync(path.join(__dirname, '..', 'src', ...relative.split('/')), 'utf8');
+  // #762: the thumbnail kept its own monitor resolution and re-read every interface while it waited for a frame.
+  for (const helper of ['capture', 'thumbnail']) {
+    assert.match(read(`${helper}/contract.h`), /#include "\.\.\/win\/monitorIdentity\.h"/u, helper);
+    assert.doesNotMatch(read(`${helper}/host.cpp`), /EnumDisplayDevicesW|EDD_GET_DEVICE_INTERFACE_NAME/u, helper);
+  }
+  assert.doesNotMatch(read('thumbnail/host.cpp'), /VerifyUnique/u);
 });

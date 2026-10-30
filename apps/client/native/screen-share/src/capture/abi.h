@@ -42,8 +42,6 @@ enum class Bounds : int { Stretch = 1, ScaleInner = 2 };
 enum class EncoderType : int { Audio = 0, Video = 1 };
 enum class PropertyType : int { Boolean = 1, Integer = 2, Text = 4, List = 6 };
 enum class ComboFormat : int { Integer = 1, String = 3 };
-enum class WindowSearch : int { IncludeMinimized = 0 };
-enum class WindowPriority : int { Title = 1 };
 enum class TaskType : int { Graphics = 1, Destroy = 3 };
 
 struct Vec2 { float x; float y; };
@@ -231,8 +229,6 @@ struct Api {
   bool(__cdecl* calldata_get_string)(const CallData*, const char*, const char**) = nullptr;
   void(__cdecl* bfree)(void*) = nullptr;
   void(__cdecl* ms_build_window_strings)(const char*, char**, char**, char**) = nullptr;
-  HWND__*(__cdecl* ms_find_window)(WindowSearch, WindowPriority, const char*, const char*, const char*) = nullptr;
-  HWND__*(__cdecl* ms_find_window_top_level)(WindowSearch, WindowPriority, const char*, const char*, const char*) = nullptr;
 };
 
 static_assert(sizeof(void*) == 8 && sizeof(bool) == 1 && sizeof(int) == 4);

@@ -71,7 +71,7 @@ function fixture(t) {
     capabilities: { abiVersion: 2, contractRevision: 8, externallyEncodedH264: true, externallyEncodedAV1: true,
       encodedInputCopied: true, encodedFeedback: true, encodedProfileLevelId: '4d003c',
       encodedBitrateCeilingBps: 80000000, pairedCaptureClock: true, p2pReceiverRouting: true,
-      inputLeaseCorrelation: true, decodedOutput: 'NV12_IOSURFACE_LEASE', runtimeQualified: false,
+      decodedOutput: 'NV12_IOSURFACE_LEASE', runtimeQualified: false,
       hardwareExecutionObserved: null, inputFormat: null, inputTimebase: 'mach-host-us' },
   };
   fs.writeFileSync(path.join(directory, 'mac-capture-build.json'), JSON.stringify(capture));

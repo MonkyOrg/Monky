@@ -45,9 +45,6 @@ std::optional<AdapterDiagnostic> Protect(Function&& function) {
     return std::nullopt;
   } catch (const AdapterError& error) {
     return Diagnostic(error.code, error.what(), error.status, error.hresult);
-  } catch (const sv::EncoderError& error) {
-    return Diagnostic(error.code.c_str(), error.what(),
-                      WEBRTC_VIDEO_CODEC_ENCODER_FAILURE, error.hresult);
   } catch (const sv::DecoderError& error) {
     return Diagnostic(error.code.c_str(), error.what(),
                       WEBRTC_VIDEO_CODEC_ERROR, error.hresult);
@@ -83,7 +80,6 @@ struct WorkerSlot {
   std::atomic<unsigned> thread_id{0};
   std::atomic<bool> start_failed{false};
   std::mutex snapshot_mutex;
-  std::optional<EncoderRuntimeSnapshot> encoder;
   std::optional<DecoderRuntimeSnapshot> decoder;
 };
 
@@ -107,8 +103,6 @@ class SharedState : public std::enable_shared_from_this<SharedState> {
   std::shared_ptr<NativeLease> Lookup(
       const webrtc::scoped_refptr<webrtc::VideoFrameBuffer>& buffer) const;
 
-  std::atomic<std::uint64_t> encoded_access_units{0};
-  std::atomic<std::uint64_t> rtc_rejected_access_units{0};
   std::atomic<std::uint64_t> decoded_gpu_frames{0};
   std::atomic<std::uint64_t> i420_readbacks{0};
   std::atomic<std::uint64_t> i420_failures{0};
@@ -192,27 +186,23 @@ class FenceNotification {
 
 using codec_policy::CallbackGate;
 
+// One immutable decoded output. It pins its worker, device and MF core until
+// every RTC/readback reference is gone.
 struct NativeLease {
   NativeLease(std::shared_ptr<Worker> owner,
-              std::shared_ptr<const sv::GpuNv12Frame> frame,
-              std::shared_ptr<const sv::GpuDecodedFrame> decoded,
+              std::shared_ptr<const sv::GpuDecodedFrame> frame,
               winrt::com_ptr<ID3D11Device> device,
               winrt::com_ptr<ID3D11DeviceContext4> context,
-              sv::VideoFrameRect visible,
-              std::shared_ptr<sv::MfH264Decoder> decoder = nullptr);
+              std::shared_ptr<sv::MfH264Decoder> decoder);
   ~NativeLease();
   NativeLease(const NativeLease&) = delete;
   NativeLease& operator=(const NativeLease&) = delete;
   std::shared_ptr<Worker> owner;
-  std::shared_ptr<const sv::GpuNv12Frame> frame;
-  std::shared_ptr<const sv::GpuDecodedFrame> decoded;
+  std::shared_ptr<const sv::GpuDecodedFrame> frame;
   std::shared_ptr<sv::MfH264Decoder> decoder;
   winrt::com_ptr<ID3D11Device> device;
   winrt::com_ptr<ID3D11DeviceContext4> context;
   const sv::VideoFrameRect visible;
-  std::shared_ptr<Budget::Ticket> admission;
-  std::shared_ptr<const sv::GpuNv12Frame> Alias(
-      const std::shared_ptr<NativeLease>& self) const;
 };
 
 webrtc::scoped_refptr<webrtc::VideoFrameBuffer> MakeNativeBuffer(
@@ -240,14 +230,10 @@ class Worker : public std::enable_shared_from_this<Worker> {
   void Report(AdapterDiagnostic diagnostic, bool terminal = false) const;
 
  protected:
-  void RecordEncoderSnapshot(EncoderRuntimeSnapshot snapshot);
   void RecordDecoderSnapshot(DecoderRuntimeSnapshot snapshot);
   bool PostMedia(std::function<void()> function,
-                 EncoderInputDiagnosticTicket* encoder_diagnostic = nullptr,
-                 DecoderInputDiagnosticTicket* decoder_diagnostic = nullptr);
-  std::size_t CancelQueuedMedia(
-      std::optional<EncoderInputReleaseReason> reason = std::nullopt,
-      std::optional<DecoderInputReleaseReason> decoder_reason = std::nullopt);
+                 DecoderInputDiagnosticTicket* diagnostic = nullptr);
+  std::size_t CancelQueuedMedia(std::optional<DecoderInputReleaseReason> reason = std::nullopt);
   void Fail(AdapterDiagnostic diagnostic);
   HANDLE command_event() const { return command_event_.get(); }
   virtual void Initialize() {}
@@ -260,12 +246,7 @@ class Worker : public std::enable_shared_from_this<Worker> {
   virtual HANDLE CoreEvent() const = 0;
   virtual void DestroyCore() noexcept = 0;
   virtual void RevokeCallbacks() = 0;
-  virtual sv::I420Image ReadFrame(const NativeLease& lease,
-                                 ID3D11Fence* completion) = 0;
-  void WaitForFence(ID3D11Fence* fence, std::uint64_t value,
-                    ID3D11Device* device);
-  bool SourceReady(const std::shared_ptr<NativeLease>& lease,
-                   const std::shared_ptr<Budget::Ticket>& admission);
+  virtual sv::I420Image ReadFrame(const NativeLease& lease) = 0;
 
  private:
   friend struct DecoderMappingQueueChecksAccess;
@@ -274,17 +255,10 @@ class Worker : public std::enable_shared_from_this<Worker> {
     std::function<void()> function;
     // Borrowed from the input already owned by function; never dereference after
     // dispatch, when function may have transferred/destroyed that input.
-    EncoderInputDiagnosticTicket* encoder_diagnostic = nullptr;
-    DecoderInputDiagnosticTicket* decoder_diagnostic = nullptr;
+    DecoderInputDiagnosticTicket* diagnostic = nullptr;
   };
   struct ReadbackJob;
   struct ReadbackRetirement;
-  struct SourceFenceRetirement {
-    std::shared_ptr<NativeLease> lease;
-    std::shared_ptr<Budget::Ticket> admission;
-    SteadyClock::time_point waiting_since;
-    FenceNotification notification;
-  };
   static unsigned __stdcall Entry(void* argument);
   void Run();
   bool PostReadback(std::function<void()> function);
@@ -310,7 +284,6 @@ class Worker : public std::enable_shared_from_this<Worker> {
   bool closing_ = false;
   std::shared_ptr<Budget> readback_budget_;
   std::vector<std::shared_ptr<ReadbackRetirement>> readback_retirements_;
-  std::vector<SourceFenceRetirement> source_fence_retirements_;
   std::optional<SteadyClock::time_point> readback_watchdog_;
 };
 
@@ -322,31 +295,6 @@ using codec_policy::SupportedFormats;
 using codec_policy::IsSupportedLevel;
 using codec_policy::Bt709Limited;
 using codec_policy::IsBt709Limited;
-
-using codec_policy::EncoderSetup;
-EncoderSetup MakeEncoderSetup(const webrtc::VideoCodec& codec,
-                             const webrtc::VideoEncoder::Settings& settings,
-                             NegotiatedH264 negotiated,
-                             const AdapterOptions& options);
-struct EncoderRates {
-  std::uint32_t bitrate = 0;
-  double fps = 0;
-};
-EncoderRates ValidateRates(
-    const webrtc::VideoEncoder::RateControlParameters& parameters,
-    const EncoderSetup& setup);
-
-class SourceRateLimiter {
- public:
-  explicit SourceRateLimiter(double fps) : interval_us_(1000000.0L / fps) {}
-  void SetFps(double fps);
-  void Reset();
-  bool Accept(std::int64_t timestamp_us);
- private:
-  long double interval_us_;
-  std::optional<long double> next_due_us_;
-  std::optional<std::int64_t> last_seen_us_, last_accepted_us_;
-};
 
 class RtpTimeline {
  public:
@@ -370,8 +318,6 @@ std::optional<sv::DecoderConfig> PlanDecoderSession(
     std::uint32_t maximum_width, std::uint32_t maximum_height,
     std::uint32_t maximum_in_flight, const AdapterOptions& options);
 
-std::unique_ptr<webrtc::VideoEncoderFactory> MakeEncoderFactory(
-    const std::shared_ptr<SharedState>& state);
 std::unique_ptr<webrtc::VideoDecoderFactory> MakeDecoderFactory(
     const std::shared_ptr<SharedState>& state);
 

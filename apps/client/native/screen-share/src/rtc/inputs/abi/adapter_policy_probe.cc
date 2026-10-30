@@ -2,9 +2,7 @@
 #include "h264_level_checks.h"
 #include "mf_rtc_internal.h"
 
-#include <cmath>
 #include <cstring>
-#include <limits>
 #include <stdexcept>
 #include <thread>
 
@@ -34,16 +32,15 @@ void VerifyFormatsAndIdleOwnership() {
   RunH264LevelChecks(Check);
   const mf::AdapterOptions options;
   auto bundle = mf::CreateFactoryBundle(options);
-  const auto formats = bundle.encoder_factory->GetSupportedFormats();
-  Check(formats.size() == 2 && bundle.decoder_factory->GetSupportedFormats() == formats,
-        "Encoder/decoder factories disagree on the two H264 profiles");
+  Check(!bundle.encoder_factory, "Media Foundation advertised a transmitter it no longer implements");
+  const auto formats = bundle.decoder_factory->GetSupportedFormats();
+  Check(formats.size() == 2 && formats == policy::SupportedFormats(options.maximum_h264_level),
+        "The decoder factory does not advertise exactly the two H264 profiles");
   for (const auto& format : formats) {
-    Check(bundle.encoder_factory->QueryCodecSupport(format, std::nullopt).is_supported &&
-          bundle.decoder_factory->QueryCodecSupport(format, false).is_supported,
+    Check(bundle.decoder_factory->QueryCodecSupport(format, false).is_supported,
           "Advertised native H264 format is unsupported");
-    Check(!bundle.encoder_factory->QueryCodecSupport(format, "L1T2").is_supported &&
-          !bundle.decoder_factory->QueryCodecSupport(format, true).is_supported,
-          "Unimplemented temporal/reference scaling was advertised");
+    Check(!bundle.decoder_factory->QueryCodecSupport(format, true).is_supported,
+          "Unimplemented reference scaling was advertised");
     auto invalid = format;
     invalid.parameters["packetization-mode"] = "0";
     Check(!policy::ParseFormat(invalid, 52), "Packetization mode zero was accepted");
@@ -63,20 +60,19 @@ void VerifyFormatsAndIdleOwnership() {
       "Unconstrained baseline was silently mapped to constrained baseline");
   const auto snapshot = bundle.context->Snapshot();
   Check(snapshot.live_workers == 0 && snapshot.native_buffers == 0 &&
-        snapshot.encoded_access_units == 0 && snapshot.rtc_rejected_access_units == 0 &&
         snapshot.decoded_gpu_frames == 0 &&
-        snapshot.i420_readbacks == 0 && snapshot.encoders.empty() && !snapshot.hardware_execution_observed &&
+        snapshot.i420_readbacks == 0 && snapshot.decoders.empty() && !snapshot.hardware_execution_observed &&
         bundle.context->TakeDiagnostics().empty() &&
         bundle.context->WaitForIdle(std::chrono::milliseconds::zero()),
         "Factory-only policy probe unexpectedly started native work");
-  Check(!bundle.context->GetGpuFrame(nullptr) && !bundle.context->GetDecodedFrame(nullptr),
+  Check(!bundle.context->GetDecodedFrame(nullptr),
         "A missing buffer was represented as a real GPU lease");
   auto invalid = options;
   invalid.maximum_workers = 0;
   Reject([&] { mf::CreateFactoryBundle(invalid); }, "ERR_RTC_OPTIONS");
 }
 
-void VerifyRateAndTimestampPolicies() {
+void VerifySetupAndTimestampPolicies() {
   webrtc::VideoCodec codec;
   codec.codecType = webrtc::kVideoCodecH264;
   codec.width = 1920;
@@ -90,64 +86,12 @@ void VerifyRateAndTimestampPolicies() {
   codec.spatialLayers[0].numberOfTemporalLayers = 1;
   const webrtc::VideoEncoder::Settings settings(
       webrtc::VideoEncoder::Capabilities(false), 4, 1200);
-  const auto setup = policy::MakeEncoderSetup(
-      codec, settings, {screen_video::H264Profile::ConstrainedBaseline, 51}, {});
+  const auto setup = codec_policy::MakeEncoderSetup(
+      codec, settings, {screen_video::H264Profile::ConstrainedBaseline, 51}, 8);
   Check(setup.core.level == 51 && setup.core.fps == 120 &&
         setup.initial_bitrate == 60000000 && setup.core.profile ==
             screen_video::H264Profile::ConstrainedBaseline,
-        "1080p120 policy does not map to the qualified MF configuration");
-  webrtc::VideoEncoder::RateControlParameters rate;
-  rate.framerate_fps = 120;
-  Check(rate.bitrate.SetBitrate(0, 0, 60000000), "Cannot set bounded bitrate allocation");
-  Check(policy::ValidateRates(rate, setup).bitrate == 60000000,
-        "Live MF rate policy discarded the requested bitrate");
-  rate.bitrate = webrtc::VideoBitrateAllocation();
-  rate.framerate_fps = 0;
-  Check(policy::ValidateRates(rate, setup).bitrate == 0, "Zero bitrate did not pause admission");
-  rate.framerate_fps = -1;
-  Check(policy::ValidateRates(rate, setup).fps == 120,
-        "RTC's unavailable framerate target did not use the InitEncode ceiling");
-  for (const auto fps : {120.001, 121.0, 240.0, 1000.0}) {
-    rate.framerate_fps = fps;
-    Check(policy::ValidateRates(rate, setup).fps == 120,
-          "A transient input-cadence estimate bypassed or rejected the configured ceiling");
-  }
-  rate.framerate_fps = 59.94;
-  Check(policy::ValidateRates(rate, setup).fps == 59.94,
-        "A legitimate lower fractional target was replaced by the configured maximum");
-  rate.framerate_fps = std::numeric_limits<double>::denorm_min();
-  Reject([&] { policy::ValidateRates(rate, setup); }, "ERR_RTC_FRAMERATE");
-  rate.framerate_fps = std::numeric_limits<double>::infinity();
-  Reject([&] { policy::ValidateRates(rate, setup); }, "ERR_RTC_FRAMERATE");
-  rate.framerate_fps = std::numeric_limits<double>::quiet_NaN();
-  Reject([&] { policy::ValidateRates(rate, setup); }, "ERR_RTC_FRAMERATE");
-  rate.framerate_fps = 120;
-  Check(rate.bitrate.SetBitrate(0, 1, 1000000), "Cannot construct rejected rate-layer input");
-  Reject([&] { policy::ValidateRates(rate, setup); }, "ERR_RTC_RATE_LAYERS");
-
-  policy::SourceRateLimiter jittered(120);
-  for (std::int64_t frame = 0; frame < 7200; ++frame) {
-    const auto timestamp = 1000000 + frame * 1000000 / 120 + (frame % 2 ? 2500 : -2500);
-    Check(jittered.Accept(timestamp), "Source jitter caused systematic 120FPS policy drops");
-  }
-  policy::SourceRateLimiter bounded(120), fractional(59.94);
-  std::size_t accepted = 0, fractional_accepted = 0;
-  for (std::int64_t frame = 0; frame < 2400; ++frame) {
-    const auto timestamp = frame * 1000000 / 240;
-    accepted += bounded.Accept(timestamp);
-    fractional_accepted += fractional.Accept(timestamp);
-    // Include the production limiter's one-microsecond timestamp rounding.
-    Check(accepted <= static_cast<std::size_t>((timestamp + 1) * 120 / 1000000 + 2),
-          "Rate limiter accrued more than one extra scheduling credit");
-  }
-  Check(accepted >= 1199 && accepted <= 1201 &&
-        fractional_accepted >= 599 && fractional_accepted <= 601,
-        "Integer/fractional rates did not preserve their bounded long-run deadlines");
-  bounded.Reset();
-  bounded.SetFps(60);
-  Check(bounded.Accept(11000000), "Rate policy did not resume after reset");
-  Reject([&] { bounded.Accept(11000000); }, "ERR_RTC_SOURCE_TIMESTAMP");
-  Reject([&] { bounded.Accept(9007199254740992ll); }, "ERR_RTC_SOURCE_TIMESTAMP");
+        "1080p120 policy does not map to the qualified H264 configuration");
   policy::RtpTimeline timeline;
   Check(timeline.Push(0xfffffff0u) == 0 && timeline.Push(0x20u) == 533,
         "RTP wraparound lost the original 90kHz timeline");
@@ -203,33 +147,33 @@ void VerifyPureOwnership() {
   const auto first_slot = state->ReserveWorker(), second_slot = state->ReserveWorker();
   {
     std::lock_guard lock(first_slot->snapshot_mutex);
-    first_slot->encoder = mf::EncoderRuntimeSnapshot{};
-    first_slot->encoder->session_id = 71;
-    first_slot->encoder->configured.fps = 120;
-    first_slot->encoder->requested_fps = 30;
-    first_slot->encoder->core.outputs = 5;
+    first_slot->decoder = mf::DecoderRuntimeSnapshot{};
+    first_slot->decoder->session_id = 71;
+    first_slot->decoder->configured.fps = 120;
+    first_slot->decoder->capability_fps_hint = 30;
+    first_slot->decoder->core.gpuFrames = 5;
   }
   {
     std::lock_guard lock(second_slot->snapshot_mutex);
-    second_slot->encoder = mf::EncoderRuntimeSnapshot{};
-    second_slot->encoder->session_id = 72;
-    second_slot->encoder->core.outputs = 9;
+    second_slot->decoder = mf::DecoderRuntimeSnapshot{};
+    second_slot->decoder->session_id = 72;
+    second_slot->decoder->core.gpuFrames = 9;
   }
   auto observed = state->Snapshot();
-  Check(observed.encoders.size() == 2 && observed.encoders[0].session_id == 71 &&
-        observed.encoders[1].session_id == 72 && observed.encoders[0].configured.fps == 120 &&
-        observed.encoders[0].requested_fps == 30 && observed.encoders[0].core.outputs == 5 &&
+  Check(observed.decoders.size() == 2 && observed.decoders[0].session_id == 71 &&
+        observed.decoders[1].session_id == 72 && observed.decoders[0].configured.fps == 120 &&
+        observed.decoders[0].capability_fps_hint == 30 && observed.decoders[0].core.gpuFrames == 5 &&
         !observed.hardware_execution_observed,
         "Per-worker observation mixed configured rate, actual counters or hardware qualification");
-  observed.encoders[0].core.outputs = 99;
-  Check(state->Snapshot().encoders[0].core.outputs == 5,
+  observed.decoders[0].core.gpuFrames = 99;
+  Check(state->Snapshot().decoders[0].core.gpuFrames == 5,
         "A snapshot reader mutated the worker's diagnostic state");
   first_slot->start_failed.store(true);
   const auto remaining = state->Snapshot();
-  Check(remaining.encoders.size() == 1 && remaining.encoders[0].session_id == 72,
+  Check(remaining.decoders.size() == 1 && remaining.decoders[0].session_id == 72,
         "Retired worker diagnostics were retained or removed a different worker");
   second_slot->start_failed.store(true);
-  Check(state->Snapshot().encoders.empty(), "Worker-bound diagnostic storage outlived its slots");
+  Check(state->Snapshot().decoders.empty(), "Worker-bound diagnostic storage outlived its slots");
 }
 
 using Bytes = std::vector<std::uint8_t>;
@@ -432,7 +376,7 @@ void VerifyDeviceFreeAdapterPolicies(void (*check)(bool, const char*)) {
     ~RestoreCheckSink() { check_sink = previous; }
   } restore{std::exchange(check_sink, check)};
   VerifyFormatsAndIdleOwnership();
-  VerifyRateAndTimestampPolicies();
+  VerifySetupAndTimestampPolicies();
   VerifyPureOwnership();
   VerifyAdaptiveDecoderSessions();
   VerifyFenceNotificationRecovery();

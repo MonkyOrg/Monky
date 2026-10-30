@@ -4,6 +4,7 @@ import { soundboardService, type SoundItem } from '../core/SoundboardService';
 import { t } from '../i18n';
 import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
 import { escapeHtml } from '../utils/html';
+import { reportError, useAppValidation } from '../utils/feedback';
 import { enableBackdropClose } from '../utils/modal';
 import { SoundboardEditorPlayer } from './SoundboardEditorPlayer';
 import { SoundboardTimeline } from './SoundboardTimeline';
@@ -79,6 +80,8 @@ export class SoundboardEditor {
       if (signal.aborted) return;
       const channels = Array.from({ length: decoded.numberOfChannels }, (_, index) => decoded.getChannelData(index));
       const form = backdrop.querySelector<HTMLFormElement>('[data-editor-form]')!;
+      // A missing copy name is explained in the app's language, not in the browser's balloon.
+      useAppValidation(form, signal);
       const fieldset = form.querySelector('fieldset')!;
       const input = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
       const timeline = new SoundboardTimeline(backdrop.querySelector<HTMLElement>('[data-editor-timeline]')!, decoded, () => update());
@@ -119,8 +122,8 @@ export class SoundboardEditor {
         seconds => timeline.setPlaybackTime(seconds),
         error => {
           if (signal.aborted) return;
-          status.setAttribute('role', error ? 'alert' : 'status');
-          status.textContent = error instanceof SoundboardLibraryError ? error.message : error ? t('soundboard.previewFailed') : '';
+          status.textContent = '';
+          if (error) reportError(error instanceof SoundboardLibraryError ? error.message : t('soundboard.previewFailed'));
         },
       );
       this.player = player;
@@ -186,8 +189,8 @@ export class SoundboardEditor {
           if (!signal.aborted) close();
         } catch (error: unknown) {
           if (!signal.aborted) {
-            status.setAttribute('role', 'alert');
-            status.textContent = error instanceof SoundboardLibraryError ? error.message : t('soundboard.fileError.io_failed');
+            status.textContent = '';
+            reportError(error instanceof SoundboardLibraryError ? error.message : t('soundboard.fileError.io_failed'));
           }
         } finally {
           busy = false;

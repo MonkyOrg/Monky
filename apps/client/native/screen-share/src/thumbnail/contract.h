@@ -7,8 +7,10 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include "../win/monitorIdentity.h"
 
 namespace monky::thumbnail {
+namespace win = ::monky::win;
 inline constexpr std::size_t kMaximumPngBytes = 1024 * 1024;
 inline constexpr std::uint64_t kMaximumPixelBytes = 256 * 1024 * 1024;
 inline constexpr std::uint64_t kDeadlineMs = 3000;
@@ -49,9 +51,8 @@ inline std::int32_t Coordinate(std::wstring_view text) {
 struct Arguments {
   bool window = false;
   std::uint64_t hwnd = 0, creation = 0;
-  std::uint32_t pid = 0, width = 0, height = 0, maxWidth = 0, maxHeight = 0;
-  std::int32_t left = 0, top = 0;
-  std::wstring deviceId, deviceName;
+  std::uint32_t pid = 0, maxWidth = 0, maxHeight = 0;
+  win::MonitorIdentity monitor;
 };
 inline Arguments Parse(const std::vector<std::wstring_view>& values) {
   Require(!values.empty());
@@ -67,18 +68,12 @@ inline Arguments Parse(const std::vector<std::wstring_view>& values) {
     result.maxHeight = static_cast<std::uint32_t>(Unsigned(values[5], 360));
   } else {
     Require(values[0] == L"--monitor" && values.size() == 9);
-    result.deviceId = values[1]; result.deviceName = values[2];
-    Require(result.deviceId.starts_with(L"\\\\?\\DISPLAY#") && result.deviceId.size() > 12 &&
-        result.deviceId.size() < 128 && result.deviceName.starts_with(L"\\\\.\\DISPLAY") &&
-        result.deviceName.size() > 11 && result.deviceName.size() < 32);
-    for (const auto value : result.deviceId) Require(value >= 0x20 && value <= 0x7e);
-    Require(Unsigned(std::wstring_view(result.deviceName).substr(11), UINT32_MAX) > 0);
-    result.left = Coordinate(values[3]); result.top = Coordinate(values[4]);
-    result.width = static_cast<std::uint32_t>(Unsigned(values[5], 32768));
-    result.height = static_cast<std::uint32_t>(Unsigned(values[6], 32768));
-    Require(result.width && result.height &&
-        static_cast<std::int64_t>(result.left) + result.width <= INT32_MAX &&
-        static_cast<std::int64_t>(result.top) + result.height <= INT32_MAX);
+    auto& monitor = result.monitor;
+    monitor.deviceId = values[1]; monitor.deviceName = values[2];
+    monitor.x = Coordinate(values[3]); monitor.y = Coordinate(values[4]);
+    monitor.width = static_cast<std::uint32_t>(Unsigned(values[5], 32768));
+    monitor.height = static_cast<std::uint32_t>(Unsigned(values[6], 32768));
+    Require(win::ValidMonitorIdentity(monitor));
     result.maxWidth = static_cast<std::uint32_t>(Unsigned(values[7], 640));
     result.maxHeight = static_cast<std::uint32_t>(Unsigned(values[8], 360));
   }

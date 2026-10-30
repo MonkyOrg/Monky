@@ -36,9 +36,10 @@ if (!process.versions.electron) {
   return;
 }
 
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const { createMacScreenProvider, loadRuntime } = require('..');
-const { setupNativeScreenSharingIpc } = require('../../../dist-electron/main/nativeScreenSharing.js');
+const { registerNativeScreenSharingIpc } = require('../../../dist-electron/main/nativeScreenSharing.js');
+const { IpcRegistry, windowContents } = require('../../../dist-electron/main/ipc/registry.js');
 const sourcePid = Number(process.argv.find(value => value.startsWith('--source-pid='))?.slice(13));
 const sourceWindow = Number(process.argv.find(value => value.startsWith('--source-window='))?.slice(16));
 assert.ok(Number.isSafeInteger(sourcePid) && sourcePid > 0 && Number.isSafeInteger(sourceWindow) && sourceWindow > 0);
@@ -78,7 +79,8 @@ void (async () => {
     }
     return result;
   })()`);
-  service = setupNativeScreenSharingIpc(window, (id, kind) => provider.resolveTarget(id, kind));
+  service = registerNativeScreenSharingIpc(new IpcRegistry(ipcMain, { main: () => windowContents(window), overlay: () => null }),
+    { window, resolveSource: (id, kind) => provider.resolveTarget(id, kind) });
   const command = value => window.webContents.executeJavaScript(`nativeCaptureSmoke.command(${JSON.stringify(value)})`);
   const callId = randomUUID();
   await command({ action: 'join', callId, sessionId: 'owned-publisher', channelId: 'owned-channel',

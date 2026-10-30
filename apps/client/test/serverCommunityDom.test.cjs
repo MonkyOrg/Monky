@@ -22,6 +22,7 @@ if (!process.versions.electron) {
   });
 } else {
   const { app, BrowserWindow } = require('electron');
+  const { recordFeed } = require('./fixtures/feedRecorder.cjs');
   app.on('window-all-closed', () => {});
   app.setPath('userData', process.env.MONKY_COMMUNITY_PROFILE);
   let vite, browser, timeout;
@@ -76,6 +77,7 @@ if (!process.versions.electron) {
         features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
       });
       const inviteModule = '/@fs/' + path.resolve(root, '..', '..', 'packages', 'shared', 'src', 'serverInvites.ts').replaceAll('\\', '/');
+      await browser.webContents.executeJavaScript(`window.recordFeed = ${recordFeed}; void 0`);
       await browser.webContents.executeJavaScript(`window.communityRegression = (${regression.toString()})(${JSON.stringify(locale)}, ${JSON.stringify(inviteModule)}); void 0`);
       for (;;) {
         const step = await browser.webContents.executeJavaScript('window.communityRegression.next().catch(error => ({ failure: error.stack || String(error) }))', true);
@@ -83,6 +85,8 @@ if (!process.versions.electron) {
         if (step.done) { console.log(`Community DOM (${locale}): ${step.value} checks`); break; }
         if (process.env.MONKY_COMMUNITY_TRACE) console.log(`Community step (${locale}): ${step.value}`);
         if (['event-step-reduced-motion', 'event-step-motion-enabled',
+          'poll-step-reduced-motion', 'poll-step-motion-enabled',
+          'form-step-reduced-motion', 'form-step-motion-enabled',
           'live-action-reduced-motion', 'live-action-motion-enabled',
           'chat-entry-reduced-motion', 'chat-entry-motion-enabled'].includes(step.value)) {
           await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
@@ -147,6 +151,29 @@ if (!process.versions.electron) {
           browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
           browser.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
           browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+          await browser.webContents.executeJavaScript('window.communityKeyDelivery');
+          await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        }
+        if (step.value === 'keyboard-tab' || step.value === 'keyboard-shift-tab') {
+          // A native Tab moves focus as the browser does; a dispatched event would not move it at all.
+          const modifiers = step.value === 'keyboard-shift-tab' ? ['shift'] : [];
+          browser.focus();
+          browser.webContents.focus();
+          await browser.webContents.executeJavaScript(`window.communityKeyDelivery = new Promise((resolve, reject) => {
+            const received = event => {
+              if (!event.isTrusted || event.key !== 'Tab') return;
+              clearTimeout(timer);
+              window.removeEventListener('keyup', received, true);
+              resolve();
+            };
+            const timer = setTimeout(() => {
+              window.removeEventListener('keyup', received, true);
+              reject(new Error('Native Tab was not delivered to ' + document.activeElement?.outerHTML));
+            }, 5000);
+            window.addEventListener('keyup', received, true);
+          }); void 0`);
+          browser.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab', modifiers });
+          browser.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab', modifiers });
           await browser.webContents.executeJavaScript('window.communityKeyDelivery');
           await browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
         }
@@ -221,7 +248,7 @@ if (!process.versions.electron) {
                   expanded: root?.querySelector('[data-audience-toggle]')?.getAttribute('aria-expanded'),
                   value: search?.value, focused: document.activeElement === search,
                   searchBox: box && [box.left, box.top, box.width, box.height].map(Math.round),
-                  stepScroll: document.querySelector('[data-poll-step-viewport]')?.scrollTop };
+                  stepScroll: document.querySelector('[data-poll-viewport]')?.scrollTop };
               })()`).catch(stateError => String(stateError));
               throw new Error(`${error.message} ${JSON.stringify(state)}`);
             });
@@ -276,6 +303,7 @@ async function* regression(locale, inviteModule) {
   const { ServerCommunityView } = await import('/views/ServerCommunityView.ts');
   const { openNativePollWizard } = await import('/views/NativePollWizard.ts');
   const { imageCarouselNavigationButton, moveImageCarousel, renderImageCarouselEditor } = await import('/views/ImageCarousel.ts');
+  const { renderAttachments } = await import('/views/chat/channelMessage.ts');
   const { serverRailCallIcon } = await import('/views/ServerRailView.ts');
   const { ForumView } = await import('/views/ForumView.ts');
   const { openImageCropper, openImageCropperBatch } = await import('/views/ImageCropModal.ts');
@@ -456,6 +484,8 @@ async function* regression(locale, inviteModule) {
       } finally { clearTimeout(timeout); }
     }
   };
+  // A click as a mouse gives it: `detail` counts the clicks of one gesture, 2 for the second of a double click.
+  const clickWithCount = (button, detail) => button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail }));
   const initiallyDisabled = document.createElement('button');
   initiallyDisabled.disabled = true;
   setButtonLoading(initiallyDisabled, true);
@@ -935,7 +965,8 @@ async function* regression(locale, inviteModule) {
   'Sending disables the live action submit button and moves focus to the form title instead of losing it');
   await flush();
   check(!document.querySelector('[data-live-submit]').disabled, 'Failed form response restores controls');
-  check(document.querySelector('[data-community-error]:not([hidden])'), 'Form failure is visible');
+  check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.getAttribute('role') === 'alert' && !document.querySelector('[data-community-error]'),
+    'Form failure is explained in the alert toast, not in the layout');
   check(document.activeElement === actionWizard.querySelector('.live-action-step > h2'),
     'After a failed send, focus stays on the form title');
   document.querySelector('[data-live-submit]').click();
@@ -1368,7 +1399,7 @@ async function* regression(locale, inviteModule) {
   await flush();
   const refreshedLoss = t('poll.editLossChanged', { option: 'Yes', count: 3 });
   check(calls.filter(call => call.type === 'POLL_EDIT').at(-1)?.payload.expectedRevision === 0
-    && editWizard.querySelector('[data-community-error]')?.textContent === t('poll.editChanged')
+    && document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('poll.editChanged'))
     && editWizard.querySelector('.native-poll-edit-summary--loss')?.textContent.includes(refreshedLoss)
     && editWizard.querySelector('[data-poll-option]') === null,
   'Votes cast while editing are never discarded unseen: the wizard reloads them and shows the new effects');
@@ -1552,7 +1583,7 @@ async function* regression(locale, inviteModule) {
   check(document.querySelectorAll('.native-poll-image-editor .image-carousel-dot').length === 2,
     'Dropping multiple images crops and adds every supported file to the carousel');
   document.querySelector('[data-poll-duration]').closest('.native-poll-number-control')
-    .querySelector('[data-poll-number-step="1"]').click();
+    .querySelector('[data-number-step="1"]').click();
   check(document.querySelector('[data-poll-duration]').value === '25',
     'The custom duration increment control updates the numeric value');
   input('[data-poll-duration]', '');
@@ -1567,7 +1598,7 @@ async function* regression(locale, inviteModule) {
   check(pollAudience.querySelector('[data-audience-toggle]').getAttribute('aria-expanded') === 'false'
     && pollAudience.querySelector('[data-audience-popup]').hidden,
   'Enabling private poll visibility reveals the audience field without opening its dropdown');
-  await settleScroll(document.querySelector('[data-poll-step-viewport]'));
+  await settleScroll(document.querySelector('[data-poll-viewport]'));
   pollAudience.querySelector('[data-audience-toggle]').click();
   // Measured where the dropdown rests, after its entrance motion.
   await flush();
@@ -1652,8 +1683,16 @@ async function* regression(locale, inviteModule) {
   check(Math.abs(pollPreviewImage.left - pollPreviewCard.left) <= 3
     && Math.abs(pollPreviewImage.right - pollPreviewCard.right) <= 3,
   'Poll preview images fill the card from edge to edge');
-  document.querySelector('[data-poll-submit]').click();
+  check(document.querySelector('[data-poll-submit]').disabled,
+    'Publish waits for the preview to slide in');
   await flush();
+  // Publishing from the keyboard: a real Enter on the focused button, which the double-click guard lets through.
+  const pollsBeforeEnter = calls.filter(call => call.type === 'POLL_CREATE').length;
+  document.querySelector('[data-poll-submit]').focus();
+  yield 'keyboard-enter';
+  await flush();
+  check(calls.filter(call => call.type === 'POLL_CREATE').length === pollsBeforeEnter + 1,
+    'A real Enter on Publish publishes the poll');
   const creation = calls.filter(call => call.type === 'POLL_CREATE').at(-1);
   check(creation.payload.maxVoters === 2 && creation.payload.durationMinutes === undefined
     && creation.payload.liveAction && creation.payload.allowMultiple && creation.payload.options.length === 3
@@ -1690,6 +1729,104 @@ async function* regression(locale, inviteModule) {
   'The live-action switch is unavailable with the exact reason when server activities are disabled');
   disabledLiveWizard.close(true);
   server.communityEventsEnabled = true;
+  // The three wizards share one frame: the stepper and the footer stay while the steps slide.
+  const shellWizard = openNativePollWizard(client, server, 'text');
+  const shellFooter = shellWizard.element.querySelector('.event-wizard-footer');
+  const shellNext = shellWizard.element.querySelector('[data-poll-next]');
+  const shellViewport = shellWizard.element.querySelector('[data-poll-viewport]');
+  check(document.activeElement === shellWizard.element.querySelector('[data-poll-question]'),
+    'The poll wizard opens with focus on its first field');
+  input('[data-poll-question]', 'Shell poll');
+  input('[data-poll-option][data-option-index="0"]', 'Yes');
+  input('[data-poll-option][data-option-index="1"]', 'No');
+  shellNext.click();
+  const slideKeyframes = () => shellViewport.getAnimations({ subtree: true })
+    .map(animation => animation.effect.getKeyframes()[0].transform);
+  check(slideKeyframes().includes('translateX(100%)') && slideKeyframes().length === 2
+    && shellViewport.querySelector('[data-poll-step="0"][data-ui-closing][inert][aria-hidden=true]')
+    && shellViewport.firstElementChild.matches('[data-poll-step="1"]'),
+  'Next slides the content step out while the appearance step comes in from the right');
+  check(shellWizard.element.querySelector('.event-wizard-footer') === shellFooter && shellNext.isConnected
+    && shellNext.disabled && document.activeElement === shellViewport.querySelector('[data-poll-step="1"] h2'),
+  'The footer stays, Next waits for the slide and focus moves to the title of the new step');
+  await flush();
+  check(!shellNext.disabled && !shellViewport.querySelector('[data-ui-closing]'),
+    'The slide lands without leaving the old step behind, and Next works again');
+  yield 'keyboard-tab';
+  check(document.activeElement === shellViewport.querySelector('[data-poll-step="1"] [data-carousel-dropzone]'),
+    `Tab from the title of a new step goes on to its first field: ${document.activeElement?.outerHTML.slice(0, 120)}`);
+  yield 'keyboard-shift-tab';
+  check(document.activeElement === shellNext,
+    `Shift+Tab from the first field wraps to the last control of the wizard: ${document.activeElement?.outerHTML.slice(0, 120)}`);
+  shellNext.click();
+  check(shellNext.hasAttribute('data-poll-submit') && !shellNext.hasAttribute('data-poll-next')
+    && shellNext.textContent.trim() === t('poll.publish'),
+  'On the last step the same button publishes');
+  await flush();
+  shellWizard.element.querySelector('[data-poll-back]').click();
+  check(slideKeyframes().includes('translateX(-100%)'), 'Back slides the other way');
+  await flush();
+  yield 'poll-step-reduced-motion';
+  shellWizard.element.querySelector('[data-poll-back]').click();
+  check(shellViewport.getAnimations({ subtree: true }).length === 0 && shellViewport.childElementCount === 1
+    && shellViewport.querySelector('[data-poll-step="0"]') && !shellNext.disabled
+    && shellWizard.element.querySelector('[data-poll-question]').value === 'Shell poll',
+  'With reduced motion the step changes at once, keeping the draft');
+  // The footer stays put, so the second click of a double click lands on the button the first one
+  // just changed. Without motion nothing holds the buttons back: that click itself must not count.
+  const shellBack = shellWizard.element.querySelector('[data-poll-back]');
+  const shellStep = () => Number(shellViewport.firstElementChild?.dataset.pollStep);
+  const pollCreations = () => calls.filter(call => call.type === 'POLL_CREATE').length;
+  const pollsBeforeDoubleClicks = pollCreations();
+  clickWithCount(shellNext, 1);
+  clickWithCount(shellNext, 2);
+  check(shellStep() === 1 && shellNext.hasAttribute('data-poll-next') && !shellNext.disabled,
+    `With reduced motion, a double click on Next moves one step, not two: step ${shellStep()}`);
+  clickWithCount(shellNext, 1);
+  check(shellStep() === 2 && shellNext.hasAttribute('data-poll-submit') && !shellNext.disabled,
+    'With reduced motion, the preview is ready to publish as soon as it shows');
+  clickWithCount(shellNext, 2);
+  await flush();
+  check(pollCreations() === pollsBeforeDoubleClicks && shellStep() === 2 && !shellWizard.signal.aborted,
+    'With reduced motion, the second click of a double click on Next does not publish the preview it brought up');
+  clickWithCount(shellBack, 1);
+  clickWithCount(shellBack, 2);
+  check(shellStep() === 1, `A double click on Back also moves one step: step ${shellStep()}`);
+  yield 'poll-step-motion-enabled';
+  clickWithCount(shellNext, 1);
+  await flush();
+  check(shellStep() === 2 && !shellNext.disabled && !shellViewport.querySelector('[data-ui-closing]'),
+    'With motion, the preview lands and Publish works again');
+  clickWithCount(shellNext, 2);
+  await flush();
+  check(pollCreations() === pollsBeforeDoubleClicks && !shellWizard.signal.aborted,
+    'With motion, the second click of a double click slower than the slide does not publish the preview either');
+  appEvents.emit('session.changed', { key: 'another-server' });
+  check(shellWizard.signal.aborted && !shellWizard.element.isConnected,
+    'A poll draft leaves at once when the visible server changes');
+  // The form wizard publishes through the same frame: a double click stops at its preview, a new click publishes.
+  const { openNativeLiveFormWizard } = await import('/views/NativeLiveFormWizard.ts');
+  yield 'form-step-reduced-motion';
+  const doubleClickForm = openNativeLiveFormWizard(client, server, 'text');
+  const formPrimary = doubleClickForm.element.querySelector('[data-live-form-next]');
+  const formCreations = () => calls.filter(call => call.type === 'NATIVE_FORM_CREATE');
+  const formsBeforeDoubleClick = formCreations().length;
+  input('[data-live-form-title]', 'Double click form');
+  clickWithCount(formPrimary, 1);
+  input('[data-live-form-field-label]', 'Name');
+  clickWithCount(formPrimary, 1);
+  check(formPrimary.hasAttribute('data-live-form-submit') && !formPrimary.disabled && formCreations().length === formsBeforeDoubleClick,
+    'With reduced motion, the native form preview is ready to publish as soon as it shows');
+  clickWithCount(formPrimary, 2);
+  await flush();
+  check(formCreations().length === formsBeforeDoubleClick && !doubleClickForm.signal.aborted,
+    'The second click of a double click on Next does not publish the native form it brought up');
+  clickWithCount(formPrimary, 1);
+  await flush();
+  check(formCreations().length === formsBeforeDoubleClick + 1 && formCreations().at(-1).payload.form.title === 'Double click form'
+    && formCreations().at(-1).payload.form.fields[0].label === 'Name' && doubleClickForm.signal.aborted,
+  'A new click on Publish creates the native form and closes its wizard');
+  yield 'form-step-motion-enabled';
   const { EventBus } = await import('/core/EventBus.ts');
   const wizardServer = { ...server, bus: new EventBus(), communityEventsEnabled: true };
   const escapeWizard = openNativePollWizard(client, wizardServer, 'text');
@@ -1723,9 +1860,15 @@ async function* regression(locale, inviteModule) {
   escapeToggle.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   check(escapeWizard.signal.aborted, 'With the dropdown closed, Escape still closes the wizard');
   await flush();
+  root.querySelector('[data-community=actions]').click();
+  [...document.querySelectorAll('.live-action-list-modal [data-create-live-action]')].at(-1).click();
+  await flush();
+  [...document.querySelectorAll('.live-action-create-modal [data-live-action-type=form]')].at(-1).click();
+  await flush();
+  check(document.querySelector('.native-live-form-wizard'), 'Create live action opens the form wizard from the list');
   view.destroy();
   await flush();
-  check(!document.querySelector('.community-modal'), 'All activity dialogs close on teardown');
+  check(!document.querySelector('.community-modal'), 'All activity dialogs close on teardown, wizards opened from them included');
   const openedTextChannels = [];
   const restored = new ServerCommunityView(root, feed, async () => {}, undefined, channelId => openedTextChannels.push(channelId));
   check(!root.textContent.includes(event.title), 'Banner dismissal persists for the occurrence');
@@ -1742,22 +1885,22 @@ async function* regression(locale, inviteModule) {
   await flush();
   check(eventListBackdrop.hidden || eventListCard.hidden, 'The parent event list is hidden when the modal transition finishes');
   yield 'event-location';
-  check(!document.querySelector('[data-action=next]').disabled, 'Wizard keeps Next actionable so validation can explain missing data');
-  document.querySelector('[data-action=next]').click();
+  check(!document.querySelector('[data-event-next]').disabled, 'Wizard keeps Next actionable so validation can explain missing data');
+  document.querySelector('[data-event-next]').click();
   check(document.querySelector('.chat-copy-toast--danger')?.textContent.includes(t('community.locationRequired'))
     && document.querySelector('.community-location-cards').getAttribute('aria-invalid') === 'true',
   'Missing location uses a danger toast and highlights the relevant control');
   const locationOptions = [...document.querySelectorAll('[data-location]')].map(node => node.getBoundingClientRect());
   check(locationOptions[1].top >= locationOptions[0].bottom, 'Location cards are stacked like the reference');
   document.querySelector('[data-location=channel]').click();
-  check(!document.querySelector('[data-action=next]').disabled, 'Channel validation remains actionable before a channel is selected');
+  check(!document.querySelector('[data-event-next]').disabled, 'Channel validation remains actionable before a channel is selected');
   const channelSelect = () => document.querySelector('[data-input=channel]');
   document.querySelector('[data-channel-type=text]').click();
   check([...channelSelect().options].some(option => option.value === 'text')
     && ![...channelSelect().options].some(option => option.value === 'event-thread'),
   'Event locations include real text channels but exclude forum threads');
   document.querySelector('[data-channel-type=voice]').click();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   check(channelSelect().getAttribute('aria-invalid') === 'true'
     && document.querySelector('.chat-copy-toast--danger')?.textContent.includes(t('community.selectChannel')),
   'Missing channel uses a toast and highlights its selector');
@@ -1805,17 +1948,33 @@ async function* regression(locale, inviteModule) {
     && parseFloat(getComputedStyle(wizardShell.querySelector('.event-step-body')).paddingRight) >= 16
     && getComputedStyle(wizardShell.querySelector('.event-step-viewport')).overflowY === 'auto',
   'The event wizard keeps its fields inset from the scrolling edges while preserving its width and bounded height');
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   check(document.querySelector('.event-step-viewport').getAnimations({ subtree: true }).length >= 2,
     'Advancing runs the incoming and outgoing slides inside the fixed-height wizard');
   yield 'event-step-forward-motion';
   yield 'event-step-reduced-motion';
-  check(!document.querySelector('.event-step-viewport').getAnimations({ subtree: true }).some(animation => animation.playState === 'running'),
-    'Enabling reduced motion during a step transition immediately settles its final state');
+  // Only the step's own motion: a field the slide brought under the resting pointer still fades its hover color.
+  const stillRunning = document.querySelector('.event-step-viewport').getAnimations({ subtree: true })
+    .filter(animation => animation.playState === 'running' && !(animation instanceof CSSTransition));
+  check(!stillRunning.length,
+    `Enabling reduced motion during a step transition immediately settles its final state: ${JSON.stringify(stillRunning
+      .map(animation => [animation.effect.target?.outerHTML.slice(0, 100), animation.effect.getKeyframes().at(-1)]))}`);
   check(automaticScrollBehavior() === 'instant',
     'Reduced motion makes automatic scrolling settle immediately');
   check(document.querySelector('.event-wizard') === wizardShell && wizardShell.querySelector('.community-steps') === wizardStepper
     && wizardShell.querySelector('.event-wizard-footer') === wizardFooter, 'Step changes preserve the wizard shell, stepper and footer');
+  const stillDurations = element => getComputedStyle(element).transitionDuration.split(',').every(value => parseFloat(value) === 0);
+  const reducedCarousel = document.createElement('div');
+  reducedCarousel.innerHTML = renderImageCarouselEditor(['/avatars/cover.png', '/avatars/cover.png'], {
+    label: 'Images', addLabel: 'Add', removeLabel: 'Remove', moveBackLabel: 'Move back', moveForwardLabel: 'Move forward',
+  });
+  document.body.append(reducedCarousel);
+  check(stillDurations(document.querySelector('.event-step-viewport [data-carousel-dropzone]'))
+    && stillDurations(reducedCarousel.querySelector('.image-carousel-track'))
+    && stillDurations(reducedCarousel.querySelector('.image-carousel-dot'))
+    && stillDurations(reducedCarousel.querySelector('.image-carousel-editor-toolbar button')),
+  'Reduced motion also stops the image drop zone and the carousel track, dots and toolbar');
+  reducedCarousel.remove();
   yield 'event-step-motion-enabled';
   check(automaticScrollBehavior() === 'smooth',
     'Automatic scrolling resumes smooth movement when reduced motion is disabled');
@@ -1840,7 +1999,7 @@ async function* regression(locale, inviteModule) {
   eventPrivate.dispatchEvent(new Event('change', { bubbles: true }));
   await flush();
   HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
-  check(!document.querySelector('[data-action=next]').disabled,
+  check(!document.querySelector('[data-event-next]').disabled,
     'Private audience validation leaves Next actionable');
   const eventAudienceTrigger = document.querySelector(
     '[data-resource-audience=event-audience] [data-audience-toggle]',
@@ -1980,16 +2139,16 @@ async function* regression(locale, inviteModule) {
   audienceScrollSpace.remove();
   for (let index = 0; index < 40; index++) server.knownMembers.delete(`scroll-audience-${index}`);
   eventAudienceTrigger.click();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   check(document.querySelector('[data-audience-toggle]').getAttribute('aria-invalid') === 'true'
     && document.querySelector('.chat-copy-toast--danger')?.textContent.includes(t('audience.empty'))
     && getComputedStyle(document.querySelector('[data-audience-toggle]')).outlineOffset === '-2px',
   'An empty private audience uses a toast and highlights its picker');
   check(!document.querySelector('[data-date-error]')
-    && !document.querySelector('.event-wizard [data-community-error]:not([hidden])'),
+    && !document.querySelector('.event-wizard [data-community-error]'),
   'Incomplete event details do not print an inline red error while the user is still editing');
   document.querySelector('[data-resource-audience=event-audience] [data-audience-kind=role]').click();
-  check(!document.querySelector('[data-action=next]').disabled
+  check(!document.querySelector('[data-event-next]').disabled
     && document.querySelector('[data-resource-audience=event-audience] .share-audience-chip'),
   'Event creation reuses the audience picker and restores validity after a role is selected');
   check(document.querySelector('[data-carousel-dropzone]')
@@ -2124,20 +2283,30 @@ async function* regression(locale, inviteModule) {
     && wizardFooter.scrollWidth <= wizardFooter.clientWidth, 'Narrow event fields and footer do not overflow horizontally');
   yield 'event-details-narrow';
   wizardShell.style.width = '';
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   check(document.querySelector('.community-modal:last-child') || document.querySelector('[aria-current=step]'), 'Event review is rendered');
-  check(document.querySelectorAll('.event-step-body:not(.event-step-outgoing) .image-carousel-dot').length === 2,
+  check(document.querySelectorAll('.event-step-body:not([data-ui-closing]) .image-carousel-dot').length === 2,
     'The event review renders every selected image');
   yield 'event-review';
-  document.querySelector('[data-action=back]').click();
-  const returning = document.querySelector('.event-step-body:not(.event-step-outgoing)').getAnimations()[0];
+  document.querySelector('[data-event-back]').click();
+  const returning = document.querySelector('.event-step-body:not([data-ui-closing])').getAnimations()[0];
   check(returning?.effect.getKeyframes()[0].transform === 'translateX(-100%)', 'Going back reverses the step slide direction');
   await flush();
   check(document.querySelector('[data-input=title]').value === 'Scheduled event', 'Returning to details preserves the event draft');
-  document.querySelector('[data-action=next]').click();
+  // A double click on Next whose second click comes after the review has slid in, onto Save.
+  const eventSaves = () => calls.filter(call => call.type === 'EVENT_SAVE').length;
+  const savesBeforeDoubleClick = eventSaves();
+  const eventPrimary = document.querySelector('[data-event-next]');
+  clickWithCount(eventPrimary, 1);
   await flush();
-  document.querySelector('[data-action=next]').click();
+  check(eventPrimary.hasAttribute('data-event-submit') && !eventPrimary.disabled,
+    'The event review lands with Save ready');
+  clickWithCount(eventPrimary, 2);
+  await flush();
+  check(eventSaves() === savesBeforeDoubleClick && document.querySelector('.server-event-wizard'),
+    'The second click of a double click on Next does not save the event it brought up for review');
+  clickWithCount(eventPrimary, 1);
   await flush();
   check(calls.some(call => call.type === 'EVENT_SAVE' && call.payload.title === 'Scheduled event'
     && call.payload.imageSources.length === 2
@@ -2156,14 +2325,14 @@ async function* regression(locale, inviteModule) {
     'Text selection filters out voice channels');
   picker().querySelector('[role=option][aria-disabled=false]').click();
   await flush();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   document.querySelector('[data-input=title]').value = 'Text event';
   document.querySelector('[data-input=title]').dispatchEvent(new Event('input', { bubbles: true }));
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   yield 'event-text-review';
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-submit]').click();
   await flush();
   check(calls.some(call => call.type === 'EVENT_SAVE' && call.payload.title === 'Text event' &&
     call.payload.location.kind === 'text' && call.payload.location.channelId === 'text'), 'Text events persist a channel identity, not a free-text label');
@@ -2182,16 +2351,16 @@ async function* regression(locale, inviteModule) {
   yield 'event-external-placeholder';
   external.value = 'https://example.test/event';
   external.dispatchEvent(new Event('input', { bubbles: true }));
-  check(!document.querySelector('[data-action=next]').disabled && !channelSelect(),
+  check(!document.querySelector('[data-event-next]').disabled && !channelSelect(),
     'Somewhere else accepts a URL directly without a channel dropdown');
   yield 'event-external';
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   document.querySelector('[data-input=title]').value = 'External event';
   document.querySelector('[data-input=title]').dispatchEvent(new Event('input', { bubbles: true }));
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-submit]').click();
   await flush();
   check(calls.some(call => call.type === 'EVENT_SAVE' && call.payload.title === 'External event' &&
     call.payload.location.kind === 'external' && call.payload.location.label === 'https://example.test/event'),
@@ -2219,7 +2388,7 @@ async function* regression(locale, inviteModule) {
   document.querySelector('[data-location=external]').click();
   document.querySelector('[data-input=location]').value = 'https://example.test/covers';
   document.querySelector('[data-input=location]').dispatchEvent(new Event('input', { bubbles: true }));
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   document.querySelector('[data-input=title]').value = 'Oversized event';
   document.querySelector('[data-input=title]').dispatchEvent(new Event('input', { bubbles: true }));
@@ -2231,22 +2400,22 @@ async function* regression(locale, inviteModule) {
   }
   await until(() => document.querySelectorAll('.event-cover-field .image-carousel-slide').length === 5);
   if (oversizedApi === undefined) delete window.api; else window.api = oversizedApi;
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
   const savesBeforeOversize = calls.filter(call => call.type === 'EVENT_SAVE').length;
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-submit]').click();
   await flush();
   check(calls.filter(call => call.type === 'EVENT_SAVE').length === savesBeforeOversize
     && document.querySelector('.chat-copy-toast--danger')?.textContent.includes(t('community.eventImagesTooLarge'))
-    && document.querySelector('.server-event-wizard') && !document.querySelector('[data-action=next]').disabled,
+    && document.querySelector('.server-event-wizard') && !document.querySelector('[data-event-submit]').disabled,
   'An event too large for one WebSocket message stays open with an explanation instead of dropping the connection');
-  document.querySelector('[data-action=back]').click();
+  document.querySelector('[data-event-back]').click();
   await flush();
   document.querySelector('.event-cover-field [data-carousel-edit=remove]').click();
   await flush();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-next]').click();
   await flush();
-  document.querySelector('[data-action=next]').click();
+  document.querySelector('[data-event-submit]').click();
   await flush();
   check(calls.some(call => call.type === 'EVENT_SAVE' && call.payload.title === 'Oversized event'
     && call.payload.imageSources.length === 4) && !document.querySelector('.server-event-wizard'),
@@ -2339,7 +2508,7 @@ async function* regression(locale, inviteModule) {
     copyFailure = true;
     chooseEventAction('community.copyLink');
     await flush();
-    check(detail().querySelector('[data-community-error]').textContent === t('community.copyFailed'), 'Clipboard failure is localized and visible');
+    check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('community.copyFailed')), 'Clipboard failure is localized and visible');
     chooseEventAction('community.exportCalendar');
     await flush();
     check(calendarInput.event.id === event.id && !detail().querySelector('[data-event-feedback]'), 'Calendar cancel sends no success notice');
@@ -2350,7 +2519,7 @@ async function* regression(locale, inviteModule) {
     calendarResult = { status: 'failed', error: 'Fixture save failure' };
     chooseEventAction('community.exportCalendar');
     await flush();
-    check(detail().querySelector('[data-community-error]').textContent === 'Fixture save failure'
+    check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes('Fixture save failure')
       && !detail().querySelector('[data-event-feedback]'), 'Calendar write failures never report success');
   } finally {
     if (originalApi === undefined) delete window.api; else window.api = originalApi;
@@ -2389,7 +2558,7 @@ async function* regression(locale, inviteModule) {
   await until(() => historicReads() > readsBeforeTimeout);
   await flush();
   check(detail()?.querySelector('[data-event-id="historic"]') && detail().querySelector('.modal-title').textContent === event.title
-    && detail().querySelector('[data-community-error]').hidden && !eventToast(),
+    && !eventToast(),
   'A check that times out keeps the event on screen, with its name and no error');
   eventGetFailure = null;
   yield 'event-linked-details';
@@ -2425,9 +2594,10 @@ async function* regression(locale, inviteModule) {
   await new Promise(resolve => setTimeout(resolve, 1300));
   check(historicReads() === readsBeforeInFlight + 1 && !detail(),
     'A cancelled check neither brings the dialog back nor asks the server again');
+  document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
   feed.requestOpenEvent('missing');
   await flush();
-  check(document.querySelector('[data-community-error]:not([hidden])'), 'Unavailable linked events show an explicit failure');
+  check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])'), 'Unavailable linked events show an explicit failure');
   allowed = true;
   document.querySelector('[data-community-close]').click();
   event.imageUrl = '/avatars/cover.png';
@@ -2675,9 +2845,10 @@ async function* regression(locale, inviteModule) {
     'A history event deleted while open closes its dialog, says why and leaves the history');
     check(document.activeElement === document.querySelector('.event-list-modal .modal-title'),
       'Focus falls back from the closed dialog to the list title, not to the body or another event');
+    document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
     feed.requestOpenEvent('historic');
     const linkDialog = () => [...document.querySelectorAll('.modal-backdrop:not([data-ui-closing]) .community-modal')].at(-1);
-    await until(() => linkDialog() && !linkDialog().querySelector('[data-community-error]').hidden);
+    await until(() => linkDialog() && document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])'));
     check(!detail() && !linkDialog().querySelector('[data-event-id]'), 'A link to the deleted event does not bring its old copy back');
     linkDialog().querySelector('[data-community-close]').click();
     await flush();
@@ -2708,7 +2879,7 @@ async function* regression(locale, inviteModule) {
     await until(() => !historicCard());
     await flush();
     check(historyExports.length === 1
-      && document.querySelector('.event-list-modal [data-community-error]')?.textContent === t('community.eventUnavailable'),
+      && document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('community.eventUnavailable')),
     'Exporting a history event deleted meanwhile writes no file, says why and drops it from the history');
   } finally {
     if (historyApi === undefined) delete window.api; else window.api = historyApi;
@@ -2802,6 +2973,18 @@ async function* regression(locale, inviteModule) {
   check(renameForm && renameForm.querySelectorAll('input').length === 1
     && !renameForm.querySelector('textarea, [data-post-emoji], [data-post-file]'),
   'Editing a thread opens a standard rename-only modal');
+  // A real submit, with the browser's own validation: the missing title is explained in the app's language.
+  const renameField = renameForm.querySelector('input');
+  const renameCalls = calls.length;
+  renameField.value = '';
+  renameForm.requestSubmit();
+  await flush();
+  const missingTitle = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+  check(renameForm.noValidate && missingTitle?.getAttribute('role') === 'alert'
+    && missingTitle.textContent.includes(t('validation.required', { field: t('forum.renameLabel') }))
+    && renameField.getAttribute('aria-invalid') === 'true' && document.activeElement === renameField && calls.length === renameCalls,
+  'An empty thread title is explained in the alert toast, in the app language, instead of the browser balloon');
+  missingTitle.querySelector('.chat-copy-toast-close').click();
   renameForm.querySelector('input').value = 'Renamed topic';
   renameForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await flush();
@@ -3170,6 +3353,18 @@ async function* regression(locale, inviteModule) {
     && root.querySelector('[data-post-emoji]').getBoundingClientRect().width <= 34,
   'Forum attachment actions use the compact toolbar geometry shared by the app');
   document.querySelector('textarea[name=content]').value = 'Initial message';
+  const composerTitle = document.querySelector('input[name=title]');
+  const composerCalls = calls.length;
+  composerTitle.value = '';
+  root.querySelector('.forum-composer form').requestSubmit();
+  await flush();
+  const missingPostTitle = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+  check(root.querySelector('.forum-composer form').noValidate
+    && missingPostTitle?.textContent.includes(t('validation.required', { field: t('forum.postTitle') }))
+    && composerTitle.getAttribute('aria-invalid') === 'true' && calls.length === composerCalls,
+  'A new topic without a title is explained in the alert toast, in the app language, and is not published');
+  missingPostTitle.querySelector('.chat-copy-toast-close').click();
+  composerTitle.value = 'New topic';
   yield 'forum-composer';
   root.querySelector('.forum-composer form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await flush();
@@ -3386,7 +3581,7 @@ async function* regression(locale, inviteModule) {
     'Opening the narrow discussion does not clip the draft composer actions');
     yield 'forum-chat-carousel';
     const carouselProbe = document.createElement('div');
-    carouselProbe.innerHTML = main.chatView.renderAttachments([
+    carouselProbe.innerHTML = renderAttachments([
       { id: 'image-a', kind: 'image', url: '/attachments/a.png', originalName: 'a.png', mimeType: 'image/png', sizeBytes: 1 },
       { id: 'video-b', kind: 'video', url: '/attachments/b.webm', originalName: 'b.webm', mimeType: 'video/webm', sizeBytes: 2 },
       { id: 'file-c', kind: 'file', url: '/attachments/c.pdf', originalName: 'c.pdf', mimeType: 'application/pdf', sizeBytes: 3 },
@@ -3412,18 +3607,18 @@ async function* regression(locale, inviteModule) {
       'The real chat composer sends replies to the post channel');
     const discussionChannel = chatServer.getChannel('post');
     discussionChannel.forumClosed = true;
-    main.chatView.syncComposerPermissionState();
+    main.chatView.composer.syncPermissionState();
     check(reply.readOnly && reply.placeholder === t('forum.closedPlaceholder')
       && getComputedStyle(pane.querySelector('#chat-send-permission-banner')).display === 'none',
     'An author-closed thread locks the composer with only a placeholder and no warning banner');
     discussionChannel.forumClosed = false;
     discussionChannel.forumLocked = true;
-    main.chatView.syncComposerPermissionState();
+    main.chatView.composer.syncPermissionState();
     check(reply.readOnly && reply.placeholder === t('forum.lockedPlaceholder')
       && getComputedStyle(pane.querySelector('#chat-send-permission-banner')).display === 'none',
     'An administratively locked thread uses its distinct placeholder without a warning banner');
     discussionChannel.forumLocked = false;
-    main.chatView.syncComposerPermissionState();
+    main.chatView.composer.syncPermissionState();
     yield 'forum-discussion';
     pane.querySelector('#chat-forum-back').click();
     check(pane.inert, 'Closing a discussion immediately disables its outgoing controls');
@@ -3441,6 +3636,8 @@ async function* regression(locale, inviteModule) {
     main.showSelectedChannel('text');
     check(!mainRoot.querySelector('.forum-layout') && mainRoot.querySelector('.channel-title')?.textContent === 'Text',
       'Switching to a regular channel restores a full-width chat');
+    // What the feed does from here on, for the reveal below to show if it fails.
+    const revealRecord = window.recordFeed(main.chatView.feed.list);
     const previousHistory = actualChatStore.getMessages('text');
     actualChatStore.setHistory('text', Array.from({ length: 200 }, (_, index) => ({
       id: `long-history-${index}`, channelId: 'text', userId: chatServer.currentUser.id,
@@ -3459,7 +3656,7 @@ async function* regression(locale, inviteModule) {
         top: Math.max(0, Math.min(options.top, max)), before: this.scrollTop, max });
       scrollTo.call(this, options);
     };
-    main.chatView.renderMessages({ forceScroll: true });
+    main.chatView.feed.render({ forceScroll: true });
     // The composer growing mid-reveal (a toolbar wrapping in a narrow window) shrinks
     // the feed without scrolling it; the reveal must still end on the newest message.
     const revealComposer = mainRoot.querySelector('.chat-input-container');
@@ -3473,19 +3670,20 @@ async function* regression(locale, inviteModule) {
       const start = performance.now();
       const settle = () => {
         if (Math.abs(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop) <= 1) resolve();
-        else if (performance.now() - start > 2000) reject(new Error('Short chat entry did not reach the latest message'));
-        else requestAnimationFrame(settle);
+        else if (performance.now() - start > 2000) {
+          reject(new Error(`Short chat entry did not reach the latest message: ${JSON.stringify({ feed: revealRecord.dump(), scrollCalls })}`));
+        } else requestAnimationFrame(settle);
       };
       requestAnimationFrame(settle);
     });
     revealComposer.style.paddingBottom = '';
     // Exercise a normal bottom pin too: a clamped no-op is not another viewport of travel.
-    main.chatView.scrollToBottom();
+    main.chatView.feed.list.scrollToEnd();
     check(scrollCalls.filter(call => call.behavior === 'smooth').every(call => Math.abs(call.top - call.before) <= 161),
       'Every smooth leg of the history reveal stays within the distance limit, including the layout frame: ' +
         JSON.stringify(scrollCalls));
     scrollCalls.length = 0;
-    main.chatView.renderMessages({ forceScroll: true });
+    main.chatView.feed.render({ forceScroll: true });
     await flush();
     check(Math.abs(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop) <= 1 &&
       scrollCalls.length > 0 && scrollCalls.every(call => Math.abs(call.top - call.before) <= 1),
@@ -3493,14 +3691,14 @@ async function* regression(locale, inviteModule) {
     yield 'chat-entry-reduced-motion';
     scrollTo.call(longFeed, { top: 0, behavior: 'instant' });
     scrollCalls.length = 0;
-    main.chatView.renderMessages({ forceScroll: true });
+    main.chatView.feed.render({ forceScroll: true });
     check(longFeed.scrollHeight - longFeed.clientHeight - longFeed.scrollTop <= 1 &&
       scrollCalls.every(call => call.behavior === 'instant'),
     'Reduced motion opens long histories directly at the destination without animation');
     yield 'chat-entry-motion-enabled';
     longFeed.scrollTo = scrollTo;
     actualChatStore.setHistory('text', previousHistory);
-    main.chatView.renderMessages({ forceScroll: true });
+    main.chatView.feed.render({ forceScroll: true });
     const oldPermissions = chatServer.myPermissions;
     const oldOwner = chatServer.ownerId;
     const readableChannel = chatServer.getChannel('text');
@@ -3519,7 +3717,7 @@ async function* regression(locale, inviteModule) {
     let acknowledgeRetiredSend;
     client.sendRequest = (type, ...args) => type === 'CHAT_SEND'
       ? new Promise(resolve => { acknowledgeRetiredSend = resolve; }) : originalSendRequest.call(client, type, ...args);
-    const lateSend = main.chatView.transmitMessage(outgoing);
+    const lateSend = main.chatView.composer.transmitMessage(outgoing);
     chatServer.updateChannel({ ...readableChannel, categoryId: null, inheritCategoryPermissions: false,
       permissionOverwrites: [{ roleId: null, allow: 0, deny: 512 }] });
     check(actualChatStore.getMessages('text').length === 0 &&
@@ -3625,6 +3823,18 @@ async function* regression(locale, inviteModule) {
     await flush();
     check(Math.abs(voicePanel.getBoundingClientRect().width - resizedVoicePanelWidth) <= 1,
       'Reopening voice chat restores its persisted width');
+    {
+      // A window too small for the chosen width narrows the panel; growing again gives that width back.
+      const persisted = localStorage.getItem('monky_voice_chat_width');
+      main.clampVoiceChatWidth = () => 480;
+      window.dispatchEvent(new Event('resize'));
+      const narrowed = voicePanel.style.width;
+      delete main.clampVoiceChatWidth;
+      window.dispatchEvent(new Event('resize'));
+      check(narrowed === '480px' && Math.abs(voicePanel.getBoundingClientRect().width - resizedVoicePanelWidth) <= 1
+        && localStorage.getItem('monky_voice_chat_width') === persisted,
+      'The voice chat gets its chosen width back when the window grows again, and the window never rewrites it');
+    }
     mainRoot.querySelector('.voice-chat-close').click();
     check(main.voiceChatChannelId === null && voiceJoinRequests === 0,
       'Closing the panel never changes voice admission');
@@ -3644,6 +3854,53 @@ async function* regression(locale, inviteModule) {
     const sidebar = document.createElement('aside');
     check(main.clampSidebarWidth(100000) === Math.max(280, Math.floor(window.innerWidth * 0.175))
       && main.clampSidebarWidth(1) === 280, 'Sidebar halves its maximum width while preserving the readable minimum');
+    {
+      // The channel list's edge is a window splitter like the voice chat's: reachable and operable by
+      // keyboard. The width chosen survives the window shrinking and growing again, as on a 1920 px
+      // screen (17.5vw = 336 px) restored to a smaller window and maximized again.
+      const channelsSidebar = mainRoot.querySelector('.channels-sidebar');
+      const edge = document.createElement('div');
+      edge.id = 'channels-resizer';
+      edge.className = 'channels-resizer';
+      channelsSidebar.prepend(edge);
+      const savedWidth = localStorage.getItem('monky_channels_width');
+      localStorage.removeItem('monky_channels_width');
+      let widest = 336;
+      main.clampSidebarWidth = width => Math.min(widest, Math.max(280, width));
+      const press = key => edge.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+      const resizeWindowTo = width => {
+        widest = width;
+        window.dispatchEvent(new Event('resize'));
+      };
+      const shows = width => channelsSidebar.style.width === `${width}px` && edge.getAttribute('aria-valuenow') === String(width);
+      const stored = () => localStorage.getItem('monky_channels_width');
+      main.setupChannelsResizer();
+      try {
+        check(edge.getAttribute('role') === 'separator' && edge.getAttribute('aria-orientation') === 'vertical'
+          && edge.tabIndex === 0 && edge.getAttribute('aria-valuemin') === '280' && edge.getAttribute('aria-valuemax') === '336',
+        'The channel list edge is a focusable separator that announces its bounds');
+        press('End');
+        check(shows(336) && stored() === '336', 'End widens the channel list from the keyboard and keeps that width');
+        resizeWindowTo(280);
+        check(shows(280) && edge.getAttribute('aria-valuemax') === '280' && stored() === '336',
+          'A smaller window narrows the list within its bounds and never rewrites the width chosen');
+        press('ArrowRight');
+        check(shows(280) && stored() === '336', 'A key the bounds swallow changes nothing, the width chosen included');
+        resizeWindowTo(336);
+        check(shows(336) && edge.getAttribute('aria-valuemax') === '336' && stored() === '336',
+          'Growing the window again gives the chosen width back');
+        press('Home');
+        check(shows(280) && stored() === '280', 'Home narrows the list from the keyboard and keeps that width');
+      } finally {
+        main.channelsResizeCleanup?.();
+        main.channelsResizeCleanup = null;
+        delete main.clampSidebarWidth;
+        edge.remove();
+        channelsSidebar.style.removeProperty('width');
+        if (savedWidth === null) localStorage.removeItem('monky_channels_width');
+        else localStorage.setItem('monky_channels_width', savedWidth);
+      }
+    }
     sidebar.id = 'sidebar-layout-fixture';
     sidebar.style.cssText = 'width:280px;height:700px;display:flex;flex-direction:column;background:var(--bg-panel)';
     sidebar.innerHTML = `<div class="server-header"><button id="server-dropdown-toggle" class="server-dropdown-toggle" type="button"><span>Monky QA</span><span class="material-symbols-outlined server-dropdown-caret">expand_more</span></button>

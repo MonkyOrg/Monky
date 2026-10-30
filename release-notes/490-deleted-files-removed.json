@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Arquivos de mensagens apagadas (depois do prazo de desfazer) e de canais excluídos não ficam mais no disco do servidor nem acessíveis pelo link.",
+  "en": "Files from deleted messages (after the undo window) and from deleted channels no longer stay on the server's disk or reachable by link."
+}

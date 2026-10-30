@@ -17,7 +17,9 @@ import { ServerResourceScope } from './infrastructure/lifecycle/ServerResourceSc
 import { closeHttpServer, listenHttpServer } from './infrastructure/lifecycle/httpLifecycle';
 import { Logger } from './infrastructure/logger/Logger';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
-import type { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import type { ClientSession } from './infrastructure/websocket/ClientSession';
+import { ChatHandler } from './infrastructure/websocket/ChatHandler';
+import { route } from './infrastructure/websocket/routing/MessageRouter';
 import { consumeUpdateRestart, prepareUpdateRestart } from './infrastructure/lifecycle/updateRestart';
 import { resolveServerVersion } from './runtimeVersion';
 import { identity, Peer, record, text, type Received } from './testFixtures/bots';
@@ -221,7 +223,7 @@ test('server-level listener errors never disconnect or evict existing voice sess
   Object.defineProperty(socket, 'readyState', { configurable: true, value: WebSocket.OPEN });
   socket.send = () => {};
   let closes = 0;
-  const session: Parameters<WebSocketServer['handleServerUpdateSettings']>[0] = {
+  const session: ClientSession = {
     ws: socket, sessionId: 'retained-session', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     user: { id: 'retained-user', clientId: 'test-key', sessionId: 'retained-session', nickname: 'Peer', status: 'ONLINE', joinedAt: 1 },
   };
@@ -513,6 +515,28 @@ test('partially failed seeding rolls back before cleanup so a retry gets its com
   assert.deepEqual((await new SqliteChannelRepository(db).listByServerId(record.id)).map(channel => channel.type).sort(), ['TEXT', 'VOICE']);
   assert.ok(await new SqliteRoleRepository(db).findByName('Admin'));
   assert.equal(await new SqliteRoleRepository(db).findByName('Membro'), null);
+  await retry.stop();
+  assertReleased(retry);
+});
+
+test('a message type answered by two routes fails the server creation, not the first frame a client sends (S-WS-5)', async (t) => {
+  const f = temporaryData(t);
+  const routes = ChatHandler.prototype.routes;
+  // A second route for the heartbeat, which the connection itself already answers.
+  const duplicate = t.mock.method(ChatHandler.prototype, 'routes', function (this: ChatHandler) {
+    return [...routes.call(this), route({ types: [MessageType.PING], handle: () => {} })];
+  });
+  try {
+    // A server created anyway is stopped, so the failure is reported instead of holding the process open.
+    const creation = MonkyServer.create({ port: 0, dataDir: f.directory, serverName: 'Duplicate route' })
+      .then(async (server) => { await server.stop(); return server; });
+    await assert.rejects(creation, { message: `More than one route answers ${MessageType.PING}.` });
+  } finally {
+    duplicate.mock.restore();
+  }
+  // Nothing the failed creation opened is left behind: the same directory starts again.
+  const retry = await MonkyServer.create({ port: 0, dataDir: f.directory, serverName: 'Duplicate route' });
+  f.cleanup.push(() => retry.stop());
   await retry.stop();
   assertReleased(retry);
 });

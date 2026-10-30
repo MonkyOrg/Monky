@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Mensagens, posts e enquetes de quem foi expulso continuam no histórico, e os bots adicionados por essa pessoa seguem no servidor. O servidor parado não regrava mais o banco a cada poucos segundos.",
+  "en": "Messages, posts and polls from kicked members stay in the history, and bots they added stay on the server. An idle server no longer rewrites its database every few seconds."
+}

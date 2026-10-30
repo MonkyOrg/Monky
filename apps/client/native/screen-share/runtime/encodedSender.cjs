@@ -4,7 +4,9 @@ const assert = require('node:assert/strict');
 const { assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const STARTUP_BITRATE_KBPS = 150;
 const MINIMUM_CAPTURE_BITRATE_KBPS = 50;
-const RECOVERY_REASONS = new Set(['rtc-unconsumed', 'input-expired', 'publication-expired', 'codec-expired', 'clock-sample-uncertain']);
+// Every reason the native encoded source sends with a recovery (see encoded_video.cc).
+const RECOVERY_REASONS = new Set(['rtc-unconsumed', 'input-expired', 'publication-expired', 'codec-expired',
+  'clock-sample-uncertain', 'clock-frame-dropped', 'dispatch-delayed']);
 // Every capture encoder runs with keyint_sec=1, so a real IDR follows within
 // one configured-rate GOP of encoded AUs. Encoders skip frames under CPU load,
 // which stretches that GOP in wall time; the recovery bound therefore counts
@@ -271,4 +273,4 @@ class LiveSenderFlow {
   }
 }
 
-module.exports = { LiveSenderFlow, STARTUP_BITRATE_KBPS };
+module.exports = { LiveSenderFlow, STARTUP_BITRATE_KBPS, RECOVERY_REASONS };

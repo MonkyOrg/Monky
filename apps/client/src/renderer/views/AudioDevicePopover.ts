@@ -11,6 +11,7 @@ import { cameraDeviceSelectionError, populateCameraDeviceSelect } from './settin
 import { smoothScrollIntoView } from '../utils/scroll';
 import { createTypeahead, focusItem, nextIndex } from '../utils/rovingFocus';
 import '../styles/mediaPopovers.css';
+import { reportError } from '../utils/feedback';
 
 let nextId = 0;
 type PopoverKind = 'input' | 'output' | 'camera' | 'noise';
@@ -153,11 +154,10 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       let busy = false;
       let deviceStatus = '';
       let previewStatus = '';
-      let selectionStatus = '';
       let submenuTimer: ReturnType<typeof setTimeout> | null = null;
       const typeahead = createTypeahead();
       const abort = new AbortController();
-      const showStatus = () => { status.textContent = selectionStatus || previewStatus || deviceStatus; };
+      const showStatus = () => { status.textContent = previewStatus || deviceStatus; };
       const optionButtons = () => Array.from(options.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
       const position = () => {
         if (!trigger.isConnected) { close(); return; }
@@ -263,14 +263,12 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         busy = true;
         select.disabled = deviceRow.disabled = true;
         hideOptions();
-        selectionStatus = '';
-        showStatus();
         try {
           if (camera) await camera.changeDevice(select.value);
           else if (kind === 'input' || kind === 'output') await selectAudioDevice(kind, select.value, abort.signal);
         } catch (error) {
           if (!closed) {
-            selectionStatus = kind === 'camera' ? cameraDeviceSelectionError(error) : audioDeviceError(error);
+            reportError(kind === 'camera' ? cameraDeviceSelectionError(error) : audioDeviceError(error));
             const selected = kind === 'camera' ? settingsStore.selectedCameraId : selectedAudioDevice(kind);
             select.value = selected === 'default' ? '' : selected;
           }
@@ -386,12 +384,10 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         if (mode !== 'voice_activity' && mode !== 'push_to_talk') return;
         try {
           settingsStore.setInputMode(mode);
-          selectionStatus = '';
         } catch {
-          selectionStatus = t('settings.inputModeSaveFailed');
+          reportError(t('settings.inputModeSaveFailed'));
         }
         refreshInputMode();
-        showStatus();
         schedulePosition();
       });
       configure.addEventListener('click', () => {

@@ -5,6 +5,7 @@ import { t, type TranslationKey } from '../../i18n';
 import { NOISE_SUPPRESSION_MODES, isNoiseSuppressionMode, type NoiseSuppressionMode } from '../../utils/audioPreferences';
 import { escapeHtml } from '../../utils/html';
 import { createTypeahead, focusItem, nextIndex } from '../../utils/rovingFocus';
+import { reportError } from '../../utils/feedback';
 
 const labels: Record<NoiseSuppressionMode, TranslationKey> = {
   rnnoise: 'audioNoise.rnnoise',
@@ -104,7 +105,8 @@ export class NoiseSuppressionControl {
       } catch (error) {
         if (!abort.signal.aborted) {
           console.error('[NoiseSuppression] Could not apply the selected engine:', error);
-          status.textContent = t('audioNoise.selectionFailed');
+          status.textContent = '';
+          reportError(t('audioNoise.selectionFailed'));
         }
       } finally {
         busy = false;

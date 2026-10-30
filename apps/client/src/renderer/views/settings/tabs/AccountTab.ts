@@ -1,4 +1,5 @@
 import { escapeHtml } from '../../../utils/html';
+import { renderSwitch } from '../../../utils/formControls';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { serverStore } from '../../../stores/serverStore';
 import { settingsStore } from '../../../stores/settingsStore';
@@ -159,24 +160,18 @@ export class AccountTab {
         </label>
         <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
           <div style="flex: 1; margin-right: 12px;">
-            <div style="font-size: 13px; color: var(--text-primary);">${t('settings.gameActivityLabel')}</div>
-            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.gameActivityHint')}</div>
+            <div id="game-activity-label" style="font-size: 13px; color: var(--text-primary);">${t('settings.gameActivityLabel')}</div>
+            <div id="game-activity-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.gameActivityHint')}</div>
           </div>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-game-activity" ${settingsStore.shareGameActivity ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'toggle-game-activity', labelledBy: 'game-activity-label', describedBy: 'game-activity-hint', checked: settingsStore.shareGameActivity })}
         </div>
         ${window.api?.platform === 'win32' ? `
         <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; margin-top: 8px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
           <div style="flex: 1; margin-right: 12px;">
             <div id="game-share-suggestion-label" style="font-size: 13px; color: var(--text-primary);">${t('settings.gameShareSuggestionLabel')}</div>
-            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.gameShareSuggestionHint')}</div>
+            <div id="game-share-suggestion-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.gameShareSuggestionHint')}</div>
           </div>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-game-share-suggestion" aria-labelledby="game-share-suggestion-label" ${settingsStore.suggestGameShare ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'toggle-game-share-suggestion', labelledBy: 'game-share-suggestion-label', describedBy: 'game-share-suggestion-hint', checked: settingsStore.suggestGameShare })}
         </div>` : ''}
       </div>
 
@@ -187,13 +182,10 @@ export class AccountTab {
         </label>
         <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
           <div style="flex: 1; margin-right: 12px;">
-            <div style="font-size: 13px; color: var(--text-primary);">${t('settings.autoConnectServersLabel')}</div>
-            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.autoConnectServersHint')}</div>
+            <div id="auto-connect-servers-label" style="font-size: 13px; color: var(--text-primary);">${t('settings.autoConnectServersLabel')}</div>
+            <div id="auto-connect-servers-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.autoConnectServersHint')}</div>
           </div>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-auto-connect-servers" ${settingsStore.autoConnectServers ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'toggle-auto-connect-servers', labelledBy: 'auto-connect-servers-label', describedBy: 'auto-connect-servers-hint', checked: settingsStore.autoConnectServers })}
         </div>
       </div>
 
@@ -425,7 +417,8 @@ export class AccountTab {
           : restored.length > 0
             ? `${t('identity.importSuccess')} ${t('backup.extrasRestored')}`
             : t('identity.importSuccess');
-        showAlert({ title: t('identity.importTitle'), message });
+        // The settings reopen only after the notice is read: reopening first would put it behind them.
+        await showAlert({ title: t('identity.importTitle'), message });
         callbacks.onReloadModal();
       }
     });

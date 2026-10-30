@@ -291,15 +291,15 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
         target.dispatchEvent(event);
         return event;
       };
-      check(scroll(focusedVideo, -100).defaultPrevented && stage.focusZoom.scale > 1
+      check(scroll(focusedVideo, -100).defaultPrevented && stage.zoom.transform.scale > 1
         && focusedVideo.style.transform.includes('scale('), 'Ordinary scroll zooms the focused screen without Ctrl');
       scroll(focusedVideo, 100);
-      check(stage.focusZoom.scale === 1 && focusedVideo.style.transform === '', 'Ordinary scroll restores the unzoomed image');
+      check(stage.zoom.transform.scale === 1 && focusedVideo.style.transform === '', 'Ordinary scroll restores the unzoomed image');
       scroll(focusedVideo, -100, true);
-      check(stage.focusZoom.scale > 1, 'Ctrl+scroll remains compatible');
+      check(stage.zoom.transform.scale > 1, 'Ctrl+scroll remains compatible');
       scroll(focusedVideo, 100);
       const controls = focusedCard.querySelector('.stage-card-controls');
-      check(controls && !scroll(controls, -100).defaultPrevented && stage.focusZoom.scale === 1,
+      check(controls && !scroll(controls, -100).defaultPrevented && stage.zoom.transform.scale === 1,
         'Scrolling focused card controls must not zoom the picture');
       check(scroll(focusedVideo, -100).defaultPrevented && focusedCard.classList.contains('is-zoomed'),
         'The focused screen is zoomed before the focus splits');
@@ -309,17 +309,17 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
         && card(local.sessionId, first.id) === focusedCard && video(local.sessionId, first.id) === focusedVideo,
       'Adding a second pane keeps the zoomed screen card');
       check(focusedVideo.style.transform === '' && !focusedCard.classList.contains('is-zoomed')
-        && !focusedCard.classList.contains('is-panning') && stage.focusZoom.scale === 1,
+        && !focusedCard.classList.contains('is-panning') && stage.zoom.transform.scale === 1,
       'Two panes drop the zoom instead of leaving the kept pane cropped without its gestures');
       check(!scroll(focusedVideo, -100).defaultPrevented && focusedVideo.style.transform === '',
         'Two panes have no zoom target');
       document.querySelector(`[data-tile-key="${remoteCameraKey}"]`).click();
       check(focused().join() === focusKey(first.id) && card(local.sessionId, first.id) === focusedCard,
         'Clicking the second pane takes it out of focus, since nothing is zoomed');
-      check(scroll(focusedVideo, -100).defaultPrevented && stage.focusZoom.scale > 1 && focusedCard.classList.contains('is-zoomed'),
+      check(scroll(focusedVideo, -100).defaultPrevented && stage.zoom.transform.scale > 1 && focusedCard.classList.contains('is-zoomed'),
         'A single pane zooms again after the split');
       scroll(focusedVideo, 100);
-      check(stage.focusZoom.scale === 1 && focusedVideo.style.transform === '', 'The single pane unzooms again');
+      check(stage.zoom.transform.scale === 1 && focusedVideo.style.transform === '', 'The single pane unzooms again');
       card(local.sessionId, first.id).click();
       check(focused().length === 0, 'The publisher can unfocus the automatic preview');
       const localVideo = video(local.sessionId, first.id);
@@ -482,9 +482,11 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       rejectPip = true;
       pipButton.click();
       await settle();
-      check(document.querySelector('.dialog-card')?.textContent.includes(language.t('stage.pictureInPictureErrorMessage')),
-        'A rejected Picture-in-Picture request reports a localized error instead of failing silently');
-      document.querySelector('.dialog-card [data-action="confirm"]').click();
+      const pipFailure = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+      check(pipFailure?.getAttribute('role') === 'alert' && pipFailure.textContent.includes(language.t('stage.pictureInPictureErrorMessage'))
+        && !document.querySelector('.dialog-card'),
+        'A rejected Picture-in-Picture request reports a localized error in the alert toast, like the automatic one, instead of failing silently');
+      pipFailure.querySelector('.chat-copy-toast-close').click();
       await new Promise(resolve => setTimeout(resolve, 400));
       rejectPip = false;
       fullscreen = remoteCard;
@@ -883,15 +885,15 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       voice.addScreenShare(telemetrySource.id);
       const telemetryKey = focusKey(telemetrySource.id);
       const originalDiagnostics = rtc.getScreenVideoDiagnostics;
-      const originalTelemetryTrack = stage.getTelemetryTrack;
+      const originalTelemetryTrack = stage.telemetry.track;
       let telemetryTime = 0;
       let replacePreview = false;
       rtc.getScreenVideoDiagnostics = async (sessionId, shareId) => {
         if (sessionId !== local.sessionId || shareId !== telemetrySource.id) return null;
         if (replacePreview) {
           const preview = { id: crypto.randomUUID(), readyState: 'live' };
-          stage.getTelemetryTrack = tile => tile.key === telemetryKey ? preview
-            : originalTelemetryTrack.call(stage, tile);
+          stage.telemetry.track = tile => tile.key === telemetryKey ? preview
+            : originalTelemetryTrack.call(stage.telemetry, tile);
           replacePreview = false;
         }
         telemetryTime += 1500;
@@ -909,41 +911,41 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       };
       try {
         settings.screenShareTelemetryEnabled = true;
-        stage.syncTelemetryMonitor();
+        stage.telemetry.sync();
         await settle();
-        await stage.refreshTelemetry();
-        const samplesBeforeRender = stage.telemetryHistory.get(telemetryKey)?.length;
+        await stage.telemetry.refresh();
+        const samplesBeforeRender = stage.telemetry.history.get(telemetryKey)?.length;
         check(samplesBeforeRender >= 2, 'The native sender must collect multiple actual diagnostic samples');
         stage.render();
         await settle();
-        check(stage.telemetryHistory.get(telemetryKey)?.length > samplesBeforeRender,
+        check(stage.telemetry.history.get(telemetryKey)?.length > samplesBeforeRender,
           'Repainting the same stage must not reset native sender telemetry to a single sample');
-        const sample = stage.telemetrySnapshots.get(telemetryKey)?.streams[0]?.data;
+        const sample = stage.telemetry.snapshots.get(telemetryKey)?.streams[0]?.data;
         check(sample?.intervalMs === 1500 && sample.bitrateKbps === 2000,
           'Native RTP deltas must survive a DOM repaint of the unchanged publisher');
         replacePreview = true;
-        await stage.refreshTelemetry();
-        check(stage.telemetryHistory.get(telemetryKey)?.length > samplesBeforeRender + 1,
+        await stage.telemetry.refresh();
+        check(stage.telemetry.history.get(telemetryKey)?.length > samplesBeforeRender + 1,
           'Replacing only the native local preview during an RTP read must not erase sender diagnostics');
-        stage.getTelemetryTrack = originalTelemetryTrack;
-        for (let i = 0; i < 22; i++) await stage.refreshTelemetry();
-        await stage.copyTelemetry(telemetryKey, card(local.sessionId, telemetrySource.id).querySelector('.stage-diagnostics-btn'));
+        stage.telemetry.track = originalTelemetryTrack;
+        for (let i = 0; i < 22; i++) await stage.telemetry.refresh();
+        await stage.telemetry.copy(telemetryKey, card(local.sessionId, telemetrySource.id).querySelector('.stage-diagnostics-btn'));
         const report = JSON.parse(copiedTelemetry);
         check(report.history.length === 20 && report.history.every(entry => entry.streams[0].data.bitrateKbps === 2000),
           'Copy must export the bounded 20-sample history with real RTP deltas, not only the last reading');
         const capture = captures.get(telemetrySource.id);
         capture.source = { ...capture.source, instanceId: crypto.randomUUID() };
-        await stage.refreshTelemetry();
-        check(stage.telemetryHistory.get(telemetryKey)?.length === 1,
+        await stage.telemetry.refresh();
+        check(stage.telemetry.history.get(telemetryKey)?.length === 1,
           'A replaced native source must not inherit the previous source telemetry history');
         stage.setChannel('other-channel');
-        check(stage.telemetryHistory.size === 0, 'Changing the displayed channel must clear diagnostic history');
+        check(stage.telemetry.history.size === 0, 'Changing the displayed channel must clear diagnostic history');
         stage.setChannel(channel.id);
       } finally {
         settings.screenShareTelemetryEnabled = false;
-        stage.syncTelemetryMonitor();
-        check(stage.telemetryHistory.size === 0, 'Disabling telemetry must discard its diagnostic history');
-        stage.getTelemetryTrack = originalTelemetryTrack;
+        stage.telemetry.sync();
+        check(stage.telemetry.history.size === 0, 'Disabling telemetry must discard its diagnostic history');
+        stage.telemetry.track = originalTelemetryTrack;
         rtc.getScreenVideoDiagnostics = originalDiagnostics;
         clearShares();
       }

@@ -52,7 +52,55 @@ Todo código produzido deve seguir as melhores práticas da indústria, com foco
 
 ---
 
-### 2. Pragmatismo & Anti-Overengineering
+### 2. Arquitetura vigente: reutilize antes de criar
+
+O mega code review (#490) dividiu os arquivos gigantes em módulos com uma responsabilidade cada e criou peças compartilhadas para o que se repetia. **Código novo entra nesses módulos.** Não recrie ao lado algo que já existe, nem devolva responsabilidades aos arquivos que foram esvaziados (`WebSocketServer.ts`, `main.ts`, `MainView.ts`, `ChatView.ts`, `ServerCommunityView.ts`).
+
+**Antes de escrever, procure.** Busque pelo conceito, não só pelo nome: "toast", "erro", "modal", "permissão", "rolar até o fim". Se algo equivalente existe, use-o ou estenda-o.
+
+#### Onde cada coisa entra
+
+| Você precisa de | Use |
+|---|---|
+| **Servidor:** novo tipo de mensagem WebSocket | Rota no `*Handler.ts` do domínio (`apps/server/src/infrastructure/websocket/`, `voice/` para voz), pelo método `routes()` lido pelo `routing/MessageRouter.ts`. Acrescente a linha na tabela fixada de `apps/server/src/test-message-routes.ts`. Nunca um `case` novo no `WebSocketServer.ts`. |
+| **Servidor:** decidir se alguém pode ver ou fazer algo | `access/Authorizer.ts`. Mudança que revoga o acesso já entregue passa pelo `access/AccessEpoch.ts`. |
+| **Servidor:** enviar um evento | `Outbox.ts`, que escolhe o público: todos, quem tem acesso ao canal ou quem está na chamada. |
+| **Servidor:** recurso preso a uma conexão | Liberação idempotente no `releaseConnection()` do `WebSocketServer.ts`, que encerra todos os caminhos (fechamento, kick, troca de aparelho, revogação de bot). |
+| **Shared:** payload ou mensagem nova | Tipo em `packages/shared/src/protocolPayloads.ts` e schema zod em `validators.ts`. Recurso novo de protocolo vai como feature em `PROTOCOL_FEATURES` (`protocolCompatibility.ts`), usada só quando os dois lados a anunciam. |
+| **Main:** canal IPC | Módulo `apps/client/src/main/ipc/*Ipc.ts` do domínio, registrado pelo `IpcRegistry` (`ipc/registry.ts`) com a política de remetente. O payload é validado com `ipc/guards.ts`, e o contrato fica em `packages/shared/src/ipc.ts`. |
+| **Renderer:** modal ou diálogo | `utils/modalShell.ts` (`openModal`): pilha, foco, Tab, Esc e animação. |
+| **Renderer:** erro, aviso ou validação | `utils/feedback.ts` (`reportError`, `validateForm`, `markFieldInvalid`). |
+| **Renderer:** liga/desliga ou escolha exclusiva | `utils/formControls.ts` (`renderSwitch`, `renderChoiceCards`). |
+| **Renderer:** abas de configurações | `views/settings/settingsLayout.ts`. |
+| **Renderer:** assistente em etapas | `views/community/wizardShell.ts` (`mountWizard`). |
+| **Renderer:** painel redimensionável | `utils/resizableEdge.ts` (`bindResizableEdge`). |
+| **Renderer:** view com dados de um servidor | `core/sessionBinding.ts`: a view para quando o servidor, a conexão ou o membro mudam, e as requisições pendentes são canceladas ao fechar. |
+| **Renderer:** redesenhar uma lista sem perder foco ou rolagem | `utils/preserveViewState.ts`, com `itemKeys`. |
+| **Renderer:** evento interno | `EventBus` tipado. O evento novo entra em `core/appEventMap.ts`. |
+| **Renderer:** chat, shell e tela nativa | `views/chat/*` (feed, composer, bandeja, ações), `views/main/*` (cabeçalho, canais, membros, rodapé) e `core/webrtc/nativeScreen/*`. |
+| **Texto visível ao usuário** | Chave nos dois locales (`i18n/locales/pt-BR.ts` e `en.ts`; o `en` é tipado, então faltar uma chave quebra o build). Nunca texto fixo no código. |
+| **SDK de bots** | `packages/bot-sdk/src/client/*`. Ao mudar um export público, regenere a referência com `node docs-site/scripts/generate-bot-reference.mjs`. |
+| **Runtime nativo de tela** | Prazos e observadores com `runtime/asyncTools.cjs` (`within`, `notifyObserver`). |
+
+#### Regras de organização
+
+- **Uma regra, um lugar.** Cálculo, limite, regra de permissão, texto ou markup que aparece em dois lugares vira uma função ou componente só. Cliente, servidor, CLI e SDK compartilham regras pelo `@monky/shared`: a mesma regra de menção, os mesmos limites e as mesmas validações do CLI e do app. Unifique o que é **a mesma regra**, não o que só se parece. Duas coisas que hoje coincidem mas mudam por motivos diferentes continuam separadas.
+- **Uma responsabilidade por módulo.** Uma view desenha e delega; estado fica nas stores; rede, IPC e regras ficam em controladores ou serviços. Quando um arquivo passa de umas 800 linhas ou mistura desenho, estado, rede e eventos, divida-o antes de acrescentar mais. A divisão de `ChatView` em `views/chat/*` é o modelo.
+- **Quem cria, libera.** Listeners usam `AbortController`/`signal`; `destroy()`/`dispose()` é idempotente; timers, observers e requisições pendentes são cancelados no teardown. Uma segunda montagem não pode duplicar handlers.
+- **Corrija a causa, em todos os caminhos.** Um defeito costuma ter irmãos: canal e DM, P2P e SFU, Windows e macOS, teclado e mouse, cliente e Light. Procure o mesmo padrão nos caminhos equivalentes e corrija todos juntos.
+- **Sem código morto.** Apague o que deixou de ser usado, em vez de comentar ou manter "por garantia". O histórico do git guarda o antigo.
+- **Dado externo nunca vira HTML cru.** Texto, cor, URL ou id vindos do servidor, de outro usuário ou de um bot entram no DOM por `html`/`escapeHtml` (`utils/html.ts`) ou por `textContent`. Nunca por concatenação em `innerHTML`. Isso vale também para atributos como `style`, `src` e `data-*`.
+- **Resposta atrasada não vale.** Todo resultado assíncrono (resposta do servidor, IPC, `load` de mídia, timer) confere, antes de agir, se ainda pertence ao pedido atual: mesmo servidor, conexão, sala, sessão ou mensagem. Use `sessionBinding`, `AccessEpoch`, `AbortSignal` ou um id do pedido. Admissões de voz cruzadas, moves seguidos e kick durante a entrada vieram de respostas aplicadas fora de hora.
+- **Evento só para quem tem acesso.** No servidor, quem recebe cada envio é decidido no `Outbox.ts`: `broadcastToChannel` para membros com acesso ao canal e `sendToCall` para quem está na chamada. O `access/ChannelVisibility.ts` cuida de quais canais cada conexão conhece. Não mande evento de canal, sala ou recurso privado pelo `broadcast` geral. Quem não tem acesso não recebe nem o evento, nem a contagem, nem o nome de quem entrou ou saiu.
+- **Gravar sem perder o anterior.** Arquivo do app se grava com `writeFileAtomicSync` (`apps/client/src/main/atomicFile.ts`) ou pelo mesmo padrão temporário + rename. Substituir algo (avatar, ícone, backup) só apaga o antigo depois de o novo estar gravado. Lotes no SQLite vão numa transação.
+- **Custo que não cresce com o servidor.** No servidor, nada de consulta ao banco dentro de laço por membro, mensagem ou canal: carregue em lote e indexe em memória. No renderer, atualize só o item que mudou, em vez de redesenhar a lista.
+- **Teste não depende do relógio.** Controle o tempo com `mock.timers` do `node:test` ou com o relógio injetado do módulo. Nunca espere tempo real com `sleep`. Em smoke DOM, encurte os prazos pelas constantes estáticas da classe. Simular `Date.now` derruba o heartbeat de 12 s do `NetworkClient`.
+- **Bug corrigido exige teste de regressão que falha sem a correção.** Confira revertendo a correção. Use o nível certo: unitário para regra pura, teste do servidor para protocolo, smoke DOM para interface e teclado. Arquivo de teste novo do servidor só roda no CI se entrar em `test:bots`, `test:community` ou na lista explícita do `.github/workflows/ci.yml`.
+- **Revise o próprio diff antes de pedir validação:** duplicação, vazamentos, `any`, código morto, texto fora do i18n e documentação que ficou desatualizada.
+
+---
+
+### 3. Pragmatismo & Anti-Overengineering
 
 - **KISS (Keep It Simple, Stupid):** Prefira sempre a solução mais simples e legível que resolva o problema com eficácia.
 - **YAGNI (You Aren't Gonna Need It):** Não crie abstrações prematuras, camadas intermediárias vazias, fábricas ou padrões complexos para funcionalidades que não existem no escopo atual.
@@ -168,7 +216,7 @@ flowchart TD
      - **Minor** (`1.X.0`): Novas funcionalidades (`feat:`, `feat(...)`, `feature:`).
      - **Major** (`X.0.0`): Breaking changes / refatorações arquiteturais (`BREAKING CHANGE:`, `feat!:`, `major:`).
    - **Só gera versão o PR que muda o que chega ao usuário:** arquivo de aplicação ou de dependência (os mesmos que exigem nota de release) ou uma nota nova em `release-notes/`. PR só de CI, scripts, testes ou documentação não publica release nem conta no número da próxima, então não há release a esperar. Mudança de build ou de CI que precisa chegar ao usuário entra com uma nota de release, que é o que gera a versão.
-   - ⚠️ **Toda mudança de compatibilidade entre cliente e servidor é `major`.** Um cliente e um servidor com `PROTOCOL_VERSION` diferentes se recusam a conectar (`packages/shared/src/validators.ts` exige igualdade exata), então quem não atualizar os dois lados fica sem conseguir entrar. Ao mexer em `PROTOCOL_VERSION` (`packages/shared/src/constants.ts`), no formato das mensagens do WebSocket ou no schema esperado pelo outro lado, use `feat!:`/`major:` no título do PR ou um parágrafo `BREAKING CHANGE:` na mensagem de um commit. O CI (`scripts/check-protocol-bump.js`) reprova o PR que mudar o `PROTOCOL_VERSION` sem esse marcador.
+   - ⚠️ **Toda mudança de compatibilidade entre cliente e servidor é `major`.** Cliente e servidor negociam a compatibilidade ao conectar (`packages/shared/src/protocolCompatibility.ts`): o servidor aceita clientes a partir de `MIN_CLIENT_PROTOCOL` e bots a partir de `MIN_BOT_PROTOCOL`, e cada lado só usa os recursos que os dois anunciaram (`PROTOCOL_FEATURES`). Quem não atualizar continua entrando, mas sem os recursos novos. Quando uma correção de segurança ou uma mudança incompatível eleva um piso, quem ficar abaixo dele deixa de conseguir entrar. Ao mexer em `PROTOCOL_VERSION` (`packages/shared/src/constants.ts`), nos pisos, no formato das mensagens do WebSocket ou no schema esperado pelo outro lado, use `feat!:`/`major:` no título do PR ou um parágrafo `BREAKING CHANGE:` na mensagem de um commit. O CI (`scripts/check-protocol-bump.js`) reprova o PR que mudar o `PROTOCOL_VERSION` sem esse marcador.
    - A versão é calculada a partir da **última release publicada, betas inclusive**, avaliando apenas os commits feitos desde ela. Cada push move o número conforme o que carrega: `fix:` sobe patch, `feat:` sobe minor e breaking change sobe major, mesmo no meio de uma linha de beta (#378). Promover uma beta publica exatamente os números dela (`v3.4.2-beta` → `v3.4.2`).
    - **Cada commit que gera versão vale um salto, não cada release.** Um PR com três `fix:` leva `1.0.0` a `1.0.3`; com duas `feat:` e três `fix:`, a `1.2.3` (#465). Os saltos são aplicados na ordem cronológica dos commits, então a ordem importa: uma `feat:` depois de um `fix:` zera o patch recém-somado. Isso funciona sob squash porque o GitHub deixa a lista dos commits originais no corpo da mensagem — **se você reescrever esse corpo e apagar a lista, o PR volta a valer um salto só**, o do título.
    - Betas saem como `v<MAJOR>.<MINOR>.<PATCH>-beta`, sem contador (`v3.1.2-beta`). O sufixo já carregou um número de 3 dígitos (`-beta001`) para manter em ordem as betas de uma **mesma base** na página de releases do GitHub, que ordena pelo nome da tag (#338); como a base passou a subir a cada release (#378), não existem mais duas betas da mesma base para desempatar e o contador nunca saía de `001` (#382). As tags já publicadas (`-betaNNN` e o legado `-beta.N`) continuam sendo lidas normalmente.

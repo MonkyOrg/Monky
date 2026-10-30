@@ -875,8 +875,13 @@ function runTests() {
     voiceMode: 'sfu',
   }, { id: 'u1', nickname: 'TestUser', status: 'ONLINE' });
   assert(sStore.serverDetails?.voiceMode === 'sfu', 'ServerStore armazena voiceMode: "sfu"');
-  sStore.updateServerMeta('Servidor P2P', false, true, undefined, undefined, undefined, undefined, true, true, 'p2p');
-  assert(sStore.serverDetails?.voiceMode === 'p2p', 'updateServerMeta atualiza voiceMode para "p2p"');
+  sStore.applySettings({ name: 'Servidor P2P', hasPassword: false, allowSoundboard: true, allowEveryoneMention: true, allowMessageEdit: true, voiceMode: 'p2p' });
+  assert(sStore.serverDetails?.voiceMode === 'p2p', 'applySettings atualiza voiceMode para "p2p"');
+  assert(sStore.serverDetails?.name === 'Servidor P2P' && sStore.serverDetails.allowMessageEdit === true,
+    'applySettings aplica nome e interruptores enviados');
+  sStore.applySettings({ name: 'Servidor P2P', hasPassword: true });
+  assert(sStore.serverDetails?.voiceMode === 'p2p' && sStore.serverDetails.allowMessageEdit === true && sStore.serverDetails.hasPassword,
+    'applySettings preserva o que o servidor não enviou');
 
   // Testar SfuClientEngine
   console.log('\n--- Testando SfuClientEngine ---');

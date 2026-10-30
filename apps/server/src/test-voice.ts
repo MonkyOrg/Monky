@@ -21,6 +21,7 @@ import { DatabaseConnection } from './infrastructure/database/DatabaseConnection
 import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
 import { SfuManager, SfuProducerClosedError, SfuProducerLimitError } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import type { ClientSession } from './infrastructure/websocket/ClientSession';
 import { VoiceSessionHandler } from './infrastructure/websocket/voice/VoiceSessionHandler';
 import { Logger } from './infrastructure/logger/Logger';
 import { createFixture, record, records as recordList, text, type Received } from './testFixtures/bots';
@@ -121,15 +122,12 @@ test('authentication supplies the current identity restriction before voice, aft
   server['reconnectTimers'] = new Map();
   server['closing'] = false;
   server['dmRelay'] = { register: () => {}, unregister: () => {} } as unknown as WebSocketServer['dmRelay'];
-  server['broadcastRolesState'] = async () => {};
+  server['roleAdmin'].broadcastState = async () => {};
   // The login compares the access versions read before and after its snapshot.
   const permissions = Object.create(PermissionService.prototype) as PermissionService;
   permissions.getRoleAccessVersion = () => 0;
   server['permissionService'] = permissions;
-  server['localAccessVersion'] = 0;
-  server['botSettingsPermissionVersion'] = 0;
-  server['pendingLocalAccessMutations'] = 0;
-  server['handleCommandsList'] = () => {};
+  server['botManagement'].sendCommands = () => {};
   const messages: Parameters<WebSocketServer['send']>[1][] = [];
   server['send'] = (_socket, message) => { messages.push(message); };
   server['broadcast'] = () => {};
@@ -145,17 +143,17 @@ test('authentication supplies the current identity restriction before voice, aft
     };
     const socket = Object.create(WebSocket.prototype) as WebSocket;
     Object.defineProperty(socket, 'readyState', { value: WebSocket.OPEN });
-    const session: Parameters<WebSocketServer['handleAuthChallengeResponse']>[0] = {
+    const session: ClientSession = {
       ws: socket, lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
     };
     server['sessions'].set(socket, session);
     auth.verifyChallengeResponse = async () => ({ success: true, user, serverDetails: details });
-    server['buildIceServersFor'] = async () => {
+    server['authentication']['buildIceServersFor'] = async () => {
       await Promise.resolve();
       restrictions.save(user.id, { serverMuted: blocked, serverDeafened: blocked });
       return [];
     };
-    await server['handleAuthChallengeResponse'](session, { signature: 'fixture' }, `auth-${blocked}`);
+    await server['authentication']['answerChallenge'](session, { signature: 'fixture' }, `auth-${blocked}`);
     const response = messages.find((message) => message.requestId === `auth-${blocked}`);
     assert.equal(response?.type, MessageType.AUTH_SUCCESS);
     const payload = response?.payload as AuthSuccessPayload;
@@ -164,11 +162,11 @@ test('authentication supplies the current identity restriction before voice, aft
     assert.deepEqual(payload.server.voiceStates, {}, 'restrictions do not require or create voice membership');
     assert.equal(payload.currentUser.id, 'alice');
     const beforeDisconnect = messages.length;
-    server['buildIceServersFor'] = async () => {
+    server['authentication']['buildIceServersFor'] = async () => {
       server['sessions'].delete(socket);
       return [];
     };
-    await server['handleAuthChallengeResponse'](session, { signature: 'fixture' }, 'disconnected-during-ice');
+    await server['authentication']['answerChallenge'](session, { signature: 'fixture' }, 'disconnected-during-ice');
     assert.equal(messages.length, beforeDisconnect, 'a departed connection must not receive a late auth snapshot');
   }
   assert.deepEqual(service.getVoiceRestrictions('bob'), { serverMuted: false, serverDeafened: false });
@@ -426,8 +424,8 @@ test('SQLite voice restrictions survive restart, stay server-scoped and cascade 
 
 test('voice join snapshot is captured after async broadcast and includes peers who arrived during it', async () => {
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
-  server['requirePermission'] = async () => true;
-  server['requireChannelAccess'] = async () => true;
+  server['authorizer'].requirePermission = async () => true;
+  server['authorizer'].requireChannelAccess = async () => true;
   const service = signaling();
   const sfu = new SfuManager();
   server['signalingService'] = service;
@@ -1100,9 +1098,8 @@ function departureFixture() {
   server['signalingService'] = service;
   server['sfuManager'] = sfu;
   server['closing'] = false;
-  server['botSettingsPermissionVersion'] = 0;
-  server['localAccessVersion'] = 0;
-  server['pendingLocalAccessMutations'] = 1;
+  // A change to channel access is running: departures go out whatever access is doing.
+  void server['epoch'].change(() => new Promise<void>(() => {}));
   const permissions = Object.create(PermissionService.prototype) as PermissionService;
   permissions.getRoleAccessVersion = () => 0;
   server['permissionService'] = permissions;
@@ -1314,7 +1311,7 @@ test('a voice room that leaves or joins a connection\'s list takes or brings who
     id: 'room', serverId: 'server', name: 'room', type: 'VOICE', position: 0, createdAt: 0, botCommandsEnabled: false,
     isPrivate: false, allowedRoleIds: [],
   };
-  const list = (client: Client, userId: string, visible: string[]) => f.server['sendChannelVisibility'](client, new Set(visible),
+  const list = (client: Client, userId: string, visible: string[]) => f.server['visibility'].sendChannels(client, new Set(visible),
     [room], [], { userId, permissions: 0, roleIds: [], isBot: client.isBot }, false);
   const withdraw = (client: Client, userId: string) => list(client, userId, ['lobby']);
   const show = (client: Client, userId: string) => list(client, userId, ['lobby', 'room']);

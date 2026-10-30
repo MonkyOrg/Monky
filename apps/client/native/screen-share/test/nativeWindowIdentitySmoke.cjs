@@ -12,6 +12,8 @@ const { within } = require('../runtime/asyncTools.cjs');
 const artifacts = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);
 const contracts = process.argv.find(value => value.startsWith('--contracts='))?.slice('--contracts='.length)
   ?? path.resolve(__dirname, '..', 'build', 'capture-production', 'capture-contract-test.exe');
+// Runs only the probes on fixtures that never appear on screen: minimized, or restored past every monitor.
+const offscreenOnly = process.argv.includes('--offscreen-only');
 assert.ok(artifacts && path.isAbsolute(artifacts));
 assert.equal(fs.existsSync(artifacts), false, 'Never reuse source-identity smoke artifacts.');
 assert.ok(path.isAbsolute(contracts) && fs.existsSync(contracts), 'Build native capture contracts first.');
@@ -19,8 +21,8 @@ fs.mkdirSync(artifacts);
 const owners = new Set();
 const report = { probes: [], personalWindowsCaptured: false, videoRecorded: false, forcedTermination: false };
 
-async function fixture(className, nonce = randomBytes(16).toString('hex'), parent) {
-  const child = spawn(contracts, ['--window-fixture', className, nonce, ...(parent ? [String(parent)] : [])],
+async function fixture(className, nonce = randomBytes(16).toString('hex'), parent, options = []) {
+  const child = spawn(contracts, ['--window-fixture', className, nonce, ...(parent ? [String(parent)] : []), ...options],
     { stdio: ['pipe', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', value => { stderr += value; });
@@ -118,6 +120,22 @@ async function main() {
   try {
     const runtime = loadCaptureRuntime();
     for (const className of ['WinUIDesktopWin32WindowClass', 'ApplicationFrameWindow']) {
+      // These fixtures never appear on screen. Each probe isolates one reason that used to refuse a window: being
+      // minimized, its own long title, the long title of another listed window (restored, as the stock list
+      // once listed only restored windows), or half an emoji in its title.
+      const minimized = await fixture(className, undefined, undefined, ['minimized']);
+      await probe(runtime, minimized.target, `${className}:minimized`);
+      await minimized.close();
+      const longTitled = await fixture(className, undefined, undefined, ['offscreen', 'long-title']);
+      await probe(runtime, longTitled.target, `${className}:long-title`);
+      const restored = await fixture(className, undefined, undefined, ['offscreen']);
+      await probe(runtime, restored.target, `${className}:another-window-long-title`);
+      await restored.close();
+      await longTitled.close();
+      const surrogate = await fixture(className, undefined, undefined, ['offscreen', 'unpaired-surrogate']);
+      await probe(runtime, surrogate.target, `${className}:unpaired-surrogate-title`);
+      await surrogate.close();
+      if (offscreenOnly) continue;
       const selected = await fixture(className);
       await probe(runtime, selected.target, `${className}:same-process-child`, undefined, true);
       const duplicate = await fixture(className, selected.nonce);

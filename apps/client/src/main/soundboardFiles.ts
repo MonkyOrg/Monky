@@ -9,10 +9,8 @@ import {
 import { isSoundFileName, isSoundAudio } from './soundAudioValidation';
 import type { SoundboardDownloads } from './soundboardDownload';
 import { supportsSoundboardEncoding, type SoundboardEncoder } from './soundboardEncoder';
+import { isRecord } from './ipc/guards';
 
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 function samePath(a: string, b: string): boolean {
   return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
@@ -21,7 +19,7 @@ class FileError extends Error {
 }
 function failure(error: unknown): { status: 'failed'; reason: SoundboardFileFailure } {
   if (error instanceof FileError) return { status: 'failed', reason: error.reason };
-  const code = record(error) ? error.code : undefined;
+  const code = isRecord(error) ? error.code : undefined;
   return { status: 'failed', reason: code === 'ENOENT' ? 'missing' : code === 'EEXIST' ? 'exists'
     : ['EPERM', 'EACCES', 'EBUSY', 'ETXTBSY'].includes(String(code)) ? 'locked' : 'io_failed' };
 }
@@ -32,7 +30,7 @@ export class SoundboardFiles {
   constructor(private readonly folders: Pick<SoundboardDownloads, 'availability'>, private readonly encoder?: SoundboardEncoder) {}
 
   private async source(input: unknown): Promise<{ folder: string; source: string; fileName: string; stat: Stats }> {
-    if (!record(input) || typeof input.folder !== 'string' || !path.isAbsolute(input.folder) ||
+    if (!isRecord(input) || typeof input.folder !== 'string' || !path.isAbsolute(input.folder) ||
         input.folder.length > 4096 || !isSoundFileName(input.fileName)) throw new FileError('invalid_request');
     if (await this.folders.availability(input.folder) !== 'ready') throw new FileError('no_folder');
     const folder = path.resolve(input.folder);
@@ -79,7 +77,7 @@ export class SoundboardFiles {
   public openEditor(input: unknown): Promise<SoundboardFileResult<SoundboardEditorSource>> {
     return this.run(async () => {
       const data = await this.snapshot(input);
-      const fileName = record(input) && typeof input.fileName === 'string' ? input.fileName : '';
+      const fileName = isRecord(input) && typeof input.fileName === 'string' ? input.fileName : '';
       const extension = path.extname(fileName).toLowerCase();
       const overwriteAvailable = extension === '.wav' ||
         (supportsSoundboardEncoding(extension) && !!await this.encoder?.available());
@@ -88,7 +86,7 @@ export class SoundboardFiles {
   }
 
   private encode(input: unknown): { bytes: Uint8Array; duration: number; channels: number } {
-    if (!record(input) || !Array.isArray(input.channels) ||
+    if (!isRecord(input) || !Array.isArray(input.channels) ||
         !input.channels.every((channel): channel is Float32Array => channel instanceof Float32Array) ||
         typeof input.sampleRate !== 'number' || typeof input.start !== 'number' || typeof input.end !== 'number' ||
         typeof input.fadeIn !== 'number' || typeof input.fadeOut !== 'number') throw new FileError('invalid_request');
@@ -104,7 +102,7 @@ export class SoundboardFiles {
 
   public overwrite(input: unknown): Promise<SoundboardFileResult<SoundboardSavedFile>> {
     return this.run(async () => {
-      if (!record(input) || typeof input.revision !== 'string' || !/^[a-f0-9]{64}$/.test(input.revision)) throw new FileError('invalid_request');
+      if (!isRecord(input) || typeof input.revision !== 'string' || !/^[a-f0-9]{64}$/.test(input.revision)) throw new FileError('invalid_request');
       const checked = await this.source(input);
       if ((await this.snapshot(input)).revision !== input.revision) throw new FileError('source_changed');
       let edited = this.encode(input);
@@ -151,13 +149,13 @@ export class SoundboardFiles {
   public rename(input: unknown): Promise<SoundboardFileResult<SoundboardSavedFile>> {
     return this.run(async () => {
       const checked = await this.source(input);
-      if (!record(input) || !isSoundFileName(input.newFileName) ||
+      if (!isRecord(input) || !isSoundFileName(input.newFileName) ||
           path.extname(input.newFileName).toLowerCase() !== path.extname(checked.fileName).toLowerCase()) throw new FileError('invalid_request');
       const target = path.join(checked.folder, input.newFileName);
       // link is atomic and fails if the destination exists, unlike POSIX rename.
       try { await fs.link(checked.source, target); }
       catch (error: unknown) {
-        if (!record(error) || !['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV'].includes(String(error.code))) throw error;
+        if (!isRecord(error) || !['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV'].includes(String(error.code))) throw error;
         await fs.copyFile(checked.source, target, constants.COPYFILE_EXCL);
       }
       try { await fs.unlink(checked.source); }
@@ -180,7 +178,7 @@ export class SoundboardFiles {
   public edit(input: unknown): Promise<SoundboardFileResult<SoundboardSavedFile>> {
     return this.run(async () => {
       const { folder } = await this.source(input);
-      if (!record(input) || !isSoundFileName(input.newFileName) || path.extname(input.newFileName).toLowerCase() !== '.wav' ||
+      if (!isRecord(input) || !isSoundFileName(input.newFileName) || path.extname(input.newFileName).toLowerCase() !== '.wav' ||
           !Array.isArray(input.channels) || !input.channels.every((channel): channel is Float32Array => channel instanceof Float32Array) ||
           typeof input.sampleRate !== 'number' || typeof input.start !== 'number' || typeof input.end !== 'number' ||
           typeof input.fadeIn !== 'number' || typeof input.fadeOut !== 'number') throw new FileError('invalid_request');

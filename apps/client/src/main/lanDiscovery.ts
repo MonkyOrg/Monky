@@ -1,17 +1,13 @@
 import dgram from 'dgram';
-import { BrowserWindow } from 'electron';
+import type { DiscoveredLanServer, IpcEventChannel } from '@monky/shared';
 
 const DEFAULT_DISCOVERY_PORT = 41234;
 const ANNOUNCEMENT_TYPE = 'monky-announce';
 const SERVER_TTL_MS = 10000;
 const PRUNE_INTERVAL_MS = 1000;
 
-export interface DiscoveredLanServer {
-  host: string;
-  port: number;
-  serverName: string;
-  version: string;
-}
+/** What the renderer hears about a server announced on the local network. */
+export type LanDiscoveryEvent = Extract<IpcEventChannel, 'lan:found' | 'lan:lost'>;
 
 interface DiscoveredLanServerEntry extends DiscoveredLanServer {
   lastSeen: number;
@@ -25,15 +21,16 @@ interface DiscoveryMessage {
 }
 
 export class LanDiscovery {
-  private readonly mainWindow: BrowserWindow;
   private readonly discoveryPort: number;
   private socket: dgram.Socket | null = null;
   private pruneTimer: NodeJS.Timeout | null = null;
   private readonly servers = new Map<string, DiscoveredLanServerEntry>();
   private isStarted = false;
 
-  constructor(mainWindow: BrowserWindow, discoveryPort = DEFAULT_DISCOVERY_PORT) {
-    this.mainWindow = mainWindow;
+  constructor(
+    private readonly notify: (event: LanDiscoveryEvent, server: DiscoveredLanServer) => void,
+    discoveryPort = DEFAULT_DISCOVERY_PORT,
+  ) {
     this.discoveryPort = discoveryPort;
   }
 
@@ -134,7 +131,7 @@ export class LanDiscovery {
 
     this.servers.set(key, server);
     if (isNew) {
-      this.emitFound(server);
+      this.notify('lan:found', server);
     }
   }
 
@@ -143,18 +140,8 @@ export class LanDiscovery {
     for (const [key, server] of this.servers.entries()) {
       if (server.lastSeen > cutoff) continue;
       this.servers.delete(key);
-      this.emitLost(server);
+      this.notify('lan:lost', server);
     }
-  }
-
-  private emitFound(server: DiscoveredLanServer): void {
-    if (this.mainWindow.isDestroyed()) return;
-    this.mainWindow.webContents.send('lan:found', server);
-  }
-
-  private emitLost(server: DiscoveredLanServer): void {
-    if (this.mainWindow.isDestroyed()) return;
-    this.mainWindow.webContents.send('lan:lost', server);
   }
 
   private getKey(host: string, port: number): string {

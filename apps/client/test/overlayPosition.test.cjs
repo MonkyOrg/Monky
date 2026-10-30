@@ -3,15 +3,8 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { EventEmitter } = require('node:events');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const ts = require('typescript');
 const shared = require('@monky/shared');
-const filename = path.resolve(__dirname, '..', 'src', 'main', 'overlayManager.ts');
-const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
-}).outputText;
+const { loadMain } = require('./mainModules.cjs');
 
 function fixture(platform = process.platform) {
   const windows = [], notifications = [], timers = new Set(), intervals = new Set();
@@ -22,7 +15,8 @@ function fixture(platform = process.platform) {
       this.moves = [];
       this.aspects = [];
       this.events = [];
-      this.webContents = { id: windows.length + 1, send: (type, value) => this.events.push({ type, value }) };
+      this.webContents = { id: windows.length + 1, isDestroyed: () => this.destroyed,
+        send: (type, value) => this.events.push({ type, value }) };
       this.destroyed = false;
       windows.push(this);
     }
@@ -65,21 +59,25 @@ function fixture(platform = process.platform) {
     getPrimaryDisplay: () => display, getDisplayNearestPoint: () => display,
     getCursorScreenPoint: () => ({ x: 0, y: 0 }),
   } };
-  const module = { exports: {} };
-  vm.runInThisContext(`(function(require, module, exports, __dirname, setTimeout, clearTimeout, setInterval, clearInterval, process) {
-    ${compiled}\n})`, { filename })(
-    name => name === 'electron' ? electron : name === '@monky/screen-audio' ? {
-      setWindowResizeAspect(handle, ratio, width, height) {
-        windows[handle.readUInt32LE() - 1].aspects.push({ ratio, extraSize: { width, height } });
+  const { OverlayManager } = loadMain('overlayManager', {
+    packages: {
+      electron,
+      '@monky/screen-audio': {
+        setWindowResizeAspect(handle, ratio, width, height) {
+          windows[handle.readUInt32LE() - 1].aspects.push({ ratio, extraSize: { width, height } });
+        },
       },
-    } : require(name), module, module.exports, path.dirname(filename),
-    callback => { timers.add(callback); return callback; }, timer => timers.delete(timer),
-    callback => { intervals.add(callback); return callback; }, timer => intervals.delete(timer),
-    { ...process, platform },
-  );
-  const manager = new module.exports.OverlayManager({
+    },
+    globals: {
+      setTimeout: callback => { timers.add(callback); return callback; }, clearTimeout: timer => timers.delete(timer),
+      setInterval: callback => { intervals.add(callback); return callback; }, clearInterval: timer => intervals.delete(timer),
+      process: { ...process, platform },
+    },
+  });
+  const manager = new OverlayManager({
     isDestroyed: () => false, getBounds: () => ({ x: -1600, y: 100, width: 700, height: 900 }),
-    webContents: { send: (type, value) => notifications.push({ type, value: structuredClone(value) }) },
+    webContents: { isDestroyed: () => false,
+      send: (type, value) => notifications.push({ type, value: structuredClone(value) }) },
   });
   manager.open({ mode: 'cameras-only', layout: 'grid', position: 'bottom-right', cardOpacity: 0.85, focusActiveSpeaker: false });
   return { manager, windows, notifications, timers, intervals, flush() {

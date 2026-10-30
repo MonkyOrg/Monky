@@ -1,10 +1,9 @@
 import { setMainStdioLogger } from './mainStdio';
 import { markStartup, reportStartupWhenPainted } from './startupTiming';
-import { app, BrowserWindow, dialog, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain as electronIpcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
 import path from 'path';
 import { setupIpcHandlers } from './ipcHandlers';
 import { flushDirectMessages } from './dm/dmIpc';
-import { setupUpdater } from './updater';
 import {
   handleLaunchDuringUpdate,
   isInstallSplashActive,
@@ -32,11 +31,14 @@ import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } fro
 import { CrashRecovery } from './crashRecovery';
 import { hasIdentity } from './identityService';
 import { initializeMainLanguage, mt } from './i18n';
-import { APP_RENDERER_READY, APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, BOT_STORAGE_CHANGED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
+import { APP_RENDERER_READY, APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, BOT_STORAGE_CHANGED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC } from '@monky/shared';
 import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
 import { configureVideoPresentation } from './videoPresentation';
 import { handleScreenPictureInPictureOpen } from './screenPictureInPictureWindow';
 import { installWebContentsPolicy } from './webContentsPolicy';
+import type { ContractIpcMain } from './ipcContract';
+import { webUrl } from './ipc/guards';
+import { IpcRegistry, sendEvent, windowContents } from './ipc/registry';
 
 import fs from 'fs';
 
@@ -98,9 +100,7 @@ if (process.platform === 'win32' && process.env.MONKY_DISABLE_WGC !== '1') {
 
 let mainWindow: BrowserWindow | null = null;
 const botDeviceStorage = new BotDeviceStorage(path.join(app.getPath('userData'), 'bot-storage'), (scopeId) => {
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send(BOT_STORAGE_CHANGED, scopeId);
-  }
+  sendEvent(windowContents(mainWindow), BOT_STORAGE_CHANGED, scopeId);
 });
 const isMainWindowContents = (contents: Electron.WebContents): boolean => mainWindow?.webContents === contents;
 const unbindBotScreenDocuments = bindBotScreenDocuments(isMainWindowContents, botDeviceStorage);
@@ -109,6 +109,9 @@ app.once('will-quit', () => {
   unbindBotScreenDocuments();
   unbindBotDeviceStorage();
 });
+// Channels that outlive any one window: they answer the main window that exists now (E-MAIN-4).
+const ipcMain: ContractIpcMain = electronIpcMain;
+const appIpc = new IpcRegistry(ipcMain, { main: () => windowContents(mainWindow), overlay: () => null });
 const serverInviteInbox = new ServerInviteInbox();
 let overlayManager: OverlayManager | null = null;
 let trayManager: TrayManager | null = null;
@@ -133,9 +136,7 @@ let hostedServicesStopping = false;
 let hostedServicesStopped = false;
 
 function notifyServerInvite(): void {
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send(SERVER_INVITE_AVAILABLE);
-  }
+  sendEvent(windowContents(mainWindow), SERVER_INVITE_AVAILABLE);
 }
 
 const onOpenInviteUrl = (event: Electron.Event, url: string): void => {
@@ -150,18 +151,16 @@ const onOpenInviteUrl = (event: Electron.Event, url: string): void => {
 };
 app.on('open-url', onOpenInviteUrl);
 serverInviteInbox.receiveArguments(process.argv);
-ipcMain.handle(SERVER_INVITE_IPC.take, (event: Electron.IpcMainInvokeEvent, ...args: unknown[]): ServerInviteResult | null => {
-  const window = mainWindow;
-  if (!window || window.isDestroyed() || event.sender !== window.webContents
-    || event.senderFrame !== window.webContents.mainFrame || args.length !== 0) {
-    console.warn('[Invites] Rejected an invitation read outside the main application frame.');
+appIpc.handle(SERVER_INVITE_IPC.take, 'main', (_event, ...args) => {
+  if (args.length !== 0) {
+    console.warn('[Invites] Rejected an invitation read with unexpected arguments.');
     throw new Error(mt('error.serverInviteUnavailable'));
   }
   return serverInviteInbox.take();
 });
 app.once('will-quit', () => {
   flushDirectMessages();
-  ipcMain.removeHandler(SERVER_INVITE_IPC.take);
+  appIpc.dispose();
   app.removeListener('open-url', onOpenInviteUrl);
 });
 
@@ -221,10 +220,7 @@ let onLeaveComplete: ((request: unknown) => void) | null = null;
 let shutdownRequestId = 0;
 let rendererNativeRetired = false;
 
-ipcMain.handle(APP_SHUTDOWN_IPC.acknowledge, (event, request: unknown) => {
-  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
-    || event.senderFrame !== mainWindow.webContents.mainFrame)
-    throw new Error('Shutdown acknowledgement belongs to a different renderer.');
+appIpc.handle(APP_SHUTDOWN_IPC.acknowledge, 'main', (_event, request) => {
   onLeaveComplete?.(request);
 });
 
@@ -236,13 +232,9 @@ ipcMain.handle(APP_SHUTDOWN_IPC.acknowledge, (event, request: unknown) => {
  * this; the guards did not.
  */
 function openExternalIfWebUrl(url: string): void {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
-    void shell.openExternal(parsed.toString());
-  } catch {
-    // Not a URL we can make sense of: leaving it to the OS is the risk itself.
-  }
+  const parsed = webUrl(url);
+  // Not a web link we can make sense of: leaving it to the OS is the risk itself.
+  if (parsed) void shell.openExternal(parsed.toString());
 }
 
 function bindMainWindowNavigationGuards(): void {
@@ -469,7 +461,6 @@ function createWindow(deferShow = false): void {
   });
   localExecutionStopped = false;
   rendererNativeRetired = false;
-  setupUpdater(mainWindow, signal => serverManager.getUpdateInventory(signal));
 
   // A launch straight after an update install keeps the "finishing" splash up
   // while this fresh process cold-starts. Hold the main window back until the

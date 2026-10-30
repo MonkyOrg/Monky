@@ -11,9 +11,14 @@ import type { ServerStore } from '../stores/serverStore';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { initialBotInputValues } from '../utils/botInputs';
-import { openCommunityModal } from './CommunityModal';
+import { openCommunityModal, type CommunityModal } from './CommunityModal';
 import { renderBotFields } from './botFields';
 import { ResourceAudiencePicker } from './ResourceAudiencePicker';
+import { mountWizard } from './community/wizardShell';
+import {
+  durationMinutes, isDurationUnit, longestDuration, renderDurationUnit, renderNumberControl, stepNumberControl,
+  type DurationUnit,
+} from './community/durationField';
 
 type DraftType =
   | 'short_text'
@@ -24,7 +29,6 @@ type DraftType =
   | 'multi_select'
   | 'dropdown'
   | 'rating';
-type DurationUnit = 'minutes' | 'hours' | 'days';
 interface DraftField {
   id: string;
   label: string;
@@ -33,20 +37,21 @@ interface DraftField {
   choices: string[];
 }
 
+const DRAFT_TYPES: readonly DraftType[] = ['short_text', 'long_text', 'integer', 'boolean', 'select', 'multi_select', 'dropdown', 'rating'];
+
+function isDraftType(value: string | undefined): value is DraftType {
+  return DRAFT_TYPES.some(type => type === value);
+}
+
 export function openNativeLiveFormWizard(
   client: NetworkClient,
   server: ServerStore,
   channelId: string,
-): ReturnType<typeof openCommunityModal> | undefined {
+): CommunityModal | undefined {
   if (!server.hasPermission(Permission.EMIT_LIVE_ACTIONS, channelId) ||
       !server.serverDetails?.protocol?.features.includes('native-live-forms')) return;
-  const modal = openCommunityModal(t('liveForm.create'));
-  modal.element.querySelector('.community-modal')?.classList.add(
-    'event-wizard',
-    'native-poll-wizard',
-    'native-live-form-wizard',
-  );
-  let step = 0;
+  const modal = openCommunityModal(t('liveForm.create'), { closeWithSession: true });
+  modal.card.classList.add('event-wizard', 'native-poll-wizard', 'native-live-form-wizard');
   let title = '';
   let description = '';
   let duration = '24';
@@ -62,41 +67,7 @@ export function openNativeLiveFormWizard(
   }];
   let pending = false;
   const audience = new ResourceAudiencePicker(server, 'live-form-audience');
-
-  modal.content.innerHTML = `<div class="native-poll-wizard-shell">
-    <nav class="community-steps native-poll-stepper" aria-label="${escapeHtml(t('liveForm.steps'))}">
-      ${(['details', 'fields', 'preview'] as const).map((name, index) =>
-        `<span data-live-form-stepper="${index}">${t(`liveForm.step.${name}`)}</span>`).join('')}
-    </nav>
-    <div class="native-poll-step-viewport" data-live-form-viewport></div>
-    <footer class="modal-footer event-wizard-footer" data-live-form-footer></footer>
-  </div>`;
-  const viewport = modal.content.querySelector<HTMLElement>('[data-live-form-viewport]')!;
-  const footer = modal.content.querySelector<HTMLElement>('[data-live-form-footer]')!;
-  const durationMinutes = () => Number(duration) * (unit === 'days' ? 1440 : unit === 'hours' ? 60 : 1);
-
-  const capture = () => {
-    if (step === 0) {
-      title = viewport.querySelector<HTMLInputElement>('[data-live-form-title]')?.value ?? title;
-      description = viewport.querySelector<HTMLTextAreaElement>('[data-live-form-description]')?.value ?? description;
-      duration = viewport.querySelector<HTMLInputElement>('[data-live-form-duration]')?.value ?? duration;
-      unit = (viewport.querySelector<HTMLSelectElement>('[data-live-form-unit]')?.value ?? unit) as DurationUnit;
-      anonymous = viewport.querySelector<HTMLInputElement>('[data-live-form-anonymous]')?.checked ?? anonymous;
-      return;
-    }
-    if (step !== 1) return;
-    fields = [...viewport.querySelectorAll<HTMLElement>('[data-live-form-field]')].map((element) => {
-      const previous = fields.find(field => field.id === element.dataset.liveFormField)!;
-      const choiceInputs = [...element.querySelectorAll<HTMLInputElement>('[data-live-form-field-choice]')];
-      return {
-        id: previous.id,
-        label: element.querySelector<HTMLInputElement>('[data-live-form-field-label]')?.value ?? previous.label,
-        type: (element.querySelector<HTMLSelectElement>('[data-live-form-field-type]')?.value ?? previous.type) as DraftType,
-        required: element.querySelector<HTMLInputElement>('[data-live-form-field-required]')?.checked ?? previous.required,
-        choices: choiceInputs.length > 0 ? choiceInputs.map(input => input.value) : previous.choices,
-      };
-    });
-  };
+  const fieldSelector = (id: string, control: string) => `[data-live-form-field="${CSS.escape(id)}"] ${control}`;
 
   const normalizedFields = (): NativeLiveFormField[] => fields.map((field) => {
     const common = { name: field.id, label: field.label.trim(), required: field.required };
@@ -117,7 +88,7 @@ export function openNativeLiveFormWizard(
   });
   const payload = (): NativeLiveFormCreate => ({
     channelId,
-    durationMinutes: durationMinutes(),
+    durationMinutes: durationMinutes(duration, unit),
     form: {
       title: title.trim(),
       description: description.trim() || undefined,
@@ -127,25 +98,17 @@ export function openNativeLiveFormWizard(
     },
     audience: audience.value(),
   });
-  const detailsValid = () => title.trim().length >= 1 && title.trim().length <= 100 &&
-    description.length <= 1000 && Number.isInteger(durationMinutes()) &&
-    durationMinutes() >= 1 && durationMinutes() <= 43_200 && audience.isValid();
+  const detailsValid = () => {
+    const minutes = durationMinutes(duration, unit);
+    return title.trim().length >= 1 && title.trim().length <= 100 && description.length <= 1000 &&
+      Number.isInteger(minutes) && minutes >= 1 && minutes <= 43_200 && audience.isValid();
+  };
   const fieldsValid = () => fields.length >= 1 && fields.length <= LIMITS.MAX_BOT_FORM_FIELDS &&
     fields.every(field => field.label.trim().length >= 1 && field.label.trim().length <= 100 &&
       (!['select', 'multi_select', 'dropdown'].includes(field.type) || (field.choices.length >= 2 &&
         field.choices.length <= LIMITS.MAX_BOT_FORM_CHOICES &&
         field.choices.every(choice => choice.trim().length >= 1 && choice.trim().length <= 80) &&
         new Set(field.choices.map(choice => choice.trim().toLocaleLowerCase())).size === field.choices.length)));
-
-  const numberControl = () => `<div class="native-poll-number-control">
-    <input data-live-form-duration class="native-poll-number-input" type="number" inputmode="numeric"
-      min="1" max="${unit === 'days' ? 30 : unit === 'hours' ? 720 : 43200}"
-      value="${escapeHtml(duration)}" aria-label="${escapeHtml(t('liveForm.duration'))}" ${pending ? 'disabled' : ''}>
-    <button type="button" data-live-form-duration-step="-1" aria-label="${escapeHtml(t('poll.decrement', { field: t('liveForm.duration') }))}">
-      <span class="material-symbols-outlined md-16">remove</span></button>
-    <button type="button" data-live-form-duration-step="1" aria-label="${escapeHtml(t('poll.increment', { field: t('liveForm.duration') }))}">
-      <span class="material-symbols-outlined md-16">add</span></button>
-  </div>`;
 
   const detailsStep = () => `<section class="native-poll-step" data-live-form-step="0">
     <div class="native-poll-step-heading"><span class="material-symbols-outlined">description</span>
@@ -158,11 +121,11 @@ export function openNativeLiveFormWizard(
         placeholder="${escapeHtml(t('liveForm.descriptionPlaceholder'))}" ${pending ? 'disabled' : ''}>${escapeHtml(description)}</textarea>
     </label>
     <div class="native-poll-settings-grid">
-      <label>${t('liveForm.duration')}${numberControl()}</label>
-      <label>${t('poll.durationUnit')}<select class="input-field" data-live-form-unit>
-        ${(['minutes', 'hours', 'days'] as const).map(value =>
-          `<option value="${value}" ${unit === value ? 'selected' : ''}>${t(`poll.${value}`)}</option>`).join('')}
-      </select></label>
+      <label>${t('liveForm.duration')}${renderNumberControl({
+        hook: 'live-form-duration', value: duration, min: 1, max: longestDuration(unit),
+        label: t('liveForm.duration'), disabled: pending,
+      })}</label>
+      ${renderDurationUnit('live-form-unit', unit)}
     </div>
     <div class="bot-permission-row native-live-form-anonymous-row">
       <div><label for="native-live-form-anonymous">${t('liveForm.anonymous')}</label>
@@ -183,7 +146,7 @@ export function openNativeLiveFormWizard(
       <label>${t('liveForm.fieldLabel')}<input class="input-field" data-live-form-field-label maxlength="100"
         value="${escapeHtml(field.label)}" placeholder="${escapeHtml(t('liveForm.fieldLabelPlaceholder'))}"></label>
       <label>${t('liveForm.fieldType')}<select class="input-field" data-live-form-field-type>
-        ${(['short_text', 'long_text', 'integer', 'boolean', 'select', 'multi_select', 'dropdown', 'rating'] as const).map(type =>
+        ${DRAFT_TYPES.map(type =>
           `<option value="${type}" ${field.type === type ? 'selected' : ''}>${t(`liveForm.fieldType.${type}`)}</option>`).join('')}
       </select></label>
     </div>
@@ -245,76 +208,87 @@ export function openNativeLiveFormWizard(
     </section>`;
   };
 
-  const render = (
-    direction = 0,
-    focusId?: string,
-    focusControl: 'label' | 'type' = 'label',
-    preservedScrollTop?: number,
-  ) => {
-    const stepper = modal.content.querySelector<HTMLElement>('.native-poll-stepper')!;
-    stepper.style.setProperty('--event-step', String(step));
-    for (const [index, item] of [...modal.content.querySelectorAll<HTMLElement>('[data-live-form-stepper]')].entries()) {
-      item.classList.toggle('is-active', index === step);
-      item.classList.toggle('is-complete', index < step);
-      item.setAttribute('aria-current', index === step ? 'step' : 'false');
+  const wizard = mountWizard(modal, {
+    name: 'live-form',
+    label: t('liveForm.steps'),
+    stepperClass: 'native-poll-stepper',
+    viewportClass: 'native-poll-step-viewport',
+    steps: [
+      { label: t('liveForm.step.details'), render: detailsStep },
+      { label: t('liveForm.step.fields'), render: fieldsStep },
+      { label: t('liveForm.step.preview'), render: previewStep },
+    ],
+    itemKeys: ['data-live-form-field'],
+    submitLabel: () => t('liveForm.publish'),
+    capture: () => capture(),
+    ready: step => step === 0 ? detailsValid() : step === 1 ? fieldsValid()
+      : nativeLiveFormCreateSchema.safeParse(payload()).success,
+    pending: () => pending,
+    submit: () => submit(),
+    drawn: () => audience.sync(viewport),
+  });
+  const { viewport } = wizard;
+
+  const capture = () => {
+    if (wizard.step === 0) {
+      title = viewport.querySelector<HTMLInputElement>('[data-live-form-title]')?.value ?? title;
+      description = viewport.querySelector<HTMLTextAreaElement>('[data-live-form-description]')?.value ?? description;
+      duration = viewport.querySelector<HTMLInputElement>('[data-live-form-duration]')?.value ?? duration;
+      const chosen = viewport.querySelector<HTMLSelectElement>('[data-live-form-unit]')?.value;
+      if (isDurationUnit(chosen)) unit = chosen;
+      anonymous = viewport.querySelector<HTMLInputElement>('[data-live-form-anonymous]')?.checked ?? anonymous;
+      return;
     }
-    viewport.classList.remove('native-poll-step-viewport--forward', 'native-poll-step-viewport--back');
-    if (direction) viewport.classList.add(direction > 0 ? 'native-poll-step-viewport--forward' : 'native-poll-step-viewport--back');
-    viewport.innerHTML = step === 0 ? detailsStep() : step === 1 ? fieldsStep() : previewStep();
-    audience.sync(viewport);
-    footer.innerHTML = `${step > 0
-      ? `<button type="button" class="btn btn-secondary" data-live-form-back ${pending ? 'disabled' : ''}>${t('common.back')}</button>`
-      : '<span class="event-footer-spacer"></span>'}
-      <span class="event-footer-spacer"></span>
-      <button type="button" class="btn btn-secondary" data-live-form-cancel ${pending ? 'disabled' : ''}>${t('common.cancel')}</button>
-      <button type="button" class="btn btn-primary" ${step < 2 ? 'data-live-form-next' : 'data-live-form-submit'}
-        ${pending || (step === 0 ? !detailsValid() : step === 1 ? !fieldsValid() :
-          !nativeLiveFormCreateSchema.safeParse(payload()).success) ? 'disabled' : ''}>
-        ${t(step < 2 ? 'common.next' : 'liveForm.publish')}</button>`;
-    const focus = focusId
-      ? viewport.querySelector<HTMLElement>(
-        `[data-live-form-field="${CSS.escape(focusId)}"] [data-live-form-field-${focusControl}]`,
-      )
-      : viewport.querySelector<HTMLElement>('h2, [data-live-form-title]');
-    focus?.focus({ preventScroll: preservedScrollTop !== undefined });
-    if (preservedScrollTop !== undefined) {
-      const scroller = modal.element.querySelector<HTMLElement>('.community-modal');
-      if (scroller) scroller.scrollTop = preservedScrollTop;
-    }
+    if (wizard.step !== 1) return;
+    fields = [...viewport.querySelectorAll<HTMLElement>('[data-live-form-field]')].flatMap((element) => {
+      const previous = fields.find(field => field.id === element.dataset.liveFormField);
+      if (!previous) return [];
+      const choiceInputs = [...element.querySelectorAll<HTMLInputElement>('[data-live-form-field-choice]')];
+      const type = element.querySelector<HTMLSelectElement>('[data-live-form-field-type]')?.value;
+      return [{
+        id: previous.id,
+        label: element.querySelector<HTMLInputElement>('[data-live-form-field-label]')?.value ?? previous.label,
+        type: isDraftType(type) ? type : previous.type,
+        required: element.querySelector<HTMLInputElement>('[data-live-form-field-required]')?.checked ?? previous.required,
+        choices: choiceInputs.length > 0 ? choiceInputs.map(input => input.value) : previous.choices,
+      }];
+    });
   };
   const syncValidity = () => {
     capture();
     const durationInput = viewport.querySelector<HTMLInputElement>('[data-live-form-duration]');
-    if (durationInput) durationInput.max = String(unit === 'days' ? 30 : unit === 'hours' ? 720 : 43200);
-    const next = footer.querySelector<HTMLButtonElement>('[data-live-form-next]');
-    if (next) next.disabled = pending || (step === 0 ? !detailsValid() : !fieldsValid());
+    if (durationInput) durationInput.max = String(longestDuration(unit));
+    wizard.sync();
   };
+  const submit = () => {
+    if (pending) return;
+    const parsed = nativeLiveFormCreateSchema.safeParse(payload());
+    if (!parsed.success) { modal.fail(t('liveForm.invalid')); return; }
+    pending = true;
+    wizard.sync();
+    void modal.run(async () => {
+      try {
+        await client.sendRequest(MessageType.NATIVE_FORM_CREATE, parsed.data);
+        if (!modal.signal.aborted) modal.close();
+      } catch (error) {
+        pending = false;
+        if (!modal.signal.aborted) wizard.sync();
+        throw error;
+      }
+    });
+  };
+
   audience.bind(viewport, modal.signal, syncValidity);
   viewport.addEventListener('input', syncValidity, { signal: modal.signal });
   viewport.addEventListener('change', event => {
-    const type = event.target instanceof Element
-      ? event.target.closest<HTMLSelectElement>('[data-live-form-field-type]') : null;
-    const fieldId = type?.closest<HTMLElement>('[data-live-form-field]')?.dataset.liveFormField;
-    const scrollTop = modal.element.querySelector<HTMLElement>('.community-modal')?.scrollTop;
     syncValidity();
-    if (type && fieldId) render(0, fieldId, 'type', scrollTop);
+    // A field of another type has other controls; focus and scroll stay on its type.
+    const type = event.target instanceof Element ? event.target.closest('[data-live-form-field-type]') : null;
+    const id = type?.closest<HTMLElement>('[data-live-form-field]')?.dataset.liveFormField;
+    if (id) wizard.redraw(fieldSelector(id, '[data-live-form-field-type]'));
   }, { signal: modal.signal });
-  modal.content.addEventListener('click', event => {
+  viewport.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest('[data-live-form-cancel]')) { modal.close(); return; }
-    if (target?.closest('[data-live-form-back]') && step > 0) {
-      capture();
-      step--;
-      render(-1);
-      return;
-    }
-    if (target?.closest('[data-live-form-next]') && step < 2) {
-      capture();
-      if ((step === 0 && !detailsValid()) || (step === 1 && !fieldsValid())) return;
-      step++;
-      render(1);
-      return;
-    }
     if (target?.closest('[data-live-form-add-field]') && fields.length < LIMITS.MAX_BOT_FORM_FIELDS) {
       capture();
       const id = `field_${nextField++}`;
@@ -325,14 +299,14 @@ export function openNativeLiveFormWizard(
         required: true,
         choices: [t('liveForm.defaultChoice', { number: 1 }), t('liveForm.defaultChoice', { number: 2 })],
       });
-      render(0, id);
+      wizard.redraw(fieldSelector(id, '[data-live-form-field-label]'));
       return;
     }
     const removeId = target?.closest<HTMLElement>('[data-live-form-remove-field]')?.dataset.liveFormRemoveField;
     if (removeId && fields.length > 1) {
       capture();
       fields = fields.filter(field => field.id !== removeId);
-      render();
+      wizard.redraw();
       return;
     }
     const addChoice = target?.closest<HTMLButtonElement>('[data-live-form-add-choice]');
@@ -342,9 +316,7 @@ export function openNativeLiveFormWizard(
       const field = fields.find(candidate => candidate.id === id);
       if (!field || field.choices.length >= LIMITS.MAX_BOT_FORM_CHOICES) return;
       field.choices.push('');
-      render();
-      const card = viewport.querySelector<HTMLElement>(`[data-live-form-field="${CSS.escape(field.id)}"]`);
-      card?.querySelectorAll<HTMLInputElement>('[data-live-form-field-choice]')[field.choices.length - 1]?.focus();
+      wizard.redraw(fieldSelector(field.id, `[data-live-form-field-choice="${field.choices.length - 1}"]`));
       return;
     }
     const removeChoice = target?.closest<HTMLButtonElement>('[data-live-form-remove-choice]');
@@ -356,41 +328,11 @@ export function openNativeLiveFormWizard(
       if (!field || field.choices.length <= 2 || !Number.isInteger(index) ||
           index < 0 || index >= field.choices.length) return;
       field.choices.splice(index, 1);
-      render();
-      const card = viewport.querySelector<HTMLElement>(`[data-live-form-field="${CSS.escape(field.id)}"]`);
-      card?.querySelectorAll<HTMLInputElement>('[data-live-form-field-choice]')[
-        Math.min(index, field.choices.length - 1)
-      ]?.focus();
+      wizard.redraw(fieldSelector(field.id, `[data-live-form-field-choice="${Math.min(index, field.choices.length - 1)}"]`));
       return;
     }
-    const stepButton = target?.closest<HTMLButtonElement>('[data-live-form-duration-step]');
-    if (stepButton) {
-      const input = viewport.querySelector<HTMLInputElement>('[data-live-form-duration]');
-      if (!input) return;
-      const current = input.valueAsNumber;
-      const delta = Number(stepButton.dataset.liveFormDurationStep);
-      input.value = String(Math.min(Number(input.max), Math.max(Number(input.min),
-        Number.isFinite(current) ? current + delta : Number(input.min))));
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.focus();
-      return;
-    }
-    if (!target?.closest('[data-live-form-submit]') || pending) return;
-    const parsed = nativeLiveFormCreateSchema.safeParse(payload());
-    if (!parsed.success) { modal.fail(t('liveForm.invalid')); return; }
-    pending = true;
-    render();
-    void modal.run(async () => {
-      try {
-        await client.sendRequest(MessageType.NATIVE_FORM_CREATE, parsed.data);
-        if (!modal.signal.aborted) modal.close();
-      } catch (error) {
-        pending = false;
-        if (!modal.signal.aborted) render();
-        throw error;
-      }
-    });
+    stepNumberControl(target);
   }, { signal: modal.signal });
-  render();
+  wizard.start();
   return modal;
 }

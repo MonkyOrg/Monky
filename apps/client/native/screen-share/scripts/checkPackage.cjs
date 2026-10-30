@@ -132,6 +132,9 @@ function verifySourceInputs() {
     [path.join(root, 'src', 'rtc'), rtc.sourceFiles],
     [path.join(root, 'src', 'capture'), capture.sourceFiles],
     [path.join(root, 'src', 'thumbnail'), thumbnails.sourceFiles],
+    // Both Windows helpers compile the shared identity helpers.
+    [path.join(root, 'src', 'win'), capture.sharedSourceFiles],
+    [path.join(root, 'src', 'win'), thumbnails.sharedSourceFiles],
   ]) {
     assert.ok(Array.isArray(records) && records.length > 0, 'Rebuild native screen sharing before packaging.');
     assert.deepEqual(records.map(file => file.path).sort(), regularFiles(directory),

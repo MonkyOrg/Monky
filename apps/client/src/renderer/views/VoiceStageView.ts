@@ -1,4 +1,4 @@
-import { MessageType, SCREEN_SHARE_LIMITS, getScreenShareQualities, screenShareQualitySchema, type BotScreen, type NativeScreenSource } from '@monky/shared';
+import { getScreenShareQualities, screenShareQualitySchema, type NativeScreenSource } from '@monky/shared';
 import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
@@ -7,53 +7,41 @@ import { sessionManager } from '../core/SessionManager';
 import {
   screenPictureInPicture, type ScreenPictureInPictureRelease, type ScreenPictureInPictureSource,
 } from '../core/ScreenPictureInPicture';
-import { networkClient } from '../core/NetworkClient';
-import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
+import { participantManager } from '../core/ParticipantManager';
 import { chooseSharesToStop, screenShareChooser, stopChosenShares, type ScreenShareSelection } from './ScreenShareChooser';
 import { getActiveServerStore, serverStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore, VoiceStore } from '../stores/voiceStore';
-import { audioProcessor } from '../core/AudioProcessor';
 import { videoService } from '../core/VideoService';
 import { webRtcManager } from '../core/WebRtcManager';
 import { getAvatarUrl } from '../utils/avatar';
+import { screenShareFailureMessage } from '../utils/screenShareFailure';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { renderPresenceTag } from '../utils/presenceTag';
 import { getVoiceControlModeration, isViewingCallServer, leaveCall, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
 import { bindStageControlsMotion } from './FooterControlsMotion';
-import { showAlert, showConfirm } from './Dialog';
+import { showAlert } from './Dialog';
 import { userContextMenu } from './UserContextMenu';
 import { setButtonLoading, isButtonLoading } from '../utils/buttonLoading';
 import { soundboardModal } from './SoundboardModal';
 import { overlayConfigModal } from './OverlayConfigModal';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
-import { VideoDiagnosticsSampler } from '../core/webrtc/videoDiagnostics';
-import { NativeDecoderDiagnosticsSampler } from '../core/webrtc/nativeDecoderDiagnostics';
-import { formatVideoTelemetry, serializeVideoTelemetry, VideoTelemetrySnapshot } from './VideoTelemetry';
-import { showCopyToast } from './CopyToast';
 import { t } from '../i18n';
 import { toggleCamera as toggleCallCamera, turnCameraOff } from '../core/CameraPublication';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { BotScreenDock, type BotScreenStage } from './BotScreenDock';
 import { ScreenViewersView } from './ScreenViewersView';
+import { StageVolumeControl, type StageVolumeTexts } from './StageVolumeControl';
+import {
+  buildStageTiles, isSafeShareId, measuredTiles, remoteScreenStream, screenShareIds, sidOf, stageTileKey, tileDomId,
+  type OwnStageMedia, type ParticipantStageTile, type StageTile,
+} from './stage/stageTiles';
+import { StageTelemetryMonitor } from './stage/StageTelemetryMonitor';
+import { FocusedScreenZoom } from './stage/FocusedScreenZoom';
 import { showErrorToast } from './CopyToast';
-
-/**
- * A single renderable tile on the stage. A participant contributes one tile per
- * active media source, so someone sharing camera + screen at once shows up as
- * two independent tiles (#26). Participants with no video get a single 'voice'
- * (avatar) tile.
- */
-interface ParticipantStageTile {
-  p: ParticipantViewModel;
-  kind: 'voice' | 'camera' | 'screen';
-  key: string; // `${sessionId}:${kind}` (+ `:${shareId}` for screens) — stable identity for focus/DOM keys
-  /** Which screen share this tile renders, for 'screen' tiles only (#253). */
-  shareId?: string;
-}
-type StageTile = ParticipantStageTile | { kind: 'miniapp'; key: string; screen: BotScreen };
+import { reportError } from '../utils/feedback';
 
 /** Where a card sits: the grid, the focus stack or the strip beside it; each frames the tile differently. */
 type StagePlacement = 'grid' | 'focused' | 'strip';
@@ -66,26 +54,9 @@ interface StageCard {
   element: HTMLElement;
   signature: string;
   dispose: () => void;
+  /** Brings what the card's controls show (its screen volume) up to date. */
+  sync: () => void;
 }
-
-/** Tiles address a connection rather than a person: someone may join twice (#309). */
-function sidOf(p: ParticipantViewModel): string {
-  return p.user.sessionId || p.user.id;
-}
-
-/**
- * Share id used for peers that only announce the legacy `isScreenSharing`
- * boolean (clients older than #253). They can only ever have one share, so a
- * fixed key is enough to give their tile a stable identity.
- */
-const LEGACY_SHARE_ID = 'legacy';
-
-/**
- * Share ids come from other clients and are interpolated into DOM ids and data
- * attributes, so only MediaStream-shaped ids are accepted. Anything else is
- * treated as a hostile payload and ignored.
- */
-const SAFE_SHARE_ID = /^[A-Za-z0-9_.-]{1,64}$/;
 
 /**
  * How many tiles can sit in the focus area at once (#253). Two side-by-side
@@ -94,10 +65,20 @@ const SAFE_SHARE_ID = /^[A-Za-z0-9_.-]{1,64}$/;
  */
 const MAX_FOCUSED_TILES = 2;
 
-/** Zoom bounds for the focused screen share (#271). */
-const FOCUS_ZOOM_MAX_SCALE = 4;
-const FOCUS_ZOOM_STEP = 0.25;
-const MAX_TELEMETRY_SAMPLES = 20;
+const SCREEN_VOLUME: StageVolumeTexts = { volume: 'stage.screenAudioVolume', muted: 'stage.screenAudioMuted', mute: 'stage.screenAudioMute' };
+
+/** How the call travels, in the stage header: through the server (SFU) or peer to peer. */
+function modeBadge(): string {
+  return webRtcManager.isSfuMode()
+    ? `<div class="header-status-badge sfu-mode-badge" style="background-color: rgba(88, 101, 242, 0.15); color: var(--accent-primary); display: flex; align-items: center; gap: 6px;" title="${t('stage.sfuModeTooltip')}">
+       <span class="material-symbols-outlined md-14">hub</span>
+       <span>${t('stage.connectedSfu')}</span>
+     </div>`
+    : `<div class="header-status-badge p2p-mode-badge" style="background-color: rgba(35, 165, 90, 0.15); color: var(--success); display: flex; align-items: center; gap: 6px;" title="${t('stage.p2pModeTooltip')}">
+       <span class="material-symbols-outlined md-14">wifi_tethering</span>
+       <span>${t('stage.connectedMesh')}</span>
+     </div>`;
+}
 
 export class VoiceStageView {
   public onToggleChat?: (channelId: string) => void;
@@ -116,26 +97,10 @@ export class VoiceStageView {
   private focusError: HTMLElement | null = null;
   private readonly seenScreenStarts = new WeakSet<MediaStream>();
   private readonly pendingScreenFocus = new Map<string, { tileKey: string; isCurrent: () => boolean }>();
-  /** Zoom/pan state of the focused screen share, reset when focus changes (#271). */
-  private focusZoom = { scale: 1, x: 0, y: 0 };
-  private focusZoomTileKey: string | null = null;
-  /** The focused screen whose zoom listeners are attached; kept while its card stays on the stage. */
-  private focusZoomBinding: { main: HTMLElement; video: HTMLElement; controller: AbortController } | null = null;
+  private readonly zoom = new FocusedScreenZoom(() => { this.suppressCardClickUntil = Date.now() + 200; });
   private suppressCardClickUntil = 0;
   private unbindPing: (() => void) | null = null;
-  private telemetryInterval: number | null = null;
-  private telemetryEpoch = 0;
-  private telemetryRefreshInFlight = false;
-  private telemetrySnapshots = new Map<string, VideoTelemetrySnapshot>();
-  private telemetryHistory = new Map<string, VideoTelemetrySnapshot[]>();
-  private telemetryHistorySources = new Map<string, string>();
-  private telemetrySampler = new VideoDiagnosticsSampler();
-  private nativeDecoderSampler = new NativeDecoderDiagnosticsSampler();
-  private nativeTelemetryTargets = new Map<string, object>();
-  private telemetryEndpoints = new Map<object, number>();
-  private nextTelemetryEndpoint = 1;
-  private telemetryCopyRequest = 0;
-  private clearTelemetryToast: (() => void) | null = null;
+  private readonly telemetry: StageTelemetryMonitor;
   private videoLoadingListeners = new WeakMap<HTMLVideoElement, () => void>();
   // Caches the current live-banner content so updateControlsUI() only rebuilds
   // it when the broadcast state actually changes, preventing the pulse dot from
@@ -149,13 +114,13 @@ export class VoiceStageView {
   private readonly botScreenStage: BotScreenStage = {
     open: (id) => this.watchBotScreen(id),
     toggleFocus: (id) => {
-      const key = `miniapp:${id}`;
+      const key = stageTileKey.miniapp(id);
       if (this.focusedTileKeys.includes(key)) this.setFocusedTiles([]);
       else this.toggleFocus(key);
     },
     revealQuestion: (id) => {
       // A filmstrip frame ignores the pointer, so the miniapp's question would be unanswerable.
-      const key = `miniapp:${id}`;
+      const key = stageTileKey.miniapp(id);
       if (this.focusedTileKeys.length > 0 && !this.focusedTileKeys.includes(key)) this.toggleFocus(key);
     },
     changed: () => this.renderParticipants(),
@@ -165,6 +130,7 @@ export class VoiceStageView {
 
   constructor(container: HTMLElement, private readonly sharedBotScreenDock: BotScreenDock | null = null) {
     this.container = container;
+    this.telemetry = new StageTelemetryMonitor(container, () => this.getTelemetryTiles());
   }
 
   private get botScreenDock(): BotScreenDock {
@@ -200,12 +166,12 @@ export class VoiceStageView {
     this.pendingScreenFocus.clear();
     this.clearFocusError();
     this.releaseBotScreens();
-    if (channelId !== this.currentChannelId) this.stopTelemetryMonitor();
+    if (channelId !== this.currentChannelId) this.telemetry.stop();
     this.currentChannelId = channelId;
     this.focusedTileKeys = [];
     this.retiredScreenFocus.clear();
     if (!channelId) {
-      this.stopTelemetryMonitor();
+      this.telemetry.stop();
     }
     this.render();
     this.restorePictureInPicture();
@@ -229,11 +195,10 @@ export class VoiceStageView {
         this.positionBotScreens();
         appEvents.emit('stage.bot_screens_changed');
       } catch (error: unknown) {
-        console.warn('[Voice stage] Could not open the miniapp.', error);
-        void showAlert({ title: t('common.error'), message: t('botScreen.openError'), variant: 'danger' });
+        reportError(t('botScreen.openError'), { log: 'UI', error });
       }
     };
-    this.setFocusedTiles([`miniapp:${id}`], { afterRender: open });
+    this.setFocusedTiles([stageTileKey.miniapp(id)], { afterRender: open });
   }
 
   /** The stage is going away or showing something else; open miniapps stay open off stage. */
@@ -258,7 +223,7 @@ export class VoiceStageView {
     if (!area) return;
     const views = this.botScreenDock.viewsOn(this.botScreenStage);
     for (const view of views) {
-      const key = `miniapp:${view.snapshot.id}`;
+      const key = stageTileKey.miniapp(view.snapshot.id);
       view.setLayout(this.focusedTileKeys.includes(key), this.focusedTileKeys.length > 0 && !this.focusedTileKeys.includes(key));
     }
     this.botScreenLayoutObserver?.disconnect();
@@ -320,10 +285,10 @@ export class VoiceStageView {
 
     // The notice covers the participant, not a specific share, so opt into all
     // of their shares and focus the first one (#253).
-    const shareIds = this.getShareIds(participant, false);
+    const shareIds = screenShareIds(participant);
     if (shareIds.length === 0) return;
 
-    this.setFocusedTiles([`${sessionId}:screen:${shareIds[0]}`], { beforeRender: () => {
+    this.setFocusedTiles([stageTileKey.screen(sessionId, shareIds[0])], { beforeRender: () => {
       for (const shareId of shareIds) {
         webRtcManager.setRemoteScreenWatching(sessionId, shareId, true);
       }
@@ -337,8 +302,8 @@ export class VoiceStageView {
     this.releaseStageVideos(this.container);
     if (this.focusError) this.focusError.textContent = t('stage.fullscreenExitError');
     this.stopPingMonitor();
-    if (retainTelemetry) this.pauseTelemetryMonitor();
-    else this.stopTelemetryMonitor();
+    if (retainTelemetry) this.telemetry.pause();
+    else this.telemetry.stop();
     this.unbindListeners();
 
     if (!this.currentChannelId || !serverStore.serverDetails) {
@@ -384,19 +349,7 @@ export class VoiceStageView {
               <div id="ping-tooltip-content" hidden>${t('stage.pingCalculating')}</div>
             </div>
 
-            <div id="stage-header-mode-badge-wrapper">
-              ${
-                webRtcManager.isSfuMode()
-                  ? `<div class="header-status-badge sfu-mode-badge" style="background-color: rgba(88, 101, 242, 0.15); color: var(--accent-primary); display: flex; align-items: center; gap: 6px;" title="${t('stage.sfuModeTooltip')}">
-                       <span class="material-symbols-outlined md-14">hub</span>
-                       <span>${t('stage.connectedSfu')}</span>
-                     </div>`
-                  : `<div class="header-status-badge p2p-mode-badge" style="background-color: rgba(35, 165, 90, 0.15); color: var(--success); display: flex; align-items: center; gap: 6px;" title="${t('stage.p2pModeTooltip')}">
-                       <span class="material-symbols-outlined md-14">wifi_tethering</span>
-                       <span>${t('stage.connectedMesh')}</span>
-                     </div>`
-              }
-            </div>
+            <div id="stage-header-mode-badge-wrapper">${modeBadge()}</div>
             ` : ''}
           </div>
         </div>
@@ -464,7 +417,7 @@ export class VoiceStageView {
     this.attachEvents();
     if (joinedHere) this.startPingMonitor();
     else this.stopPingMonitor();
-    this.syncTelemetryMonitor();
+    this.telemetry.sync();
   }
 
   public updateControlsUI(): void {
@@ -623,48 +576,20 @@ export class VoiceStageView {
     }
   }
 
-  /**
-   * Expands the flat participant list into renderable tiles. Camera + screen
-   * are independent, so a participant broadcasting both yields two tiles (#26);
-   * a participant sharing two screens yields one tile per share (#253);
-   * participants with no video yield a single avatar ('voice') tile.
-   */
-  private buildStageTiles(participants: ParticipantViewModel[], currentSessionId?: string): StageTile[] {
-    const tiles: StageTile[] = [];
-    for (const p of participants) {
-      const isLocal = sidOf(p) === currentSessionId;
-      const isCamOn = isLocal ? voiceStore.isCameraOn : (p.voiceState?.isCameraOn ?? false);
-      const shareIds = this.getShareIds(p, isLocal);
-      if (isCamOn) tiles.push({ p, kind: 'camera', key: `${sidOf(p)}:camera` });
-      for (const shareId of shareIds) {
-        tiles.push({ p, kind: 'screen', key: `${sidOf(p)}:screen:${shareId}`, shareId });
-      }
-      if (!isCamOn && shareIds.length === 0) tiles.push({ p, kind: 'voice', key: `${sidOf(p)}:voice` });
-    }
-    for (const view of this.botScreenDock.viewsOn(this.botScreenStage)) {
-      tiles.push({ kind: 'miniapp', key: `miniapp:${view.snapshot.id}`, screen: view.snapshot });
-    }
-    return tiles;
+  private ownSessionId(): string | undefined {
+    return serverStore.currentUser?.sessionId || serverStore.currentUser?.id;
   }
 
-  /**
-   * Screen shares to render for a participant (#253). Falls back to a single
-   * synthetic share when the peer only reports the legacy `isScreenSharing`
-   * boolean, so older clients still show up as one tile.
-   *
-   * Share ids arrive from other clients and end up in DOM ids and attributes,
-   * so anything that isn't a plain MediaStream-style id is dropped here — this
-   * is the single choke point every tile goes through.
-   */
-  private getShareIds(p: ParticipantViewModel, isLocal: boolean): string[] {
-    if (isLocal) return [...voiceStore.screenShareIds];
-    const announced = p.voiceState?.screenShareIds;
-    if (announced && announced.length > 0) {
-      // A repeated id would give two tiles one key, and the stage keeps one card per key.
-      const safe = [...new Set(announced.filter((id) => SAFE_SHARE_ID.test(id)))];
-      if (safe.length > 0) return safe.slice(0, SCREEN_SHARE_LIMITS.maximum);
-    }
-    return p.voiceState?.isScreenSharing ? [LEGACY_SHARE_ID] : [];
+  /** This client's own connection and media in the call, ahead of the roster. */
+  private ownMedia(): OwnStageMedia {
+    return { sessionId: this.ownSessionId(), cameraOn: voiceStore.isCameraOn, screenShareIds: voiceStore.screenShareIds };
+  }
+
+  /** The room's tiles: one per participant source, then the miniapps docked on this stage. */
+  private stageTiles(
+    participants = this.currentChannelId ? participantManager.getInVoiceChannel(this.currentChannelId) : [],
+  ): StageTile[] {
+    return buildStageTiles(participants, this.ownMedia(), this.botScreenDock.viewsOn(this.botScreenStage).map((view) => view.snapshot));
   }
 
   /**
@@ -688,7 +613,7 @@ export class VoiceStageView {
   }
 
   private queueScreenStartFocus({ shareId, stream }: { shareId: string; stream: MediaStream }): void {
-    if (!SAFE_SHARE_ID.test(shareId) || this.seenScreenStarts.has(stream)) return;
+    if (!isSafeShareId(shareId) || this.seenScreenStarts.has(stream)) return;
     this.seenScreenStarts.add(stream);
     const channelId = this.currentChannelId;
     const displayedServer = getActiveServerStore();
@@ -696,7 +621,7 @@ export class VoiceStageView {
     const voiceSessionKey = voiceStore.voiceSessionKey;
     if (!channelId || !sessionId || channelId !== voiceStore.currentVoiceChannelId || !isViewingCallServer()) return;
     this.pendingScreenFocus.set(shareId, {
-      tileKey: `${sessionId}:screen:${shareId}`,
+      tileKey: stageTileKey.screen(sessionId, shareId),
       isCurrent: () => this.currentChannelId === channelId && voiceStore.currentVoiceChannelId === channelId
         && voiceStore.voiceSessionKey === voiceSessionKey && getActiveServerStore() === displayedServer
         && (displayedServer.currentUser?.sessionId || displayedServer.currentUser?.id) === sessionId
@@ -710,10 +635,7 @@ export class VoiceStageView {
       if (!intent.isCurrent()) this.pendingScreenFocus.delete(shareId);
     }
     if (!this.pendingScreenFocus.size || !this.currentChannelId) return false;
-    const availableTiles = tiles ?? this.buildStageTiles(
-      participantManager.getInVoiceChannel(this.currentChannelId),
-      serverStore.currentUser?.sessionId || serverStore.currentUser?.id,
-    );
+    const availableTiles = tiles ?? this.stageTiles();
     const ready = [...this.pendingScreenFocus].filter(([, intent]) =>
       availableTiles.some(tile => tile.key === intent.tileKey));
     if (!ready.length) return false;
@@ -796,30 +718,8 @@ export class VoiceStageView {
     });
   }
 
-  /**
-   * Resolves the remote stream backing a screen tile. Pre-#253 peers announce
-   * their real MediaStream id over `screen-video-meta` but never publish a
-   * `screenShareIds` list, so their tile is keyed by LEGACY_SHARE_ID and has to
-   * fall back to whichever single screen stream arrived for that user.
-   */
-  private getRemoteScreenStream(tile: ParticipantStageTile): MediaStream | undefined {
-    const streams = tile.p.remoteScreenStreams;
-    if (tile.shareId === LEGACY_SHARE_ID) {
-      return streams.values().next().value;
-    }
-    return streams.get(tile.shareId!);
-  }
-
-  /** Stable, unique DOM id fragment for a tile — screens differ by share (#253). */
-  private tileDomId(tile: StageTile): string {
-    if (tile.kind === 'miniapp') return `bot-screen-${tile.screen.id}`;
-    return tile.kind === 'screen'
-      ? `${sidOf(tile.p)}-screen-${tile.shareId}`
-      : `${sidOf(tile.p)}-${tile.kind}`;
-  }
-
   private tileAttributes(tile: StageTile): string {
-    const common = `id="card-${escapeHtml(this.tileDomId(tile))}" data-kind="${tile.kind}" data-tile-key="${escapeHtml(tile.key)}"`;
+    const common = `id="card-${escapeHtml(tileDomId(tile))}" data-kind="${tile.kind}" data-tile-key="${escapeHtml(tile.key)}"`;
     return tile.kind === 'miniapp'
       ? `${common} data-bot-screen-slot="${escapeHtml(tile.screen.id)}" aria-hidden="true"`
       : `${common} data-session-id="${escapeHtml(sidOf(tile.p))}"`;
@@ -854,11 +754,9 @@ export class VoiceStageView {
       return;
     }
 
-    const currentSessionId = serverStore.currentUser?.sessionId || serverStore.currentUser?.id;
-
     // A participant sharing camera + screens contributes one tile per source
     // (#26, #253); focus, speaking and DOM keys are keyed per tile.
-    const tiles = this.buildStageTiles(participants, currentSessionId);
+    const tiles = this.stageTiles(participants);
     if (this.focusStartedScreens(tiles)) return;
 
     // Drop focus entries whose tile disappeared (share ended, peer left).
@@ -866,7 +764,7 @@ export class VoiceStageView {
     for (const [key, expiresAt] of this.retiredScreenFocus) if (expiresAt < now) this.retiredScreenFocus.delete(key);
     this.focusedTileKeys = this.focusedTileKeys.filter((key) => {
       if (tiles.some((tile) => tile.key === key)) return true;
-      if (key.includes(':screen:')) this.retiredScreenFocus.set(key, now + VoiceStore.SCREEN_WATCH_HANDOFF_MS);
+      if (stageTileKey.isScreen(key)) this.retiredScreenFocus.set(key, now + VoiceStore.SCREEN_WATCH_HANDOFF_MS);
       return false;
     });
 
@@ -886,7 +784,7 @@ export class VoiceStageView {
     const pipKey = this.pictureInPictureTileKey();
     const created: Array<{ key: string; card: StageCard }> = [];
     const placed = groups.map(([parent, placement, group]) => ({
-      parent, cards: group.map((tile) => this.reconcileStageCard(tile, placement, pipKey, currentSessionId, created)),
+      parent, cards: group.map((tile) => this.reconcileStageCard(tile, placement, pipKey, created)),
     }));
     // Each registered card goes in once. A key repeated within a render would otherwise also place,
     // and wire up, the card it replaced, which nothing would ever release.
@@ -909,12 +807,12 @@ export class VoiceStageView {
     }
     if (otherTiles.length === 0) containers.strip?.remove();
     for (const { key, card } of created) {
-      if (this.stageCards.get(key) === card) card.dispose = this.bindStageCard(card.element);
+      if (this.stageCards.get(key) === card) Object.assign(card, this.bindStageCard(card.element));
     }
 
-    this.setupFocusedScreenZoom(area);
+    this.zoom.attach(area);
     this.updateSpeakingClasses();
-    this.refreshParticipantMedia(tiles, currentSessionId);
+    this.refreshParticipantMedia(tiles);
   }
 
   /**
@@ -955,15 +853,16 @@ export class VoiceStageView {
 
   /** Keeps a tile's card while nothing it is built from changed; otherwise builds a new one. */
   private reconcileStageCard(tile: StageTile, placement: StagePlacement, pipKey: string | null,
-    currentSessionId: string | undefined, created: Array<{ key: string; card: StageCard }>): HTMLElement {
+    created: Array<{ key: string; card: StageCard }>): HTMLElement {
     const fresh = this.buildStageCard(tile, placement);
     const current = this.stageCards.get(tile.key);
-    if (current && current.signature === fresh.signature && this.showsTileMedia(current.element, tile, pipKey, currentSessionId)) {
+    if (current && current.signature === fresh.signature && this.showsTileMedia(current.element, tile, pipKey)) {
       this.syncStageCard(current.element, fresh.element);
+      current.sync();
       return current.element;
     }
     if (current) this.removeStageCard(tile.key, current);
-    const card: StageCard = { element: fresh.element, signature: fresh.signature, dispose: () => {} };
+    const card: StageCard = { element: fresh.element, signature: fresh.signature, dispose: () => {}, sync: () => {} };
     this.stageCards.set(tile.key, card);
     created.push({ key: tile.key, card });
     return card.element;
@@ -977,14 +876,14 @@ export class VoiceStageView {
   }
 
   /** Voice metadata must not detach a playing video, but a replaced or removed stream must. */
-  private showsTileMedia(card: HTMLElement, tile: StageTile, pipKey: string | null, currentSessionId: string | undefined): boolean {
+  private showsTileMedia(card: HTMLElement, tile: StageTile, pipKey: string | null): boolean {
     if (tile.kind === 'voice' || tile.kind === 'miniapp' || tile.key === pipKey) return true;
     const video = card.querySelector<HTMLVideoElement>('video[data-video-tile-key]');
-    const stream = tile.kind === 'screen' && sidOf(tile.p) !== currentSessionId
-      && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!) ? null : this.getTileStream(tile, currentSessionId);
+    const stream = tile.kind === 'screen' && !tile.local
+      && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!) ? null : this.getTileStream(tile);
     // A remote camera moving to a new track (a new SFU consumer, a rebuilt peer link) keeps
     // its card: refreshParticipantMedia points the same element at the new stream.
-    if (tile.kind === 'camera' && video && stream && sidOf(tile.p) !== currentSessionId) return true;
+    if (tile.kind === 'camera' && video && stream && !tile.local) return true;
     return video?.srcObject === stream;
   }
 
@@ -1033,7 +932,6 @@ export class VoiceStageView {
       overlay.textContent = '';
     }
     for (const button of normalized.querySelectorAll('.stage-diagnostics-btn')) button.removeAttribute('hidden');
-    for (const slider of normalized.querySelectorAll('.stage-screen-volume-slider')) slider.removeAttribute('value');
     for (const thumbnail of normalized.querySelectorAll('.stage-native-thumbnail')) thumbnail.removeAttribute('data-live');
     for (const choice of normalized.querySelectorAll('[data-screen-quality]')) choice.removeAttribute('aria-pressed');
     normalized.querySelector(':scope > .stage-reconnecting-overlay')?.remove();
@@ -1058,34 +956,15 @@ export class VoiceStageView {
     } else if (!freshNotice && notice) {
       removeWithMotion(notice, 'notice');
     }
-    const slider = card.querySelector<HTMLInputElement>('.stage-screen-volume-slider');
-    const volume = fresh.querySelector('.stage-screen-volume-slider')?.getAttribute('value');
-    if (slider && typeof volume === 'string' && slider.value !== volume && !slider.closest('.dragging')) slider.value = volume;
     for (const choice of card.querySelectorAll<HTMLElement>('[data-screen-quality]')) {
       const pressed = fresh.querySelector(`[data-screen-quality="${CSS.escape(choice.dataset.screenQuality ?? '')}"]`)
         ?.getAttribute('aria-pressed');
       if (pressed && choice.getAttribute('aria-pressed') !== pressed) choice.setAttribute('aria-pressed', pressed);
     }
-    this.syncScreenAudioButton(card);
   }
 
-  /** The mute button follows the share's audio, wherever it was muted (#159). */
-  private syncScreenAudioButton(card: HTMLElement): void {
-    const wrapper = card.querySelector('.stage-volume-wrapper');
-    const button = wrapper?.querySelector<HTMLButtonElement>('.stage-volume-btn');
-    const sessionId = wrapper?.querySelector('.stage-screen-volume-slider')?.getAttribute('data-session-id');
-    if (!wrapper || !button || !sessionId) return;
-    const muted = voiceStore.isScreenAudioMuted(sessionId);
-    const icon = button.querySelector('.material-symbols-outlined');
-    const name = muted ? 'volume_off' : 'volume_up';
-    if (icon && icon.textContent !== name) icon.textContent = name;
-    const title = t(muted ? 'stage.screenAudioMuted' : 'stage.screenAudioVolume');
-    if (button.title !== title) button.title = title;
-    wrapper.classList.toggle('screen-audio-muted', muted);
-  }
-
-  /** Wires one card's controls; the returned function releases what would outlive its DOM. */
-  private bindStageCard(card: HTMLElement): () => void {
+  /** Wires one card's controls; `dispose` releases what would outlive its DOM. */
+  private bindStageCard(card: HTMLElement): Pick<StageCard, 'dispose' | 'sync'> {
     // Focus toggle on click & right-click for volume adjustment
     if (card.dataset.sessionId) {
       card.addEventListener('click', (e: Event) => {
@@ -1095,7 +974,7 @@ export class VoiceStageView {
         if (Date.now() < this.suppressCardClickUntil) return;
         if ((e.target as HTMLElement).closest('.stage-card-controls, .stage-viewers, .stage-pip-placeholder')) return;
         // While zoomed in, a click pans instead of dropping out of focus (#271).
-        if (this.focusZoom.scale > 1 && card.classList.contains('stage-focused-main')) return;
+        if (this.zoom.zoomed && card.classList.contains('stage-focused-main')) return;
         const tileKey = card.getAttribute('data-tile-key');
         if (tileKey) {
           this.toggleFocus(tileKey);
@@ -1144,7 +1023,7 @@ export class VoiceStageView {
       const onCopy = (event: MouseEvent): void => {
         event.stopPropagation();
         const tileKey = button.dataset.diagnosticsKey;
-        if (tileKey) void this.copyTelemetry(tileKey, button);
+        if (tileKey) void this.telemetry.copy(tileKey, button);
       };
       button.addEventListener('click', onCopy);
       unbindDiagnostics.push(() => button.removeEventListener('click', onCopy));
@@ -1161,7 +1040,7 @@ export class VoiceStageView {
         const shareId = btn.getAttribute('data-watch-share');
         if (!sessionId || !shareId) return;
         if (!isViewingCallServer() || this.currentChannelId !== voiceStore.currentVoiceChannelId) return;
-        this.setFocusedTiles([`${sessionId}:screen:${shareId}`], { beforeRender: () => {
+        this.setFocusedTiles([stageTileKey.screen(sessionId, shareId)], { beforeRender: () => {
           webRtcManager.setRemoteScreenWatching(sessionId, shareId, true);
         } });
       });
@@ -1174,7 +1053,7 @@ export class VoiceStageView {
         const sessionId = btn.getAttribute('data-stopwatch-session');
         const shareId = btn.getAttribute('data-stopwatch-share');
         if (!sessionId || !shareId) return;
-        const tileKey = `${sessionId}:screen:${shareId}`;
+        const tileKey = stageTileKey.screen(sessionId, shareId);
         if (!isViewingCallServer() || this.currentChannelId !== voiceStore.currentVoiceChannelId) return;
         this.setFocusedTiles(this.focusedTileKeys.filter((key) => key !== tileKey), {
           beforeRender: () => { webRtcManager.setRemoteScreenWatching(sessionId, shareId, false); },
@@ -1218,89 +1097,58 @@ export class VoiceStageView {
       });
     });
 
-    // Screen audio volume sliders (#75): every step is heard at once, and the
-    // volume is saved where the slider stops.
-    card.querySelectorAll<HTMLInputElement>('.stage-screen-volume-slider').forEach((slider) => {
-      slider.addEventListener('input', () => {
-        const sessionId = slider.getAttribute('data-session-id');
-        if (!sessionId) return;
-        const vol = parseInt(slider.value, 10);
-        // Persisted per device, not per person (#363): the same person sharing
-        // from two machines gets one slider each.
-        settingsStore.setScreenAudioVolume(sessionId, vol, 'soon');
-      });
-      slider.addEventListener('change', () => settingsStore.save());
-    });
+    // A watched share's audio (#75): volume per device, not per person (#363), and the mute
+    // button follows the share's audio wherever it was muted (#159).
+    let syncVolume = (): void => {};
+    const volumeSlot = card.querySelector<HTMLElement>('[data-volume-slot]');
+    const sessionId = card.dataset.sessionId;
+    if (volumeSlot && sessionId) {
+      const volume = new StageVolumeControl(SCREEN_VOLUME,
+        (percent, timing) => {
+          settingsStore.setScreenAudioVolume(sessionId, percent, timing);
+          syncVolume();
+        },
+        () => {
+          webRtcManager.setScreenAudioMuted(sessionId, !voiceStore.isScreenAudioMuted(sessionId));
+          syncVolume();
+        });
+      syncVolume = () => volume.update(
+        settingsStore.getScreenAudioVolume(sessionId, participantManager.get(sessionId)?.user.clientId),
+        voiceStore.isScreenAudioMuted(sessionId));
+      volumeSlot.replaceWith(volume.element);
+      syncVolume();
+    }
 
-    // Volume button click → toggle mute screen audio. A muted share must not come
-    // back showing "volume_up" (#159).
-    this.syncScreenAudioButton(card);
-    card.querySelectorAll<HTMLButtonElement>('.stage-volume-btn').forEach((btn) => {
-      btn.addEventListener('click', (e: Event) => {
-        e.stopPropagation();
-        const wrapper = btn.closest('.stage-volume-wrapper');
-        const slider = wrapper?.querySelector('.stage-screen-volume-slider') as HTMLInputElement | null;
-        if (!slider) return;
-        const sessionId = slider.getAttribute('data-session-id');
-        if (!sessionId) return;
-        const icon = btn.querySelector('.material-symbols-outlined');
-        if (voiceStore.isScreenAudioMuted(sessionId)) {
-          webRtcManager.setScreenAudioMuted(sessionId, false);
-          if (icon) icon.textContent = 'volume_up';
-          btn.title = t('stage.screenAudioVolume');
-          wrapper?.classList.remove('screen-audio-muted');
-        } else {
-          webRtcManager.setScreenAudioMuted(sessionId, true);
-          if (icon) icon.textContent = 'volume_off';
-          btn.title = t('stage.screenAudioMuted');
-          wrapper?.classList.add('screen-audio-muted');
-        }
-      });
-    });
-
-    // Volume controls must not toggle card focus (which changes the layout and
-    // leaves fullscreen). Suppress the card click that follows any control
-    // interaction, and keep the slider popup open + tracking the pointer while
-    // dragging, even when the mouse leaves the small popup area (#75).
+    // Controls must not toggle card focus (which changes the layout and leaves fullscreen),
+    // not even through the click that trails a slider drag ending outside them (#75).
     card.querySelectorAll('.stage-card-controls').forEach((bar) => {
       bar.addEventListener('pointerdown', () => {
         this.suppressCardClickUntil = Date.now() + 800;
       });
-    });
-
-    card.querySelectorAll('.stage-volume-wrapper').forEach((wrapper) => {
-      const slider = wrapper.querySelector('.stage-screen-volume-slider') as HTMLInputElement | null;
-      if (!slider) return;
-      slider.addEventListener('pointerdown', (e: Event) => {
-        wrapper.classList.add('dragging');
-        try { slider.setPointerCapture((e as PointerEvent).pointerId); } catch { /* ignore */ }
-      });
-      const endDrag = () => {
-        wrapper.classList.remove('dragging');
-        // Keep suppressing briefly so the trailing click can't reach the card.
+      bar.addEventListener('lostpointercapture', () => {
         this.suppressCardClickUntil = Date.now() + 400;
-      };
-      slider.addEventListener('pointerup', endDrag);
-      slider.addEventListener('lostpointercapture', endDrag);
+      });
     });
 
-    return () => {
-      menus.forEach(cancelSurfaceMotion);
-      viewers.forEach(view => view.destroy());
-      // A discarded copy button must not keep copying, even if something still holds it.
-      unbindDiagnostics.forEach(unbind => unbind());
+    return {
+      sync: () => syncVolume(),
+      dispose: () => {
+        menus.forEach(cancelSurfaceMotion);
+        viewers.forEach(view => view.destroy());
+        // A discarded copy button must not keep copying, even if something still holds it.
+        unbindDiagnostics.forEach(unbind => unbind());
+      },
     };
   }
 
-  private refreshParticipantMedia(tiles: StageTile[], currentSessionId: string | undefined): void {
+  private refreshParticipantMedia(tiles: StageTile[]): void {
     // Attach media streams to the per-tile video elements cleanly. Camera rides
     // remoteStream / cameraStream; each screen share rides its own stream keyed
     // by share id so every tile shows independent video (#26, #253).
     tiles.forEach((tile) => {
       if (tile.kind === 'voice' || tile.kind === 'miniapp') return;
-      const isLocal = sidOf(tile.p) === currentSessionId;
-      if (!isLocal && tile.kind === 'screen' && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!)) return;
-      const stream = this.getTileStream(tile, currentSessionId);
+      if (!tile.local && tile.kind === 'screen' && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!)) return;
+      const stream = this.getTileStream(tile);
       if (!stream) return;
       const suffix = tile.kind === 'screen' ? `screen-${tile.shareId}` : tile.kind;
       const ids = [`video-${sidOf(tile.p)}-${suffix}`, `video-mini-${sidOf(tile.p)}-${suffix}`];
@@ -1315,8 +1163,8 @@ export class VoiceStageView {
       });
     });
 
-    this.applyTelemetryOverlayState();
-    this.syncTelemetryMonitor();
+    this.telemetry.applyOverlays();
+    this.telemetry.sync();
     this.syncBotScreenLayout();
     this.refreshNativeScreenState();
     this.watchPendingLoadingOverlays();
@@ -1335,10 +1183,10 @@ export class VoiceStageView {
     }
   }
 
-  private getTileStream(tile: ParticipantStageTile, currentSessionId: string | undefined): MediaStream | null {
-    return (sidOf(tile.p) === currentSessionId
+  private getTileStream(tile: ParticipantStageTile): MediaStream | null {
+    return (tile.local
       ? (tile.kind === 'screen' ? videoService.getScreenStream(tile.shareId!) : videoService.getCameraState().stream)
-      : (tile.kind === 'screen' ? this.getRemoteScreenStream(tile) : tile.p.remoteStream)) ?? null;
+      : (tile.kind === 'screen' ? remoteScreenStream(tile) : tile.p.remoteStream)) ?? null;
   }
 
   private renderScreenQuality(source: NativeScreenSource, sessionId: string): string {
@@ -1369,12 +1217,13 @@ export class VoiceStageView {
   private refreshNativeScreenState(): void {
     for (const card of this.container.querySelectorAll<HTMLElement>('[data-kind="screen"][data-session-id]')) {
       const sessionId = card.dataset.sessionId;
-      const shareId = card.dataset.tileKey?.split(':screen:')[1];
+      const shareId = sessionId && card.dataset.tileKey ? stageTileKey.shareOf(card.dataset.tileKey, sessionId) : undefined;
       if (!sessionId || !shareId) continue;
+      const local = sessionId === this.ownSessionId();
       const badge = card.querySelector<HTMLElement>('.stage-capture-mode-badge');
       if (badge) {
         const native = badge.dataset.nativeScreen === 'true'
-          || (serverStore.isMySession(sessionId) ? videoService.getNativeScreenCapture(shareId)
+          || (local ? videoService.getNativeScreenCapture(shareId)
             : webRtcManager.getNativeScreenSource(sessionId, shareId)) !== null;
         if (native) badge.dataset.nativeScreen = 'true';
         const mode = native ? webRtcManager.getScreenCaptureMode(sessionId, shareId) : 'normal';
@@ -1387,7 +1236,7 @@ export class VoiceStageView {
         if (badge.getAttribute('aria-label') !== label) badge.setAttribute('aria-label', label);
         if (badge.title !== label) badge.title = label;
       }
-      if (sessionId && shareId && serverStore.isMySession(sessionId) && videoService.getNativeScreenCapture(shareId)) {
+      if (local && videoService.getNativeScreenCapture(shareId)) {
         const state = webRtcManager.getLocalScreenPreviewState(shareId);
         const warning = webRtcManager.getLocalScreenSourceWarning(shareId);
         card.dataset.previewState = state;
@@ -1497,135 +1346,6 @@ export class VoiceStageView {
     videoEl.addEventListener('loadeddata', hide, { once: true });
   }
 
-  /**
-   * Scrolling zooms the focused screen share towards the pointer, dragging
-   * pans the zoomed image and a double-click resets it (#271). The listeners
-   * stay on the focused card while it stays on the stage, and move with it.
-   */
-  private setupFocusedScreenZoom(area: HTMLElement): void {
-    // Zoom/pan targets a single pane; with the focus area split in two (#253)
-    // there is no unambiguous target, so it stays disabled until one is left.
-    const mains = area.querySelectorAll<HTMLElement>('.stage-focused-main');
-    const main = mains.length === 1 ? mains[0] : null;
-    const video = main?.querySelector<HTMLElement>('video.stage-video-element.screen-share:not(.screen-locked)') ?? null;
-    const tileKey = main?.getAttribute('data-tile-key') ?? null;
-    if (main && video && this.focusZoomBinding?.main === main && this.focusZoomBinding.video === video) return;
-    this.releaseFocusZoom();
-
-    if (!main || !video || !tileKey) {
-      this.focusZoomTileKey = null;
-      this.focusZoom = { scale: 1, x: 0, y: 0 };
-      return;
-    }
-
-    if (this.focusZoomTileKey !== tileKey) {
-      this.focusZoomTileKey = tileKey;
-      this.focusZoom = { scale: 1, x: 0, y: 0 };
-    }
-    const controller = new AbortController();
-    const { signal } = controller;
-    this.focusZoomBinding = { main, video, controller };
-
-    const clampPan = () => {
-      const rect = main.getBoundingClientRect();
-      const maxX = (rect.width * (this.focusZoom.scale - 1)) / 2;
-      const maxY = (rect.height * (this.focusZoom.scale - 1)) / 2;
-      this.focusZoom.x = Math.min(maxX, Math.max(-maxX, this.focusZoom.x));
-      this.focusZoom.y = Math.min(maxY, Math.max(-maxY, this.focusZoom.y));
-    };
-
-    const apply = () => {
-      const { scale, x, y } = this.focusZoom;
-      video.style.transform = scale > 1 ? `translate(${x}px, ${y}px) scale(${scale})` : '';
-      main.classList.toggle('is-zoomed', scale > 1);
-    };
-
-    apply();
-
-    main.addEventListener('wheel', (e: WheelEvent) => {
-      if (e.target instanceof Element && e.target.closest('.stage-card-controls')) return;
-      e.preventDefault();
-
-      const previous = this.focusZoom.scale;
-      const next = Math.min(
-        FOCUS_ZOOM_MAX_SCALE,
-        Math.max(1, previous - Math.sign(e.deltaY) * FOCUS_ZOOM_STEP)
-      );
-      if (next === previous) return;
-
-      // Keep the pixel under the cursor anchored while the scale changes.
-      const rect = main.getBoundingClientRect();
-      const cursorX = e.clientX - rect.left - rect.width / 2;
-      const cursorY = e.clientY - rect.top - rect.height / 2;
-      const anchorX = (cursorX - this.focusZoom.x) / previous;
-      const anchorY = (cursorY - this.focusZoom.y) / previous;
-
-      this.focusZoom.scale = next;
-      this.focusZoom.x = cursorX - anchorX * next;
-      this.focusZoom.y = cursorY - anchorY * next;
-      clampPan();
-      apply();
-    }, { passive: false, signal });
-
-    let panning = false;
-    let panStartX = 0;
-    let panStartY = 0;
-    let panOriginX = 0;
-    let panOriginY = 0;
-
-    main.addEventListener('pointerdown', (e: PointerEvent) => {
-      if (e.button !== 0 || this.focusZoom.scale <= 1) return;
-      if ((e.target as HTMLElement).closest('.stage-card-controls')) return;
-      panning = true;
-      panStartX = e.clientX;
-      panStartY = e.clientY;
-      panOriginX = this.focusZoom.x;
-      panOriginY = this.focusZoom.y;
-      main.classList.add('is-panning');
-      main.setPointerCapture(e.pointerId);
-    }, { signal });
-
-    main.addEventListener('pointermove', (e: PointerEvent) => {
-      if (!panning) return;
-      this.focusZoom.x = panOriginX + (e.clientX - panStartX);
-      this.focusZoom.y = panOriginY + (e.clientY - panStartY);
-      clampPan();
-      apply();
-    }, { signal });
-
-    const endPan = (e: PointerEvent) => {
-      if (!panning) return;
-      panning = false;
-      main.classList.remove('is-panning');
-      if (main.hasPointerCapture(e.pointerId)) main.releasePointerCapture(e.pointerId);
-      // The pointer-up turns into a click that would otherwise leave focus mode.
-      this.suppressCardClickUntil = Date.now() + 200;
-    };
-
-    main.addEventListener('pointerup', endPan, { signal });
-    main.addEventListener('pointercancel', endPan, { signal });
-
-    main.addEventListener('dblclick', (e: MouseEvent) => {
-      if (this.focusZoom.scale <= 1) return;
-      e.preventDefault();
-      e.stopPropagation();
-      this.focusZoom = { scale: 1, x: 0, y: 0 };
-      apply();
-      this.suppressCardClickUntil = Date.now() + 200;
-    }, { signal });
-  }
-
-  private releaseFocusZoom(): void {
-    const binding = this.focusZoomBinding;
-    if (!binding) return;
-    // A pane kept when focus splits in two outlives its zoom: it must not stay cropped without the
-    // gestures that undo it. Rebinding the same screen applies the zoom again.
-    binding.video.style.transform = '';
-    binding.main.classList.remove('is-zoomed', 'is-panning');
-    binding.controller.abort();
-    this.focusZoomBinding = null;
-  }
-
   /** Toggles native fullscreen for a stage video tile (#68).
    *  Fullscreens the whole card (a <div>), not the bare <video>, so Chromium's
    *  native video controls don't appear — they act on the muted <video> element
@@ -1653,15 +1373,15 @@ export class VoiceStageView {
   private pictureInPictureSource(video: HTMLVideoElement): ScreenPictureInPictureSource | null {
     const card = video.closest<HTMLElement>('[data-kind="screen"][data-session-id]');
     const publisherSessionId = card?.dataset.sessionId;
-    const prefix = `${publisherSessionId}:screen:`;
     const key = card?.dataset.tileKey;
+    const shareId = key && publisherSessionId ? stageTileKey.shareOf(key, publisherSessionId) : undefined;
     const publisher = publisherSessionId ? participantManager.get(publisherSessionId) : undefined;
-    if (!publisherSessionId || !publisher || !key?.startsWith(prefix) || !this.renderedSessionKey
+    if (!publisherSessionId || !publisher || !shareId || !this.renderedSessionKey
       || !this.currentChannelId || !(video.srcObject instanceof MediaStream)) return null;
     return {
       sessionKey: this.renderedSessionKey, channelId: this.currentChannelId,
       publisherSessionId, publisherName: participantManager.displayName(publisher),
-      shareId: key.slice(prefix.length), stream: video.srcObject,
+      shareId, stream: video.srcObject,
     };
   }
 
@@ -1709,15 +1429,15 @@ export class VoiceStageView {
   /** A publisher switching sources keeps the viewer's focused layout on the new share. */
   private refocusScreenHandoff(handoff: { sessionId: string; fromShareId: string; shareId: string }): void {
     if (!this.isJoinedHere()) return;
-    const previousKey = `${handoff.sessionId}:screen:${handoff.fromShareId}`;
-    const nextKey = `${handoff.sessionId}:screen:${handoff.shareId}`;
+    const previousKey = stageTileKey.screen(handoff.sessionId, handoff.fromShareId);
+    const nextKey = stageTileKey.screen(handoff.sessionId, handoff.shareId);
     const retired = (this.retiredScreenFocus.get(previousKey) ?? 0) >= Date.now();
     this.retiredScreenFocus.delete(previousKey);
     if (this.focusedTileKeys.includes(nextKey)) return;
     if (this.focusedTileKeys.includes(previousKey)) {
       this.setFocusedTiles(this.focusedTileKeys.map(key => key === previousKey ? nextKey : key), { screenStart: true });
     } else if (retired) {
-      this.setFocusedTiles([...this.focusedTileKeys, nextKey].slice(-2), { screenStart: true });
+      this.setFocusedTiles([...this.focusedTileKeys, nextKey].slice(-MAX_FOCUSED_TILES), { screenStart: true });
     }
   }
 
@@ -1725,12 +1445,12 @@ export class VoiceStageView {
     if (!this.isJoinedHere()) return;
     const entry = screenPictureInPicture.getStageReturn(this.renderedSessionKey, this.currentChannelId);
     if (!entry) return;
-    const key = `${entry.source.publisherSessionId}:screen:${entry.source.shareId}`;
+    const key = stageTileKey.screen(entry.source.publisherSessionId, entry.source.shareId);
     // Automatic PiP restores the layout left behind; a manual one rejoins the
     // current layout, back in focus only if it was focused when it opened.
     const keys = entry.automatic ? [...entry.focusedTileKeys] : this.focusedTileKeys.filter(candidate => candidate !== key);
     if ((entry.automatic || entry.focusedTileKeys.includes(key)) && !keys.includes(key)) keys.push(key);
-    this.setFocusedTiles(keys.slice(-2), {
+    this.setFocusedTiles(keys.slice(-MAX_FOCUSED_TILES), {
       isCurrent: () => screenPictureInPicture.getStageReturn(this.renderedSessionKey, this.currentChannelId) === entry,
       afterRender: () => {
         const target = this.container.querySelector<HTMLVideoElement>(`[data-video-tile-key="${CSS.escape(key)}"]`);
@@ -1759,13 +1479,7 @@ export class VoiceStageView {
       await screenPictureInPicture.open(video, source, undefined, this.focusedTileKeys);
     } catch (error: unknown) {
       console.warn('[VoiceStageView] Picture-in-Picture request failed:', error);
-      if (button.isConnected) {
-        void showAlert({
-          title: t('stage.pictureInPictureErrorTitle'),
-          message: t('stage.pictureInPictureErrorMessage'),
-          variant: 'danger',
-        });
-      }
+      if (button.isConnected) reportError(t('stage.pictureInPictureErrorMessage'));
     } finally {
       if (button.isConnected) {
         button.disabled = false;
@@ -1777,7 +1491,7 @@ export class VoiceStageView {
   private renderCardContent(tile: StageTile, isFocused: boolean = false, isMini: boolean = false): string {
     if (tile.kind === 'miniapp') return '';
     const p = tile.p;
-    const isLocal = serverStore.isMySession(p.user.sessionId);
+    const isLocal = tile.local;
     const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
     const isCamOn = isLocal ? voiceStore.isCameraOn : (p.voiceState?.isCameraOn ?? false);
     const isScreenOn = isLocal ? voiceStore.isScreenSharing : (p.voiceState?.isScreenSharing ?? false);
@@ -1806,7 +1520,7 @@ export class VoiceStageView {
     // Distinguish the two tiles of a camera + screen sharer with a "· Tela"
     // suffix on the screen tile label (#26); when the same person shares two
     // screens at once, number them so the tiles stay tellable apart (#253).
-    const shareIds = isScreenTile ? this.getShareIds(p, isLocal) : [];
+    const shareIds = isScreenTile ? screenShareIds(p, isLocal ? voiceStore.screenShareIds : undefined) : [];
     const shareIndex = isScreenTile ? shareIds.indexOf(tile.shareId!) : -1;
     const screenLabel = shareIds.length > 1 && shareIndex >= 0
       ? t('stage.screenLabelNumbered', { index: String(shareIndex + 1) })
@@ -1851,7 +1565,7 @@ export class VoiceStageView {
           <div
             class="telemetry-overlay position-${settingsStore.screenShareTelemetryPosition}${settingsStore.screenShareTelemetryEnabled ? '' : ' is-hidden'}"
             data-telemetry-key="${escapeHtml(tile.key)}"
-          >${escapeHtml(this.getTelemetryText(tile.key))}</div>
+          >${escapeHtml(this.telemetry.text(tile.key))}</div>
         ` : ''}
         ${isLocked ? html`
           <div class="stage-watch-overlay${isMini ? ' stage-watch-overlay--mini' : ''}">
@@ -1865,14 +1579,7 @@ export class VoiceStageView {
           <div class="stage-card-controls">
             ${isRemoteScreen ? html`
               ${remoteNative && !isMini ? trustedHtml(this.renderScreenQuality(remoteNative, sidOf(p))) : ''}
-              <div class="stage-volume-wrapper">
-                <div class="stage-volume-popup">
-                  <input type="range" class="stage-screen-volume-slider" data-session-id="${sidOf(p)}" min="0" max="200" value="${settingsStore.getScreenAudioVolume(sidOf(p), p.user.clientId)}" />
-                </div>
-                <button class="stage-volume-btn" title="${t('stage.screenAudioVolume')}" aria-label="${t('stage.volumeAria')}">
-                  <span class="material-symbols-outlined md-18">volume_up</span>
-                </button>
-              </div>
+              <span data-volume-slot hidden></span>
               <button class="stage-stopwatch-btn" data-stopwatch-session="${sidOf(p)}" data-stopwatch-share="${tile.shareId}" title="${t('stage.stopWatching')}" aria-label="${t('stage.stopWatching')}">
                 <span class="material-symbols-outlined md-18">visibility_off</span>
               </button>
@@ -1924,367 +1631,11 @@ export class VoiceStageView {
     `;
   }
 
-  /** Telemetry is keyed by tile, so each share reports its own numbers (#340). */
-  private getTelemetryText(tileKey: string): string {
-    const snapshot = this.telemetrySnapshots.get(tileKey);
-    return snapshot
-      ? formatVideoTelemetry(snapshot, settingsStore.screenShareTelemetryMode)
-      : t('stage.telemetryCollecting');
-  }
-
-  private async copyTelemetry(tileKey: string, button: HTMLButtonElement): Promise<void> {
-    const snapshot = this.telemetrySnapshots.get(tileKey);
-    if (!snapshot || !settingsStore.screenShareTelemetryEnabled) {
-      void showAlert({ message: t('stage.telemetryCollecting') });
-      return;
-    }
-    const request = ++this.telemetryCopyRequest;
-    this.clearTelemetryToast?.();
-    this.clearTelemetryToast = null;
-    try {
-      await navigator.clipboard.writeText(serializeVideoTelemetry(snapshot, navigator.userAgent, this.telemetryHistory.get(tileKey)));
-    } catch (error) {
-      console.warn('[VoiceStageView] Could not copy video diagnostics', error);
-      if (request === this.telemetryCopyRequest && button.isConnected) {
-        void showAlert({ message: t('stage.telemetryCopyFailed'), variant: 'danger' });
-      }
-      return;
-    }
-    if (request === this.telemetryCopyRequest && button.isConnected) {
-      this.clearTelemetryToast = showCopyToast(t('stage.telemetryCopied'));
-    }
-  }
-
-  private applyTelemetryOverlayState(): void {
-    this.container.querySelectorAll<HTMLButtonElement>('.stage-diagnostics-btn').forEach(button => {
-      button.hidden = !settingsStore.screenShareTelemetryEnabled;
-      const snapshot = this.telemetrySnapshots.get(button.dataset.diagnosticsKey ?? '');
-      button.title = snapshot
-        ? `${formatVideoTelemetry(snapshot, 'complete')}\n\n${t('stage.telemetryCopy')}`
-        : t('stage.telemetryCopy');
-    });
-    const overlays = this.container.querySelectorAll('.telemetry-overlay');
-    overlays.forEach((overlay) => {
-      overlay.classList.remove(
-        'position-top-left',
-        'position-top-right',
-        'position-bottom-left',
-        'position-bottom-right'
-      );
-      overlay.classList.add(`position-${settingsStore.screenShareTelemetryPosition}`);
-      overlay.classList.toggle('is-hidden', !settingsStore.screenShareTelemetryEnabled);
-      const tileKey = overlay.getAttribute('data-telemetry-key');
-      if (tileKey) {
-        overlay.textContent = this.getTelemetryText(tileKey);
-      }
-    });
-  }
-
-  /**
-   * Video tiles currently on the stage — every screen share plus every camera
-   * (#493). Built the same way as `buildStageTiles` so the keys match the
-   * overlays already in the DOM (#340).
-   */
+  /** The video tiles the telemetry measures; miniapps have none. */
   private getTelemetryTiles(): ParticipantStageTile[] {
     if (!this.currentChannelId) return [];
-    const tiles: ParticipantStageTile[] = [];
-    for (const p of participantManager.getInVoiceChannel(this.currentChannelId)) {
-      const isLocal = serverStore.isMySession(p.user.sessionId);
-      const isCamOn = isLocal ? voiceStore.isCameraOn : (p.voiceState?.isCameraOn ?? false);
-      if (isCamOn) tiles.push({ p, kind: 'camera', key: `${sidOf(p)}:camera` });
-      for (const shareId of this.getShareIds(p, isLocal)) {
-        const key = `${sidOf(p)}:screen:${shareId}`;
-        if (isLocal || this.isWatchingScreen(sidOf(p), shareId)) {
-          tiles.push({ p, kind: 'screen', key, shareId });
-        }
-      }
-    }
-    return tiles;
-  }
-
-  private hasTelemetryTiles(): boolean {
-    return this.getTelemetryTiles().length > 0;
-  }
-
-  private syncTelemetryMonitor(): void {
-    if (!this.currentChannelId || !settingsStore.screenShareTelemetryEnabled || !this.hasTelemetryTiles()) {
-      this.stopTelemetryMonitor();
-      this.applyTelemetryOverlayState();
-      return;
-    }
-
-    if (this.telemetryInterval !== null) {
-      this.applyTelemetryOverlayState();
-      return;
-    }
-
-    const tick = () => {
-      void this.refreshTelemetry();
-    };
-
-    tick();
-    this.telemetryInterval = window.setInterval(tick, 1500);
-  }
-
-  private async refreshTelemetry(): Promise<void> {
-    if (this.telemetryRefreshInFlight || !this.currentChannelId || !settingsStore.screenShareTelemetryEnabled) {
-      return;
-    }
-
-    const epoch = this.telemetryEpoch;
-    this.telemetryRefreshInFlight = true;
-    try {
-      const videoTiles = this.getTelemetryTiles();
-      if (videoTiles.length === 0) {
-        this.stopTelemetryMonitor();
-        this.applyTelemetryOverlayState();
-        return;
-      }
-
-      const targets = new Set<object>();
-      const samples = await Promise.all(videoTiles.map(async tile => ({
-        key: tile.key,
-        sourceKey: this.nativeTelemetrySource(tile)?.instanceId ?? this.getTelemetryTrack(tile)?.id,
-        snapshot: await this.collectTelemetrySnapshot(tile, epoch, targets),
-      })));
-      if (epoch !== this.telemetryEpoch) return;
-
-      const nextSnapshots = new Map<string, VideoTelemetrySnapshot>();
-      for (const sample of samples) {
-        if (sample.snapshot && sample.sourceKey) {
-          nextSnapshots.set(sample.key, sample.snapshot);
-          const history = this.telemetryHistorySources.get(sample.key) === sample.sourceKey
-            ? this.telemetryHistory.get(sample.key) ?? [] : [];
-          history.push(sample.snapshot);
-          if (history.length > MAX_TELEMETRY_SAMPLES) history.shift();
-          this.telemetryHistory.set(sample.key, history);
-          this.telemetryHistorySources.set(sample.key, sample.sourceKey);
-        }
-      }
-      for (const key of this.telemetryHistory.keys()) {
-        if (!nextSnapshots.has(key)) {
-          this.telemetryHistory.delete(key);
-          this.telemetryHistorySources.delete(key);
-        }
-      }
-      this.telemetrySnapshots = nextSnapshots;
-      this.telemetrySampler.retainTargets(targets);
-      this.nativeDecoderSampler.retainTargets(targets);
-      for (const [key, target] of this.nativeTelemetryTargets) {
-        if (!targets.has(target)) this.nativeTelemetryTargets.delete(key);
-      }
-      for (const target of this.telemetryEndpoints.keys()) {
-        if (!targets.has(target)) this.telemetryEndpoints.delete(target);
-      }
-      this.applyTelemetryOverlayState();
-    } finally {
-      if (epoch === this.telemetryEpoch) this.telemetryRefreshInFlight = false;
-    }
-  }
-
-  private getTelemetryTrack(tile: ParticipantStageTile): MediaStreamTrack | null {
-    if (tile.kind === 'voice') return null;
-    const isLocal = serverStore.isMySession(tile.p.user.sessionId);
-    const stream = isLocal
-      ? tile.kind === 'camera' ? videoService.getCameraStream()
-        : tile.shareId ? videoService.getScreenStream(tile.shareId) : null
-      : tile.kind === 'camera' ? tile.p.remoteStream : this.getRemoteScreenStream(tile);
-    return stream?.getVideoTracks()[0] ?? null;
-  }
-
-  private telemetryEndpoint(target: object): number {
-    let endpoint = this.telemetryEndpoints.get(target);
-    if (endpoint === undefined) {
-      endpoint = this.nextTelemetryEndpoint++;
-      this.telemetryEndpoints.set(target, endpoint);
-    }
-    return endpoint;
-  }
-
-  private nativeTelemetryTarget(key: string, targets: Set<object>): object {
-    let target = this.nativeTelemetryTargets.get(key);
-    if (!target) { target = {}; this.nativeTelemetryTargets.set(key, target); }
-    targets.add(target);
-    return target;
-  }
-
-  private nativeTelemetrySource(tile: ParticipantStageTile): NativeScreenSource | null {
-    if (tile.kind !== 'screen' || !tile.shareId) return null;
-    return serverStore.isMySession(tile.p.user.sessionId)
-      ? videoService.getNativeScreenCapture(tile.shareId)?.source ?? null
-      : webRtcManager.getNativeScreenSource(sidOf(tile.p), tile.shareId);
-  }
-
-  private async collectTelemetrySnapshot(
-    tile: ParticipantStageTile,
-    epoch: number,
-    targets: Set<object>
-  ): Promise<VideoTelemetrySnapshot | null> {
-    const track = this.getTelemetryTrack(tile);
-    const nativeSource = this.nativeTelemetrySource(tile);
-    if ((!track || track.readyState !== 'live') && !nativeSource) return null;
-    const isLocal = serverStore.isMySession(tile.p.user.sessionId);
-    const profile = videoService.getProfile();
-    const settings = isLocal && !nativeSource ? track?.getSettings() : null;
-    const isCamera = tile.kind === 'camera';
-    const snapshot: VideoTelemetrySnapshot = {
-      kind: isLocal ? 'sender' : 'receiver',
-      media: isCamera ? 'camera' : 'screen',
-      transport: webRtcManager.isSfuMode() ? 'sfu' : 'p2p',
-      sampledAt: new Date().toISOString(),
-      documentVisibility: document.visibilityState,
-      requested: nativeSource ? { width: nativeSource.video.width, height: nativeSource.video.height,
-        fps: nativeSource.video.fps, bitrateKbps: nativeSource.video.maxBitrateKbps } : isLocal ? {
-        width: isCamera ? profile.cameraWidth : profile.screenWidth,
-        height: isCamera ? profile.cameraHeight : profile.screenHeight,
-        fps: isCamera ? profile.cameraFps : profile.screenFps,
-        bitrateKbps: isCamera ? profile.cameraBitrateKbps : profile.screenBitrateKbps,
-      } : null,
-      capture: settings && track ? {
-        width: settings.width ?? null,
-        height: settings.height ?? null,
-        configuredFps: settings.frameRate ?? null,
-        contentHint: track.contentHint,
-        readyState: track.readyState,
-      } : null,
-      streams: [],
-      playback: null,
-      readErrors: 0,
-    };
-
-    const videos = Array.from(this.container.querySelectorAll<HTMLVideoElement>('[data-video-tile-key]'))
-      .filter(video => video.dataset.videoTileKey === tile.key);
-    const video = videos.find(element => !element.closest('.stage-mini-card')) ?? videos[0];
-    if (track && video?.srcObject instanceof MediaStream
-      && video.srcObject.getVideoTracks().some(playingTrack => playingTrack.id === track.id)
-      && typeof video.getVideoPlaybackQuality === 'function') {
-      targets.add(video);
-      const quality = video.getVideoPlaybackQuality();
-      snapshot.playback = this.telemetrySampler.samplePlayback(video, {
-        timestampMs: performance.now(),
-        totalFrames: quality.totalVideoFrames,
-        droppedFrames: quality.droppedVideoFrames,
-        sourceKey: track.id,
-        width: video.videoWidth,
-        height: video.videoHeight,
-        paused: video.paused,
-      });
-    }
-
-    if (nativeSource && tile.shareId) {
-      try {
-        const diagnostics = await webRtcManager.getScreenVideoDiagnostics(sidOf(tile.p), tile.shareId);
-        if (epoch !== this.telemetryEpoch || this.nativeTelemetrySource(tile)?.instanceId !== nativeSource.instanceId) return null;
-        if (this.getTelemetryTrack(tile) !== track) snapshot.playback = null;
-        if (!diagnostics) return snapshot;
-        if (diagnostics.source.instanceId !== nativeSource.instanceId) return null;
-        snapshot.nativeScreen = { receiver: isLocal ? null : diagnostics.backend,
-          waitingForViewers: diagnostics.backend === 'native' && diagnostics.viewers === 0, decoders: [] };
-        if (diagnostics.backend === 'browser') {
-          const { target, reports, profile: selected } = diagnostics;
-          snapshot.requested = { width: selected.width, height: selected.height, fps: selected.fps, bitrateKbps: selected.maxBitrateKbps };
-          targets.add(target);
-          if (reports) snapshot.streams = this.telemetrySampler.sampleInbound(target, reports, nativeSource.instanceId)
-            .map(data => ({ endpoint: this.telemetryEndpoint(target), data }));
-        } else {
-          for (const observation of diagnostics.endpoints) {
-            snapshot.readErrors += observation.readErrors;
-            const selected = observation.profile;
-            if (!isLocal) {
-              snapshot.requested = { width: selected.width, height: selected.height, fps: selected.fps, bitrateKbps: selected.maxBitrateKbps };
-              const target = this.nativeTelemetryTarget(`decoder:${observation.pipelineId}`, targets);
-              snapshot.nativeScreen.decoders.push({ endpoint: this.telemetryEndpoint(target),
-                data: this.nativeDecoderSampler.sample(target, observation.decoders) });
-            }
-            for (const observationRtp of observation.rtp) {
-              const target = this.nativeTelemetryTarget(`rtp:${observation.pipelineId}:${observationRtp.id}`, targets);
-              const reports = new Map(observationRtp.reports.map(report => [report.id, report]));
-              const streams = isLocal
-                ? this.telemetrySampler.sampleOutbound(target, reports, {
-                  encodings: [{ maxBitrate: selected.maxBitrateKbps * 1000, maxFramerate: selected.fps }],
-                }, nativeSource.instanceId)
-                : this.telemetrySampler.sampleInbound(target, reports, nativeSource.instanceId);
-              snapshot.streams.push(...streams.map(data => ({ endpoint: this.telemetryEndpoint(target), data })));
-            }
-          }
-        }
-      } catch (error) {
-        if (epoch === this.telemetryEpoch) {
-          snapshot.readErrors++;
-          console.warn('[VoiceStageView] Could not read native screen diagnostics', error);
-        }
-      }
-      if (this.getTelemetryTrack(tile) !== track) snapshot.playback = null;
-      return epoch === this.telemetryEpoch && this.nativeTelemetrySource(tile)?.instanceId === nativeSource.instanceId
-        ? snapshot : null;
-    }
-
-    if (!track) return null;
-    if (isLocal) {
-      const getSenders = (): RTCRtpSender[] => isCamera ? webRtcManager.getCameraSenders() : [];
-      const streams = await Promise.all(getSenders().map(async sender => {
-        targets.add(sender);
-        const endpoint = this.telemetryEndpoint(sender);
-        const sendingTrack = sender.track;
-        try {
-          const stats = await sender.getStats();
-          if (epoch !== this.telemetryEpoch || sender.track !== sendingTrack
-            || this.getTelemetryTrack(tile) !== track || !getSenders().includes(sender)) return [];
-          return this.telemetrySampler.sampleOutbound(sender, stats, sender.getParameters(), track.id)
-            .map(data => ({ endpoint, data }));
-        } catch (error) {
-          if (epoch === this.telemetryEpoch) {
-            snapshot.readErrors++;
-            console.warn('[VoiceStageView] Could not read sender diagnostics', error);
-          }
-          return [];
-        }
-      }));
-      snapshot.streams = streams.flat();
-    } else {
-      const receiver = webRtcManager.getReceiverForTrack(sidOf(tile.p), track.id);
-      if (receiver) {
-        targets.add(receiver);
-        const endpoint = this.telemetryEndpoint(receiver);
-        try {
-          const stats = await receiver.getStats();
-          if (epoch !== this.telemetryEpoch || this.getTelemetryTrack(tile) !== track
-            || webRtcManager.getReceiverForTrack(sidOf(tile.p), track.id) !== receiver) return null;
-          snapshot.streams = this.telemetrySampler.sampleInbound(receiver, stats, track.id)
-            .map(data => ({ endpoint, data }));
-        } catch (error) {
-          if (epoch === this.telemetryEpoch) {
-            snapshot.readErrors++;
-            console.warn('[VoiceStageView] Could not read receiver diagnostics', error);
-          }
-        }
-      }
-    }
-    return epoch === this.telemetryEpoch && this.getTelemetryTrack(tile) === track ? snapshot : null;
-  }
-
-  private pauseTelemetryMonitor(): void {
-    this.telemetryEpoch++;
-    this.telemetryRefreshInFlight = false;
-    if (this.telemetryInterval !== null) {
-      clearInterval(this.telemetryInterval);
-      this.telemetryInterval = null;
-    }
-    this.telemetryCopyRequest++;
-    this.clearTelemetryToast?.();
-    this.clearTelemetryToast = null;
-  }
-
-  private stopTelemetryMonitor(): void {
-    this.pauseTelemetryMonitor();
-    this.telemetrySnapshots.clear();
-    this.telemetryHistory.clear();
-    this.telemetryHistorySources.clear();
-    this.telemetrySampler.clear();
-    this.nativeDecoderSampler.clear();
-    this.nativeTelemetryTargets.clear();
-    this.telemetryEndpoints.clear();
-    this.nextTelemetryEndpoint = 1;
+    return measuredTiles(buildStageTiles(participantManager.getInVoiceChannel(this.currentChannelId), this.ownMedia()),
+      (sessionId, shareId) => this.isWatchingScreen(sessionId, shareId));
   }
 
   private startPingMonitor(): void {
@@ -2379,7 +1730,7 @@ export class VoiceStageView {
     const channelId = voiceStore.currentVoiceChannelId;
     if (!channelId) return;
     this.stopPingMonitor();
-    this.stopTelemetryMonitor();
+    this.telemetry.stop();
     leaveCall();
     this.setChannel(channelId);
   }
@@ -2391,7 +1742,7 @@ export class VoiceStageView {
       } catch (error) {
         await showAlert({
           title: t('screenShare.errorTitle'),
-          message: t('screenShare.errorMessage', { error: error instanceof Error ? error.message : String(error) }),
+          message: screenShareFailureMessage(error, 'stop'),
           variant: 'danger',
         });
       }
@@ -2508,8 +1859,8 @@ export class VoiceStageView {
     const u2 = appEvents.on('voice.state_updated', () => {
       this.updateControlsUI();
       this.updateSpeakingClasses();
-      this.applyTelemetryOverlayState();
-      this.syncTelemetryMonitor();
+      this.telemetry.applyOverlays();
+      this.telemetry.sync();
       this.refreshLocalCameraVideo();
       this.focusStartedScreens();
     });
@@ -2529,8 +1880,8 @@ export class VoiceStageView {
     const u6 = appEvents.on('modal.screenshare_picker_closed', clearScreenLoading);
     const u7 = appEvents.on('settings.updated', () => {
       this.updateControlsUI();
-      this.applyTelemetryOverlayState();
-      this.syncTelemetryMonitor();
+      this.telemetry.applyOverlays();
+      this.telemetry.sync();
     });
 
     const u10 = appEvents.on('overlay.state_changed', () => this.updateControlsUI());
@@ -2539,7 +1890,7 @@ export class VoiceStageView {
     const u13 = appEvents.on('overlay_settings.updated', () => this.updateControlsUI());
 
     const u11 = appEvents.on('voice.mode_switched', () => {
-      this.stopTelemetryMonitor();
+      this.telemetry.stop();
       this.updateHeaderModeBadge();
       this.renderParticipants();
     });
@@ -2604,16 +1955,7 @@ export class VoiceStageView {
 
   private updateHeaderModeBadge(): void {
     const wrapper = document.getElementById('stage-header-mode-badge-wrapper');
-    if (!wrapper) return;
-    wrapper.innerHTML = webRtcManager.isSfuMode()
-      ? `<div class="header-status-badge sfu-mode-badge" style="background-color: rgba(88, 101, 242, 0.15); color: var(--accent-primary); display: flex; align-items: center; gap: 6px;" title="${t('stage.sfuModeTooltip')}">
-           <span class="material-symbols-outlined md-14">hub</span>
-           <span>${t('stage.connectedSfu')}</span>
-         </div>`
-      : `<div class="header-status-badge p2p-mode-badge" style="background-color: rgba(35, 165, 90, 0.15); color: var(--success); display: flex; align-items: center; gap: 6px;" title="${t('stage.p2pModeTooltip')}">
-           <span class="material-symbols-outlined md-14">wifi_tethering</span>
-           <span>${t('stage.connectedMesh')}</span>
-         </div>`;
+    if (wrapper) wrapper.innerHTML = modeBadge();
   }
 
   /**
@@ -2624,7 +1966,7 @@ export class VoiceStageView {
     for (const card of this.stageCards.values()) card.dispose();
     this.stageCards.clear();
     this.stageLayout = null;
-    this.releaseFocusZoom();
+    this.zoom.release();
   }
 
   private unbindListeners(): void {
@@ -2641,7 +1983,7 @@ export class VoiceStageView {
     this.pendingScreenFocus.clear();
     this.clearFocusError();
     this.stopPingMonitor();
-    this.stopTelemetryMonitor();
+    this.telemetry.stop();
     this.unbindListeners();
     this.releaseBotScreens();
     // Without MainView, nothing else could show this stage's miniapps again.

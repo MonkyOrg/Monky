@@ -13,7 +13,7 @@ class NativeClient {
   ended = false;
   expectedPeerFailures = new Set();
 
-  constructor(fixture, { nickname, profile, password, synthetic = true, microphoneAccess, defaultProcessing = false, muted = false, deafened = false } = {}) {
+  constructor(fixture, { nickname, profile, password, synthetic = true, microphoneAccess, defaultProcessing = false, muted = false, deafened = false, tray = false, pseudoConsole = false } = {}) {
     this.nickname = nickname;
     this.profile = profile ?? path.join(fixture.directory, `native-${randomUUID()}`);
     const env = { ...process.env };
@@ -32,8 +32,17 @@ class NativeClient {
     }
     if (muted) args.push('--muted');
     if (deafened) args.push('--deafened');
-    this.child = spawn(nativeExecutable(synthetic ? 'monky-light-fixture' : 'monky-light'), args,
-      { stdio: ['pipe', 'pipe', 'pipe'], env });
+    if (tray) {
+      // The fixture's interface has the tray's threads, not its icon.
+      assert.ok(synthetic, 'The real tray would show an icon; tests use the fixture interface');
+      args.push('--tray');
+    }
+    const executable = nativeExecutable(synthetic ? 'monky-light-fixture' : 'monky-light');
+    // Inside a pseudoconsole, "#close" on stdin closes it as its window would.
+    const [command, commandArgs] = pseudoConsole
+      ? [nativeExecutable('monky-light-console-host'), [executable, ...args]]
+      : [executable, args];
+    this.child = spawn(command, commandArgs, { stdio: ['pipe', 'pipe', 'pipe'], env });
     let partial = '';
     this.child.stdout.setEncoding('utf8').on('data', chunk => {
       partial += chunk;

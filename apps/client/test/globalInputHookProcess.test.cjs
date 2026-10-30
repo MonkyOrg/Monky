@@ -9,6 +9,7 @@ const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { test } = require('node:test');
 const ts = require('typescript');
+const { loadMain } = require('./mainModules.cjs');
 
 const sourceFile = path.resolve(__dirname, '..', 'src', 'main', 'globalInputHookProcess.ts');
 const compiled = ts.transpileModule(fs.readFileSync(sourceFile, 'utf8'), {
@@ -37,6 +38,7 @@ function fixture() {
       if (name === 'electron') return electron;
       if (name === 'path') return path;
       if (name === './globalInputHook') return { globalInputHook: {} };
+      if (name === './ipc/registry') return loadMain('ipc/registry');
       throw new Error(`Unexpected dependency: ${name}`);
     },
     process: { platform: 'win32' }, Date: { now: () => now }, console: { warn() {} },
@@ -47,7 +49,8 @@ function fixture() {
     },
     clearTimeout(timer) { if (timer) timer.cleared = true; },
   }, { filename: sourceFile });
-  const window = { isDestroyed: () => false, webContents: { send: (channel, ...args) => sent.push([channel, ...args]) } };
+  const window = { isDestroyed: () => false,
+    webContents: { isDestroyed: () => false, send: (channel, ...args) => sent.push([channel, ...args]) } };
   const hook = new module.exports.GlobalInputHookProcess();
   const latest = () => children.at(-1);
   const ready = () => { latest().emit('spawn'); latest().emit('message', { type: 'ready' }); };

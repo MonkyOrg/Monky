@@ -371,6 +371,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     if (admissionOnly) {
       await testRejoinAdmission();
       await testForegroundAdmission();
+      await testVoiceKick();
       return { checks, outputs };
     }
     if (selected === 'h264') await preferHardwareCodec(testH264Profiles);
@@ -451,6 +452,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
       await testScreenSharePickerLifecycle();
       await testRejoinAdmission();
       await testForegroundAdmission();
+      await testVoiceKick();
     }
     check(signalErrors.length === 0, 'No signaling failures: ' + signalErrors.join('; '));
     return { checks, outputs };
@@ -479,8 +481,9 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
   }
 
   async function testScreenSharePickerLifecycle() {
-    const [{ ScreenSharePickerModal }, { webRtcManager: globalRtc }, { callClient }] = await Promise.all([
+    const [{ ScreenSharePickerModal }, { webRtcManager: globalRtc }, { callClient }, { openModal }] = await Promise.all([
       import('/views/ScreenSharePickerModal.ts'), import('/core/WebRtcManager.ts'), import('/core/callScope.ts'),
+      import('/utils/modalShell.ts'),
     ]);
     const picker = new ScreenSharePickerModal();
     const client = callClient();
@@ -507,13 +510,18 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     const encodingProbes = [];
     const mount = async (preserveAspectRatio = true) => {
       picker.close();
-      const modal = document.createElement('div');
-      modal.innerHTML = '<button id="btn-share">Share</button><button id="btn-share-add">Add</button>'
-        + '<button id="btn-cancel">Cancel</button><button id="modal-close">Close</button>'
-        + '<input type="hidden" id="chk-share-audio"><p id="share-capture-info"></p>'
-        + `<label class="toggle-switch"><input type="checkbox" id="chk-preserve-aspect-ratio" ${preserveAspectRatio ? 'checked' : ''}>`
-        + '<span class="toggle-slider"></span></label>';
-      document.body.appendChild(modal);
+      // Only the picker's start controls, in the shell every modal uses; closing it retires the picker as usual.
+      const shell = openModal({
+        card: '<div class="modal-card"><button id="btn-share">Share</button><button id="btn-share-add">Add</button>'
+          + '<button id="btn-cancel">Cancel</button><button id="modal-close">Close</button>'
+          + '<input type="hidden" id="chk-share-audio"><p id="share-capture-info"></p>'
+          + `<label class="toggle-switch"><input type="checkbox" id="chk-preserve-aspect-ratio" ${preserveAspectRatio ? 'checked' : ''}>`
+          + '<span class="toggle-slider"></span></label></div>',
+        initialFocus: false,
+        onClose: () => picker.teardown(shell),
+      });
+      const modal = shell.element;
+      picker.shell = shell;
       picker.modalEl = modal;
       picker.activeTab = 'screen';
       picker.selectedSourceId = `native-monitor:${String(++selection).padStart(64, '0')}`;
@@ -612,6 +620,25 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
         && nativeSelections.slice(1).every(selection => selection.preserveAspectRatio === true)
         && videoService.getNativeScreenCapture(replacement.id)?.preserveAspectRatio === true,
       'A new picker restores fit after a previous explicit OFF and persists that share choice in its capture metadata');
+
+      // #490: a native-screen:invoke rejection, exactly as Electron delivers it, opens the real error notice
+      // with the category in the app's language and none of the technical text.
+      const { t } = await import('/i18n/index.ts');
+      acquireNative = async () => {
+        throw new Error("Error invoking remote method 'native-screen:invoke': Error: Unsafe absolute path"
+          + ' [monky-screen-failure {"codes":["ERR_SCREEN_CAPTURE_PATH"]}]');
+      };
+      await mount();
+      const failing = picker.startSharing('replace');
+      const notice = await until(() => document.querySelector('.dialog-card .dialog-message'), 'The failure opens the error notice');
+      check(notice.textContent === t('screenShare.startFailed', { reason: t('screenShare.failure.files') })
+        && !/Error invoking remote method|native-screen|ERR_|Unsafe absolute path|monky-screen-failure/.test(notice.textContent)
+        && notice.closest('.dialog-card').textContent.includes(t('screenShare.errorTitle')),
+      'A native failure reads as its category in the app language, without the technical text');
+      notice.closest('.dialog-card').querySelector('[data-action="confirm"]').click();
+      await failing;
+      check(voice.screenShareIds.length === 1 && voice.screenShareIds[0] === replacement.id,
+        'A failed replacement keeps the share on air');
     } finally {
       picker.close();
       for (const resolve of pendingCaptures) resolve(new MediaStream());
@@ -794,6 +821,80 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
       voice.reset();
       destination.stream.getTracks().forEach(track => track.stop());
       await context.close();
+    }
+  }
+
+  // An administrative removal ends the call by the same path as hanging up. A kick that crosses a
+  // VOICE_JOIN already on the wire cancels that admission: if the server admits it anyway, the client
+  // leaves that room at once instead of staying in it as a ghost, and a new join on the same socket
+  // only goes out after that leave.
+  async function testVoiceKick() {
+    const [{ joinCallOnSession, isVoiceAdmissionPending }, { sessionManager }, { audioProcessor: audio },
+      { bindVoiceEvents }, { routeSessionEvent }] = await Promise.all([
+      import('/core/serverConnection.ts'), import('/core/SessionManager.ts'), import('/core/AudioProcessor.ts'),
+      import('/core/voiceEvents.ts'), import('/core/sessionRouting.ts'),
+    ]);
+    const session = sessionManager.create('voice-kick-fixture', 0, 'Alice');
+    const user = { id: 'alice', sessionId: 'alice:kick', clientId: 'fixture', nickname: 'Alice', status: 'ONLINE', joinedAt: 1 };
+    session.serverStore.currentUser = user;
+    session.serverStore.serverDetails = { id: 'kick', name: 'Kick', voiceMode: 'p2p', channels: [] };
+    session.client.getStatus = () => 'CONNECTED';
+    // Everything this socket puts on the wire, in order; requests wait for the test to answer them.
+    const sent = [];
+    const requests = [];
+    session.client.send = (type, payload) => sent.push({ type, payload });
+    session.client.sendRequest = (type, payload) => {
+      sent.push({ type, payload });
+      return new Promise((resolve, reject) => requests.push({ type, payload, resolve, reject }));
+    };
+    const admitted = channelId => {
+      const voiceState = {
+        userId: user.id, sessionId: user.sessionId, channelId, isMuted: false, isDeafened: false,
+        serverMuted: false, serverDeafened: false, isSpeaking: false, isCameraOn: false, isScreenSharing: false,
+        isSharingScreenAudio: false, connectionHealth: 'connected',
+      };
+      return { channelId, userId: user.id, sessionId: user.sessionId, user, voiceState, participants: [{ user, voiceState }] };
+    };
+    const wire = () => sent.map(message => message.type);
+    session.participants.addUser(user);
+    const previousActive = sessionManager.getActiveKey();
+    sessionManager.activate(session.key);
+    let renders = 0;
+    const unbind = bindVoiceEvents({ reconnect: { departed: () => false }, render: () => { renders++; }, rejoinOnScreen() {} });
+    try {
+      voice.reset();
+      const joining = joinCallOnSession(session.key, 'room').catch(error => error);
+      await until(() => requests.length === 1, 'The VOICE_JOIN the kick crosses never reached the wire');
+      check(requests[0].type === MessageType.VOICE_JOIN && requests[0].payload.channelId === 'room'
+        && isVoiceAdmissionPending(session.key, 'room'), 'The kick fixture starts with a VOICE_JOIN on the wire');
+      // The server's echo of us in the room.
+      session.participants.updateVoiceState(admitted('room').voiceState);
+      routeSessionEvent(session.key, `message.${MessageType.ADMIN_KICK_VOICE}`,
+        () => appEvents.emit(`message.${MessageType.ADMIN_KICK_VOICE}`, { targetSessionId: user.sessionId }));
+      check(!isVoiceAdmissionPending(session.key, 'room') && voice.currentVoiceChannelId === null && voice.voiceSessionKey === null,
+        'A voice kick cancels the admission in flight and ends the call');
+      check(!session.participants.get(user.sessionId)?.voiceState && renders === 1,
+        'A voice kick takes our own row out of the room at once and redraws the server on screen');
+      // Entering the room again right away: this join must wait for the one the kick crossed.
+      const rejoining = joinCallOnSession(session.key, 'room').catch(error => error);
+      await tick(200);
+      check(!wire().includes(MessageType.VOICE_LEAVE) && requests.length === 1,
+        'Being kicked sends no VOICE_LEAVE, and a new join on the same socket waits for the crossed one');
+      // The server admitted the join that crossed the kick.
+      requests[0].resolve(admitted('room'));
+      check((await joining)?.name === 'AbortError', 'The crossed admission settles as cancelled even though the server admitted it');
+      await until(() => requests.length === 2, 'The new join never left after the crossed one settled');
+      check(JSON.stringify(wire()) === JSON.stringify([MessageType.VOICE_JOIN, MessageType.VOICE_LEAVE, MessageType.VOICE_JOIN])
+        && sent[1].payload.channelId === 'room' && requests[1].payload.channelId === 'room',
+      'A join admitted after the kick is left with exactly one VOICE_LEAVE, before the next join goes out');
+      requests[1].reject(new Error('fixture: room unavailable'));
+      check((await rejoining)?.message === 'fixture: room unavailable', 'The later join settles on its own answer');
+    } finally {
+      unbind();
+      audio.stopMicrophone();
+      if (previousActive) sessionManager.activate(previousActive);
+      sessionManager.remove(session.key);
+      voice.reset();
     }
   }
 

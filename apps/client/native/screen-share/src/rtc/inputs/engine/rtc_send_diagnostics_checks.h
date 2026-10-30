@@ -159,7 +159,8 @@ void RunRtcSendDiagnosticChecks(Check&& check) {
   auto later = Row("z-later-same-stream", 9999, true);
   later->monky_send_stream_ssrcs = std::vector<std::uint32_t>{9999, 1000};
   full->AddStats(std::move(later));
-  const auto ordered = full->GetStatsOfType<webrtc::RTCOutboundRtpStreamStats>();
+  // report() is a lambda inside this template, so full has a dependent type here.
+  const auto ordered = full->template GetStatsOfType<webrtc::RTCOutboundRtpStreamStats>();
   check(ordered.size() == 129 && ordered.back()->id() == "z-later-same-stream",
         "The actual SDK report did not place the duplicate scope after all 128 distinct groups");
   const auto at_capacity = ObserveRtcSendStreamDrops(*full);

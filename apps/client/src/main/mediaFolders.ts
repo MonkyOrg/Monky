@@ -3,6 +3,7 @@ import { realpath as pathWalkingRealpath } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { isRecord } from './ipc/guards';
 
 export type MediaFolderPurpose = 'soundboard' | 'stickers';
 
@@ -32,10 +33,6 @@ const PURPOSES: readonly MediaFolderPurpose[] = ['soundboard', 'stickers'];
 const MAX_ENTRIES = 16;
 const MAX_FILE_BYTES = 64 * 1024;
 const walkLinks: Realpath = promisify(pathWalkingRealpath);
-
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
@@ -101,7 +98,7 @@ export class MediaFolderAccess {
       if (state.adopted) return false;
       state.adopted = true;
       for (const purpose of PURPOSES) {
-        const resolved = absolutePath(record(input) ? input[purpose] : undefined);
+        const resolved = absolutePath(isRecord(input) ? input[purpose] : undefined);
         if (!resolved) continue;
         // A drive that is not mounted right now keeps working once it is back.
         const canonical = await this.canonical(resolved);
@@ -224,12 +221,12 @@ export class MediaFolderAccess {
       try {
         const text = await fs.readFile(this.file, 'utf8');
         const saved: unknown = text.length <= MAX_FILE_BYTES ? JSON.parse(text) : null;
-        if (record(saved) && saved.version === 1) {
+        if (isRecord(saved) && saved.version === 1) {
           return { adopted: saved.adopted === true, soundboard: savedFolders(saved.soundboard), stickers: savedFolders(saved.stickers) };
         }
         console.warn('[MediaFolders] Unrecognized folder record; adopting the configured folders again.');
       } catch (error) {
-        if (!(record(error) && error.code === 'ENOENT')) {
+        if (!(isRecord(error) && error.code === 'ENOENT')) {
           // Only Main writes this file, so adopting again cannot be forced by the renderer.
           console.warn('[MediaFolders] Could not read the folder record; adopting the configured folders again.', error);
         }

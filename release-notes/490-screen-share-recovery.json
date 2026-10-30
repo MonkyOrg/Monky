@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Tela compartilhada: quando a rede de quem transmite ou de quem assiste cai, a transmissão volta sozinha em vez de congelar, e o erro de um espectador não derruba mais os outros.",
+  "en": "Screen sharing: when the presenter's or a viewer's network drops, the stream recovers on its own instead of freezing, and one viewer's error no longer takes down the others."
+}

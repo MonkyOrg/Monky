@@ -10,10 +10,10 @@ const pins = require('./native-rtc/pins.json');
 // Every device-free engine contract group except the Windows Media Foundation ones (contract_probe.cc).
 const MAC_CONTRACT_GROUPS = [
   'signalingAndResources', 'presentationLease', 'operationCompletion', 'receiveMids', 'receiveRoutes',
-  'receiverLifecycle', 'captureClock', 'externalH264', 'softwareAV1', 'peerStartupBitrate',
-  'peerScreenCongestionRecovery', 'peerVideoPlayout', 'sfuVideoStartupBitrate', 'inputLeases', 'nodeEventQueue',
+  'receiverLifecycle', 'receiveFramePolicy', 'captureClock', 'externalH264', 'softwareAV1', 'peerStartupBitrate',
+  'peerScreenCongestionRecovery', 'peerVideoPlayout', 'sfuVideoStartupBitrate', 'nodeEventQueue',
   'audioFoundations', 'audioOperationalPolicies', 'rtcSendDrops', 'rtcReceiveDiagnostics', 'rtcReceiveSdk',
-  'binaryLayout',
+  'surfaceRecycler', 'binaryLayout',
 ];
 
 // Copies the owned inputs and generates the GN graph; notices only need this graph, not compiled objects.

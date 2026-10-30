@@ -5,6 +5,7 @@ import { voiceStore } from '../stores/voiceStore';
 import { settingsStore } from '../stores/settingsStore';
 import { showInfoToast } from '../views/CopyToast';
 import { t } from '../i18n';
+import { stageTileKey } from '../views/stage/stageTiles';
 
 export interface ScreenPictureInPictureSource {
   sessionKey: string;
@@ -365,7 +366,7 @@ class ScreenPictureInPicture {
 }
 
 function tileKeyOf(entry: Presentation): string {
-  return `${entry.source.publisherSessionId}:screen:${entry.source.shareId}`;
+  return stageTileKey.screen(entry.source.publisherSessionId, entry.source.shareId);
 }
 
 export const screenPictureInPicture = new ScreenPictureInPicture();

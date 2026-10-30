@@ -2,6 +2,7 @@ import type { ChannelType } from '@monky/shared';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { renderSwitch } from '../utils/formControls';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 
 /**
@@ -25,10 +26,7 @@ export function renderChannelBotCommandsField(enabled: boolean): string {
         <span class="channel-privacy-title">${t('channelModal.botCommandsLabel')}</span>
         <span class="channel-privacy-desc">${t('channelModal.botCommandsHint')}</span>
       </div>
-      <label class="toggle-switch" aria-label="${t('channelModal.botCommandsLabel')}">
-        <input type="checkbox" id="input-channel-bot-commands" ${enabled ? 'checked' : ''}>
-        <span class="toggle-slider"></span>
-      </label>
+      ${renderSwitch({ id: 'input-channel-bot-commands', label: t('channelModal.botCommandsLabel'), checked: enabled })}
     </div>
   </div>`;
 }
@@ -67,7 +65,7 @@ export function renderChannelPrivacyFields(selection: ChannelPrivacySelection, c
               <span class="channel-role-dot" style="background: ${escapeHtml(role.color || 'var(--text-muted)')};"></span>
               <span class="channel-role-name">${escapeHtml(role.name)}</span>
               <span class="toggle-switch">
-                <input type="checkbox" class="channel-role-checkbox" value="${escapeHtml(role.id)}" ${
+                <input type="checkbox" role="switch" class="channel-role-checkbox" value="${escapeHtml(role.id)}" ${
                   selected.has(role.id) ? 'checked' : ''
                 }>
                 <span class="toggle-slider"></span>
@@ -87,10 +85,7 @@ export function renderChannelPrivacyFields(selection: ChannelPrivacySelection, c
           </span>
           <span class="channel-privacy-desc">${t(category ? 'categories.privateHint' : 'channelModal.privateHint')}</span>
         </div>
-        <label class="toggle-switch" aria-label="${t(category ? 'categories.private' : 'channelModal.privateLabel')}">
-          <input type="checkbox" id="input-channel-private" ${selection.isPrivate ? 'checked' : ''}>
-          <span class="toggle-slider"></span>
-        </label>
+        ${renderSwitch({ id: 'input-channel-private', label: t(category ? 'categories.private' : 'channelModal.privateLabel'), checked: selection.isPrivate })}
       </div>
     </div>
 
@@ -185,10 +180,7 @@ export function renderChannelCategoryFields(categoryId: string | null, inherit: 
         <span class="channel-privacy-title">${t('categories.inherit')}</span>
         <span class="channel-privacy-desc">${t('categories.inheritHint')}</span>
       </div>
-      <label class="toggle-switch" aria-label="${t('categories.inherit')}">
-        <input type="checkbox" id="input-channel-inherit" ${inherit ? 'checked' : ''}>
-        <span class="toggle-slider"></span>
-      </label>
+      ${renderSwitch({ id: 'input-channel-inherit', label: t('categories.inherit'), checked: inherit })}
     </div>
   </div>`;
 }

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Segurança: 48 funções internas do app (abrir links, atualização, janela, prévias de link e outras) só atendem a janela principal. Uma atualização em download continua depois de o app se recuperar de uma falha.",
+  "en": "Security: 48 internal app functions (opening links, updates, window controls, link previews and others) only answer the main window. A downloading update continues after the app recovers from a crash."
+}

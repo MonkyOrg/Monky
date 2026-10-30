@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { WebSocket } from 'ws';
 import { MessageType, Permission, ProtocolErrorCode, type ProtocolMessage, type ServerSettingsUpdatedPayload, type VoiceUserJoinedPayload, type VoiceUserLeftPayload } from '@monky/shared';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import type { ClientSession } from './infrastructure/websocket/ClientSession';
 import { SignalingService } from './application/services/SignalingService';
 import { AuthService, serverSettingsPayload } from './application/services/AuthService';
 import { BotLocalExecutionService } from './application/services/BotLocalExecutionService';
@@ -49,7 +50,7 @@ function fixture(restricted = true) {
     save: (userId, state) => { restrictions.set(userId, { ...state }); },
   });
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
-  type Session = Parameters<WebSocketServer['handleServerUpdateSettings']>[0];
+  type Session = ClientSession;
   // Each connection knows the rooms it was told about: departures reach only those (#384).
   const session = (id: string, rooms: string[]): Session => {
     const ws = Object.create(WebSocket.prototype) as WebSocket;
@@ -63,9 +64,6 @@ function fixture(restricted = true) {
   const sessions = [admin, alice, bob];
   server['sessions'] = new Map(sessions.map((entry) => [entry.ws, entry]));
   server['sessionSockets'] = new Map(sessions.map((entry) => [entry.sessionId!, entry.ws]));
-  server['settingsUpdateQueue'] = Promise.resolve();
-  server['localAccessVersion'] = 0;
-  server['pendingLocalAccessMutations'] = 0;
   server['botLocalExecution'] = Object.create(BotLocalExecutionService.prototype) as typeof server['botLocalExecution'];
   server['botLocalExecution'].voiceModeChanged = () => { localModeChanges++; };
   server['signalingService'] = signaling;
@@ -89,9 +87,9 @@ function fixture(restricted = true) {
   sfu.init = async () => true;
   sfu.checkPortAvailability = async () => null;
   server['sfuManager'] = sfu;
-  server['applyTurnState'] = async () => {};
+  server['serverSettings']['applyTurnState'] = async () => {};
   // What each connection was told is fixed here: the rooms listed for it do not follow its presence.
-  server['syncVoicePresenceVisibility'] = async () => {};
+  server['visibility'].syncVoicePresence = async () => {};
   const broadcasts: ProtocolMessage[] = [];
   const sent: Array<{ session: Session | undefined; message: ProtocolMessage }> = [];
   /** Everything sent, broadcast or not, in the order it went out. */
@@ -102,12 +100,12 @@ function fixture(restricted = true) {
     sent.push({ session: sessions.find((entry) => entry.ws === ws), message });
     timeline.push(message);
   };
-  server['requirePermission'] = async (entry, permission, id) => {
+  server['authorizer'].requirePermission = async (entry, permission, id) => {
     if (permission !== Permission.SPEAK || speakAllowed) return true;
     server['sendError'](entry.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Denied', id);
     return false;
   };
-  server['requireChannelAccess'] = async (entry, _channelId, id) => {
+  server['authorizer'].requireChannelAccess = async (entry, _channelId, id) => {
     if (exists && viewAllowed) return true;
     server['sendError'](entry.ws, ProtocolErrorCode.CHANNEL_NOT_FOUND, 'Gone', id);
     return false;
@@ -126,7 +124,7 @@ function fixture(restricted = true) {
 async function switchMode(f: ReturnType<typeof fixture>) {
   await f.signaling.joinVoiceChannel('alice', 'alice', 'room');
   await f.signaling.joinVoiceChannel('bob', 'bob', 'other-room');
-  await f.server['handleServerUpdateSettings'](f.admin, { voiceMode: 'p2p' }, 'save');
+  await f.server['serverSettings'].update(f.admin, { voiceMode: 'p2p' }, 'save');
   const settings = f.broadcasts.find((message) => message.type === MessageType.SERVER_SETTINGS_UPDATED)?.payload as ServerSettingsUpdatedPayload;
   assert.ok(settings.voiceTransition);
   return settings.voiceTransition.id;
@@ -154,7 +152,7 @@ test('only a real SFU to P2P change fully closes media and grants one reconnect 
     assert.equal(f.signaling.getVoiceState(session.sessionId!)?.serverMuted, true);
     assert.equal(f.signaling.getVoiceState(session.sessionId!)?.serverDeafened, true);
   }
-  await f.server['handleServerUpdateSettings'](f.admin, { voiceMode: 'p2p', name: 'Rename' });
+  await f.server['serverSettings'].update(f.admin, { voiceMode: 'p2p', name: 'Rename' });
   assert.equal(f.closes(), 1, 'unchanged full-form save never evicts the reconnected users');
   assert.equal(f.localModeChanges(), 1, 'unchanged saves must not terminate delegated streams');
   assert.equal(Object.keys(f.signaling.getAllVoiceStates()).length, 2);
@@ -179,8 +177,8 @@ test('concurrent settings saves observe the committed mode and tear down only on
   const f = fixture();
   await f.signaling.joinVoiceChannel('alice', 'alice', 'room');
   await Promise.all([
-    f.server['handleServerUpdateSettings'](f.admin, { voiceMode: 'p2p' }),
-    f.server['handleServerUpdateSettings'](f.bob, { voiceMode: 'p2p' }),
+    f.server['serverSettings'].update(f.admin, { voiceMode: 'p2p' }),
+    f.server['serverSettings'].update(f.bob, { voiceMode: 'p2p' }),
   ]);
   assert.equal(f.closes(), 1);
   assert.equal(f.departures(f.admin).length, 1);
@@ -191,7 +189,7 @@ test('P2P to SFU keeps membership and does not request a leave/rejoin', async ()
   const f = fixture();
   f.setMode('p2p');
   await f.signaling.joinVoiceChannel('alice', 'alice', 'room');
-  await f.server['handleServerUpdateSettings'](f.admin, { voiceMode: 'sfu' });
+  await f.server['serverSettings'].update(f.admin, { voiceMode: 'sfu' });
   assert.equal(f.signaling.getVoiceState('alice')?.channelId, 'room');
   assert.equal(f.closes(), 0);
   assert.equal(f.server['voiceSessions']['voiceReconnectGrants'].size, 0);
@@ -224,7 +222,7 @@ test('removed channels and revoked permission fail admission, and a later mode c
     const id = await switchMode(f);
     if (mutate === 'permission') f.revoke();
     if (mutate === 'channel') f.removeChannel();
-    if (mutate === 'mode') await f.server['handleServerUpdateSettings'](f.admin, { voiceMode: 'sfu' });
+    if (mutate === 'mode') await f.server['serverSettings'].update(f.admin, { voiceMode: 'sfu' });
     await f.server['voiceSessions']['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'denied');
     assert.equal(f.sent.at(-1)?.message.type, MessageType.SERVER_ERROR);
     assert.equal(f.signaling.getVoiceState('alice'), undefined);

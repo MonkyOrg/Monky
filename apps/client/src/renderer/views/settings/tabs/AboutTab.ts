@@ -4,10 +4,13 @@ import { updateService } from '../../../core/UpdateService';
 import { changelogModal } from '../../ChangelogModal';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { renderSwitch } from '../../../utils/formControls';
 import { bindVersionCopyButton, renderVersionCopyButton, setVersionCopyButton } from '../../VersionCopyButton';
 import { showErrorToast } from '../../CopyToast';
+import { openExternalUrl } from '../../../utils/feedback';
 import licenseText from '../../../../../../../LICENSE?raw';
 
+const SOURCE_URL = 'https://github.com/MonkyOrg/Monky';
 const IDEAS_URL = 'https://github.com/MonkyOrg/Monky/discussions/categories/ideas';
 const NEW_IDEA_URL = 'https://github.com/MonkyOrg/Monky/discussions/new?category=ideas';
 const DONATE_URL = 'https://buymeacoffee.com/monkyorg';
@@ -53,10 +56,7 @@ export class AboutTab {
               ${t('settings.betaChannelDesc')}
             </div>
           </div>
-          <label class="toggle-switch" aria-label="${t('settings.betaChannel')}">
-            <input id="checkbox-update-beta" type="checkbox" ${settingsStore.updateBetaChannel ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'checkbox-update-beta', label: t('settings.betaChannel'), checked: settingsStore.updateBetaChannel })}
         </div>
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
           <div>
@@ -69,10 +69,7 @@ export class AboutTab {
             </div>
           </div>
           <span id="auto-start-loading" class="skeleton loading-skeleton-switch" role="status" aria-label="${escapeHtml(t('common.loading'))}"></span>
-          <label id="auto-start-control" class="toggle-switch" aria-label="${t('settings.autoStart')}" hidden>
-            <input id="checkbox-auto-start" type="checkbox" disabled>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'checkbox-auto-start', label: t('settings.autoStart'), checked: false, disabled: true, wrapperId: 'auto-start-control', hidden: true })}
         </div>
         <p id="auto-start-load-error" class="audio-device-status" role="status" hidden></p>
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
@@ -85,10 +82,7 @@ export class AboutTab {
               ${t('settings.minimizeToTrayDesc')}
             </div>
           </div>
-          <label class="toggle-switch" aria-label="${t('settings.minimizeToTray')}">
-            <input id="checkbox-minimize-to-tray" type="checkbox" ${settingsStore.minimizeToTrayOnClose ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'checkbox-minimize-to-tray', label: t('settings.minimizeToTray'), checked: settingsStore.minimizeToTrayOnClose })}
         </div>
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
           <div>
@@ -100,10 +94,7 @@ export class AboutTab {
               ${t('settings.askShutdownOnLastLeaveDesc')}
             </div>
           </div>
-          <label class="toggle-switch" aria-label="${t('settings.askShutdownOnLastLeave')}">
-            <input id="checkbox-ask-shutdown" type="checkbox" ${settingsStore.askShutdownOnLastLeave ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'checkbox-ask-shutdown', label: t('settings.askShutdownOnLastLeave'), checked: settingsStore.askShutdownOnLastLeave })}
         </div>
       </div>
 
@@ -116,7 +107,6 @@ export class AboutTab {
           <pre tabindex="0" aria-label="${escapeHtml(t('settings.licenseSection'))}" style="max-height: 220px; overflow: auto; white-space: pre-wrap; font-size: 11px;">${escapeHtml(licenseText)}</pre>
         </details>
         <button id="btn-source-code" class="btn btn-secondary" style="font-size: 12px; margin-top: 8px;">${t('settings.sourceCode')}</button>
-        <p id="license-link-error" class="audio-device-status" role="alert" hidden></p>
       </div>
 
       <!-- Community -->
@@ -187,27 +177,9 @@ export class AboutTab {
     const btnReport = container.querySelector<HTMLButtonElement>('#btn-report-bug');
     const sourceButton = container.querySelector<HTMLButtonElement>('#btn-source-code');
     if (sourceButton) {
-      let active = true;
-      const openSource = async () => {
-        const failure = container.querySelector<HTMLElement>('#license-link-error');
-        if (failure) failure.hidden = true;
-        try {
-          if (!window.api?.openExternal) throw new Error('External navigation bridge unavailable');
-          const result = await window.api.openExternal('https://github.com/MonkyOrg/Monky');
-          if (!result.success) throw new Error('Source code link was not opened');
-        } catch (error: unknown) {
-          console.warn('[AboutTab] Could not open source code', error);
-          if (active && failure && container.isConnected) {
-            failure.textContent = t('settings.sourceCodeOpenFailed');
-            failure.hidden = false;
-          }
-        }
-      };
+      const openSource = () => { void openExternalUrl(SOURCE_URL, t('settings.sourceCodeOpenFailed')); };
       sourceButton.addEventListener('click', openSource);
-      this.unbindSourceLink = () => {
-        active = false;
-        sourceButton.removeEventListener('click', openSource);
-      };
+      this.unbindSourceLink = () => sourceButton.removeEventListener('click', openSource);
     }
 
     let checking = false;
@@ -300,22 +272,7 @@ export class AboutTab {
       settingsStore.save();
     });
 
-    const openInBrowser = (url: string) => {
-      window.open(url, '_blank', 'noopener');
-    };
-
-    const openLink = (url: string) => {
-      if (!window.api?.openExternal) {
-        openInBrowser(url);
-        return;
-      }
-
-      window.api.openExternal(url)
-        .then((res) => {
-          if (!res?.success) openInBrowser(url);
-        })
-        .catch(() => openInBrowser(url));
-    };
+    const openLink = (url: string) => { void openExternalUrl(url, t('settings.linkOpenFailed', { url })); };
 
     btnSupport?.addEventListener('click', () => openLink(DONATE_URL));
     btnSuggest?.addEventListener('click', () => openLink(NEW_IDEA_URL));

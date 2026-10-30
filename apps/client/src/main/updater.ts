@@ -1,8 +1,10 @@
-import { app, BrowserWindow, ipcMain, net, shell } from 'electron';
+import { app, BrowserWindow, net, shell } from 'electron';
 import path from 'path';
 import type { CancellationToken } from 'electron-updater';
 import { UpdateOutcome, ReleaseNotesResult, ReleaseHistoryResult, UPDATER_IPC, fetchReleaseCompatibility, isReleaseVersion,
-  type HostedBotUpdateWarning, type HostedUpdateServer, type UpdatePreflightResult, type UpdateCheckResult } from '@monky/shared';
+  type HostedBotUpdateWarning, type HostedUpdateServer, type IpcEventChannel, type IpcEvents, type UpdatePreflightResult,
+  type UpdateCheckResult } from '@monky/shared';
+import type { IpcRegistry } from './ipc/registry';
 import { downloadToFile } from './updateDownload';
 import { requestUpdateMetadata } from './updateMetadataRequest';
 import { mt } from './i18n';
@@ -44,8 +46,27 @@ type AutoUpdater = {
 };
 
 let autoUpdater: AutoUpdater | null = null;
-/** Settings and listeners setupUpdater applies to electron-updater once it loads. */
+/** Settings and listeners registerUpdaterIpc applies to electron-updater once it loads. */
 let configureAutoUpdater: ((updater: AutoUpdater) => void) | null = null;
+
+/**
+ * The window updates are reported to. A download outlives the window that asked
+ * for it: after the crash recovery screen replaces it (#454) there is no window
+ * at all, and a recreated window registers itself here again.
+ */
+let reporting: { registry: IpcRegistry; window: BrowserWindow } | null = null;
+
+type UpdaterEvent = Extract<IpcEventChannel, `updater:${string}`>;
+
+function notify<E extends UpdaterEvent>(channel: E, ...args: IpcEvents[E]): void {
+  reporting?.registry.send('main', channel, ...args);
+}
+
+/** The window the install splash hides, while it exists. */
+function reportingWindow(): BrowserWindow | undefined {
+  const window = reporting?.window;
+  return window && !window.isDestroyed() ? window : undefined;
+}
 
 interface UpdateOperation {
   id: string;
@@ -245,20 +266,20 @@ async function checkViaGitHub(signal: AbortSignal): Promise<CheckResult> {
   }
 }
 
-async function downloadMacDmg(mainWindow: BrowserWindow, task: UpdateOperation): Promise<CheckResult> {
+async function downloadMacDmg(task: UpdateOperation): Promise<CheckResult> {
   if (!pendingMacAsset) {
     return { ok: false, error: mt('error.noPendingUpdate') };
   }
   try {
     const destPath = path.join(app.getPath('temp'), pendingMacAsset.name);
     await downloadToFile(pendingMacAsset.url, destPath, task.controller.signal, (pct) => {
-      mainWindow.webContents.send('updater:progress', pct);
+      notify('updater:progress', pct);
     });
     task.controller.signal.throwIfAborted();
     downloadedMacPath = destPath;
     task.phase = 'installing';
     installing = true;
-    mainWindow.webContents.send('updater:downloaded', { manual: true });
+    notify('updater:downloaded', { manual: true });
 
     // Open the .dmg so the user can drag the app into Applications. A failure
     // here means there is nothing on screen to install from, so the app must
@@ -266,7 +287,7 @@ async function downloadMacDmg(mainWindow: BrowserWindow, task: UpdateOperation):
     const openError = await shell.openPath(destPath);
     if (openError) {
       installing = false;
-      mainWindow.webContents.send('updater:error', openError);
+      notify('updater:error', openError);
       return { ok: false, error: openError };
     }
 
@@ -275,7 +296,7 @@ async function downloadMacDmg(mainWindow: BrowserWindow, task: UpdateOperation):
   } catch (e) {
     if (task.controller.signal.aborted) return { ok: false, cancelled: true };
     installing = false;
-    mainWindow.webContents.send('updater:error', msg(e));
+    notify('updater:error', msg(e));
     return { ok: false, error: msg(e) };
   }
 }
@@ -299,11 +320,17 @@ async function fetchReleaseNotes(tag?: string): Promise<ReleaseNotesResult> {
 
 // ── Wiring ───────────────────────────────────────────────────────────────
 
-export function setupUpdater(
-  mainWindow: BrowserWindow,
-  getInventory: (signal: AbortSignal) => Promise<HostedUpdateServer[]>,
-): void {
+export interface UpdaterIpcDeps {
+  window: BrowserWindow;
+  /** Hosted servers and their bots, to warn before an update leaves a bot incompatible. */
+  getInventory: (signal: AbortSignal) => Promise<HostedUpdateServer[]>;
+}
+
+export function registerUpdaterIpc(registry: IpcRegistry, { window, getInventory }: UpdaterIpcDeps): void {
   const isMac = process.platform === 'darwin';
+  const reporter = { registry, window };
+  reporting = reporter;
+  registry.onDispose(() => { if (reporting === reporter) reporting = null; });
 
   if (!isMac) {
     configureAutoUpdater = (updater) => {
@@ -341,7 +368,7 @@ export function setupUpdater(
             KBps: Math.round((info.bytesPerSecond ?? 0) / 1024),
           });
         }
-        mainWindow.webContents.send('updater:progress', Math.round(percent));
+        notify('updater:progress', Math.round(percent));
       });
       updater.on('update-downloaded', (info) => {
         if (!downloading || downloading.controller.signal.aborted || installing) return;
@@ -349,7 +376,7 @@ export function setupUpdater(
         installing = true;
         downloadedVersion = cleanVer((info as { version?: string })?.version ?? '');
         updateLog('update-downloaded', { version: downloadedVersion });
-        mainWindow.webContents.send('updater:downloaded', { manual: false });
+        notify('updater:downloaded', { manual: false });
         // Run the installer non-silently and relaunch automatically — still no
         // wizard (oneClick), but now the installer's own progress window covers
         // the screen during the file replacement instead of leaving it blank,
@@ -359,7 +386,7 @@ export function setupUpdater(
         // until that splash is actually on screen, since firing it in the same
         // tick killed the window before it ever painted.
         setTimeout(() => {
-          beginUpdateInstall(downloadedVersion, mainWindow)
+          beginUpdateInstall(downloadedVersion, reportingWindow())
             .then(() => delay(SPLASH_LINGER_MS))
             .then(() => {
               updateLog('calling quitAndInstall', {
@@ -372,7 +399,7 @@ export function setupUpdater(
             .catch((e) => {
               installing = false;
               updateLog('quitAndInstall chain FAILED', { error: msg(e) });
-              mainWindow.webContents.send('updater:error', msg(e));
+              notify('updater:error', msg(e));
             });
         }, 1500);
       });
@@ -380,12 +407,12 @@ export function setupUpdater(
         if ((!downloading && !installing) || downloading?.controller.signal.aborted) return;
         installing = false;
         updateLog('electron-updater error event', { error: msg(err) });
-        mainWindow.webContents.send('updater:error', msg(err));
+        notify('updater:error', msg(err));
       });
     };
   }
 
-  ipcMain.handle(UPDATER_IPC.setChannel, async (_e, allowBeta: unknown): Promise<CheckResult> => {
+  registry.handle(UPDATER_IPC.setChannel, 'main', async (_e, allowBeta): Promise<CheckResult> => {
     if (downloading || installing || checking?.phase === 'preflight') return { ok: false, error: mt('error.updateBusy') };
     checking?.controller.abort();
     betaChannel = !!allowBeta;
@@ -401,7 +428,7 @@ export function setupUpdater(
     return { ok: true };
   });
 
-  ipcMain.handle(UPDATER_IPC.cancel, async (_event, requestId: unknown): Promise<CheckResult> => {
+  registry.handle(UPDATER_IPC.cancel, 'main', async (_event, requestId): Promise<CheckResult> => {
     if (!validRequestId(requestId)) return { ok: false, error: mt('error.invalidUpdateRequest') };
     const task = [checking, downloading].find(item => item?.id === requestId);
     if (installing || task?.phase === 'installing') return { ok: true, cancelled: false };
@@ -413,7 +440,7 @@ export function setupUpdater(
     return { ok: true, cancelled: true };
   });
 
-  ipcMain.handle(UPDATER_IPC.check, async (_event, requestId: unknown): Promise<CheckResult> => {
+  registry.handle(UPDATER_IPC.check, 'main', async (_event, requestId): Promise<CheckResult> => {
     if (requestId !== undefined && !validRequestId(requestId)) return { ok: false, error: mt('error.invalidUpdateRequest') };
     if (typeof requestId === 'string' && cancelledRequests.has(requestId)) return { ok: false, cancelled: true };
     if (downloading || installing || checking?.phase === 'preflight') return { ok: false, error: mt('error.updateBusy') };
@@ -427,7 +454,7 @@ export function setupUpdater(
     }
   });
 
-  ipcMain.handle(UPDATER_IPC.preflight, async (_event, version: unknown, requestId: unknown): Promise<UpdatePreflightResult> => {
+  registry.handle(UPDATER_IPC.preflight, 'main', async (_event, version, requestId): Promise<UpdatePreflightResult> => {
     if (!isReleaseVersion(version) || cleanVer(pendingTag ?? '') !== version || !validRequestId(requestId)) {
       return { ok: false, error: mt('error.noPendingUpdate') };
     }
@@ -468,7 +495,7 @@ export function setupUpdater(
     }
   });
 
-  ipcMain.handle(UPDATER_IPC.download, async (_event, expectedVersion: unknown, requestId: unknown): Promise<CheckResult> => {
+  registry.handle(UPDATER_IPC.download, 'main', async (_event, expectedVersion, requestId): Promise<CheckResult> => {
     if (requestId !== undefined && !validRequestId(requestId)) return { ok: false, error: mt('error.invalidUpdateRequest') };
     if (typeof requestId === 'string' && cancelledRequests.has(requestId)) return { ok: false, cancelled: true };
     if (downloading || installing) return { ok: false, error: mt('error.updateBusy') };
@@ -487,7 +514,7 @@ export function setupUpdater(
     const task = operation(typeof requestId === 'string' ? requestId : 'download', 'downloading');
     downloading = task;
     try {
-      if (isMac) return await downloadMacDmg(mainWindow, task);
+      if (isMac) return await downloadMacDmg(task);
       if (!updater) return { ok: false, error: mt('error.updaterUnavailable') };
       // Point electron-updater straight at the release `checkViaGitHub` picked,
       // as a generic feed, instead of letting its GitHub provider search for one
@@ -540,7 +567,7 @@ export function setupUpdater(
     }
   });
 
-  ipcMain.handle(UPDATER_IPC.install, async (): Promise<CheckResult> => {
+  registry.handle(UPDATER_IPC.install, 'main', async (): Promise<CheckResult> => {
     if (downloading || installing) return { ok: false, error: mt('error.updateBusy') };
     if (isMac) {
       if (downloadedMacPath) {
@@ -564,7 +591,7 @@ export function setupUpdater(
     installing = true;
     // Defer so the IPC reply is delivered before the app quits to install.
     setImmediate(() => {
-      beginUpdateInstall(downloadedVersion || cleanVer(pendingTag ?? ''), mainWindow)
+      beginUpdateInstall(downloadedVersion || cleanVer(pendingTag ?? ''), reportingWindow())
         .then(() => delay(SPLASH_LINGER_MS))
         .then(() => {
           updateLog('updater:install calling quitAndInstall', {
@@ -575,7 +602,7 @@ export function setupUpdater(
         .catch((e) => {
           installing = false;
           updateLog('updater:install chain FAILED', { error: msg(e) });
-          mainWindow.webContents.send('updater:error', msg(e));
+          notify('updater:error', msg(e));
         });
     });
     return { ok: true };
@@ -583,18 +610,18 @@ export function setupUpdater(
 
   // Reported once per launch, right after an install: the renderer turns it
   // into the "updated to X" (or "update did not finish") banner (#498).
-  ipcMain.handle(UPDATER_IPC.outcome, async (): Promise<UpdateOutcome | null> => {
+  registry.handle(UPDATER_IPC.outcome, 'main', async (): Promise<UpdateOutcome | null> => {
     return consumeUpdateOutcome();
   });
 
   // Release notes for the in-app changelog: shown once after an update and on
   // demand from Settings (#547). Defaults to the running version's release.
-  ipcMain.handle(UPDATER_IPC.releaseNotes, async (_e, tag?: unknown): Promise<ReleaseNotesResult> => {
+  registry.handle(UPDATER_IPC.releaseNotes, 'main', async (_e, tag): Promise<ReleaseNotesResult> => {
     return fetchReleaseNotes(typeof tag === 'string' ? tag : undefined);
   });
 
   // Older releases, loaded page by page as the changelog is scrolled.
-  ipcMain.handle(UPDATER_IPC.releaseHistory, async (_e, page: unknown, before?: unknown): Promise<ReleaseHistoryResult> => {
+  registry.handle(UPDATER_IPC.releaseHistory, 'main', async (_e, page, before): Promise<ReleaseHistoryResult> => {
     if (typeof page !== 'number' || (before !== undefined && typeof before !== 'string')) {
       return { ok: false, error: 'Invalid release history request' };
     }

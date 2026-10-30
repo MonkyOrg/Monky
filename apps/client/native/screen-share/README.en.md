@@ -231,10 +231,8 @@ before another MFT processing/shutdown call. Pending reads yield to the existing
 including abort/shutdown: the private presentation budget does not guarantee
 decoder-internal pool capacity. `sampleRetirementDeferrals` counts these waits
 without imposing FPS, sleeps, or an arbitrary new surface budget.
-Screen publication uses compressed AUs, not texture loans. For legacy NV12
-`submitFrame`, child death without the input reader/fence receipt does **not**
-authorize producer texture reuse: that guard is retained and full-close proof
-is rejected rather than inventing GPU retirement.
+Screen publication uses compressed AUs only: no input texture enters the RTC
+process, and Media Foundation is limited to H.264 decoding.
 
 IPC has count/byte budgets and correlated acknowledgements. Video awaits the
 real native-copy ACK with one AU retained by the bounded capture pipe, never a
@@ -333,11 +331,20 @@ start and when Windows reports a display change (`WM_DISPLAYCHANGE`,
 `WM_DEVICECHANGE` or a changed monitor list), never per frame: that read queries
 the registry while holding the system display lock, and repeating it while
 another program writes to the registry froze every screen. Each capture tick
-checks only the GDI name and bounds, which come from cached metadata. The main
+checks only the GDI name and bounds, which come from cached metadata. Thumbnails
+follow the same rule with the same code (`src/win/monitorIdentity.h`): they read
+the interface once, when they start. The main
 process follows Electron's screen events for the same read. Minimizing or hiding a window/game is treated as a pause,
-not an identity loss. Restoring it allows frames to resume. The title is not
+not an identity loss: a minimized window can also be selected, and its preview
+stays paused until it is restored. The title is not
 part of the identity either: browsers, editors and players rename their window
-for every page or file, and sharing continues. A changed window class or
+for every page or file, and sharing continues. Another open window's title never prevents sharing. The
+selected window's title does not either, as long as it fits the stock OBS window list: title, class and
+executable form one entry of at most 4096 UTF-8 bytes, where `:` and `#` take 3 bytes each. In practice,
+that is about 4,000 ASCII characters or 1,300 Chinese characters. A longer title fails sharing with
+`ERR_SCREEN_CAPTURE_SOURCE_IDENTITY`, because the window is not found in the list. Half an emoji in the
+title (an unpaired UTF-16 surrogate, which a page can leave when it cuts its own title) becomes `�`, as in
+the OBS list, and does not prevent sharing either. A changed window class or
 executable ends the source. Closing or
 replacing the window/process withdraws its announcement even without viewers.
 
@@ -400,6 +407,11 @@ preserves its owners for retry.
 
 A QPC/RTC observation exceeding 2 ms drops its frame and fences dependent
 pictures, requesting a real IDR through the existing bounded recovery (1.5 s).
+The same applies to every result the capture clock classifies as a frame drop
+(a stale, early or out-of-order frame, or one an offset correction would move
+back in RTC time): the recovery reports reason `clock-frame-dropped` with the
+code in `clockStatus`, and sharing continues. Only an invalid timestamp, a
+discontinuity or a closed clock ends the source.
 It neither widens clock tolerance nor invents timestamps or treats clock
 discontinuities as success. Connection notices use an 8-second toast instead
 of leaving a modal over the game after recovery.
@@ -603,11 +615,13 @@ remain explicit and terminal. The RTC diagnostic timer stops before native
 close begins, so it cannot inspect dismantled state while resources still drain.
 
 A paired QPC/RTC sample that takes longer than 2 ms does not, by itself,
-invalidate continuous PCM. Only in this case, the block continues without an
+invalidate continuous PCM. In that case, and for every result the capture clock
+classifies as a frame drop (including two blocks in the same RTC millisecond
+after an offset correction), the block continues without an
 absolute timestamp and increments the source's `clockObservationsUnavailable`
 diagnostic. The next valid observation resumes timestamps without restarting
 the epoch. Clock limits are not widened, timestamps are not invented and PCM
-is not discarded; discontinuities, regressions and other errors remain explicit.
+is not discarded; invalid timestamps, discontinuities and other errors remain explicit.
 
 For playout, `currentFrame` observes the graph clock, not the speaker clock.
 Chromium 152.0.7977.130 [advances the graph before updating the
@@ -1045,7 +1059,10 @@ WinUI/ApplicationFrameWindow windows. It verifies real WGC capture with
 same-process children and distinguishes both windows with duplicate titles,
 while rejecting remapping to another process's child and changed process
 identity. It also renames the window while it is captured (a new title, one
-over 512 characters and an empty one) and requires frames to keep flowing. It does not capture personal
+over 512 characters and an empty one) and requires frames to keep flowing. Before that, it admits a
+minimized window, one with a long title, one with half an emoji in its title, and one while another
+restored window has a long title; each probe isolates one of those reasons. These windows never appear
+on screen (the restored ones sit past every monitor), and `--offscreen-only` runs only those probes. It does not capture personal
 windows or record video; `--contracts=<absolute_executable>` allows a different
 build directory.
 

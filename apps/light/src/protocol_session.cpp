@@ -7,6 +7,8 @@
 #include <utility>
 
 namespace monky::light {
+using namespace reader;
+
 namespace {
 namespace msg = monky::protocol::message;
 using namespace std::chrono_literals;
@@ -18,152 +20,13 @@ constexpr auto pongTimeout = 12s;
 constexpr auto transitionTimeout = 30s;
 constexpr auto earlySignalTimeout = 5s;
 constexpr std::size_t maxEarlySignals = 32;
-constexpr std::size_t maxSignalBytes = 128 * 1024;
+// Requests this session gave up on, remembered so their late errors stay quiet.
+constexpr std::size_t maxRetiredRequests = 64;
 
-struct Invalid : std::runtime_error {
-  explicit Invalid(const char* detail) : std::runtime_error(detail) {}
-};
-void require(bool condition, const char* detail) {
-  if (!condition) throw Invalid(detail);
-}
-const Json& field(const Json& object, const char* key) {
-  require(object.is_object() && object.contains(key), "Missing required field");
-  return object.at(key);
-}
-std::string text(const Json& object, const char* key) {
-  const auto& value = field(object, key);
-  require(value.is_string() && !value.get_ref<const std::string&>().empty(), "Expected nonempty string");
-  return value.get<std::string>();
-}
-bool boolean(const Json& object, const char* key) {
-  const auto& value = field(object, key);
-  require(value.is_boolean(), "Expected boolean");
-  return value.get<bool>();
-}
-void number(const Json& object, const char* key) {
-  require(field(object, key).is_number(), "Expected number");
-}
-void objectField(const Json& object, const char* key) {
-  require(field(object, key).is_object(), "Expected object");
-}
-void arrayField(const Json& object, const char* key) {
-  require(field(object, key).is_array(), "Expected array");
-}
-void strings(const Json& array) {
-  require(array.is_array(), "Expected string array");
-  for (const auto& value : array)
-    require(value.is_string(), "Expected string array entry");
-}
-bool hex(const std::string& value, std::size_t size) {
-  return value.size() == size && std::all_of(value.begin(), value.end(), [](unsigned char c) {
-    return std::isxdigit(c) != 0;
-  });
-}
 VoiceMode voiceMode(const Json& object) {
   const auto mode = text(object, "voiceMode");
   require(mode == "p2p" || mode == "sfu", "Unsupported voice mode");
   return mode == "p2p" ? VoiceMode::p2p : VoiceMode::sfu;
-}
-void user(const Json& value) {
-  text(value, "id");
-  text(value, "clientId");
-  text(value, "nickname");
-  const auto status = text(value, "status");
-  require(status == "ONLINE" || status == "IDLE" || status == "VOICE" || status == "DISCONNECTED",
-          "Invalid user status");
-  number(value, "joinedAt");
-  if (value.contains("sessionId")) text(value, "sessionId");
-  if (value.contains("connectedAt")) number(value, "connectedAt");
-  if (value.contains("isBot")) boolean(value, "isBot");
-}
-void channel(const Json& value) {
-  text(value, "id");
-  text(value, "serverId");
-  text(value, "name");
-  const auto type = text(value, "type");
-  require(type == "VOICE" || type == "TEXT", "Invalid channel type");
-  number(value, "position");
-  number(value, "createdAt");
-  boolean(value, "isPrivate");
-  boolean(value, "botCommandsEnabled");
-  strings(field(value, "allowedRoleIds"));
-  if (value.contains("maxParticipants")) number(value, "maxParticipants");
-}
-void state(const Json& value) {
-  text(value, "sessionId");
-  text(value, "userId");
-  text(value, "channelId");
-  for (const auto* key : {"isMuted", "isDeafened", "serverMuted", "serverDeafened",
-                          "isSpeaking", "isCameraOn", "isScreenSharing", "isSharingScreenAudio"})
-    boolean(value, key);
-  if (value.contains("screenShareIds")) strings(value.at("screenShareIds"));
-  if (value.contains("connectionHealth")) {
-    const auto health = text(value, "connectionHealth");
-    require(health == "connecting" || health == "connected" || health == "reconnecting" ||
-            health == "failed", "Invalid voice health");
-  }
-}
-Participant participant(const Json& voiceState, const Json* member, const std::string& room) {
-  state(voiceState);
-  require(text(voiceState, "channelId") == room, "Foreign channel in roster");
-  Participant result{text(voiceState, "userId"), text(voiceState, "sessionId"), voiceState, std::nullopt};
-  if (member) {
-    user(*member);
-    require(text(*member, "id") == result.userId, "Mismatched roster user");
-    // UserSummary.sessionId is optional. VoiceParticipantState.sessionId is not.
-    if (member->contains("sessionId"))
-      require(text(*member, "sessionId") == result.sessionId, "Mismatched roster session");
-    result.user = *member;
-  }
-  return result;
-}
-std::map<std::string, Participant> roster(const Json& values, const std::string& room) {
-  require(values.is_array(), "Missing authoritative participants");
-  std::map<std::string, Participant> result;
-  for (const auto& value : values) {
-    const auto& member = field(value, "user");
-    auto parsed = participant(field(value, "voiceState"), &member, room);
-    const auto key = parsed.sessionId;
-    require(result.emplace(key, std::move(parsed)).second, "Duplicate roster session");
-  }
-  return result;
-}
-Participant joined(const Json& payload) {
-  const auto room = text(payload, "channelId");
-  const auto* member = payload.contains("user") ? &payload.at("user") : nullptr;
-  auto result = participant(field(payload, "voiceState"), member, room);
-  require(text(payload, "userId") == result.userId &&
-          text(payload, "sessionId") == result.sessionId, "Mismatched join identity");
-  return result;
-}
-std::string transitionId(const Json& value) {
-  require(text(value, "from") == "sfu" && text(value, "to") == "p2p", "Invalid voice transition");
-  return text(value, "id");
-}
-void signal(const Json& payload) {
-  text(payload, "targetSessionId");
-  text(payload, "fromSessionId");
-  const auto type = text(payload, "signalType");
-  if (type == "offer" || type == "answer") {
-    const auto& sdp = field(payload, "sdp");
-    require(text(sdp, "type") == type, "Mismatched SDP type");
-    text(sdp, "sdp");
-  } else if (type == "candidate") {
-    const auto& candidate = field(payload, "candidate");
-    text(candidate, "candidate");
-    for (const auto* key : {"sdpMid", "usernameFragment"})
-      if (candidate.contains(key))
-        require(candidate.at(key).is_null() || candidate.at(key).is_string(), "Invalid ICE field");
-    if (candidate.contains("sdpMLineIndex"))
-      require(candidate.at("sdpMLineIndex").is_null() ||
-              (candidate.at("sdpMLineIndex").is_number_integer() &&
-               candidate.at("sdpMLineIndex") >= 0), "Invalid ICE m-line");
-  } else if (type == "screen-audio-meta" || type == "screen-video-meta") {
-    text(payload, "streamId");
-  } else {
-    require(type == "user-left", "Invalid signal type");
-  }
-  require(payload.dump().size() <= maxSignalBytes, "Signal exceeds native queue limit");
 }
 std::vector<std::string> replies(std::string_view type) {
   if (type == msg::SFU_GET_ROUTER_RTP_CAPABILITIES) return {std::string(msg::SFU_ROUTER_RTP_CAPABILITIES)};
@@ -174,19 +37,6 @@ std::vector<std::string> replies(std::string_view type) {
   if (type == msg::SFU_CONSUME)
     return {std::string(msg::SFU_CONSUMED), std::string(msg::SFU_PRODUCER_CLOSED)};
   return {};
-}
-bool relevant(std::string_view type) {
-  for (auto value : {
-         msg::AUTH_CHALLENGE, msg::AUTH_SUCCESS, msg::AUTH_FAILED, msg::SERVER_ERROR, msg::PONG,
-         msg::SERVER_SHUTDOWN, msg::VOICE_USER_JOINED, msg::VOICE_USER_LEFT, msg::VOICE_RECONNECTED,
-         msg::VOICE_STATE_CHANGED, msg::VOICE_RESTRICTIONS_UPDATED, msg::RTC_SIGNAL,
-         msg::ADMIN_KICK_VOICE, msg::MEMBER_KICKED, msg::ADMIN_MOVE_USER, msg::SERVER_SETTINGS_UPDATED,
-         msg::CHANNEL_CREATED, msg::CHANNEL_UPDATED, msg::CHANNEL_DELETED,
-         msg::SFU_ROUTER_RTP_CAPABILITIES, msg::SFU_WEBRTC_TRANSPORT_CREATED,
-         msg::SFU_WEBRTC_TRANSPORT_CONNECTED, msg::SFU_PRODUCED, msg::SFU_PRODUCERS_LIST,
-         msg::SFU_CONSUMED, msg::SFU_NEW_PRODUCER, msg::SFU_PRODUCER_CLOSED, msg::SFU_CONSUMER_CLOSED})
-    if (type == value) return true;
-  return false;
 }
 Failure cancelled() { return {FailureKind::cancelled, {}, "Voice generation retired"}; }
 } // namespace
@@ -277,6 +127,7 @@ std::uint64_t ProtocolSession::opened(Time now, std::int64_t unixMilliseconds) {
   authId_ = freshId();
   challengeAnswered_ = false;
   signatureSent_ = false;
+  retired_.clear();
   authDeadline_ = now + authTimeout;
   pingDeadline_ = now + std::chrono::milliseconds(monky::protocol::limits::HEARTBEAT_INTERVAL_MS);
   pongDeadline_ = now + pongTimeout;
@@ -310,6 +161,7 @@ void ProtocolSession::receive(std::uint64_t connection, std::string_view frame, 
     if (pending != pending_.end() && now >= pending->second.deadline) {
       auto callback = std::move(pending->second.callback);
       pending_.erase(pending);
+      retire(id);
       effects_.push_back([callback = std::move(callback)] {
         callback(RpcResult{{}, Json::object(), Failure{FailureKind::timeout, {}, "RPC deadline exceeded"}});
       });
@@ -327,24 +179,15 @@ void ProtocolSession::receive(std::uint64_t connection, std::string_view frame, 
 void ProtocolSession::authenticate(const Json& payload) {
   const auto& server = field(payload, "server");
   const auto& self = field(payload, "currentUser");
-  user(self);
+  const auto userId = text(self, "id");
   const auto session = text(self, "sessionId");
-  require(!self.contains("isBot") || !boolean(self, "isBot"), "Human session authenticated as bot");
-  text(server, "id");
+  require(!optionalBoolean(self, "isBot").value_or(false), "Human session authenticated as bot");
+  const auto serverId = text(server, "id");
   text(server, "name");
-  number(server, "createdAt");
-  number(server, "maxUsers");
   arrayField(server, "channels");
   for (const auto& value : server.at("channels")) {
     channel(value);
-    require(text(value, "serverId") == text(server, "id"), "Foreign server channel");
-  }
-  arrayField(server, "members");
-  for (const auto& value : server.at("members")) user(value);
-  objectField(server, "voiceStates");
-  for (auto it = server.at("voiceStates").begin(); it != server.at("voiceStates").end(); ++it) {
-    state(it.value());
-    require(text(it.value(), "sessionId") == it.key(), "Mismatched server voice session");
+    require(text(value, "serverId") == serverId, "Foreign server channel");
   }
   const auto& restrictions = field(payload, "voiceRestrictions");
   const auto serverMuted = boolean(restrictions, "serverMuted");
@@ -361,10 +204,12 @@ void ProtocolSession::authenticate(const Json& payload) {
     }
     ice = payload.at("iceServers");
   }
-  auth_ = Authenticated{text(self, "id"), session, server, std::move(ice)};
+  auth_ = Authenticated{userId, session, server, std::move(ice)};
   mode_ = mode;
   policy_.serverMuted = serverMuted;
   policy_.serverDeafened = serverDeafened;
+  // A new connection is in no room yet, so no room's Speak permission applies.
+  policy_.permissionMuted = false;
   phase_ = SessionPhase::ready;
   authDeadline_.reset();
   authId_.clear();
@@ -398,6 +243,12 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
       effects_.push_back([callback = std::move(callback), error] {
         callback(RpcResult{{}, Json::object(), error});
       });
+    } else if (const auto retired = std::find(retired_.begin(), retired_.end(), id);
+               !id.empty() && retired != retired_.end()) {
+      // The answer to a request already given up on, such as the join that a
+      // second move replaced, concerns nothing this client still does.
+      retired_.erase(retired);
+      return;
     }
     failure(error);
     return;
@@ -451,6 +302,17 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
       joinId_.clear();
       return;
     }
+    if (const auto retired = std::find(retired_.begin(), retired_.end(), id);
+        !id.empty() && retired != retired_.end()) {
+      // A join given up on can be admitted all the same, as when a kick crosses
+      // the join behind a move: admission does not look for kicks. A leave ends
+      // the membership in whatever room it is, so it goes out only when no
+      // newer join or call is left to own that membership.
+      retired_.erase(retired);
+      if (!desired_ && phase_ != SessionPhase::stopped && text(payload, "sessionId") == auth_->sessionId)
+        send(msg::VOICE_LEAVE, Json{{"channelId", text(payload, "channelId")}});
+      return;
+    }
     if (type == msg::VOICE_RECONNECTED || !admission_) return;
     auto peer = joined(payload);
     if (text(payload, "channelId") != admission_->channelId || peer.sessionId == auth_->sessionId) return;
@@ -471,6 +333,13 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
       if (grant && consumedTransition_ == grant) return;
       if ((!admission_ || admission_->channelId != room) &&
           !(phase_ == SessionPhase::joining && desired_ == room)) return;
+      // While a join awaits its answer, a departure from the room it names can
+      // only end a stay from before that join: a leave the server processed
+      // first, or the room the join of a crossed move took the membership out
+      // of. The server takes a connection's messages in order and answers every
+      // join, so that answer decides; a refusal leaves, keeping both in step.
+      // A kick, a move and a withdrawn room arrive with notices of their own.
+      if (!grant && phase_ == SessionPhase::joining) return;
       if (grant && mode_ == VoiceMode::sfu && desired_ == room) {
         const bool settingsMatched = settingsTransition_ == grant;
         clearCall(cancelled());
@@ -500,7 +369,7 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
   }
   if (type == msg::VOICE_STATE_CHANGED) {
     const auto& value = field(payload, "voiceState");
-    state(value);
+    voiceState(value);
     if (!admission_ || text(value, "channelId") != admission_->channelId) return;
     auto peer = admission_->participants.find(text(value, "sessionId"));
     if (peer == admission_->participants.end()) return;
@@ -538,7 +407,7 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
     const auto room = text(payload, "channelId");
     // A move takes along a call, or the admission on its way to one. One that
     // crossed a leave reaches a client that hung up, and must start no call.
-    if (target == auth_->sessionId && desired_) join(room, now);
+    if (target == auth_->sessionId && desired_) followMove(room, now);
     return;
   }
   if (type == msg::SERVER_SETTINGS_UPDATED) {
@@ -567,8 +436,13 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
     }), channels.end());
     event(SessionEventKind::channelsChanged, type, Json{{"channels", channels}});
     if (desired_ == room) {
+      // A join on its way there may already hold a membership elsewhere: the
+      // one a later move replaced is admitted to the room it named. Only a
+      // leave ends that membership on the server too.
+      const bool joining = phase_ == SessionPhase::joining;
       desired_.reset();
       clearCall({FailureKind::cancelled, {}, "Channel no longer accessible"});
+      if (joining && online_) send(msg::VOICE_LEAVE, Json{{"channelId", room}});
     }
     return;
   }
@@ -580,7 +454,7 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
   if (found != pending_.end() &&
       std::find(found->second.accepted.begin(), found->second.accepted.end(), type) != found->second.accepted.end()) {
     if (!admission_ || mode_ != VoiceMode::sfu || found->second.generation != generation_) return;
-    validateSfu(type, payload, &found->second);
+    sfu(type, payload, admission_->channelId, admission_->participants, &found->second.requestPayload);
     if (type == msg::SFU_PRODUCERS_LIST) {
       auto participants = roster(field(payload, "participants"), admission_->channelId);
       require(participants.count(auth_->sessionId) != 0 &&
@@ -605,7 +479,7 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
   }
   if (admission_ && mode_ == VoiceMode::sfu &&
       (type == msg::SFU_NEW_PRODUCER || type == msg::SFU_PRODUCER_CLOSED || type == msg::SFU_CONSUMER_CLOSED)) {
-    validateSfu(type, payload, nullptr);
+    sfu(type, payload, admission_->channelId, admission_->participants, nullptr);
     if (type == msg::SFU_NEW_PRODUCER &&
         admission_->participants.count(text(payload, "producerSessionId")) == 0) return;
     event(SessionEventKind::sfuEvent, type, payload);
@@ -624,6 +498,16 @@ void ProtocolSession::join(std::string channelId, Time now) {
   if (desired_ || admission_ || transition_) leave();
   desired_ = std::move(channelId);
   if (auth_ && online_) beginJoin(now, false);
+}
+
+void ProtocolSession::followMove(std::string room, Time now) {
+  if (desired_ == room && (phase_ == SessionPhase::joining || phase_ == SessionPhase::admitted)) return;
+  // The server has already moved the membership, so the call follows it with
+  // a join alone, as the desktop client does. A leave would name the old room,
+  // and one crossing a second move would end the very call the server moved.
+  clearCall(cancelled());
+  desired_ = std::move(room);
+  beginJoin(now, false);
 }
 
 void ProtocolSession::beginJoin(Time now, bool reconnect) {
@@ -682,6 +566,7 @@ void ProtocolSession::acceptAdmission(const Json& payload) {
   phase_ = SessionPhase::admitted;
   policy_.serverMuted = boolean(ownState, "serverMuted");
   policy_.serverDeafened = boolean(ownState, "serverDeafened");
+  policy_.permissionMuted = optionalBoolean(ownState, "permissionMuted").value_or(false);
   if (policyRevision_ == joinPolicyRevision_) {
     policy_.muted = boolean(ownState, "isMuted");
     policy_.deafened = boolean(ownState, "isDeafened");
@@ -701,6 +586,7 @@ void ProtocolSession::updatePolicy(const Json& value, bool acceptManual) {
   }
   policy_.serverMuted = boolean(value, "serverMuted");
   policy_.serverDeafened = boolean(value, "serverDeafened");
+  policy_.permissionMuted = optionalBoolean(value, "permissionMuted").value_or(false);
   publishPolicy();
 }
 
@@ -711,11 +597,14 @@ void ProtocolSession::sendVoiceState() {
        Json{{"isMuted", policy_.muted}, {"isDeafened", policy_.deafened}, {"isSpeaking", false}}, controlId_, true);
 }
 
+Json VoicePolicy::describe() const {
+  return {{"muted", muted}, {"deafened", deafened}, {"serverMuted", serverMuted},
+          {"serverDeafened", serverDeafened}, {"permissionMuted", permissionMuted},
+          {"suppressMicrophone", suppressMicrophone()}, {"suppressPlayback", suppressPlayback()}};
+}
+
 void ProtocolSession::publishPolicy() {
-  event(SessionEventKind::policyChanged, {}, Json{
-    {"isMuted", policy_.muted}, {"isDeafened", policy_.deafened},
-    {"serverMuted", policy_.serverMuted}, {"serverDeafened", policy_.serverDeafened},
-    {"suppressMicrophone", policy_.suppressMicrophone()}, {"suppressPlayback", policy_.suppressPlayback()}});
+  event(SessionEventKind::policyChanged, {}, policy_.describe());
 }
 
 void ProtocolSession::setMuted(bool muted) {
@@ -742,10 +631,16 @@ void ProtocolSession::setDeafened(bool deafened) {
   sendVoiceState();
 }
 
+void ProtocolSession::retire(std::string id) {
+  retired_.push_back(std::move(id));
+  if (retired_.size() > maxRetiredRequests) retired_.pop_front();
+}
+
 void ProtocolSession::failPending(Failure reason) {
   auto pending = std::move(pending_);
   pending_.clear();
   for (auto& entry : pending) {
+    retire(entry.first);
     auto callback = std::move(entry.second.callback);
     effects_.push_back([callback = std::move(callback), reason] {
       callback(RpcResult{{}, Json::object(), reason});
@@ -755,6 +650,8 @@ void ProtocolSession::failPending(Failure reason) {
 
 void ProtocolSession::clearCall(Failure reason) {
   const bool hadCall = admission_ || phase_ == SessionPhase::joining || transition_;
+  // Speak is granted or denied per room, so the denial leaves with the call.
+  const bool hadPermissionMute = std::exchange(policy_.permissionMuted, false);
   ++generation_;
   admission_.reset();
   transition_.reset();
@@ -766,6 +663,8 @@ void ProtocolSession::clearCall(Failure reason) {
   if (online_ && auth_) phase_ = SessionPhase::ready;
   failPending(std::move(reason));
   if (hadCall) event(SessionEventKind::teardown);
+  // After the teardown, so the retired call's media never sees this policy.
+  if (hadPermissionMute) publishPolicy();
 }
 
 void ProtocolSession::leave() {
@@ -859,6 +758,7 @@ void ProtocolSession::tick(Time now, std::int64_t unixMilliseconds) {
   for (auto it = pending_.begin(); it != pending_.end();) {
     if (now >= it->second.deadline) {
       expired.push_back(std::move(it->second.callback));
+      retire(it->first);
       it = pending_.erase(it);
     } else ++it;
   }
@@ -940,7 +840,7 @@ void ProtocolSession::handleSettings(const Json& payload, Time now) {
 
 void ProtocolSession::handleSignal(const Json& payload) {
   if (mode_ != VoiceMode::p2p || (!admission_ && phase_ != SessionPhase::joining)) return;
-  signal(payload);
+  if (!signal(payload)) return;
   if (text(payload, "targetSessionId") != auth_->sessionId ||
       text(payload, "fromSessionId") == auth_->sessionId) return;
   if (admission_ && admission_->participants.count(text(payload, "fromSessionId"))) {
@@ -1017,6 +917,7 @@ void ProtocolSession::cancel(const std::string& requestId) {
   if (found == pending_.end()) return;
   auto callback = std::move(found->second.callback);
   pending_.erase(found);
+  retire(requestId);
   effects_.push_back([callback = std::move(callback)] {
     callback(RpcResult{{}, Json::object(), cancelled()});
   });
@@ -1027,7 +928,7 @@ bool ProtocolSession::sendSignal(Json payload, std::uint64_t generation) {
   if (!admission_ || mode_ != VoiceMode::p2p || generation != generation_) return false;
   try {
     payload["fromSessionId"] = auth_->sessionId;
-    signal(payload);
+    require(signal(payload), "Unsupported outgoing signal");
     const auto target = text(payload, "targetSessionId");
     require(target != auth_->sessionId && admission_->participants.count(target), "Unknown signaling peer");
     send(msg::RTC_SIGNAL, std::move(payload), {}, true);
@@ -1046,6 +947,7 @@ bool ProtocolSession::sendSfuNotification(std::string type, Json payload, std::u
   try {
     require(text(payload, "channelId") == admission_->channelId, "Foreign SFU channel");
     if (type == msg::SFU_PRODUCER_CLOSED) text(payload, "producerId");
+    else if (type == msg::SFU_CONSUMER_CLOSED) text(payload, "consumerId");
     else {
       require(type == msg::SFU_CONSUMER_SET_PAUSED, "Unsupported SFU notification");
       text(payload, "consumerId");
@@ -1056,53 +958,6 @@ bool ProtocolSession::sendSfuNotification(std::string type, Json payload, std::u
   } catch (const Invalid& error) {
     failure({FailureKind::invalidState, {}, error.what()});
     return false;
-  }
-}
-
-void ProtocolSession::validateSfu(const std::string& type, const Json& payload, const Pending* pending) const {
-  require(admission_ && text(payload, "channelId") == admission_->channelId, "Foreign SFU reply channel");
-  if (type == msg::SFU_ROUTER_RTP_CAPABILITIES) {
-    objectField(payload, "rtpCapabilities");
-    arrayField(payload.at("rtpCapabilities"), "codecs");
-  } else if (type == msg::SFU_WEBRTC_TRANSPORT_CREATED) {
-    const auto direction = text(payload, "direction");
-    require(direction == "send" || direction == "recv", "Invalid SFU transport direction");
-    if (pending) require(direction == text(pending->requestPayload, "direction"), "Foreign transport direction");
-    const auto& options = field(payload, "transportOptions");
-    text(options, "id");
-    objectField(options, "iceParameters");
-    arrayField(options, "iceCandidates");
-    objectField(options, "dtlsParameters");
-    if (options.contains("sctpParameters")) objectField(options, "sctpParameters");
-  } else if (type == msg::SFU_WEBRTC_TRANSPORT_CONNECTED) {
-    const auto transport = text(payload, "transportId");
-    if (pending) require(transport == text(pending->requestPayload, "transportId"), "Foreign transport reply");
-  } else if (type == msg::SFU_PRODUCED) {
-    text(payload, "id");
-  } else if (type == msg::SFU_PRODUCERS_LIST) {
-    arrayField(payload, "producers");
-    const auto participants = roster(field(payload, "participants"), admission_->channelId);
-    for (const auto& producer : payload.at("producers")) {
-      validateSfu(std::string(msg::SFU_NEW_PRODUCER), producer, nullptr);
-      require(participants.count(text(producer, "producerSessionId")) != 0, "Unknown producer session");
-    }
-  } else if (type == msg::SFU_CONSUMED || type == msg::SFU_NEW_PRODUCER) {
-    const auto producer = text(payload, "producerId");
-    const auto session = text(payload, "producerSessionId");
-    const auto kind = text(payload, "kind");
-    require(kind == "audio" || kind == "video", "Invalid producer kind");
-    objectField(payload, "appData");
-    if (type == msg::SFU_CONSUMED) {
-      text(payload, "id");
-      objectField(payload, "rtpParameters");
-      require(admission_->participants.count(session) != 0, "Unknown consumed peer");
-    }
-    if (pending) require(producer == text(pending->requestPayload, "producerId"), "Foreign producer reply");
-  } else if (type == msg::SFU_PRODUCER_CLOSED) {
-    const auto producer = text(payload, "producerId");
-    if (pending) require(producer == text(pending->requestPayload, "producerId"), "Foreign closed producer");
-  } else if (type == msg::SFU_CONSUMER_CLOSED) {
-    text(payload, "consumerId");
   }
 }
 

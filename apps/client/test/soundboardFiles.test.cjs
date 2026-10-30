@@ -1,7 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const vm = require('node:vm');
 const { randomUUID, createHash } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
@@ -327,20 +326,16 @@ for (const extension of ['.mp3', '.ogg', '.aac', '.m4a', '.webm']) {
 
 test('production IPC handlers reject foreign frames and cleanly unregister; preload routes exact typed channels', async t => {
   const handlers = new Map();
-  const source = await fs.readFile(path.resolve(__dirname, '..', 'dist-electron', 'main', 'soundboardFilesIpc.js'), 'utf8');
-  const module = { exports: {} };
-  vm.runInNewContext(source, { module, exports: module.exports, require(name) {
-    if (name === 'electron') return { ipcMain: {
-      handle: (channel, callback) => { assert.equal(handlers.has(channel), false); handlers.set(channel, callback); },
-      removeHandler: channel => handlers.delete(channel),
-    } };
-    if (name === '@monky/shared') return shared;
-    throw new Error(name);
-  } });
+  const { IpcRegistry } = require('../dist-electron/main/ipc/registry.js');
+  const { registerSoundboardFilesIpc } = require('../dist-electron/main/soundboardFilesIpc.js');
   const { files, input } = await fixture(t);
   let destroyed = false;
   const contents = { mainFrame: {}, isDestroyed: () => destroyed };
-  const dispose = module.exports.setupSoundboardFilesIpc({ webContents: contents }, files);
+  const registry = new IpcRegistry({
+    handle: (channel, callback) => { assert.equal(handlers.has(channel), false); handlers.set(channel, callback); },
+    removeHandler: channel => handlers.delete(channel),
+  }, { main: () => contents, overlay: () => null });
+  registerSoundboardFilesIpc(registry, files);
   const owner = { sender: contents, senderFrame: contents.mainFrame };
   for (const callback of handlers.values()) {
     assert.equal((await callback({ ...owner, senderFrame: {} }, input)).reason, 'invalid_request');
@@ -349,7 +344,7 @@ test('production IPC handlers reject foreign frames and cleanly unregister; prel
   assert.equal((await handlers.get(shared.SOUNDBOARD_FILES_IPC.read)(owner, input)).status, 'ok');
   destroyed = true;
   assert.equal((await handlers.get(shared.SOUNDBOARD_FILES_IPC.read)(owner, input)).reason, 'invalid_request');
-  dispose(); dispose(); assert.equal(handlers.size, 0);
+  registry.dispose(); registry.dispose(); assert.equal(handlers.size, 0);
   const preload = loadPreload();
   for (const [method, channel] of Object.entries({
     readSoundboardEdit: 'read', renameSoundboardFile: 'rename', deleteSoundboardFile: 'delete', saveSoundboardEdit: 'edit',

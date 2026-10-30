@@ -25,6 +25,7 @@ import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMo
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { bindSoundboardSettings, bindSoundboardVolumeSlider, renderSoundboardSettings } from './SoundboardSettings';
+import { reportError } from '../utils/feedback';
 
 export class SoundboardModal {
   private modalEl: HTMLElement | null = null;
@@ -434,13 +435,14 @@ export class SoundboardModal {
       <span class="material-symbols-outlined md-18" aria-hidden="true">more_vert</span></button>`;
   }
 
+  /** Confirms a file action in the modal; a failure goes to the alert toast, like any operation error. */
   private fileStatus(message: string, error = false): void {
     const status = this.modalEl?.querySelector<HTMLElement>('#sb-file-status');
     if (status) {
-      status.hidden = false;
-      status.setAttribute('role', error ? 'alert' : 'status');
-      status.textContent = message;
+      status.hidden = error;
+      status.textContent = error ? '' : message;
     }
+    if (error) reportError(message);
   }
 
   private async fileAction(action: 'edit' | 'rename' | 'delete', sound: SoundItem): Promise<void> {

@@ -1,5 +1,6 @@
 #include "engine_shared.h"
 #include "resource_registry.h"
+#include "engine_operations.h"
 #include "operation_completion.h"
 #include "capture_clock.h"
 #include "encoded_video.h"
@@ -9,10 +10,10 @@
 #include "screen_decoder_factory.h"
 #include "api/field_trials.h"
 #if defined(_WIN32)
-#include "encoder_diagnostics.h"
 #include "decoder_diagnostics.h"
 #endif
 #include "receive_routes.h"
+#include "receive_frame_policy.h"
 #include "presentation/presentation.h"
 #include "audio/runtime.h"
 
@@ -38,24 +39,18 @@ namespace monky::native_rtc::engine {
 namespace {
 
 constexpr char kBaseCapabilities[] =
-   R"({"abiVersion":2,"contractRevision":8,"audioExtensionVersion":1,"inputLeaseCorrelation":true,"pairedCaptureClock":true,"p2pReceiverRouting":true,"pcmTrackInput":true,"creditAudioPlayout":true,"calibratedAudioOutputClock":true,"perShareAvGroups":true,"sfuExplicitStreamId":true,"audioOutputInvalidation":true,"opusStereoNegotiation":true,"audioPreAdmissionRetry":true,"ownerScopedAudioOutput":true,"audioOutputEpochAdmission":true,"externallyEncodedH264":true,"externallyEncodedAV1":true,"encodedInputCopied":true,"encodedFeedback":true,"encodedProfileLevelId":"4d003c","encodedBitrateCeilingBps":80000000,"encodedInputMaximumBytes":4194304,"availabilityScope":"compiled-implementation-not-device-probe","videoAvailable":true,"p2pAvailable":true,"sfuAvailable":true,"audioAvailable":true,"audioRuntimeQualified":false,"captureAvailable":false,"presentationAvailable":true,"presentationStage":"shared-nv12-export-only-runtime-unqualified","presentationRuntimeQualified":false,"runtimeQualified":false,"hardwareExecutionObserved":null,"inputFormat":"NV12_SHARED_NT_KEY0","inputTimebase":"qpc-system-relative-us","encodedInputFormat":"H264_ANNEX_B","encodedInputFormats":["H264_ANNEX_B","AV1_OBU"],"decodedOutput":"NV12_SHARED_NT_LEASE","decodedTimestampSemantics":"rtc-render-deadline-or-immediate-us","audioInputFormat":"FLOAT32LE_ORIGINAL_PACKET","audioPlayoutFormat":"FLOAT32_STEREO_48000_480","codecs":["H264-constrained-baseline","H264-main","Opus-48000-2","AV1-main"],"scalabilityModes":["L1T1"]})";
+   R"({"abiVersion":2,"contractRevision":8,"audioExtensionVersion":1,"pairedCaptureClock":true,"p2pReceiverRouting":true,"pcmTrackInput":true,"creditAudioPlayout":true,"calibratedAudioOutputClock":true,"perShareAvGroups":true,"sfuExplicitStreamId":true,"audioOutputInvalidation":true,"opusStereoNegotiation":true,"audioPreAdmissionRetry":true,"ownerScopedAudioOutput":true,"audioOutputEpochAdmission":true,"externallyEncodedH264":true,"externallyEncodedAV1":true,"encodedInputCopied":true,"encodedFeedback":true,"encodedProfileLevelId":"4d003c","encodedBitrateCeilingBps":80000000,"encodedInputMaximumBytes":4194304,"availabilityScope":"compiled-implementation-not-device-probe","videoAvailable":true,"p2pAvailable":true,"sfuAvailable":true,"audioAvailable":true,"audioRuntimeQualified":false,"captureAvailable":false,"presentationAvailable":true,"presentationStage":"shared-nv12-export-only-runtime-unqualified","presentationRuntimeQualified":false,"runtimeQualified":false,"hardwareExecutionObserved":null,"inputFormat":null,"inputTimebase":"qpc-system-relative-us","encodedInputFormat":"H264_ANNEX_B","encodedInputFormats":["H264_ANNEX_B","AV1_OBU"],"decodedOutput":"NV12_SHARED_NT_LEASE","decodedTimestampSemantics":"rtc-render-deadline-or-immediate-us","audioInputFormat":"FLOAT32LE_ORIGINAL_PACKET","audioPlayoutFormat":"FLOAT32_STEREO_48000_480","codecs":["H264-constrained-baseline","H264-main","Opus-48000-2","AV1-main"],"scalabilityModes":["L1T1"]})";
 static_assert(MONKY_ENGINE_ABI_VERSION == 2 && MONKY_ENGINE_CONTRACT_REVISION == 8);
 
 const std::string kCapabilities = [] {
   auto value = Json::parse(kBaseCapabilities);
 #if defined(__APPLE__)
-  value["inputFormat"] = nullptr;
   value["inputTimebase"] = "mach-host-us";
   value["decodedOutput"] = "NV12_IOSURFACE_LEASE";
   value["presentationStage"] = "iosurface-export-only-runtime-unqualified";
 #endif
   return value.dump();
 }();
-
-Json ErrorJson(const Error& error) {
-  return {{"code", error.code}, {"message", error.what()}, {"status", error.status},
-          {"hresult", static_cast<std::int32_t>(error.hr)}};
-}
 
 Error CurrentError() {
   try { throw; }
@@ -106,20 +101,6 @@ Json Parse(const char* value, std::uint32_t count) {
 void SafeId(std::uint64_t id) {
   if (!id || id > kMaxId)
     throw Error("ERR_RTC_ARGUMENT", "Expected a positive safe integer ID", MONKY_ENGINE_INVALID);
-}
-
-bool KnownOperation(std::string_view op) {
-  constexpr std::string_view names[] = {
-      "source.create", "source.createEncodedVideo", "source.createAudio", "source.beginAudioEpoch", "source.setAudioSyncGroup",
-      "source.setEnabled", "audio.configureOutput", "audio.stopOutput", "resource.close",
-      "peer.create", "peer.createOffer", "peer.createAnswer", "peer.setLocalDescription",
-      "peer.setRemoteDescription", "peer.addIceCandidate", "peer.publish",
-      "peer.publishAudio", "peer.setReceiverVolume",
-      "peer.setPublicationEnabled", "peer.setReceiving", "peer.setReceiverEnabled", "peer.getStats", "peer.configureBitrate",
-      "peer.configureVideoPlayout",
-      "sfu.load", "sfu.createTransport", "sfu.produce", "sfu.consume",
-      "sfu.setProducerEnabled", "sfu.setConsumerEnabled", "sfu.setConsumerVolume", "sfu.restartIce", "sfu.getStats"};
-  return std::find(std::begin(names), std::end(names), op) != std::end(names);
 }
 
 void ValidateOptions(const MonkyEngineOptions& options) {
@@ -252,9 +233,6 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
       } else if (type == "frame") {
         event.kind = MONKY_ENGINE_EVENT_FRAME;
         event.id = data.at("frameId").get<std::uint64_t>();
-      } else if (type == "source.frameReleased") {
-        event.kind = MONKY_ENGINE_EVENT_INPUT_RELEASED;
-        event.id = data.at("frameId").get<std::uint64_t>();
       } else if (type == "frame.released") {
         event.kind = MONKY_ENGINE_EVENT_FRAME_RELEASED;
         event.id = data.at("frameId").get<std::uint64_t>();
@@ -371,67 +349,72 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
       exporter = presenter_;
     }
     if (exporter) exporter->RetireRoute(route);
+#if defined(_WIN32)
+    cpu_frame_upload_.Clear();
+#endif
   }
 
+  // A frame that cannot be presented is dropped, not the screen and its audio (ReceivedFrameFailures).
   void ReceiveFrame(const FrameRoute& route, const webrtc::VideoFrame& input) noexcept override {
-    try {
-      auto context = MfContext();
-      if (!context) return;
-      const auto id = AllocateHandle();
-      std::shared_ptr<presentation::Exporter> exporter;
-      {
-        std::lock_guard lock(mutex_);
-        if (closing_ || !presenter_ || !resources_.Contains(route.target) ||
-            !receive_routes_.Accepts(route) ||
-            frames_.size() >= options_.max_decoded_frames) {
-          ++dropped_frames_;
-          return;
-        }
-        exporter = presenter_;
-        frames_.emplace(id, Frame{route, nullptr, false, false});
+    received_failures_.Admit(route, std::chrono::steady_clock::now(), [&] { PresentReceivedFrame(route, input); });
+  }
+
+  void PresentReceivedFrame(const FrameRoute& route, const webrtc::VideoFrame& input) {
+    auto context = MfContext();
+    if (!context) return;
+    const auto id = AllocateHandle();
+    std::shared_ptr<presentation::Exporter> exporter;
+    {
+      std::lock_guard lock(mutex_);
+      if (closing_ || !presenter_ || !resources_.Contains(route.target) ||
+          !receive_routes_.Accepts(route) ||
+          frames_.size() >= options_.max_decoded_frames) {
+        ++dropped_frames_;
+        return;
       }
-      try {
-        auto gpu = context->GetDecodedFrame(input.video_frame_buffer());
-        if (!gpu && input.video_frame_buffer()->type() == webrtc::VideoFrameBuffer::Type::kI420)
+      exporter = presenter_;
+      frames_.emplace(id, Frame{route, nullptr, false, false});
+    }
+    try {
+      auto gpu = context->GetDecodedFrame(input.video_frame_buffer());
+      if (!gpu && input.video_frame_buffer()->type() == webrtc::VideoFrameBuffer::Type::kI420)
 #if defined(_WIN32)
-          gpu = cpu_frame_upload_.Upload(input);
+        gpu = cpu_frame_upload_.Upload(input);
 #else
-          gpu = mac::UploadCpuFrame(input);
+        gpu = mac::UploadCpuFrame(input);
 #endif
-        if (!gpu) throw Error("ERR_RTC_GPU_OUTPUT", "Unsupported decoded output", MONKY_ENGINE_UNSUPPORTED);
-        if (!exporter->Submit(id, route, input.timestamp_us(), std::move(gpu))) {
-          std::lock_guard lock(mutex_);
-          frames_.erase(id);
-          ++dropped_frames_;
-        } else {
-          bool retired;
-          {
-            std::lock_guard lock(mutex_);
-            retired = closing_ || !resources_.Contains(route.target) || !receive_routes_.Accepts(route);
-          }
-          // A route can retire between the engine reservation and exporter
-          // admission. Reconcile that race after admission without revoking
-          // anything an in-flight ready callback could have exposed.
-          if (retired) exporter->RetireRoute(route);
-        }
-      } catch (...) {
+      if (!gpu) throw Error("ERR_RTC_GPU_OUTPUT", "Unsupported decoded output", MONKY_ENGINE_UNSUPPORTED);
+      if (!exporter->Submit(id, route, input.timestamp_us(), std::move(gpu))) {
+        std::lock_guard lock(mutex_);
+        frames_.erase(id);
+        ++dropped_frames_;
+      } else {
+        received_failures_.Presented();
+        bool retired;
         {
           std::lock_guard lock(mutex_);
-          frames_.erase(id);
+          retired = closing_ || !resources_.Contains(route.target) || !receive_routes_.Accepts(route);
         }
-        throw;
+        // A route can retire between the engine reservation and exporter
+        // admission. Reconcile that race after admission without revoking
+        // anything an in-flight ready callback could have exposed.
+        if (retired) exporter->RetireRoute(route);
       }
-    } catch (...) { RememberCurrentFailure(); RequestClose(); }
+    } catch (...) {
+      {
+        std::lock_guard lock(mutex_);
+        frames_.erase(id);
+      }
+      throw;
+    }
   }
 
   void Request(std::uint64_t id, std::string name, std::uint64_t target, Json data) {
     SafeId(id);
-    if (target > kMaxId || !KnownOperation(name))
+    const auto* operation = FindOperation(name);
+    if (target > kMaxId || !operation)
       throw Error("ERR_RTC_COMMAND", "Unknown operation or invalid target", MONKY_ENGINE_INVALID);
-    const bool creates = name == "source.create" || name == "source.createEncodedVideo" || name == "source.createAudio" ||
-        name == "audio.configureOutput" || name == "audio.stopOutput" ||
-        name == "peer.create" || name == "sfu.load";
-    if (creates != (target == 0))
+    if ((operation->scope == OperationScope::kCreates) != (target == 0))
       throw Error("ERR_RTC_TARGET", "Operation target does not match its creation/resource scope",
                   MONKY_ENGINE_INVALID);
     auto cancellation = std::make_shared<Cancellation>();
@@ -485,43 +468,6 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
       found->second->cancelled.store(true);
     }
     wake_.notify_all();
-  }
-
-  void Submit(std::uint64_t source_id, const MonkyEngineInputFrame& input) {
-#if defined(_WIN32)
-    SafeId(source_id);
-    if (encoded_input_)
-      throw Error("ERR_RTC_INPUT_MODE", "Encoded-H264 engines do not import NV12 input handles", MONKY_ENGINE_UNSUPPORTED);
-    if (input.struct_size != sizeof(input) || input.abi_version != MONKY_ENGINE_ABI_VERSION ||
-        !input.frame_id || input.frame_id > kMaxId || !input.texture_nt_handle ||
-        input.texture_nt_handle > (std::numeric_limits<std::intptr_t>::max)() ||
-        input.timestamp_us < 0 || static_cast<std::uint64_t>(input.timestamp_us) > kMaxId ||
-        input.duration_us <= 0 || input.duration_us > 1000000 ||
-        input.ntp_time_ms < -1 || input.ntp_time_ms > static_cast<std::int64_t>(kMaxId))
-      throw Error("ERR_RTC_FRAME", "Invalid versioned leased GPU input", MONKY_ENGINE_INVALID);
-    std::shared_ptr<VideoSource> source;
-    {
-      std::lock_guard lock(mutex_);
-      if (closing_ || !ready_) throw Error("ERR_RTC_CLOSED", "Engine is not accepting frames", MONKY_ENGINE_CLOSED);
-      const auto found = sources_.find(source_id);
-      if (found == sources_.end()) throw Error("ERR_RTC_SOURCE", "Source not found", MONKY_ENGINE_NOT_FOUND);
-      source = found->second;
-    }
-    auto frame = std::make_shared<InputFrame>();
-    if (!DuplicateHandle(GetCurrentProcess(), reinterpret_cast<HANDLE>(input.texture_nt_handle),
-                         GetCurrentProcess(), &frame->texture, 0, FALSE, DUPLICATE_SAME_ACCESS))
-      throw Error("ERR_RTC_FRAME_HANDLE", "Cannot duplicate the producer's NT handle",
-                  MONKY_ENGINE_INVALID, HRESULT_FROM_WIN32(GetLastError()));
-    frame->id = input.frame_id;
-    frame->timestamp_us = input.timestamp_us;
-    frame->duration_us = input.duration_us;
-    frame->ntp_time_ms = input.ntp_time_ms;
-    source->Submit(std::move(frame));
-#else
-    (void)source_id; (void)input;
-    throw Error("ERR_RTC_INPUT_MODE", "macOS publishing accepts encoded frames, not Windows texture handles",
-                MONKY_ENGINE_UNSUPPORTED);
-#endif
   }
 
   void SubmitEncoded(std::uint64_t source_id, const MonkyEngineEncodedFrame& input) {
@@ -610,6 +556,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
                   {"videoInput", encoded_input_ ? (av1_ ? "encoded-av1" : "encoded-h264") : "nv12"},
                   {"activeReceiverRoutes", receive_routes_.Size()},
                   {"decodedFrames", frames_.size()}, {"droppedFrames", dropped_frames_.load()},
+                  {"rejectedDecodedFrames", received_failures_.Rejected()},
                   {"rejectedEvents", rejected_events_.load()},
                   {"audioAvailable", true}, {"audioRuntimeQualified", false}, {"runtimeQualified", false},
                   {"hardwareExecutionObserved", nullptr}, {"failure", failure_},
@@ -624,6 +571,9 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     for (const auto& [id, source] : sources)
       snapshot["sources"].push_back({{"id", id}, {"stats", source->Snapshot()}});
     if (exporter) snapshot["presentation"] = exporter->Snapshot();
+#if defined(_WIN32)
+    snapshot["cpuUpload"] = cpu_frame_upload_.Snapshot();
+#endif
     snapshot["audioSources"] = Json::array();
     for (const auto& source : audio_sources) snapshot["audioSources"].push_back(source->Snapshot());
     if (audio) snapshot["audio"] = audio->Snapshot();
@@ -720,9 +670,8 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
       const Error failure(error.code, error.message, error.status, error.hresult);
       if (terminal) { RememberFailure(failure); RequestClose(); }
       else {
-        auto data = ErrorJson(failure);
+        auto data = ErrorEvent(failure, false);
         data["frameId"] = id;
-        data["terminal"] = false;
         Emit("error", target, std::move(data));
       }
     } catch (...) { RememberCurrentFailure(); RequestClose(); }
@@ -893,28 +842,23 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
       source->BeginEpoch(operation.data);
       return {{"sourceId", target}, {"epoch", operation.data.at("epoch")}};
     }
-    if (operation.name == "source.create" || operation.name == "source.createEncodedVideo") {
-      const bool encoded = operation.name == "source.createEncodedVideo";
-      if (encoded != encoded_input_)
-        throw Error("ERR_RTC_INPUT_MODE", "Source kind must match the explicit engine videoInput mode", MONKY_ENGINE_UNSUPPORTED);
-      const auto group = SyncGroup(operation.data);
+    if (operation.name == "source.createEncodedVideo") {
+      if (!encoded_input_)
+        throw Error("ERR_RTC_INPUT_MODE", "Encoded video sources require an encoded engine videoInput mode",
+                    MONKY_ENGINE_UNSUPPORTED);
+      (void)SyncGroup(operation.data);
       {
         std::lock_guard lock(mutex_);
-        if (encoded && !sources_.empty())
+        if (!sources_.empty())
           throw Error("ERR_RTC_ENCODED_SOURCE_LIMIT", "One encoded source per engine may be reused by multiple peers", MONKY_ENGINE_BUSY);
-        for (const auto& [id, existing] : sources_)
-          if (existing->SyncGroup() == group)
-            throw Error("ERR_RTC_SYNC_GROUP", "Each local screen requires its own synchronization group",
-                        MONKY_ENGINE_INVALID);
       }
-      if (target) throw Error("ERR_RTC_TARGET", "source.create requires target zero", MONKY_ENGINE_INVALID);
+      if (target) throw Error("ERR_RTC_TARGET", "source.createEncodedVideo requires target zero", MONKY_ENGINE_INVALID);
       const auto id = AllocateHandle();
       // Reserve the shared resource budget BEFORE any source/device initialization.
       RegisterResource(id);
       std::shared_ptr<VideoSource> source;
       try {
-        source = encoded ? CreateEncodedVideoSource(*this, id, operation.data, cancellation, encoded_context_)
-                         : CreateGpuSource(*this, id, operation.data, cancellation);
+        source = CreateEncodedVideoSource(*this, id, operation.data, cancellation, encoded_context_);
         cancellation->Check();
         {
           std::lock_guard lock(mutex_);
@@ -977,8 +921,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
         source->Close();
         { std::lock_guard lock(mutex_); audio_sources_.erase(target); }
         ForgetResource(target);
-      } else if (peers_->Contains(target)) peers_->Close(target);
-      else if (sfu_->Contains(target)) sfu_->Close(target);
+      } else if (auto* controller = OwnerOf(target)) controller->Close(target);
       else throw Error("ERR_RTC_RESOURCE_STATE", "Registered resource has no live controller");
       return Json::object();
     }
@@ -987,13 +930,11 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
 
   void RememberFailure(const Error& error) noexcept {
     try {
-      auto data = ErrorJson(error);
       {
         std::lock_guard lock(mutex_);
-        if (failure_.is_null()) failure_ = data;
+        if (failure_.is_null()) failure_ = ErrorJson(error);
       }
-      data["terminal"] = true;
-      Emit("error", 0, std::move(data));
+      Emit("error", 0, ErrorEvent(error, true));
     } catch (...) {
       std::fputs("[monky-rtc] Could not retain a native failure report; closing.\n", stderr);
       RequestClose();
@@ -1014,9 +955,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
       // Controllers already retire their affected PC/transport when a cancelled
       // server acknowledgement cannot be obtained. Do not close other sources.
       if (error.status == MONKY_ENGINE_CANCELLED || error.status == MONKY_ENGINE_TIMEOUT) {
-        auto data = ErrorJson(error);
-        data["terminal"] = false;
-        Emit("error", target, std::move(data));
+        Emit("error", target, ErrorEvent(error, false));
       } else {
         RememberFailure(error);
         RequestClose();
@@ -1032,15 +971,11 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     if (context) {
       const auto stats = context->Snapshot();
 #if defined(_WIN32)
-      auto encoders = Json::array();
-      for (const auto& encoder : stats.encoders) encoders.push_back(EncoderRuntimeJson(encoder));
       auto decoders = Json::array();
       for (const auto& decoder : stats.decoders) decoders.push_back(DecoderRuntimeJson(decoder));
       mf = {{"liveWorkers", stats.live_workers}, {"nativeBuffers", stats.native_buffers},
             {"diagnosticsOverwritten", stats.diagnostics_overwritten},
-            {"encodedAccessUnits", stats.encoded_access_units}, {"decodedGpuFrames", stats.decoded_gpu_frames},
-            {"rtcRejectedAccessUnits", stats.rtc_rejected_access_units},
-            {"encoders", std::move(encoders)},
+            {"decodedGpuFrames", stats.decoded_gpu_frames},
             {"decoders", std::move(decoders)},
             {"i420Readbacks", stats.i420_readbacks}, {"i420Failures", stats.i420_failures},
             {"hardwareExecutionObserved", stats.hardware_execution_observed ?
@@ -1081,18 +1016,31 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     }
   }
 
+  // The media controller (P2P or SFU) that owns this peer, publication, device, transport, producer or consumer.
+  MediaController* OwnerOf(std::uint64_t target) const {
+    for (auto* controller : {peers_.get(), sfu_.get()})
+      if (controller && controller->Contains(target)) return controller;
+    return nullptr;
+  }
+
   void GateSource(std::uint64_t target) {
     std::exception_ptr failure;
-    try { peers_->SourceEnabledChanged(target); } catch (...) { failure = std::current_exception(); }
-    try { sfu_->SourceEnabledChanged(target); } catch (...) { if (!failure) failure = std::current_exception(); }
+    for (auto* controller : {peers_.get(), sfu_.get()}) {
+      try { controller->SourceEnabledChanged(target); }
+      catch (...) { if (!failure) failure = std::current_exception(); }
+    }
     if (failure) std::rethrow_exception(failure);
   }
 
+  // Undoes completed native work that JS no longer awaits, by the operation's policy (engine_operations.h).
   void RollbackCancelled(const Operation& operation, const Json& result) {
-    if (operation.name == "audio.configureOutput") {
+    const auto rollback = FindOperation(operation.name)->rollback;
+    if (rollback == Rollback::kNone) return;
+    if (rollback == Rollback::kStopAudioOutput) {
       Audio()->StopOutput(operation.data);
       return;
     }
+    // The resource the result reports (a created or changed one), else the operation's target.
     std::uint64_t target = operation.cancellation->target;
     for (const auto* key : {"sourceId", "peerId", "publicationId", "deviceId",
                              "transportId", "producerId", "consumerId"}) {
@@ -1101,40 +1049,41 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
         break;
       }
     }
-    if (operation.name.ends_with("getStats") || operation.name == "peer.createOffer" ||
-        operation.name == "peer.createAnswer" || operation.name == "resource.close") return;
-    if (auto source = FindSource(target)) {
-      if (operation.name == "source.setEnabled") {
+    if (rollback == Rollback::kDisableSource) {
+      if (auto source = FindSource(target)) {
         source->SetEnabled(false);
         GateSource(target);
-      } else {
-        source->Close();
-        {
-          std::lock_guard lock(mutex_);
-          sources_.erase(target);
-        }
-        ForgetResource(target);
+      } else if (auto audio_source = FindAudioSource(target)) {
+        audio_source->accepting.store(false);
+        audio_source->SetEnabled(false);
+        GateSource(target);
       }
-    } else if (auto source = FindAudioSource(target)) {
-      source->accepting.store(false);
-      source->SetEnabled(false);
-      GateSource(target);
-      if (operation.name == "source.createAudio") {
-        source->Close();
-        { std::lock_guard lock(mutex_); audio_sources_.erase(target); }
-        ForgetResource(target);
-      }
-    } else if (peers_->Contains(target)) peers_->Close(target);
-    else if (sfu_->Contains(target)) {
-      // Producer/consumer close would request an acknowledgement from the very
-      // operation being cancelled. Retire its native screen transport instead.
-      if (operation.name == "sfu.produce" || operation.name == "sfu.consume" ||
-          operation.name == "sfu.setProducerEnabled" || operation.name == "sfu.setConsumerEnabled") {
+      return;
+    }
+    if (rollback == Rollback::kRetireTransport) {
+      if (!sfu_->Contains(target)) return;
+      {
         std::lock_guard lock(mutex_);
         if (const auto parent = resources_.Parent(target)) target = *parent;
       }
       sfu_->Close(target);
+      return;
     }
+    if (auto source = FindSource(target)) {
+      source->Close();
+      {
+        std::lock_guard lock(mutex_);
+        sources_.erase(target);
+      }
+      ForgetResource(target);
+    } else if (auto source = FindAudioSource(target)) {
+      source->accepting.store(false);
+      source->SetEnabled(false);
+      GateSource(target);
+      source->Close();
+      { std::lock_guard lock(mutex_); audio_sources_.erase(target); }
+      ForgetResource(target);
+    } else if (auto* controller = OwnerOf(target)) controller->Close(target);
   }
 
   struct CompletionActions {
@@ -1305,6 +1254,11 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
   std::map<std::uint64_t, std::shared_ptr<audio::AudioSource>> audio_sources_;
   std::shared_ptr<audio::AudioRuntime> audio_runtime_;
   std::map<std::uint64_t, Frame> frames_;
+  ReceivedFrameFailures received_failures_{{
+      [this](const FrameRoute& route, const Error& error) { Emit("error", route.target, ErrorEvent(error, false)); },
+      [this](const Error& error) { RememberFailure(error); RequestClose(); },
+      [this] { RememberCurrentFailure(); RequestClose(); },
+  }};
   std::atomic<std::uint64_t> dropped_frames_{0};
   std::atomic<std::uint64_t> rejected_events_{0};
   std::thread actor_;
@@ -1317,8 +1271,8 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
   std::shared_ptr<CaptureClock> capture_clock_;
   std::shared_ptr<presentation::Exporter> presenter_;
   std::optional<webrtc::Environment> environment_;
-  std::unique_ptr<PeerController> peers_;
-  std::unique_ptr<SfuController> sfu_;
+  std::unique_ptr<MediaController> peers_;
+  std::unique_ptr<MediaController> sfu_;
 };
 
 }  // namespace monky::native_rtc::engine
@@ -1438,13 +1392,6 @@ extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_respond(
 extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_cancel(
     MonkyRtcEngine* engine, uint64_t id, MonkyEngineError* error) noexcept {
   return Boundary(error, [&] { State(engine).Cancel(id); });
-}
-extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_submit_frame(
-    MonkyRtcEngine* engine, uint64_t source, const MonkyEngineInputFrame* frame, MonkyEngineError* error) noexcept {
-  return Boundary(error, [&] {
-    if (!frame) throw rtc::Error("ERR_RTC_FRAME", "Input descriptor is required", MONKY_ENGINE_INVALID);
-    State(engine).Submit(source, *frame);
-  });
 }
 extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_submit_encoded_frame(
     MonkyRtcEngine* engine, uint64_t source, const MonkyEngineEncodedFrame* frame, MonkyEngineError* error) noexcept {

@@ -45,11 +45,12 @@ if (require.main === module || process.argv[1] === __filename) {
     app.setPath('userData', process.env.MONKY_TOOLTIP_TEST_PROFILE);
     app.on('window-all-closed', () => {});
     let vite;
+    let domWindow;
     let window;
     let timeout;
     const finish = async (code) => {
       clearTimeout(timeout);
-      if (window && !window.isDestroyed()) window.destroy();
+      for (const browser of [domWindow, window]) if (browser && !browser.isDestroyed()) browser.destroy();
       if (vite) await vite.close();
       app.exit(code);
     };
@@ -79,16 +80,30 @@ if (require.main === module || process.argv[1] === __filename) {
       });
       const address = httpServer.address();
       if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
-      window = new BrowserWindow({
-        show: false, width: 640, height: 440,
-        webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
-      });
-      window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      const open = async (webPreferences = {}) => {
+        const browser = new BrowserWindow({
+          show: false, width: 640, height: 440,
+          webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, ...webPreferences },
+        });
+        browser.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+        await browser.loadURL(`http://127.0.0.1:${address.port}/__tooltips__`);
+        return browser;
+      };
       timeout = setTimeout(() => { console.error('Tooltip smoke timed out'); void finish(1); }, 45_000);
-      await window.loadURL(`http://127.0.0.1:${address.port}/__tooltips__`);
-      const checks = await window.webContents.executeJavaScript(`(${runTooltipSmoke.toString()})()`, true);
-      console.log(`Tooltip smoke: ${checks} checks passed`);
+      // A window that is never shown never draws what the page paints, and after a few undrawn frames
+      // Chromium sends it one frame per second (viz ThrottleUndrawnFrames). The DOM checks wait on frames,
+      // so they run offscreen, where every frame is drawn, like the other DOM smokes.
+      domWindow = await open({ offscreen: true });
+      domWindow.webContents.setFrameRate(60);
+      const cadence = await domWindow.webContents.executeJavaScript(`(${measureFrameCadence.toString()})()`);
+      if (!(cadence.median < 100))
+        throw new Error(`Tooltip DOM checks need frames at a normal rate, not a throttled hidden window: ${JSON.stringify(cadence)}`);
+      const checks = await domWindow.webContents.executeJavaScript(`(${runTooltipSmoke.toString()})()`, true);
+      console.log(`Tooltip smoke: ${checks} checks passed (a frame every ${cadence.median} ms)`);
+      domWindow.destroy();
       if (process.argv.includes('--dom-only')) { await finish(0); return; }
+      // Trusted pointer input needs a real window, shown and focused.
+      window = await open();
       await window.webContents.executeJavaScript(`(${renderTooltipPreview.toString()})()`, true);
       await focusTooltipPreview(window);
       const point = await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
@@ -137,6 +152,26 @@ if (require.main === module || process.argv[1] === __filename) {
       await finish(0);
     }).catch(async (error) => { console.error(error); await finish(1); });
   }
+}
+
+/** Frame interval while the page paints every frame, which is what a never-shown window throttles. */
+async function measureFrameCadence() {
+  const bar = document.body.appendChild(document.createElement('div'));
+  bar.style.cssText = 'position:fixed;left:0;top:0;height:2px;background:currentColor';
+  const gaps = [];
+  await new Promise((resolve) => {
+    let last;
+    const step = (time) => {
+      bar.style.width = `${gaps.length + 1}px`;
+      if (last !== undefined) gaps.push(Math.round(time - last));
+      last = time;
+      if (gaps.length < 8) requestAnimationFrame(step);
+      else resolve();
+    };
+    requestAnimationFrame(step);
+  });
+  bar.remove();
+  return { median: [...gaps].sort((a, b) => a - b)[gaps.length >> 1], gaps };
 }
 
 async function renderTooltipPreview() {
@@ -381,12 +416,42 @@ async function runTooltipSmoke() {
     pingSource.firstElementChild.firstChild.data = 'Updated latency:';
     await frame();
     check(tip().textContent.startsWith('Updated latency:'), 'Character-data updates must refresh referenced sources');
-    pingSource.id = 'tooltip-ping-moved';
-    await frame();
-    check(closed(), 'Renaming a referenced source must hide stale content');
-    ping.dataset.tooltipSource = 'tooltip-ping-moved';
-    await wait(180);
-    check(!tip().hidden && tip().textContent.startsWith('Updated latency:'), 'Changing source reference must resolve the new label');
+    {
+      // Frames can come late on a busy runner. Changes to the referenced source reach the
+      // tooltip on its next frame, which then starts the normal hover delay: model late frames so the
+      // delay is counted from that frame, as R-SHELL-15 specifies, and never from the change itself.
+      const nativeRequest = window.requestAnimationFrame;
+      const nativeCancel = window.cancelAnimationFrame;
+      // Each late frame runs everything requested before it, in order, like a real one.
+      let pending = null;
+      let lastId = 0;
+      window.requestAnimationFrame = (callback) => {
+        if (!pending) {
+          const callbacks = pending = new Map();
+          nativeRequest.call(window, (time) => setTimeout(() => {
+            if (pending === callbacks) pending = null;
+            for (const run of callbacks.values()) run(time);
+          }, 120));
+        }
+        pending.set(--lastId, callback);
+        return lastId;
+      };
+      window.cancelAnimationFrame = (id) => { pending?.delete(id); };
+      try {
+        pingSource.id = 'tooltip-ping-moved';
+        await frame();
+        check(closed(), 'Renaming a referenced source must hide stale content');
+        ping.dataset.tooltipSource = 'tooltip-ping-moved';
+        await frame();
+        await wait(180);
+        // Its text matches the closing tooltip's: only a real re-show proves the new reference resolved.
+        check(!closed() && tip().textContent.startsWith('Updated latency:'), 'Changing source reference must resolve the new label');
+      } finally {
+        for (let attempt = 0; pending && attempt < 50; attempt++) await wait(20);
+        window.requestAnimationFrame = nativeRequest;
+        window.cancelAnimationFrame = nativeCancel;
+      }
+    }
     out(ping);
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
     ping.focus();

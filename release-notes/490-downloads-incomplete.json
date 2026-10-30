@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Downloads de anexos que travam ou caem no meio dizem o motivo, e um arquivo incompleto nunca é salvo como inteiro. A prévia de links recusa endereços internos, e o monky update compara versões corretamente.",
+  "en": "Attachment downloads that stall or drop midway now say why, and an incomplete file is never saved as whole. Link previews refuse internal addresses, and monky update compares versions correctly."
+}

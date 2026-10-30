@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No soundboard, o modal e as Configurações usam o mesmo diálogo de atalho, que avisa quando a tecla já é de outro som, e a busca não perde o cursor enquanto você digita.",
+  "en": "In the soundboard, the modal and Settings share the same shortcut dialog, which warns when a key already belongs to another sound, and search keeps the cursor while you type."
+}

@@ -90,6 +90,10 @@ struct NegotiatedH264 {
 bool IsSupportedLevel(std::uint8_t level);
 std::optional<NegotiatedH264> ParseFormat(const webrtc::SdpVideoFormat&, std::uint8_t maximum_level);
 std::vector<webrtc::SdpVideoFormat> SupportedFormats(std::uint8_t maximum_level);
+// The AV1 format both screen endpoints offer (Main profile, Main tier, up to level index 23), and whether a remote
+// format stays within it; an absent parameter takes its default.
+webrtc::SdpVideoFormat ScreenAv1Format();
+bool IsScreenAv1Format(const webrtc::SdpVideoFormat&);
 webrtc::ColorSpace Bt709Limited();
 bool IsBt709Limited(const webrtc::ColorSpace&);
 

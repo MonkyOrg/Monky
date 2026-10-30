@@ -30,35 +30,13 @@ std::uint64_t Creation(HANDLE process) {
   Require(GetProcessTimes(process, &creation, &exit, &kernel, &user), "ERR_DESKTOP_PREVIEW_IDENTITY");
   return (static_cast<std::uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime;
 }
-struct MonitorSearch {
-  const Arguments& arguments;
-  HMONITOR match = nullptr;
-  unsigned matches = 0, visited = 0;
-  bool failed = false;
-};
-BOOL CALLBACK FindMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM data) noexcept {
-  auto& search = *reinterpret_cast<MonitorSearch*>(data);
-  if (++search.visited > 64) { search.failed = true; return FALSE; }
-  MONITORINFOEXW info{}; info.cbSize = sizeof(info);
-  DISPLAY_DEVICEW device{}; device.cb = sizeof(device);
-  if (!GetMonitorInfoW(monitor, &info) ||
-      !EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME)) {
-    search.failed = true; return FALSE;
-  }
-  if (search.arguments.deviceId == device.DeviceID) {
-    ++search.matches; search.match = monitor;
-    const auto& a = search.arguments;
-    if (a.deviceName != info.szDevice || a.left != info.rcMonitor.left || a.top != info.rcMonitor.top ||
-        a.width != static_cast<std::uint32_t>(info.rcMonitor.right - info.rcMonitor.left) ||
-        a.height != static_cast<std::uint32_t>(info.rcMonitor.bottom - info.rcMonitor.top)) search.failed = true;
-  }
-  return TRUE;
-}
 struct Target {
   const Arguments& arguments;
   Handle process;
   HWND window = nullptr;
   HMONITOR monitor = nullptr;
+  // The device interface is read once here; every later check uses cached GDI metadata (#762).
+  std::optional<win::MonitorBinding> display;
   explicit Target(const Arguments& a) : arguments(a) {
     if (a.window) {
       window = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(a.hwnd));
@@ -71,19 +49,15 @@ struct Target {
       monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
       Require(monitor != nullptr, "ERR_DESKTOP_PREVIEW_UNAVAILABLE");
     } else {
-      monitor = ResolveMonitor();
+      display.emplace(a.monitor);
+      Require(display->status() == win::MonitorStatus::kMatches, "ERR_DESKTOP_PREVIEW_IDENTITY");
+      monitor = display->monitor();
       Verify();
     }
   }
-  HMONITOR ResolveMonitor() const {
-    MonitorSearch search{arguments};
-    Require(EnumDisplayMonitors(nullptr, nullptr, FindMonitor, reinterpret_cast<LPARAM>(&search)) &&
-        !search.failed && search.matches == 1, "ERR_DESKTOP_PREVIEW_IDENTITY");
-    return search.match;
-  }
   void Verify() const {
     if (!arguments.window) {
-      Require(ResolveMonitor() == monitor, "ERR_DESKTOP_PREVIEW_IDENTITY");
+      Require(display->Verify() == win::MonitorStatus::kMatches, "ERR_DESKTOP_PREVIEW_IDENTITY");
       return;
     }
     DWORD pid = 0;
@@ -195,8 +169,8 @@ Pixels Read(const Target& target, std::uint64_t deadline) {
   Require(size.Width > 0 && size.Height > 0 &&
       static_cast<std::uint64_t>(size.Width) * size.Height * 4 <= kMaximumPixelBytes,
       "ERR_DESKTOP_PREVIEW_DIMENSIONS");
-  if (!target.window) Require(static_cast<unsigned>(size.Width) == target.arguments.width &&
-      static_cast<unsigned>(size.Height) == target.arguments.height, "ERR_DESKTOP_PREVIEW_IDENTITY");
+  if (!target.window) Require(static_cast<unsigned>(size.Width) == target.arguments.monitor.width &&
+      static_cast<unsigned>(size.Height) == target.arguments.monitor.height, "ERR_DESKTOP_PREVIEW_IDENTITY");
   target.Verify();
   capture.pool = Direct3D11CaptureFramePool::CreateFreeThreaded(runtimeDevice,
       DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size);

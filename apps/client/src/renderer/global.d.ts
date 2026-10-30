@@ -5,6 +5,8 @@ import type { ElectronApi } from '../preload/api';
 declare global {
   interface Window {
     api: ElectronApi;
+    /** Console helper that prints the voice engine status (`debugVoice()` in DevTools). */
+    debugVoice?: () => unknown;
   }
 
   // Chromium supports these output-routing APIs before our DOM typings.

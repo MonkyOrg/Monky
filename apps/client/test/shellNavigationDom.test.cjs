@@ -308,14 +308,16 @@ async function shellNavigationSmoke() {
   const files = new DataTransfer();
   files.items.add(new File(['anexo'], 'anexo.txt', { type: 'text/plain' }));
   input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: files, bubbles: true, cancelable: true }));
-  await until(() => document.querySelectorAll('#chat-attachment-tray [data-dm-unstage]').length === 1, 'the attachment was not staged');
+  await until(() => document.querySelectorAll('#chat-attachment-tray [data-tray-remove]').length === 1, 'the attachment was not staged');
   const dmIntact = () => document.querySelector('#dm-conversation-root') === conversation
     && document.querySelector('#chat-message-input') === input && input.value === draft
-    && document.querySelectorAll('#chat-attachment-tray [data-dm-unstage]').length === 1;
+    && document.querySelectorAll('#chat-attachment-tray [data-tray-remove]').length === 1;
 
   await openServerSession('c.test', 5403, identity, 'Fixture', undefined, { background: true });
   await until(() => document.querySelector('.server-rail-avatar[data-port="5403"] .server-rail-status-dot')?.dataset.status === 'online',
     'the rail did not show the background connection');
+  check(connectionStore.findSavedServer({ host: 'c.test', port: 5403 })?.name === 'Server 5403',
+    'a sign-in gives the saved entry the name the server has now, in the background too (#85)');
   check(sessionManager.isHome(), 'a background connection keeps Home on screen');
   check(dmIntact(), 'a background connection keeps the DM, its text and its attachment');
   sessionManager.remove(sessionOn(5403).key);
@@ -324,6 +326,17 @@ async function shellNavigationSmoke() {
     'the rail shows the server is gone');
   check(dmIntact(), 'a background server going away keeps the DM, its text and its attachment');
 
+  phase = 'another server at a saved address';
+  // Its sign-in does not rewrite the entry the person saved: automatic entry
+  // refuses that server, and entering by hand saves it again.
+  connectionStore.addSavedServer({ host: 'e.test', port: 5405, name: 'Servidor que eu salvei', serverId: 'server-replaced', lastConnected: 1 });
+  await openServerSession('e.test', 5405, identity, 'Fixture', undefined, { background: true });
+  check(connectionStore.findSavedServer({ host: 'e.test', port: 5405 })?.name === 'Servidor que eu salvei',
+    'a different server at a saved address leaves the saved name as it was');
+  sessionManager.remove(sessionOn(5405).key);
+  connectionStore.removeSavedServer('e.test', 5405);
+  await settle();
+
   phase = 'R-SHELL-3: background servers and menus';
   await openServerSession('a.test', 5401, identity, 'Fixture');
   await until(() => !!document.querySelector('#chat-messages-feed') && !!document.querySelector('#main-user-status-dot'),
@@ -331,6 +344,8 @@ async function shellNavigationSmoke() {
   await openServerSession('b.test', 5402, identity, 'Fixture', undefined, { background: true });
   await until(() => document.querySelector('.server-rail-avatar[data-port="5402"] .server-rail-status-dot')?.dataset.status === 'online',
     'the rail did not show the second server');
+  check(document.querySelector('#btn-server-settings')?.hidden === false,
+    'a server connecting in the background leaves the menu of the server on screen as it was');
   // Settle what the periodic probe shows, so a round during the count changes nothing.
   await serverRailView.refreshServerRailStatuses();
   await settle();

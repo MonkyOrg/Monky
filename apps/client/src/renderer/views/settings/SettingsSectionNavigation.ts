@@ -132,7 +132,8 @@ export class SettingsSectionNavigation {
       }
       this.panel = panel;
       this.resizeObserver.observe(panel);
-      if (changed && previousPanel) animateEnter(panel, 'panel');
+      // A view swap fades only: moving the panel would shift the popups anchored inside it.
+      if (changed && previousPanel) animateEnter(panel, 'view');
     }
     this.activeTab = tab;
     this.scrollingTo = null;

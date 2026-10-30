@@ -191,8 +191,12 @@ export class ConnectionStore {
   public updateSavedServerMeta(host: string, port: number, meta: { name?: string; iconUrl?: string | null }): void {
     const srv = this.findSavedServer({ host, port });
     if (!srv) return;
-    if (meta.name) srv.name = meta.name;
-    if (meta.iconUrl !== undefined) srv.iconUrl = meta.iconUrl || undefined;
+    const name = meta.name || srv.name;
+    const iconUrl = meta.iconUrl !== undefined ? meta.iconUrl || undefined : srv.iconUrl;
+    // Every sign-in reports both: only a real change is saved and redraws the rail.
+    if (name === srv.name && iconUrl === srv.iconUrl) return;
+    srv.name = name;
+    srv.iconUrl = iconUrl;
     this.saveSavedServers();
     appEvents.emit('connection.saved_servers_changed');
   }

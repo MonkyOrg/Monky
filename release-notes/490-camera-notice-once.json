@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Desligar a câmera não manda mais o aviso duas vezes, a câmera de quem você assiste troca sem piscar, e uma chamada cujo servidor some não envia sinais ao servidor que você está vendo.",
+  "en": "Turning the camera off no longer sends the notice twice, the camera you watch switches without flickering, and a call whose server goes away no longer sends signals to the server you are viewing."
+}

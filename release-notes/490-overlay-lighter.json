@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "O overlay de jogo ficou bem mais leve: abre sem carregar o app inteiro e recodifica câmeras e telas só no tamanho de cada card, com cerca de 70% menos CPU. Ele volta sozinho depois de recarregar a janela principal.",
+  "en": "The game overlay is much lighter: it opens without loading the whole app and only re-encodes cameras and screens at each card's size, using about 70% less CPU. It recovers on its own after the main window reloads."
+}

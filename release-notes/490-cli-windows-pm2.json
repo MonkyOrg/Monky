@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "CLI do servidor no Windows: pastas e comandos com espaço, % ou & funcionam, e o PM2 instalado por npm, pnpm, Yarn ou Volta é encontrado. O monky destroy não apaga mais dados antes de parar o PM2.",
+  "en": "Server CLI on Windows: folders and commands with spaces, % or & work, and PM2 installed with npm, pnpm, Yarn or Volta is found. monky destroy no longer deletes data before stopping PM2."
+}

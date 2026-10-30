@@ -26,14 +26,25 @@ namespace {
 
 #ifdef _WIN32
 std::atomic<HANDLE> controlEvent = nullptr;
+// Set by a signal that ends the process, before it wakes the core.
+std::atomic_bool closeHeld = false;
+
+// Closing the console window ends the process as soon as the handler returns,
+// and the system waits five seconds at most. The core leaves the call and logs
+// out well inside that, and main then ends the process, this thread included.
+constexpr DWORD closeHoldMilliseconds = 4500;
 
 BOOL WINAPI onConsoleSignal(DWORD signal) {
-  if (signal != CTRL_C_EVENT && signal != CTRL_BREAK_EVENT && signal != CTRL_CLOSE_EVENT &&
-      signal != CTRL_LOGOFF_EVENT && signal != CTRL_SHUTDOWN_EVENT) {
-    return FALSE;
-  }
+  const bool ending = signal == CTRL_CLOSE_EVENT || signal == CTRL_LOGOFF_EVENT || signal == CTRL_SHUTDOWN_EVENT;
+  if (!ending && signal != CTRL_C_EVENT && signal != CTRL_BREAK_EVENT) return FALSE;
   const auto event = controlEvent.load();
-  return event && SetEvent(event) ? TRUE : FALSE;
+  if (!event) return FALSE;
+  // Before the wake-up, so the teardown it starts already knows of the hold.
+  if (ending) closeHeld = true;
+  if (!SetEvent(event)) return FALSE;
+  // Ctrl+C and Ctrl+Break leave the process running; only these end it.
+  if (ending) Sleep(closeHoldMilliseconds);
+  return TRUE;
 }
 #else
 volatile std::sig_atomic_t controlPipe = -1;
@@ -171,8 +182,14 @@ struct ConsoleControl::Impl final {
       if (!ReadFile(input, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr)) {
         const auto error = GetLastError();
         if (stopping) return;
-        if (error == ERROR_BROKEN_PIPE || error == ERROR_HANDLE_EOF) endOfInput();
-        else callbacks.error("Console input read failed: " + std::to_string(error));
+        // The other end is gone: the writer closed a pipe, or the console's
+        // server exited. Windows 10 and Windows Server 2022 end that server as
+        // soon as the console is closed, before its programs are done.
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_HANDLE_EOF || error == ERROR_PIPE_NOT_CONNECTED) {
+          endOfInput();
+        } else {
+          callbacks.error("Console input read failed: " + std::to_string(error));
+        }
         return;
       }
       if (count == 0) {
@@ -228,11 +245,14 @@ struct ConsoleControl::Impl final {
       }
       reader.join();
     }
-    if (registered) {
-      SetConsoleCtrlHandler(onConsoleSignal, FALSE);
-      controlEvent = nullptr;
-    }
-    if (event) CloseHandle(event);
+    // The system keeps the handler list locked while a handler runs, so taking
+    // a held one out would wait out the hold, and the system would then end the
+    // process instead of main. Kept, it finds no event and defers to the default
+    // handler; the event it may still be signalling closes with the process.
+    const bool held = registered && closeHeld;
+    if (registered && !held) SetConsoleCtrlHandler(onConsoleSignal, FALSE);
+    if (registered) controlEvent = nullptr;
+    if (event && !held) CloseHandle(event);
 #else
     if (controlPipe == descriptors[1]) controlPipe = -1;
     if (terminateInstalled) sigaction(SIGTERM, &previousTerminate, nullptr);
@@ -250,5 +270,14 @@ struct ConsoleControl::Impl final {
 
 ConsoleControl::ConsoleControl(Callbacks callbacks) : impl_(std::make_unique<Impl>(std::move(callbacks))) {}
 ConsoleControl::~ConsoleControl() = default;
+
+bool standardOutputIsConsole() {
+#ifdef _WIN32
+  DWORD mode = 0;
+  return GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode) != FALSE;
+#else
+  return isatty(STDOUT_FILENO) == 1;
+#endif
+}
 
 }  // namespace monky::light

@@ -76,6 +76,10 @@ function bindWindowSource(source) {
   const finderEnd = source.indexOf('\n\t\tif (!wc->window)', finderStart);
   assert.ok(finderStart > 0 && finderEnd > finderStart, 'Pinned WGC selection anchor changed.');
   source = source.slice(0, finderStart) + '\t\twc->window = monky_selected_window();' + source.slice(finderEnd);
+  // The selection list offers minimized windows (a pause, not a lost source), so the stock list the host matches
+  // against them must list them too.
+  source = replaceOnce(source, 'ms_fill_window_list(p, EXCLUDE_MINIMIZED, NULL);',
+    'ms_fill_window_list(p, INCLUDE_MINIMIZED, NULL);');
   source = replaceOnce(source, 'static void *wc_create(obs_data_t *settings, obs_source_t *source)\n{',
     `static void *wc_create(obs_data_t *settings, obs_source_t *source)
 {

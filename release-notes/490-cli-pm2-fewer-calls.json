@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "No servidor e no SDK de bots, monky restart e status --watch consultam o PM2 e o banco bem menos vezes.",
+  "en": "On the server and in the bot SDK, monky restart and status --watch query PM2 and the database far less often."
+}

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "SDK de bots: buscas de autocomplete canceladas ocupam a vaga até o handler terminar, então digitar rápido não acumula trabalho em segundo plano no bot.",
+  "en": "Bot SDK: cancelled autocomplete searches keep their slot until the handler finishes, so fast typing no longer piles up background work in the bot."
+}

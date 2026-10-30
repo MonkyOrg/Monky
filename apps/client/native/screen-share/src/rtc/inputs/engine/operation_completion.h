@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine_shared.h"
+#include "engine_operations.h"
 
 #include <map>
 #include <mutex>
@@ -50,7 +51,8 @@ void ExecuteAndCompleteOperation(std::string_view name, std::mutex& mutex,
                                  OperationReservations& reservations,
                                  std::shared_ptr<Cancellation>& active,
                                  std::shared_ptr<Cancellation> cancellation, Actions&& actions) {
-  const bool observes_control = name == "peer.getStats" || name == "sfu.getStats";
+  const auto* operation = FindOperation(name);
+  const bool observes_control = operation && operation->observes_control;
   Json result;
   bool succeeded = false;
   try {

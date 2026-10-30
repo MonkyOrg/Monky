@@ -23,6 +23,15 @@ export function findBlockedMoveTarget(userId: string, channelId: string): Channe
   return serverStore.knownMembers.get(userId)?.isBot && channel.isPrivate ? channel : null;
 }
 
+/** A voice room the member may not enter, explained before anything is asked of the server. */
+export function showVoicePermissionDenied(): void {
+  void showAlert({
+    title: t('main.voicePermissionDeniedTitle'),
+    message: t('main.voicePermissionDeniedMessage'),
+    variant: 'warning',
+  });
+}
+
 /**
  * Warns whoever is moving someone and reports whether the move must be dropped
  * (#390). Without this the request just fails server-side and nothing happens

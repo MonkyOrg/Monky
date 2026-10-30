@@ -11,16 +11,42 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 const shared = require('@monky/shared');
-const qualityLimits = {};
-const limitsSource = path.resolve(__dirname, '..', 'src', 'renderer', 'utils', 'qualityProfileLimits.ts');
-vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(limitsSource, 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-}).outputText}\n})`, { filename: limitsSource })(qualityLimits, require);
-const filename = path.resolve(__dirname, '..', 'src', 'renderer', 'core', 'webrtc', 'NativeScreenController.ts');
-const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-}).outputText;
-const load = vm.runInThisContext(`(function(exports, require, window, document, MediaStream, navigator) { ${compiled}\n})`, { filename });
+const rendererRoot = path.resolve(__dirname, '..', 'src', 'renderer');
+// The controller and its parts under nativeScreen/ run for real; every other renderer module must be modeled.
+const realModules = ['core/webrtc/NativeScreenController', 'core/webrtc/nativeScreen/', 'utils/qualityProfileLimits'];
+const compiledModules = new Map();
+function compileRendererModule(filename) {
+  let run = compiledModules.get(filename);
+  if (!run) {
+    const output = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+      fileName: filename, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    }).outputText;
+    // Timers and crypto stay Node's globals, so mocked timers reach the controller.
+    run = vm.runInThisContext(`(function(exports, require, window, document, MediaStream, navigator) { ${output}\n})`, { filename });
+    compiledModules.set(filename, run);
+  }
+  return run;
+}
+/**
+ * Fresh instances of `entry` (a path under src/renderer) and the real modules it imports. `models` replace
+ * packages by name and renderer modules by their path under src/renderer; every module sees the same browser globals.
+ */
+function loadRenderer(entry, models, { window, document, MediaStream, navigator }) {
+  const modules = new Map();
+  const load = name => {
+    if (Object.hasOwn(models, name)) return models[name];
+    assert.ok(realModules.some(prefix => prefix.endsWith('/') ? name.startsWith(prefix) : name === prefix),
+      `Unmodeled renderer dependency: ${name}`);
+    const loaded = modules.get(name);
+    if (loaded) return loaded.exports;
+    const module = { exports: {} };
+    modules.set(name, module);
+    compileRendererModule(path.join(rendererRoot, ...name.split('/')) + '.ts')(module.exports, request => load(request.startsWith('.')
+      ? path.posix.normalize(path.posix.join(path.posix.dirname(name), request)) : request), window, document, MediaStream, navigator);
+    return module.exports;
+  };
+  return load(entry);
+}
 const managerFilename = path.resolve(__dirname, '..', 'src', 'renderer', 'core', 'WebRtcManager.ts');
 const managerSource = ts.createSourceFile(managerFilename, fs.readFileSync(managerFilename, 'utf8'), ts.ScriptTarget.ES2022, true);
 const managerClass = managerSource.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'WebRtcManager');
@@ -32,9 +58,13 @@ const startCompiled = ts.transpileModule(`class SourceStartCore { ${startMethod.
 exports.SourceStartCore = SourceStartCore;`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
-const loadStart = vm.runInThisContext(
-  `(function(exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream) { ${startCompiled}\n})`,
+const compiledStart = vm.runInThisContext(
+  `(function(exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream, ScreenShareUserError) { ${startCompiled}\n})`,
   { filename: managerFilename });
+/** Stands in for utils/screenShareFailure: the refusals the renderer explains itself keep their text. */
+class ScreenShareUserError extends Error {}
+const loadStart = (exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream) =>
+  compiledStart(exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream, ScreenShareUserError);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function deferred() {
   let resolve, reject;
@@ -169,7 +199,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
   let visibleContext = context;
   const dependencies = {
     '@monky/shared': shared,
-    './BrowserScreenSubscription': { BrowserScreenSubscription: class {
+    'core/webrtc/BrowserScreenSubscription': { BrowserScreenSubscription: class {
       starts = 0;
       closes = 0;
       constructor(options) {
@@ -181,7 +211,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
       async close() { this.closes++; }
       async setMuted() {}
     } },
-    '../EventBus': { appEvents: { on: (event, listener) => {
+    'core/EventBus': { appEvents: { on: (event, listener) => {
       appBus.on(event, listener);
       return () => appBus.removeListener(event, listener);
     }, emit: (...value) => {
@@ -189,11 +219,11 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
       appBus.emit(...value);
       if (value[0] === 'local.screen_ended_externally') captures.delete(value[1]);
     } } },
-    '../sessionRouting': { emitOutsideRouting: run => run() },
-    '../ClientLogService': { clientLog: {
+    'core/sessionRouting': { emitOutsideRouting: run => run() },
+    'core/ClientLogService': { clientLog: {
       error: (...value) => errors.push(value), warn: (...value) => errors.push(value), info: () => {},
     } },
-    '../VideoService': { videoService: {
+    'core/VideoService': { videoService: {
       getNativeScreenCapture: id => captures.get(id) ?? null,
       getNativeScreenCaptures: () => [...captures.values()],
       getScreenStream: id => captureStreams.get(id) ?? null,
@@ -202,27 +232,25 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
         captures.set(capture.source.shareId, capture);
       },
     } },
-    '../../stores/settingsStore': { settingsStore: {
+    'stores/settingsStore': { settingsStore: {
       getScreenAudioVolume: () => volume, screenSharePreviewPauseWhenUnfocused: true,
       getScreenShareReceiver: () => receiver,
       screenEncodingStrategy: 'automatic', screenEncodingMode: 'hardware', preferredScreenCodec: 'h264',
     } },
-    '../../stores/voiceStore': { voiceStore: {
+    'stores/voiceStore': { voiceStore: {
       getScreenWatchers: () => watching ? [['publisher', [remote.shareId]]] : [],
       isWatchingScreen: (sessionId, shareId) => watching && sessionId === 'publisher' && shareId === remote.shareId,
       getScreenQuality: () => quality, getEffectiveDeafened: () => deafened, isScreenAudioMuted: () => muted,
     } },
-    '../../utils/audioPreferences': { resolveAudioOutput: () => 'default' },
-    '../../utils/qualityProfileLimits': qualityLimits,
-    '../../i18n': { t: key => key },
-    '../screenEncoding': { acceptScreenEncoding() {} },
-    '../../views/CopyToast': { showInfoToast: message => { toasts.push(message); } },
+    'utils/audioPreferences': { resolveAudioOutput: () => 'default' },
+    i18n: { t: key => key },
+    'core/screenEncoding': { acceptScreenEncoding() {} },
+    'views/CopyToast': { showInfoToast: message => { toasts.push(message); } },
   };
-  const exports = {};
-  load(exports, name => {
-    assert.ok(Object.hasOwn(dependencies, name), `Unmodeled renderer dependency: ${name}`);
-    return dependencies[name];
-  }, { api }, { createElement: () => new Video(), body: { append: element => elements.set(element.id, element) } }, Stream, navigator);
+  const exports = loadRenderer('core/webrtc/NativeScreenController', dependencies, {
+    window: { api }, document: { createElement: () => new Video(), body: { append: element => elements.set(element.id, element) } },
+    MediaStream: Stream, navigator,
+  });
   const controller = new exports.NativeScreenController(() => visibleContext, async stream => { retired.push(stream); });
   const attachRemote = () => participants.set('publisher', { user: { sessionId: 'publisher', clientId: 'remote-client' },
     voiceState: { channelId: 'room', nativeScreenShares: [remote] }, remoteScreenStreams: new Map() });
@@ -246,7 +274,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     toasts,
     outputs: list => { outputDevices = list; },
     devicesChanged: () => { for (const listener of deviceListeners) listener(); },
-    settings: dependencies['../../stores/settingsStore'].settingsStore,
+    settings: dependencies['stores/settingsStore'].settingsStore,
     receiver: value => { receiver = value; },
     registerCapture: (stream, capture) => { captures.set(stream.id, capture); captureStreams.set(stream.id, stream); },
     mainListeners, networkListeners, context, get remote() { return remote; }, nativeScreenProfile: exports.nativeScreenProfile,
@@ -254,7 +282,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     emit: emitForCall, announceCount: () => announces,
     retireDiagnostics: () => { diagnosticsRetired = true; },
     previewPreference: value => {
-      dependencies['../../stores/settingsStore'].settingsStore.screenSharePreviewPauseWhenUnfocused = value;
+      dependencies['stores/settingsStore'].settingsStore.screenSharePreviewPauseWhenUnfocused = value;
       appBus.emit('settings.updated');
     },
     hook: callback => { commandHook = callback; }, attachHook: callback => { attachHook = callback; },
@@ -386,7 +414,8 @@ for (const scenario of [
     const id = scenario.kind === 'monitor' ? `native-monitor:${'a'.repeat(64)}` : `window:123:${'b'.repeat(64)}`;
     const starting = exports.SourceStartCore.prototype.startNativeScreenShare.call(owner, id, false, () => true, scenario.kind);
     if (!scenario.allowed) {
-      await assert.rejects(starting, /screenShare.nativeUnavailable/);
+      await assert.rejects(starting, error => error instanceof ScreenShareUserError
+        && /screenShare.nativeUnavailable/.test(error.message));
       assert.equal(streams, 0);
       assert.equal(f.commands.some(command => command.action === 'source-add' || command.action === 'join'), false);
       assert.equal(f.captures.size, 0);

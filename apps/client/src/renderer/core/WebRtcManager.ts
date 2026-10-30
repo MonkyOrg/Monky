@@ -31,6 +31,7 @@ import { P2pMeshTransport } from './webrtc/p2p/P2pMeshTransport';
 import { SfuCallSession } from './webrtc/sfu/SfuCallSession';
 import type { VoiceTransport } from './webrtc/VoiceTransport';
 import { t } from '../i18n';
+import { ScreenShareUserError } from '../utils/screenShareFailure';
 import {
   NativeScreenController, nativeScreenProfile, type NativeScreenCallContext, type NativeScreenWatchState,
   type ScreenVideoDiagnostics, type NativeScreenSourceWarning,
@@ -248,15 +249,15 @@ export class WebRtcManager {
     audioReplacement?: { shareIds: readonly string[]; retirePrevious: () => Promise<void> },
     audience?: NativeScreenSource['audience'],
   ): Promise<MediaStream> {
-    if (this.voiceReconnectSuspended) throw new Error(t('screenCodec.reconnecting'));
+    if (this.voiceReconnectSuspended) throw new ScreenShareUserError(t('screenCodec.reconnecting'));
     const profile = videoService.getProfile();
     const video = nativeScreenProfile(profile);
     const capabilities = await this.nativeScreens.capabilities();
     if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
     if (!video || (!capabilities.capture && !capabilities.requiresSelectionProbe) || (audio && !capabilities.captureAudio))
-      throw new Error(t('screenShare.nativeUnavailable'));
+      throw new ScreenShareUserError(t('screenShare.nativeUnavailable'));
     if (!(capabilities.captureKinds ?? (capabilities.capture ? ['window'] : [])).includes(captureKind))
-      throw new Error(t('screenShare.nativeUnavailable'));
+      throw new ScreenShareUserError(t('screenShare.nativeUnavailable'));
     const stream = new MediaStream();
     try {
       const source = await this.nativeScreens.addSource({

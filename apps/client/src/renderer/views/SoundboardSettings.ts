@@ -3,6 +3,7 @@ import { soundboardService } from '../core/SoundboardService';
 import { t } from '../i18n';
 import { settingsStore } from '../stores/settingsStore';
 import { escapeHtml } from '../utils/html';
+import { revealWhenUnfolded } from '../utils/surfaceVisibility';
 import { bindSoundboardLimiterControls, renderSoundboardLimiterControls } from './SoundboardLimiterControls';
 
 /**
@@ -69,7 +70,10 @@ export function bindSoundboardSettings(root: HTMLElement): SoundboardSettingsBin
     section.inert = !expanded;
     section.setAttribute('aria-hidden', String(!expanded));
     section.classList.toggle('is-expanded', expanded);
-    if (expanded) section.querySelector<HTMLInputElement>('[data-limiter-toggle]')?.focus({ preventScroll: true });
+    if (expanded) {
+      section.querySelector<HTMLInputElement>('[data-limiter-toggle]')?.focus({ preventScroll: true });
+      revealWhenUnfolded(section);
+    }
   };
   const toggle = () => setExpanded(!expanded);
   const collapse = (): boolean => {

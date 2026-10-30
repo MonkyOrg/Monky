@@ -74,7 +74,7 @@ export async function runQa(options, hooks = {}) {
   if (!scenarios.includes(options.scenario)) throw new Error('Unsupported QA scenario.');
   if (options.smoke && options.realMedia) throw new Error('Real capture devices require interactive QA.');
   if (options.bot === 'production' ? !options.botRoot : options.botRoot) throw new Error('Production QA requires its explicit bot checkout; no fixture will be substituted.');
-  const { developmentQaConfigSchema, developmentQaReportSchema, botManifestSchema, PROTOCOL_VERSION } = require('../packages/shared/dist/index.js');
+  const { developmentQaConfigSchema, developmentQaReportSchema, developmentQaRunName, botManifestSchema, PROTOCOL_VERSION } = require('../packages/shared/dist/index.js');
   for (const filename of ['apps/client/dist/index.html', 'apps/client/dist-electron/main/main.js', 'apps/server/dist/server.js']) {
     await fs.access(path.join(repoRoot, ...filename.split('/'))).catch(() => { throw new Error(`Missing QA build: ${filename}. Run npm run qa (which builds first).`); });
   }
@@ -91,8 +91,14 @@ export async function runQa(options, hooks = {}) {
   const runs = path.join(repoRoot, '.qa', 'runs');
   await fs.mkdir(runs, { recursive: true });
   if (await fs.realpath(runs) !== path.join(await fs.realpath(repoRoot), '.qa', 'runs')) throw new Error('QA run directories must not redirect outside this checkout.');
-  const root = path.join(runs, `${options.scenario}-${runId}`);
+  const root = path.join(runs, developmentQaRunName(runId));
   await fs.mkdir(root, { mode: 0o700 });
+  // The native screen capture refuses paths over 240 characters (contract.h, SafeAbsolutePath), and its
+  // longest one adds 126 to the profile: native-screen-capture\hooks-<digest>\data\obs-plugins\win-capture\...
+  const profile = path.join(root, 'client');
+  if (process.platform === 'win32' && profile.length > 114) {
+    console.warn(`QA profile path has ${profile.length} characters (limit 114): screen sharing will fail with "Unsafe absolute path". Use a checkout with a shorter path.`);
+  }
   const children = [];
   let failureReject;
   const failure = new Promise((_, reject) => { failureReject = reject; });
@@ -169,9 +175,9 @@ export async function runQa(options, hooks = {}) {
     await fs.writeFile(configFile, JSON.stringify({ ownerPid: process.pid, config }), { flag: 'wx', mode: 0o600 });
     const reports = [];
     const client = spawn('QA client', require('electron'), [
-      path.join(repoRoot, 'apps', 'client'), `--user-data-dir=${path.join(root, 'client')}`,
+      path.join(repoRoot, 'apps', 'client'), `--user-data-dir=${profile}`,
     ], path.join(repoRoot, 'apps', 'client'), isolatedEnvironment(
-      path.join(root, 'client'), { MONKY_QA_CONFIG: configFile }, { useSystemKeychain: true },
+      profile, { MONKY_QA_CONFIG: configFile }, { useSystemKeychain: true },
     ), message => {
       if (message.type !== 'qa-report') return;
       const report = developmentQaReportSchema.parse(message.report);

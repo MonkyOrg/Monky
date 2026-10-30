@@ -49,6 +49,7 @@ export * from './developmentQa.js';
 export * from './bugReport.js';
 export * from './nativeAudioIpc.js';
 export * from './screenSharing.js';
+export * from './screenShareFailures.js';
 export * from './resourceAudience.js';
 export * from './nativeScreenIpc.js';
 export * from './shortcuts.js';

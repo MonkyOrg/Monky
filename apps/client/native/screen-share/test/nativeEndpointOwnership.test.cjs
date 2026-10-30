@@ -30,13 +30,13 @@ function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = f
       assert.fail(`An unwatched endpoint cannot allocate transport resources: ${operation}`);
     },
     submitEncodedFrame() { assert.fail('A local-only preview cannot submit network media.'); },
-    cancel() {}, submitFrame() {}, releaseFrame() {},
+    cancel() {}, releaseFrame() {},
     respond() { assert.fail('An unwatched endpoint cannot acknowledge transport creation.'); },
     close() { closeCalls++; return closing; },
   };
   for (const method of ['grantAudioCredits', 'audioClockProbe', 'calibrateAudioClock', 'setAudioOutputFeedback'])
     engine[method] = () => assert.fail(`An unwatched preview cannot open audio output: ${method}`);
-  if (incomplete) delete engine.submitFrame;
+  if (incomplete) delete engine.releaseFrame;
   const frame = { isDestroyed: () => false, postMessage() {}, url: 'file:///C:/modeled/index.html' };
   const webContents = Object.assign(new EventEmitter(), { isDestroyed: () => false, mainFrame: frame });
   const endpoint = new NativeScreenEndpoint({

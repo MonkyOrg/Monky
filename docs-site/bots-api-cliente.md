@@ -20,7 +20,7 @@ export type BotCapability = "commands" | "read_messages" | "send_messages" | "pu
 
 ## `BotChoice` {#botchoice}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L241)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L140)
 
 ```ts
 export interface BotChoice {
@@ -34,7 +34,7 @@ export interface BotChoice {
 
 ## `BotClient` {#botclient}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L395)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L122)
 
 ```ts
 export class BotClient extends EventEmitter {
@@ -93,7 +93,7 @@ export class BotClient extends EventEmitter {
 
 ## `BotManifest` {#botmanifest}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1410)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1443)
 
 ```ts
 export interface BotManifest {
@@ -120,7 +120,7 @@ export interface BotManifest {
 
 ## `BotOptions` {#botoptions}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L134)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L33)
 
 ```ts
 export interface BotOptions {
@@ -168,7 +168,7 @@ export class BotRequestError extends Error {
 
 ## `BotSelectorResponseContext` {#botselectorresponsecontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L251)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L150)
 
 ```ts
 export interface BotSelectorResponseContext {
@@ -179,7 +179,7 @@ export interface BotSelectorResponseContext {
 
 ## `BotSelectorResponseEvent` {#botselectorresponseevent}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L249)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L148)
 
 ```ts
 export type BotSelectorResponseEvent = {
@@ -298,7 +298,7 @@ export interface BotStoredObject {
 
 ## `CommandAudioPreviewContext` {#commandaudiopreviewcontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L183)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L82)
 
 ```ts
 export interface CommandAudioPreviewContext {
@@ -326,7 +326,7 @@ export interface CommandAudioPreviewContext {
 
 ## `CommandAudioPreviewData` {#commandaudiopreviewdata}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L196)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L95)
 
 ```ts
 export interface CommandAudioPreviewData {
@@ -337,7 +337,7 @@ export interface CommandAudioPreviewData {
 
 ## `CommandAudioPreviewResponse` {#commandaudiopreviewresponse}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L201)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L100)
 
 ```ts
 export type CommandAudioPreviewResponse = {
@@ -351,7 +351,7 @@ export type CommandAudioPreviewResponse = {
 
 ## `CommandAutocompleteContext` {#commandautocompletecontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L167)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L66)
 
 ```ts
 export interface CommandAutocompleteContext {
@@ -382,7 +382,7 @@ export interface CommandAutocompleteContext {
 
 ## `CommandContext` {#commandcontext}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L203)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L102)
 
 ```ts
 export interface CommandContext {
@@ -426,7 +426,7 @@ export interface CommandContext {
 
 ## `CommandDefinition` {#commanddefinition}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L150)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L49)
 
 ```ts
 export interface CommandDefinition {
@@ -445,7 +445,7 @@ export interface CommandDefinition {
 
 ## `ServeOptions` {#serveoptions}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/index.ts#L2072)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/client/types.ts#L155)
 
 ```ts
 export interface ServeOptions {

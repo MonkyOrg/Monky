@@ -1,6 +1,7 @@
 import { utilityProcess, type BrowserWindow, type UtilityProcess } from 'electron';
 import path from 'path';
 import { globalInputHook as localInputHook } from './globalInputHook';
+import { sendEvent, windowContents } from './ipc/registry';
 import type { ShortcutCommand, ShortcutConfiguration, ShortcutOperation, ShortcutWorkerMessage, ShortcutWorkerRequest } from './shortcutWorkerProtocol';
 
 const RESPONSE_TIMEOUT_MS = 10_000;
@@ -119,7 +120,7 @@ export class GlobalInputHookProcess {
     }
     this.pending.clear();
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('ptt:state-changed', false);
+      sendEvent(windowContents(this.mainWindow), 'ptt:state-changed', false);
       if (this.retained) {
         const delay = Math.min(MAX_RESTART_DELAY_MS, RESTART_DELAY_MS * 2 ** (this.consecutiveCrashes - 1));
         this.restartTimer = setTimeout(() => {

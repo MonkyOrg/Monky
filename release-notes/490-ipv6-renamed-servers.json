@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Servidores com endereço IPv6 funcionam como os demais, e o nome de um servidor renomeado aparece certo no rail e na Home, mesmo em segundo plano.",
+  "en": "Servers with IPv6 addresses work like any other, and a renamed server shows its new name in the rail and on Home, even in the background."
+}

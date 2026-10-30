@@ -615,7 +615,7 @@ struct ConsumerEntry final : public mediasoupclient::Consumer::Listener {
   ~ConsumerEntry() override { try { DetachSink(); } catch (...) { CallbackFailure(); } }
 };
 
-class NativeSfuController final : public SfuController {
+class NativeSfuController final : public MediaController {
  public:
   explicit NativeSfuController(Host& host) : host_(host) {
     PrivateRtcLogging();
@@ -645,13 +645,6 @@ class NativeSfuController final : public SfuController {
       if (consumer.track) audio::GateTrack(host_, *consumer.track, consumer.enabled ? volume : 0);
       consumer.volume = volume;
       return {{"consumerId", target}, {"volume", volume}};
-    }
-    if (operation == "resource.close") {
-      Keys(data, {});
-      if (!Contains(target))
-        throw Error("ERR_RTC_NOT_FOUND", "SFU resource not found", MONKY_ENGINE_NOT_FOUND);
-      Close(target);
-      return Json::object();
     }
     if (operation == "sfu.setProducerEnabled") {
       Keys(data, {"enabled"});
@@ -941,9 +934,8 @@ class NativeSfuController final : public SfuController {
            {"enabled", false}, {"purpose", "screen"}}, CleanupCancellation(host_, target)));
     } catch (...) {
       try {
-        host_.Emit("error", target, {{"code", "ERR_RTC_SERVER_CLEANUP"},
-            {"message", "Server did not acknowledge pausing an unpublished producer"},
-            {"status", MONKY_ENGINE_FAILURE}, {"hresult", 0}, {"terminal", false}});
+        host_.Emit("error", target, ErrorEvent(Error("ERR_RTC_SERVER_CLEANUP",
+            "Server did not acknowledge pausing an unpublished producer"), false));
       } catch (...) { CallbackFailure(); }
     }
   }
@@ -1244,9 +1236,8 @@ class NativeSfuController final : public SfuController {
             {{"transportId", server_transport_id}, {"consumerId", server_id},
              {"enabled", false}, {"purpose", "screen"}}, CleanupCancellation(host_, target)));
       } catch (...) {
-        host_.Emit("error", target, {{"code", "ERR_RTC_SERVER_CLEANUP"},
-            {"message", "Server did not acknowledge pausing an unpublished consumer"},
-            {"status", MONKY_ENGINE_FAILURE}, {"hresult", 0}, {"terminal", false}});
+        host_.Emit("error", target, ErrorEvent(Error("ERR_RTC_SERVER_CLEANUP",
+            "Server did not acknowledge pausing an unpublished consumer"), false));
       }
       cancellation->Check();
       if (call.listener_failure) std::rethrow_exception(call.listener_failure);
@@ -1263,7 +1254,7 @@ class NativeSfuController final : public SfuController {
 
 }  // namespace
 
-std::unique_ptr<SfuController> CreateSfuController(Host& host) {
+std::unique_ptr<MediaController> CreateSfuController(Host& host) {
   return std::make_unique<NativeSfuController>(host);
 }
 

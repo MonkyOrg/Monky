@@ -24,4 +24,8 @@ class ConsoleControl final {
   std::unique_ptr<Impl> impl_;
 };
 
+// Whether stdout is the console (a terminal) the person sees, rather than a
+// pipe or a file another program reads. Ask before the console can go away.
+bool standardOutputIsConsole();
+
 }  // namespace monky::light

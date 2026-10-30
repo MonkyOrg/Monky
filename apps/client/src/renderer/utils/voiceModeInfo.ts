@@ -1,5 +1,18 @@
-import { CapacityEstimator, CapacityEstimate, HostSpecs } from '@monky/shared';
+import { CapacityEstimator, CapacityEstimate, HostSpecs, type VoiceMode } from '@monky/shared';
 import { t } from '../i18n';
+import { renderChoiceCards } from './formControls';
+import type { SafeHtml } from './html';
+
+/** The P2P or SFU choice: the same cards when a server is created and in its settings. */
+export function renderVoiceModeCards(id: string, selected: VoiceMode): SafeHtml {
+  return renderChoiceCards({
+    id, label: t('serverSettings.voiceModeLabel'), attribute: 'data-mode', selected,
+    choices: [
+      { value: 'p2p', icon: 'wifi_tethering', title: t('serverSettings.voiceModeP2pTitle'), description: t('serverSettings.voiceModeP2pDesc') },
+      { value: 'sfu', icon: 'hub', title: t('serverSettings.voiceModeSfuTitle'), description: t('serverSettings.voiceModeSfuDesc') },
+    ],
+  });
+}
 
 export function renderWhatPassesWhereTableHtml(): string {
   return `

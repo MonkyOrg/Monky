@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Dá para compartilhar janelas minimizadas, com títulos muito longos ou com um emoji cortado no título (como abas do navegador), e as miniaturas de monitor no seletor gastam menos CPU.",
+  "en": "You can share minimized windows, windows with very long titles or with a cut-off emoji in the title (like browser tabs), and monitor thumbnails in the picker use less CPU."
+}

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Ao anexar vários arquivos, todas as recusas aparecem num aviso só, e o arquivo grande demais fica marcado na bandeja até ser removido.",
+  "en": "When attaching several files, all refusals show in a single notice, and a file that is too large stays marked in the tray until removed."
+}

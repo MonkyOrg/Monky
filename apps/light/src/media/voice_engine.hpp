@@ -33,6 +33,9 @@ struct AudioPolicy {
 struct Participant {
   std::string user_id;
   std::string session_id;
+  // The room denies them its Speak permission: their microphone is not played,
+  // whatever their client still sends (P2P has no server to enforce it).
+  bool suppressed = false;
 };
 
 struct IceServer {

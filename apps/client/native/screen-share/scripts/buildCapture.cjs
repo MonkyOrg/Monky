@@ -9,6 +9,8 @@ const windowsToolchain = require('./windowsToolchain.cjs');
 
 const vendor = path.join(root, 'src', 'vendor', 'obs');
 const source = path.join(root, 'src', 'capture');
+// Windows helpers shared with the thumbnail host.
+const shared = path.join(root, 'src', 'win');
 const inputs = require(path.join(vendor, 'sources.json'));
 const runtimeInputs = require(path.join(vendor, 'runtime-inputs.json'));
 const additionalInputs = require(path.join(source, 'runtime-additions.json'));
@@ -48,6 +50,7 @@ function build(config) {
   const stock = fs.realpathSync(config.stock), dependencies = fs.realpathSync(config.dependencies);
   const stockPath = relative => path.join(stock, ...relative.split('\\'));
   const sourceFiles = regularFiles(source).map(relative => ({ path: relative, ...fingerprint(path.join(source, relative)) }));
+  const sharedSourceFiles = regularFiles(shared).map(relative => ({ path: relative, ...fingerprint(path.join(shared, relative)) }));
   for (const file of inputs.files) verify(path.join(vendor, file.path), file);
   for (const file of inputs.dependencies.files) verify(path.join(dependencies, file.path), file);
   assert.equal(additionalInputs.obsVersion, inputs.version);
@@ -282,6 +285,7 @@ function build(config) {
     for (const file of inputs.files) verify(path.join(vendor, file.path), file);
     for (const file of runtime) verify(runtimeSource(file.path), file);
     for (const file of sourceFiles) verify(path.join(source, file.path), file);
+    for (const file of sharedSourceFiles) verify(path.join(shared, file.path), file);
     const bin = config.output ?? path.join(root, 'bin', 'win32-x64');
     for (const file of runtime) write(path.join(bin, 'obs', ...file.path.split('\\')), fs.readFileSync(runtimeSource(file.path)));
     for (const probe of ['obs-amf-test.exe', 'obs-nvenc-test.exe'])
@@ -298,7 +302,7 @@ function build(config) {
     }
     const report = {
       schemaVersion: 5, obsVersion: inputs.version, obsRevision: inputs.revision, runtime, av1Runtime,
-      sourceFiles,
+      sourceFiles, sharedSourceFiles,
       sourceBindingRecipe: fingerprint(path.join(__dirname, 'captureSourceBindings.cjs')),
       crt: { version: crt.version, files: redistributables },
       host: { path: 'monky-screen-capture.exe', ...fingerprint(executable) },

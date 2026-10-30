@@ -1,4 +1,4 @@
-import { BrowserWindow, screen } from 'electron';
+import { BrowserWindow, screen, type WebContents } from 'electron';
 import { setWindowResizeAspect } from '@monky/screen-audio';
 import path from 'path';
 import {
@@ -14,6 +14,7 @@ import type {
   OverlayPosition,
   OverlaySyncState,
 } from '@monky/shared';
+import { sendEvent, windowContents } from './ipc/registry';
 
 const DEFAULT_OVERLAY_WIDTH = OVERLAY_DEFAULT_WIDTH;
 const DEFAULT_OVERLAY_HEIGHT = OVERLAY_DEFAULT_HEIGHT;
@@ -40,6 +41,11 @@ export class OverlayManager {
 
   public isOpen(): boolean {
     return !!this.overlayWindow && !this.overlayWindow.isDestroyed();
+  }
+
+  /** The overlay's page while it is open: the only one its IPC policy admits besides the main window. */
+  public contents(): WebContents | null {
+    return windowContents(this.overlayWindow);
   }
 
   public isScreenShareSource(sourceId: string): boolean {
@@ -216,7 +222,7 @@ export class OverlayManager {
         point.y < b.y + b.height;
       if (inside || inside !== this.isHovered) {
         this.isHovered = inside;
-        this.overlayWindow.webContents.send('overlay:hover-changed', inside, { x: point.x - b.x, y: point.y - b.y });
+        sendEvent(windowContents(this.overlayWindow), 'overlay:hover-changed', inside, { x: point.x - b.x, y: point.y - b.y });
       }
     }, 120);
   }
@@ -232,7 +238,7 @@ export class OverlayManager {
   private setResizing(resizing: boolean): void {
     if (this.isResizing === resizing) return;
     this.isResizing = resizing;
-    this.overlayWindow?.webContents.send('overlay:resize-state-changed', resizing);
+    sendEvent(windowContents(this.overlayWindow), 'overlay:resize-state-changed', resizing);
   }
 
   public setConfig(configPartial: Partial<OverlayConfig>): void {
@@ -333,9 +339,7 @@ export class OverlayManager {
     const payload = overlaySignalPayloadSchema.safeParse(input);
     if (!payload.success) throw new Error('Invalid overlay signal.');
     const window = payload.data.target === 'overlay' ? this.overlayWindow : this.mainWindow;
-    if (window && !window.isDestroyed()) {
-      window.webContents.send('overlay:signal-received', payload.data.signal);
-    }
+    sendEvent(windowContents(window), 'overlay:signal-received', payload.data.signal);
   }
 
   public sendSyncState(state: OverlaySyncState): void {
@@ -344,23 +348,17 @@ export class OverlayManager {
         this.resizeAspect = undefined;
         this.updateResizeAspect();
       }
-      this.overlayWindow.webContents.send('overlay:sync-state-received', state);
+      sendEvent(windowContents(this.overlayWindow), 'overlay:sync-state-received', state);
     }
   }
 
   private notifyStateChanged(isOpen: boolean): void {
-    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('overlay:state-changed', isOpen);
-    }
+    sendEvent(windowContents(this.mainWindow), 'overlay:state-changed', isOpen);
   }
 
   private notifyConfigUpdated(config: OverlayConfig): void {
-    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('overlay:config-updated', config);
-    }
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      this.overlayWindow.webContents.send('overlay:config-updated', config);
-    }
+    sendEvent(windowContents(this.mainWindow), 'overlay:config-updated', config);
+    sendEvent(windowContents(this.overlayWindow), 'overlay:config-updated', config);
   }
 
   private getInitialBounds(config: OverlayConfig): OverlayBounds {

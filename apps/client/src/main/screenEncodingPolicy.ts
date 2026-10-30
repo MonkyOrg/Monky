@@ -1,6 +1,6 @@
-import type {
-  ScreenCodec, ScreenCodecPreference, ScreenEncoder, ScreenEncodingAvailability, ScreenEncodingMode, ScreenEncodingSelection,
-  ScreenEncodingStrategy,
+import {
+  nativeErrorCodes, type ScreenCodec, type ScreenCodecPreference, type ScreenEncoder, type ScreenEncodingAvailability,
+  type ScreenEncodingMode, type ScreenEncodingSelection, type ScreenEncodingStrategy,
 } from '@monky/shared';
 
 const hardwareEncoders: Readonly<Record<ScreenCodec, readonly ScreenEncoder[]>> = {
@@ -19,11 +19,19 @@ export function isUnsupportedScreenEncoder(error: unknown): boolean {
   ].includes(error.code);
 }
 
+/**
+ * Why a hardware candidate was left behind: another candidate is tried next, the encoder is unsupported (software
+ * may follow), or verification failed and explicit Software continues without hardware.
+ */
+export type HardwareRefusal = 'next-candidate' | 'unsupported' | 'failed';
+
+/** Every refused hardware candidate is reported once, so Main logs why a share fell back to software. */
 export async function selectScreenEncoding(
   strategy: ScreenEncodingStrategy, mode: ScreenEncodingMode, preference: ScreenCodecPreference, compiled: readonly ScreenEncoder[],
   probe: (selection: ScreenEncodingSelection) => Promise<void>, inspectHardware = true,
-  onHardwareProbeFailure: (selection: ScreenEncodingSelection, error: Error) => void = (selection) => {
-    console.warn('[ScreenShare] Hardware encoder probe failed; trying another hardware candidate:', selection.encoder);
+  onHardwareProbeFailure: (selection: ScreenEncodingSelection, error: unknown, outcome: HardwareRefusal) => void =
+  (selection, _error, outcome) => {
+    console.warn(`[ScreenShare] Hardware encoder probe failed (${outcome}):`, selection.encoder);
   },
 ): Promise<ScreenEncodingAvailability> {
   if (strategy === 'manual' && preference === 'auto') throw new Error('Manual encoding requires an exact codec.');
@@ -32,6 +40,7 @@ export async function selectScreenEncoding(
   let hardwareError = false;
   let hardwareFailure: Error | null = null;
   let reason = 'No compatible hardware encoder is compiled into this runtime.';
+  let reasonCodes: string[] = [];
   if (mode === 'hardware' || inspectHardware) {
     discovery: for (const codec of preference === 'auto' ? ['av1', 'h264'] as const : [preference]) {
       for (const encoder of hardwareEncoders[codec]) {
@@ -47,24 +56,28 @@ export async function selectScreenEncoding(
               ].includes(String(error.code))) {
               // The source-free probe returns these only after proving retirement.
               // A failed AV1 candidate must not prevent a real H264 hardware probe.
-              onHardwareProbeFailure(candidate, error);
+              onHardwareProbeFailure(candidate, error, 'next-candidate');
               hardwareFailure ??= error;
               continue;
             }
             if (mode !== 'software' || error instanceof AggregateError
               || (error instanceof Error && error.name === 'AbortError')) throw error;
+            onHardwareProbeFailure(candidate, error, 'failed');
             hardwareError = true;
             reason = error instanceof Error ? error.message.slice(0, 1024) : 'Hardware verification failed.';
+            reasonCodes = nativeErrorCodes(error);
             break discovery;
           }
+          onHardwareProbeFailure(candidate, error, 'unsupported');
           reason = error instanceof Error ? error.message.slice(0, 1024) : 'Hardware encoder is unsupported.';
+          reasonCodes = nativeErrorCodes(error);
         }
       }
       if (hardware) break;
     }
   }
   const hardwareAvailability = { available: !!hardware, reason: hardware ? null : reason,
-    ...(hardwareError ? { error: true } : {}) };
+    ...(!hardware && reasonCodes.length ? { codes: reasonCodes } : {}), ...(hardwareError ? { error: true } : {}) };
   if (mode === 'hardware' && hardware)
     return { selection: hardware, hardware: { available: true, reason: null }, fallback: false };
   if (hardwareFailure) throw hardwareFailure;

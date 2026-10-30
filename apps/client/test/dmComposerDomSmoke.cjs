@@ -411,6 +411,7 @@ async function installFixture() {
     window.getSelection().addRange(range);
   };
   const toast = () => document.querySelector('.chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-label')?.textContent ?? null;
+  const alertToast = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
   const waitForToast = async text => {
     await until(() => toast() === text, `Expected the "${text}" confirmation, got ${JSON.stringify(toast())}`);
     return true;
@@ -423,9 +424,9 @@ async function installFixture() {
     await settle();
   };
   const unstageAll = async () => {
-    const count = document.querySelectorAll('#chat-attachment-tray [data-dm-unstage]').length;
+    const count = document.querySelectorAll('#chat-attachment-tray [data-tray-remove]').length;
     // Each removal redraws the tray, so the next button is looked up again.
-    for (let index = 0; index < count; index++) find('#chat-attachment-tray [data-dm-unstage]').click();
+    for (let index = 0; index < count; index++) find('#chat-attachment-tray [data-tray-remove]').click();
     await new Promise(resolve => setTimeout(resolve, 400));
   };
 
@@ -561,7 +562,7 @@ async function installFixture() {
       const formatted = await last();
       expect(formatted.kind === 'formatted' && formatted.text === expected.text && formatted.html.includes('data-monky-clipboard'),
         'Copy with formatting writes rich text that pastes back as Markdown');
-      find('.chat-message-row[data-message-id="mine"] [data-dm-action="copy"]').click();
+      find('.chat-message-row[data-message-id="mine"] [data-message-action="copy"]').click();
       expect(await waitForToast('Copiado!') && (await last()).text === 'Mensagem minha', 'The hover copy button copies formatted text with feedback');
       expect(keydown(focusRow('peer-rich'), 'c', { ctrlKey: true }), 'Ctrl+C on a focused message is handled');
       await settle();
@@ -579,12 +580,14 @@ async function installFixture() {
       await clickMenuItem('Copiar sem formatação');
       expect((await last()).text === 'Texto editado', 'The edited marker of grouped messages is not copied');
       writeMode = 'reject';
-      find('.chat-message-row[data-message-id="mine"] [data-dm-action="copy"]').click();
-      await until(() => dialog(), 'A failed copy did not explain itself');
-      expect(dialog().querySelector('.dialog-message').textContent === 'Não foi possível copiar a mensagem.' && toast() === null,
-        'A clipboard failure is reported instead of being swallowed');
+      find('.chat-message-row[data-message-id="mine"] [data-message-action="copy"]').click();
+      await until(() => alertToast(), 'A failed copy did not explain itself');
+      expect(alertToast().querySelector('.chat-copy-toast-label').textContent === 'Não foi possível copiar a mensagem.' && !dialog()
+        && !document.querySelector('.chat-copy-toast:not(.chat-copy-toast--danger):not([data-ui-closing])'),
+        'A clipboard failure is reported in the alert toast instead of being swallowed or confirmed');
       writeMode = 'resolve';
-      await dismissAlert();
+      alertToast().querySelector('.chat-copy-toast-close').click();
+      await settle();
       find('.chat-message-row[data-message-id="mine-code"] .md-code-copy').click();
       await until(() => find('.chat-message-row[data-message-id="mine-code"] .md-code-copy-label').textContent === 'Copiado!',
         'The code block copy button did not confirm the copy');
@@ -621,7 +624,7 @@ async function installFixture() {
       'While editing, Send becomes Save and attachments step aside');
       expect(keydown(content(), 'Escape') && input().value === 'rascunho' && send().textContent.trim().endsWith('Enviar')
         && find('#chat-edit-composer').hidden, 'Escape cancels the edit and restores the unsent draft');
-      find('.chat-message-row[data-message-id="mine"] [data-dm-action="edit"]').click();
+      find('.chat-message-row[data-message-id="mine"] [data-message-action="edit"]').click();
       await settle();
       input().value = 'Mensagem corrigida';
       expect(keydown(content(), 'Enter'), 'Enter saves the edit');
@@ -653,6 +656,33 @@ async function installFixture() {
       expect(!chat.classList.contains('chat-drag-over') && find('#chat-attachment-tray').textContent.includes('arrastado.txt'),
         'Dropping stages the files and hides the overlay');
       await unstageAll();
+      // Files over the friend's limit stay marked in the tray, one alert names them all, and they never go (#490).
+      const friend = dmStore.peer(peer);
+      const savedLimit = friend.maxFileBytes;
+      friend.maxFileBytes = 4;
+      const batch = new DataTransfer();
+      for (const [name, text] of [['grande-1.txt', 'grande demais'], ['grande-2.txt', 'também grande'], ['ok.txt', 'abc']]) {
+        batch.items.add(new File([text], name, { type: 'text/plain' }));
+      }
+      await resetComposer('Com anexos');
+      expect(paste(content(), batch), 'A batch of files pasted into the DM is attached');
+      await settle();
+      const alertLabel = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-label')?.textContent;
+      const names = new Intl.ListFormat(language.getLanguage(), { type: 'conjunction' }).format(['"grande-1.txt"', '"grande-2.txt"']);
+      expect(alertLabel === language.t('dm.errorFilesTooLarge', { nickname: 'Amigo', size: '4 B', names }),
+        `Every file over the friend's limit is named in one alert: ${alertLabel}`);
+      const staged = [...document.querySelectorAll('#chat-attachment-tray .tray-item')]
+        .map(item => [item.title, item.classList.contains('is-error')]);
+      expect(JSON.stringify(staged) === JSON.stringify([['grande-1.txt', true], ['grande-2.txt', true], ['ok.txt', false]]),
+        `Files over the limit stay marked in the tray: ${JSON.stringify(staged)}`);
+      const sends = calls.send.length;
+      keydown(content(), 'Enter');
+      await until(() => calls.send.length === sends + 1 && input().value === '', 'The message with attachments was not sent');
+      expect(JSON.stringify(calls.send.at(-1).files.map(file => file.name)) === JSON.stringify(['ok.txt']),
+        'Only the files within the limit go with the message');
+      friend.maxFileBytes = savedLimit;
+      document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-close')?.click();
+      await settle();
       return checks;
     },
     async testIncrementalFeed() {
@@ -722,7 +752,7 @@ async function installFixture() {
         return scrollIntoView.call(this, options);
       };
       try {
-        find('.chat-message-row[data-message-id="answer"] [data-dm-jump="peer-rich"]').click();
+        find('.chat-message-row[data-message-id="answer"] [data-reply-target="peer-rich"]').click();
         await settle();
       } finally {
         Element.prototype.scrollIntoView = scrollIntoView;
@@ -749,7 +779,7 @@ async function installFixture() {
       };
       await resetComposer('rascunho que não pode sumir');
       paste(content(), fileData('anexo.txt'));
-      find('.chat-message-row[data-message-id="peer-rich"] [data-dm-action="reply"]').click();
+      find('.chat-message-row[data-message-id="peer-rich"] [data-message-action="reply"]').click();
       await settle();
       check(tray().includes('anexo.txt') && visible(find('#chat-reply-composer')), 'The composer holds text, a file and a reply');
 

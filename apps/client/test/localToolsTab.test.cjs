@@ -41,6 +41,7 @@ function fixture(language = 'en') {
   const listeners = new Set();
   const allListeners = [];
   const renders = [];
+  const errors = [];
   const subscriptions = { added: 0, removed: 0, fail: false };
   const mutation = (kind, input) => {
     const request = { ...deferred(), kind, input };
@@ -83,7 +84,8 @@ function fixture(language = 'en') {
   const allowed = new Set([
     'views/settings/tabs/LocalToolsTab', 'i18n/index', 'i18n/locales/en',
     'i18n/locales/pt-BR', 'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/locales/botStorage', 'i18n/messageSearch',
-    'utils/html', 'utils/attachment', 'utils/loadingIndicator', 'utils/storageUsage', 'views/settings/BotDeviceStorageList',
+    'utils/html', 'utils/attachment', 'utils/loadingIndicator', 'utils/loadingSkeleton', 'utils/storageUsage', 'views/settings/BotDeviceStorageList',
+    'utils/feedback',
   ]);
   function load(name) {
     if (modules.has(name)) return modules.get(name);
@@ -102,7 +104,10 @@ function fixture(language = 'en') {
         if (request.endsWith('/core/NetworkClient')) return { networkClient: {} };
         // The bot data list confirms and reports with the shared dialog and toasts; localToolsDom.test.cjs runs them.
         if (request.endsWith('/Dialog')) return { showConfirm: async () => false };
-        if (request.endsWith('/CopyToast')) return { showErrorToast() {}, showSuccessToast() {} };
+        // Failed actions are announced in the shared alert toast; the strings it received are what the person reads.
+        if (request.endsWith('/CopyToast')) return { showErrorToast(message) { errors.push(message); return () => {}; }, showSuccessToast() {}, showCopyToast() {} };
+        if (request.endsWith('/core/ClientLogService')) return { clientLog: { warn() {} } };
+        if (request.endsWith('/utils/surfaceVisibility')) return { setSurfaceVisible() {} };
         if (!request.startsWith('.')) throw new Error(`Unexpected IPC or network dependency: ${request}`);
         let resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), request));
         if (resolved === 'i18n') resolved = 'i18n/index';
@@ -127,7 +132,7 @@ function fixture(language = 'en') {
     return { root, container, ready };
   };
   return {
-    tab, t, api, reads, mutations, external, listeners, allListeners, subscriptions, renders, mount, document: globals.document,
+    tab, t, api, reads, mutations, external, listeners, allListeners, subscriptions, renders, errors, mount, document: globals.document,
     emit(snapshot) { for (const listener of listeners) listener(snapshot); },
     catalogs: { en: load('i18n/locales/en').en, 'pt-BR': load('i18n/locales/pt-BR').ptBR },
   };
@@ -278,7 +283,7 @@ test('permission intent survives changes, duplicate mutations do not prompt agai
   f.reads[1].resolve(empty());
   await operation;
   assert.equal(f.tab.pending, null);
-  assert.equal(f.tab.feedbackError, false);
+  assert.deepEqual(f.errors, [], 'a cancelled authorization is not a failure');
   assert.equal(f.mutations.length, 1);
   f.tab.cleanup();
 });
@@ -336,8 +341,8 @@ test('every LocalExecutionFailure is localized, and rejected IPC never exposes e
     await flush();
     f.reads.at(-1).resolve(empty());
     await operation;
-    assert.equal(f.tab.feedback, f.t(`localExecution.failure.${reason}`));
-    assert.equal(f.tab.feedbackError, true);
+    assert.equal(f.errors.at(-1), f.t(`localExecution.failure.${reason}`));
+    assert.equal(f.tab.feedback, '', 'a failure leaves the panel and goes to the alert toast');
     assert.equal(f.tab.pending, null);
   }
   const operation = f.tab.mutate({ kind: 'cache' });
@@ -345,8 +350,8 @@ test('every LocalExecutionFailure is localized, and rejected IPC never exposes e
   await flush();
   f.reads.at(-1).resolve(empty());
   await operation;
-  assert.equal(f.tab.feedback, f.t('localExecution.failure.transport_failed'));
-  assert.ok(!f.tab.feedback.includes('private'));
+  assert.equal(f.errors.at(-1), f.t('localExecution.failure.transport_failed'));
+  assert.ok(!f.errors.some(message => message.includes('private')));
   f.tab.cleanup();
 });
 
@@ -405,8 +410,8 @@ test('remove, cache and task actions use exact IPC arguments without automatic a
   assert.equal(f.external[0].url, 'https://example.invalid/node?artifact=%22');
   f.external[0].resolve({ success: false });
   await source;
-  assert.equal(f.tab.feedback, f.t('localExecution.sourceFailed'));
-  assert.equal(f.tab.feedbackError, true);
+  assert.equal(f.errors.at(-1), f.t('localExecution.sourceFailed'));
+  assert.equal(f.tab.feedback, '');
   f.tab.cleanup();
 });
 
@@ -427,6 +432,7 @@ test('closing during a mutation cannot refresh or clear pending intent in a reop
   assert.equal(f.reads.length, 2, 'old action must not fetch state for the new mount');
   assert.equal(f.tab.pending, pending);
   assert.equal(f.tab.feedback, f.t('localExecution.pending'));
+  assert.deepEqual(f.errors, [], 'the failure of a closed mount is not announced over the reopened one');
   f.mutations[1].resolve({ status: 'completed' });
   await flush();
   f.tab.cleanup();

@@ -12,6 +12,8 @@ interface OperationOptions {
   validate: (permission?: number) => void;
   changed: () => void;
   errorMessage: (error: unknown) => string;
+  /** Each failure is announced once, as it happens; `failures` keeps the ones not retried yet. */
+  failed?: (failure: ServerSettingsFailure) => void;
 }
 
 /**
@@ -40,7 +42,9 @@ export class ServerSettingsOperations {
   }
 
   public reportError(key: string, label: string, message: string): void {
-    this.errors.set(key, { key, label, message });
+    const failure = { key, label, message };
+    this.errors.set(key, failure);
+    this.options.failed?.(failure);
     this.options.changed();
   }
 
@@ -67,7 +71,9 @@ export class ServerSettingsOperations {
         return { ok: true, value };
       } catch (error) {
         const message = this.options.errorMessage(error);
-        this.errors.set(key, { key, label, message });
+        const failure = { key, label, message };
+        this.errors.set(key, failure);
+        this.options.failed?.(failure);
         return { ok: false, message };
       } finally {
         const remaining = (this.pending.get(key) ?? 1) - 1;

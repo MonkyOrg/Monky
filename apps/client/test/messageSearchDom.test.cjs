@@ -585,9 +585,18 @@ async function* regression(language) {
     && getComputedStyle(audioSeekTrack).backgroundImage.includes('linear-gradient'),
   'Media ranges keep thin tracks with accessible targets and visible unclipped audio volume');
   const link = firstResult.querySelector('a');
-  link.addEventListener('click', event => event.preventDefault(), { once: true });
+  // A last-resort guard keeps the fixture page in place even if the app let the link through.
+  let preventedByApp = null;
+  document.addEventListener('click', event => { preventedByApp = event.defaultPrevented; event.preventDefault(); }, { once: true });
+  const opened = [];
+  const api = window.api;
+  window.api = { ...api, openExternal: async url => { opened.push(url); return { success: true }; } };
   link.click();
+  await flush();
+  window.api = api;
   check(navigation.length === 0, 'Clicking an interactive link does not jump to the message');
+  check(preventedByApp === true && opened.length === 1 && opened[0] === link.dataset.externalLink,
+    'A link in a result opens in the browser through the app, as links in the chat do');
   const resultScroller = panel().querySelector('.message-search-results');
   const paginationTop = panel().querySelector('.message-search-pagination').getBoundingClientRect().top;
   const overflowResults = Array.from({ length: 24 }, () => resultScroller.firstElementChild.cloneNode(true));

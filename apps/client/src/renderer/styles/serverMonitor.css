@@ -1,0 +1,174 @@
+.modal-card.server-monitor-card {
+  max-width: 860px;
+  width: 92vw;
+}
+
+.server-monitor-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.server-monitor-title .material-symbols-outlined {
+  color: var(--accent-primary);
+}
+
+.server-monitor-source {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.server-monitor-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.server-monitor-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.server-monitor-stat {
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.server-monitor-stat-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.server-monitor-stat-value {
+  margin-top: 2px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.server-monitor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.server-monitor-levels {
+  display: flex;
+  gap: 4px;
+}
+
+.server-monitor-levels > .server-monitor-level {
+  height: 26px;
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.server-monitor-levels > .server-monitor-level[aria-pressed="true"] {
+  border-color: var(--accent-primary);
+  background: var(--accent-primary);
+  color: #fff;
+}
+
+/* Above the base input rule, which pads every text field for a full form. */
+.server-monitor-card .server-monitor-toolbar > .server-monitor-search {
+  flex: 1;
+  min-width: 140px;
+  height: 26px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.server-monitor-autoscroll {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.server-monitor-autoscroll > label:first-child {
+  cursor: pointer;
+}
+
+.server-monitor-logs {
+  height: 320px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary, #1e1f22);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.server-monitor-empty {
+  padding: 16px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.server-monitor-line {
+  display: flex;
+  gap: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.server-monitor-time {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.server-monitor-category {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.server-monitor-category[data-level="WARN"] {
+  color: var(--warning, #faa61a);
+}
+
+.server-monitor-category[data-level="ERROR"] {
+  color: var(--danger);
+}
+
+.server-monitor-message {
+  color: var(--text-primary);
+}
+
+.server-monitor-dropped {
+  font-size: 11px;
+  color: var(--warning);
+}
+
+.server-monitor-footer {
+  display: flex;
+  gap: 8px;
+}
+
+.server-monitor-count {
+  flex: 1;
+  align-self: center;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.server-monitor-card .server-monitor-footer .btn {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.server-monitor-card .server-monitor-footer .btn .material-symbols-outlined {
+  margin-right: 4px;
+}

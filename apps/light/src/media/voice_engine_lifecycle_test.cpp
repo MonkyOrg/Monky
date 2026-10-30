@@ -33,7 +33,7 @@ JoinConfig Configuration() {
   config.self_user_id = "user";
   config.self_session_id = "user:device";
   config.channel_id = "room";
-  config.admitted_participants = {{"user", "user:device"}};
+  config.admitted_participants = {{"user", "user:device", false}};
   return config;
 }
 

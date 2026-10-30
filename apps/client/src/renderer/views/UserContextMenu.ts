@@ -12,7 +12,7 @@ import { webRtcManager } from '../core/WebRtcManager';
 import { appEvents } from '../core/EventBus';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
 import { getActiveNetworkClient, networkClient } from '../core/NetworkClient';
-import { showAlert } from './Dialog';
+import { errorMessage, reportError } from '../utils/feedback';
 import { showErrorToast, showSuccessToast } from './CopyToast';
 import { canManageAdmins, changeMemberRole, memberRoleChangedMessage } from './memberActions';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
@@ -350,12 +350,7 @@ export class UserContextMenu {
       await action();
       if (this.menuEl === menu) this.close();
     } catch (err: unknown) {
-      if (this.menuEl !== menu) return;
-      await showAlert({
-        title: t('common.error'),
-        message: err instanceof Error ? err.message : t('userMenu.actionFailed'),
-        variant: 'danger',
-      });
+      if (this.menuEl === menu) reportError(errorMessage(err, t('userMenu.actionFailed')));
     }
   }
 
@@ -415,11 +410,7 @@ export class UserContextMenu {
     } catch (err: unknown) {
       if (this.menuEl !== menu) return;
       this.close();
-      await showAlert({
-        title: t('common.error'),
-        message: err instanceof Error ? err.message : t('userMenu.actionFailed'),
-        variant: 'danger',
-      });
+      reportError(errorMessage(err, t('userMenu.actionFailed')));
     }
   }
 

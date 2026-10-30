@@ -184,9 +184,9 @@ async function runRegression(language) {
   unlock.value = 'old';
   openDialog()?.querySelector('[data-action="confirm"]')?.click();
   await waitFor(() => decrypted.length === 1, () => 'The unlock password was held back');
-  check(decrypted[0] === 'old' && !toast(), 'Older, shorter passwords still unlock their files');
-  const alertButton = await waitFor(() => openDialog()?.querySelector('[data-action="confirm"]'), () => 'The failure alert did not open');
-  alertButton.click();
+  check(decrypted[0] === 'old', 'Older, shorter passwords still unlock their files');
+  const failure = await waitFor(toast, () => 'The failed import was not reported');
+  check(failure.textContent.includes('fixture stop') && !openDialog(), 'A file that does not open is explained in the toast, not in another dialog');
   check(await importing === null, 'A failed import resolves without applying anything');
   return checks;
 }

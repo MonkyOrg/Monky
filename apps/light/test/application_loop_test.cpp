@@ -85,6 +85,29 @@ void priorityAndLimits() {
   }
 }
 
+// Network input that outruns the core is refused within its share, while the
+// core's own work still finds room and the loop carries on.
+void networkInputHasItsShare() {
+  ApplicationLoop loop;
+  for (std::size_t index = 0; index < ApplicationLoop::maxOfferedCallbacks; ++index) {
+    require(loop.offer([] {}, 1), "Network input was refused before its share");
+  }
+  require(!loop.offer([] {}, 1), "Network input took more than its share");
+  bool ran = false;
+  require(loop.post([&] {
+    ran = true;
+    loop.stop();
+  }), "A full share of network input left no room for the core");
+  loop.run([] { return ApplicationLoop::Deadline{}; }, [](auto) {});
+  require(ran, "The core's own work did not run after refused network input");
+
+  ApplicationLoop bytes;
+  require(bytes.offer([] {}, ApplicationLoop::maxOfferedBytes), "A message within the share was refused");
+  require(!bytes.offer([] {}, 1), "Network input passed its share of bytes");
+  require(bytes.post([&] { bytes.stop(); }, 1024), "Refused network bytes left no room for the core");
+  bytes.run([] { return ApplicationLoop::Deadline{}; }, [](auto) {});
+}
+
 }  // namespace
 
 int main() {
@@ -92,6 +115,7 @@ int main() {
     orderedCallbacks();
     wakingAndDeadline();
     priorityAndLimits();
+    networkInputHasItsShare();
     std::cout << "Application loop scenarios passed\n";
     return 0;
   } catch (const std::exception& error) {

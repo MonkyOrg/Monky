@@ -1,4 +1,5 @@
 import {
+  AUDIENCE_LIMITS,
   PUBLIC_AUDIENCE,
   type ResourceAudience,
 } from '@monky/shared';
@@ -6,15 +7,57 @@ import type { ServerStore } from '../stores/serverStore';
 import { getAvatarUrl } from '../utils/avatar';
 import { isHexColor } from '../utils/colors';
 import { escapeHtml } from '../utils/html';
-import { t } from '../i18n';
+import { t, type TranslationKey } from '../i18n';
 import { scrollWithin, smoothScrollIntoView } from '../utils/scroll';
 import { focusItem, nextIndex } from '../utils/rovingFocus';
 import { animateEnter, hideWithMotion, ownSurface } from '../utils/surfaceMotion';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
+
+/** Where the members and roles on offer come from. */
+export type AudienceDirectory = Pick<ServerStore, 'knownMembers' | 'currentUser' | 'roles' | 'getVisibleRoles'>;
+
+/** What the picker says; a screen share speaks of who can watch, a community resource of who can access. */
+export interface AudienceTexts {
+  readonly private: TranslationKey;
+  readonly description: TranslationKey;
+  readonly who: TranslationKey;
+  readonly search: TranslationKey;
+  readonly choose: TranslationKey;
+  readonly noResults: TranslationKey;
+  readonly empty: TranslationKey;
+  /** With `{count}`. */
+  readonly selected: TranslationKey;
+  readonly roles: TranslationKey;
+  readonly members: TranslationKey;
+  /** The accessible name of the "+N" after the first selections, with `{count}`. */
+  readonly more?: TranslationKey;
+}
+
+const RESOURCE_TEXTS: AudienceTexts = {
+  private: 'audience.private', description: 'audience.description', who: 'audience.who', search: 'audience.search',
+  choose: 'audience.choose', noResults: 'audience.noResults', empty: 'audience.empty', selected: 'audience.selected',
+  roles: 'audience.roles', members: 'audience.members',
+};
+
+export interface AudiencePickerOptions {
+  readonly texts?: Partial<AudienceTexts>;
+  /** The host shows its own private/public switch and reports it with setPrivate(). */
+  readonly externalSwitch?: boolean;
+  /** Classes of the picker's root; the community resource block by default. */
+  readonly className?: string;
+}
 
 export class ResourceAudiencePicker {
   private audience: ResourceAudience;
+  /** Who was chosen before the host's switch made the audience public (setPrivate). */
+  private parked: { userIds: string[]; roleIds: string[] } | null = null;
   private open = false;
+  private disabled = false;
+  private readonly texts: AudienceTexts;
+  private readonly externalSwitch: boolean;
+  private readonly className: string;
   private positionOpenPopup: (() => void) | null = null;
+  private openPopup: (() => void) | null = null;
   /**
    * The open popup is registered as a surface of its trigger, so the modal
    * around it leaves Escape to the popup instead of closing everything.
@@ -23,15 +66,19 @@ export class ResourceAudiencePicker {
   private releaseOwner: (() => void) | null = null;
 
   constructor(
-    private readonly server: ServerStore,
+    private readonly server: AudienceDirectory | (() => AudienceDirectory | null),
     private readonly prefix: string,
     initial: ResourceAudience = PUBLIC_AUDIENCE,
     private readonly placement: 'adaptive' | 'below' = 'adaptive',
     private readonly mode: 'audience' | 'permission-targets' = 'audience',
+    options: AudiencePickerOptions = {},
   ) {
     this.audience = initial.visibility === 'private'
       ? { visibility: 'private', userIds: [...initial.userIds], roleIds: [...initial.roleIds] }
       : PUBLIC_AUDIENCE;
+    this.texts = { ...RESOURCE_TEXTS, ...options.texts };
+    this.externalSwitch = options.externalSwitch === true;
+    this.className = options.className ?? 'resource-audience';
   }
 
   value(): ResourceAudience {
@@ -41,6 +88,7 @@ export class ResourceAudiencePicker {
   }
 
   setValue(value: ResourceAudience): void {
+    this.parked = null;
     this.audience = value.visibility === 'private'
       ? { visibility: 'private', userIds: [...value.userIds], roleIds: [...value.roleIds] }
       : PUBLIC_AUDIENCE;
@@ -51,36 +99,71 @@ export class ResourceAudiencePicker {
       this.audience.userIds.length + this.audience.roleIds.length > 0;
   }
 
+  /**
+   * The host's own switch made the audience public or private again. Switching it off sets who
+   * was chosen aside, unsent, so switching back on restores them instead of starting over.
+   */
+  setPrivate(container: ParentNode, isPrivate: boolean): void {
+    if (isPrivate === (this.audience.visibility === 'private')) return;
+    this.open = false;
+    if (this.audience.visibility === 'private') {
+      this.parked = { userIds: [...this.audience.userIds], roleIds: [...this.audience.roleIds] };
+      this.audience = PUBLIC_AUDIENCE;
+    } else {
+      const { userIds = [], roleIds = [] } = this.parked ?? {};
+      this.audience = { visibility: 'private', userIds: [...userIds], roleIds: [...roleIds] };
+    }
+    this.sync(container);
+  }
+
+  /** Nothing can be chosen while the host's operation is in flight; the list closes. */
+  setDisabled(container: ParentNode, disabled: boolean): void {
+    if (disabled && this.open) this.open = false;
+    this.disabled = disabled;
+    this.sync(container);
+  }
+
+  /** Opens the list with focus in its search, as the host asks for a choice. */
+  showOptions(): void {
+    if (!this.open && !this.disabled && this.audience.visibility === 'private') this.openPopup?.();
+  }
+
   render(disabled = false): string {
-    return `<section class="resource-audience" data-resource-audience="${escapeHtml(this.prefix)}">
-      ${this.mode === 'audience' ? `<div class="bot-permission-row resource-audience-mode">
-        <div><label for="${escapeHtml(this.prefix)}-private">${t('audience.private')}</label>
-          <p class="bot-settings-description">${t('audience.description')}</p></div>
-        <label class="toggle-switch"><input id="${escapeHtml(this.prefix)}-private" data-audience-private
-          type="checkbox" role="switch" ${this.audience.visibility === 'private' ? 'checked' : ''}
+    this.disabled = disabled;
+    const id = (part: string): string => escapeHtml(`${this.prefix}-${part}`);
+    const isPrivate = this.audience.visibility === 'private';
+    const hasStatus = this.mode === 'audience';
+    const listed = this.listsOptions();
+    return `<section class="${escapeHtml(this.className)}" data-resource-audience="${escapeHtml(this.prefix)}">
+      ${this.mode === 'audience' && !this.externalSwitch ? `<div class="bot-permission-row resource-audience-mode">
+        <div><label for="${id('private')}">${t(this.texts.private)}</label>
+          <p class="bot-settings-description">${t(this.texts.description)}</p></div>
+        <label class="toggle-switch"><input id="${id('private')}" data-audience-private
+          type="checkbox" role="switch" aria-controls="${escapeHtml(this.prefix)}" ${isPrivate ? 'checked' : ''}
           ${disabled ? 'disabled' : ''}><span class="toggle-slider"></span></label>
       </div>` : ''}
-      <div class="share-audience" data-audience-selection ${this.audience.visibility === 'private' ? '' : 'hidden'}>
-        <label class="share-audience-label">${t(this.mode === 'audience' ? 'audience.who' : 'channelPermissions.targets')}</label>
+      <div class="share-audience" id="${escapeHtml(this.prefix)}" data-audience-selection ${isPrivate ? '' : 'hidden'}>
+        <label class="share-audience-label" for="${id('toggle')}">${t(this.mode === 'audience' ? this.texts.who : 'channelPermissions.targets')}</label>
         <div class="share-audience-picker">
-          <button type="button" class="share-audience-trigger" data-audience-toggle aria-haspopup="listbox"
-            aria-expanded="${this.open}" ${disabled ? 'disabled' : ''}>
-            <span class="share-audience-summary" data-audience-summary></span>
+          <button type="button" id="${id('toggle')}" class="share-audience-trigger" data-audience-toggle aria-haspopup="listbox"
+            aria-expanded="${this.open}" aria-controls="${id('options')}"${hasStatus ? ` aria-describedby="${id('status')}"` : ''}
+            ${disabled ? 'disabled' : ''}>
+            <span id="${id('summary')}" class="share-audience-summary" data-audience-summary></span>
             <span class="material-symbols-outlined md-20 share-audience-chevron" aria-hidden="true">expand_more</span>
           </button>
-          <div class="share-audience-popup" data-audience-popup popover="manual" ${this.open ? '' : 'hidden'}>
+          <div id="${id('popup')}" class="share-audience-popup" data-audience-popup popover="manual" ${this.open ? '' : 'hidden'}>
             <div class="share-audience-search">
               <span class="material-symbols-outlined md-18" aria-hidden="true">search</span>
-              <input type="search" data-audience-search autocomplete="off"
-                aria-label="${escapeHtml(t('audience.search'))}" placeholder="${escapeHtml(t('audience.search'))}">
+              <input type="search" id="${id('search')}" data-audience-search autocomplete="off" aria-controls="${id('options')}"
+                aria-label="${escapeHtml(t(this.texts.search))}" placeholder="${escapeHtml(t(this.texts.search))}">
             </div>
-            <div class="share-audience-options" role="listbox" aria-multiselectable="true">
-              ${this.options()}
-            </div>
-            <p data-audience-no-results role="status" hidden>${t('audience.noResults')}</p>
+            <div id="${id('options')}" class="share-audience-options" role="listbox" aria-multiselectable="true"
+              aria-label="${escapeHtml(t(this.mode === 'audience' ? this.texts.who : 'channelPermissions.targets'))}"
+              ${listed ? 'data-audience-rendered' : ''}>${listed ? this.options() : ''}</div>
+            <p id="${id('no-results')}" data-audience-no-results role="status" hidden>${t(this.texts.noResults)}</p>
           </div>
         </div>
-        ${this.mode === 'audience' ? '<p class="audio-device-status" data-audience-status role="status" aria-live="polite"></p>' : ''}
+        ${hasStatus ? `<p class="audio-device-status" id="${id('status')}" data-audience-status role="status" aria-live="polite"></p>` : ''}
       </div>
     </section>`;
   }
@@ -159,10 +242,26 @@ export class ResourceAudiencePicker {
         positionPopup();
       }, 500);
     };
+    const openPopup = (root: HTMLElement) => {
+      // Members come and go: the list is rebuilt each time it opens.
+      this.renderOptions(root);
+      this.open = true;
+      this.sync(container);
+      const trigger = root.querySelector<HTMLElement>('[data-audience-toggle]');
+      if (trigger) revealTrigger(trigger);
+      positionPopup();
+      root.querySelector<HTMLInputElement>('[data-audience-search]')?.focus({ preventScroll: true });
+    };
+    const openFromHost = () => {
+      const root = container.querySelector<HTMLElement>(`[data-resource-audience="${CSS.escape(this.prefix)}"]`);
+      if (root) openPopup(root);
+    };
     this.positionOpenPopup = positionPopup;
+    this.openPopup = openFromHost;
     signal.addEventListener('abort', () => {
       closePopup();
       if (this.positionOpenPopup === positionPopup) this.positionOpenPopup = null;
+      if (this.openPopup === openFromHost) this.openPopup = null;
       finishPositioningScroll(true);
     }, { once: true });
     window.addEventListener('resize', positionPopup, { signal });
@@ -259,13 +358,7 @@ export class ResourceAudiencePicker {
       if (!root || !target || target.closest('button')?.matches(':disabled')) return;
       if (target.closest('[data-audience-toggle]')) {
         if (this.open) { closePopup(); return; }
-        root.querySelector<HTMLElement>('.share-audience-options')!.innerHTML = this.options();
-        this.open = true;
-        this.sync(container);
-        const trigger = root.querySelector<HTMLElement>('[data-audience-toggle]');
-        if (trigger) revealTrigger(trigger);
-        positionPopup();
-        root.querySelector<HTMLInputElement>('[data-audience-search]')?.focus({ preventScroll: true });
+        openPopup(root);
         return;
       }
       const option = target.closest<HTMLButtonElement>('[data-audience-id]');
@@ -282,10 +375,17 @@ export class ResourceAudiencePicker {
       onChange();
     }, { signal });
     container.addEventListener('keydown', event => {
-      if (!this.open) return;
       const target = event.target instanceof Element ? event.target : null;
       const root = target?.closest<HTMLElement>(`[data-resource-audience="${CSS.escape(this.prefix)}"]`);
       if (!root) return;
+      if (!this.open) {
+        // A closed list opens from its field with the arrows, like a select.
+        if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && target?.matches('[data-audience-toggle]:not(:disabled)')) {
+          event.preventDefault();
+          openPopup(root);
+        }
+        return;
+      }
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
@@ -295,7 +395,8 @@ export class ResourceAudiencePicker {
       }
       const searching = target?.matches('[data-audience-search]');
       const current = target?.closest<HTMLButtonElement>('[data-audience-id]');
-      const choices = [...root.querySelectorAll<HTMLButtonElement>('[data-audience-id]:not([hidden])')];
+      const choices = [...root.querySelectorAll<HTMLButtonElement>('[data-audience-id]')]
+        .filter(choice => !choice.hidden && !choice.disabled);
       if (searching && event.key === 'Enter') {
         event.preventDefault();
         choices[0]?.click();
@@ -316,9 +417,12 @@ export class ResourceAudiencePicker {
     const audience = this.audience;
     const isPrivate = audience.visibility === 'private';
     const section = root.querySelector<HTMLElement>('[data-audience-selection]');
-    if (section) section.hidden = !isPrivate;
+    if (section) setSurfaceVisible(section, isPrivate);
+    const privacy = root.querySelector<HTMLInputElement>('[data-audience-private]');
+    if (privacy) privacy.disabled = this.disabled;
     const toggle = root.querySelector<HTMLButtonElement>('[data-audience-toggle]');
     toggle?.setAttribute('aria-expanded', String(this.open));
+    if (toggle) toggle.disabled = this.disabled;
     const popup = root.querySelector<HTMLElement>('[data-audience-popup]');
     if (popup) {
       if (this.open) {
@@ -349,16 +453,22 @@ export class ResourceAudiencePicker {
       }
     }
     if (audience.visibility !== 'private') return;
+    if (!root.querySelector('[data-audience-rendered]')) this.renderOptions(root);
     const search = root.querySelector<HTMLInputElement>('[data-audience-search]');
+    if (search) search.disabled = this.disabled;
     const normalize = (value: string) => value.normalize('NFD').replace(/\p{M}/gu, '').toLocaleLowerCase();
     const query = normalize(search?.value.trim() ?? '');
     const selectedOptions: HTMLButtonElement[] = [];
     let visible = 0;
     for (const option of root.querySelectorAll<HTMLButtonElement>('[data-audience-id]')) {
       const key = option.dataset.audienceKind === 'role' ? 'roleIds' : 'userIds';
-      const selected = audience[key].includes(option.dataset.audienceId ?? '');
+      const chosen = audience[key];
+      const selected = chosen.includes(option.dataset.audienceId ?? '');
       option.classList.toggle('selected', selected);
       option.setAttribute('aria-selected', String(selected));
+      // A private audience names at most AUDIENCE_LIMITS of each; the server refuses more.
+      option.disabled = this.disabled || (this.mode === 'audience' && !selected
+        && chosen.length >= (key === 'userIds' ? AUDIENCE_LIMITS.users : AUDIENCE_LIMITS.roles));
       option.hidden = !normalize(option.dataset.audienceName ?? '').includes(query);
       if (!option.hidden) visible++;
       if (selected) selectedOptions.push(option);
@@ -369,18 +479,22 @@ export class ResourceAudiencePicker {
     }
     const summary = root.querySelector<HTMLElement>('[data-audience-summary]');
     if (summary) {
-      summary.innerHTML = selectedOptions.length && this.mode === 'audience'
+      const more = selectedOptions.length - 2;
+      const content = selectedOptions.length && this.mode === 'audience'
         ? selectedOptions.slice(0, 2).map(option =>
           `<span class="share-audience-chip">${option.querySelector('.share-audience-identity')?.innerHTML ?? ''}</span>`).join('')
-          + (selectedOptions.length > 2 ? `<span class="share-audience-more">+${selectedOptions.length - 2}</span>` : '')
-        : `<span class="share-audience-placeholder">${t('audience.choose')}</span>`;
+          + (more > 0 ? `<span class="share-audience-more"${this.texts.more
+            ? ` aria-label="${escapeHtml(t(this.texts.more, { count: more }))}"` : ''}>+${more}</span>` : '')
+        : `<span class="share-audience-placeholder">${escapeHtml(t(this.texts.choose))}</span>`;
+      // Rewriting equal markup would replace the chips' avatars and make them reload.
+      if (summary.innerHTML !== content) summary.innerHTML = content;
     }
     const empty = root.querySelector<HTMLElement>('[data-audience-no-results]');
     if (empty) empty.hidden = visible > 0;
     const status = root.querySelector<HTMLElement>('[data-audience-status]');
     if (status) status.textContent = this.isValid()
-      ? t('audience.selected', { count: audience.userIds.length + audience.roleIds.length })
-      : t('audience.empty');
+      ? t(this.texts.selected, { count: audience.userIds.length + audience.roleIds.length })
+      : t(this.texts.empty);
   }
 
   private releasePopup(): void {
@@ -389,29 +503,48 @@ export class ResourceAudiencePicker {
     this.ownedPopup = null;
   }
 
+  /** A public audience never lists members: the list is built when someone could be chosen. */
+  private listsOptions(): boolean {
+    return this.mode === 'permission-targets' || this.audience.visibility === 'private';
+  }
+
+  private renderOptions(root: HTMLElement): void {
+    const list = root.querySelector<HTMLElement>('.share-audience-options');
+    if (!list) return;
+    list.innerHTML = this.options();
+    list.dataset.audienceRendered = '';
+  }
+
+  private directory(): AudienceDirectory | null {
+    return typeof this.server === 'function' ? this.server() : this.server;
+  }
+
   private options(): string {
+    const server = this.directory();
     const render = (
       kind: 'role' | 'user',
       values: Array<{ id: string; name: string; color?: string | null; avatarUrl?: string | null }>,
     ) => [...values].sort((a, b) => a.name.localeCompare(b.name)).map(value => `
       <button type="button" class="share-audience-option" data-audience-kind="${kind}"
         data-audience-id="${escapeHtml(value.id)}" data-audience-name="${escapeHtml(value.name)}"
-        role="option" aria-selected="false">
+        role="option" aria-selected="false" tabindex="-1">
         <span class="share-audience-identity">
           ${kind === 'role'
             ? `<span class="share-audience-role" style="--role-color: ${isHexColor(value.color) ? value.color : 'var(--text-muted)'}" aria-hidden="true"></span>`
-            : `<img class="share-audience-avatar" src="${escapeHtml(getAvatarUrl(value.avatarUrl))}" alt="" data-fallback="avatar">`}
+            : `<img class="share-audience-avatar" src="${escapeHtml(getAvatarUrl(value.avatarUrl))}" alt="" data-fallback="avatar" loading="lazy" decoding="async">`}
           <span class="share-audience-name">${escapeHtml(value.name)}</span>
         </span>
         <span class="material-symbols-outlined md-18 share-audience-check" aria-hidden="true">check</span>
       </button>`).join('');
-    const members = [...this.server.knownMembers.values()]
-      .filter(user => (this.mode === 'permission-targets' || user.id !== this.server.currentUser?.id) && !user.isBot)
+    const members = [...server?.knownMembers.values() ?? []]
+      .filter(user => (this.mode === 'permission-targets' || user.id !== server?.currentUser?.id) && !user.isBot)
       .map(user => ({ id: user.id, name: user.nickname, avatarUrl: user.avatarUrl }));
-    return `<div class="share-audience-group" role="group">
-      <h4>${t('audience.roles')}</h4>${render('role', this.mode === 'permission-targets' ? this.server.getVisibleRoles() : this.server.roles)}
-    </div><div class="share-audience-group" role="group">
-      <h4>${t('audience.members')}</h4>${render('user', members)}
+    const roles = !server ? [] : this.mode === 'permission-targets' ? server.getVisibleRoles() : server.roles;
+    const heading = (part: string): string => escapeHtml(`${this.prefix}-${part}`);
+    return `<div class="share-audience-group" role="group" aria-labelledby="${heading('roles')}">
+      <h4 id="${heading('roles')}">${t(this.texts.roles)}</h4>${render('role', roles)}
+    </div><div class="share-audience-group" role="group" aria-labelledby="${heading('members')}">
+      <h4 id="${heading('members')}">${t(this.texts.members)}</h4>${render('user', members)}
     </div>`;
   }
 }

@@ -4,6 +4,7 @@
 #include "protocol.hpp"
 
 #include <Device.hpp>
+#include <MediaSoupClientErrors.hpp>
 #include <api/audio/builtin_audio_processing_builder.h>
 #include <api/audio_codecs/builtin_audio_decoder_factory.h>
 #include <api/audio_codecs/builtin_audio_encoder_factory.h>
@@ -354,9 +355,14 @@ struct VoiceEngine::Impl : std::enable_shared_from_this<VoiceEngine::Impl> {
   std::map<std::string, std::unique_ptr<mediasoupclient::Consumer>> consumers;
   std::map<std::string, Json> known_producers;
   std::set<std::string> closed_producers;
+  // Microphones this call could not receive; tried again only on new transports.
+  std::set<std::string> failed_producers;
   std::map<std::string, std::string> sfu_transport_states;
   Json applied_devices;
   bool initialized = false;
+  // The server refused the microphone: the call only receives, with capture
+  // stopped, until the next policy change tries again.
+  bool publish_refused = false;
   bool sfu_recovery_pending = false;
   unsigned sfu_recovery_attempts = 0;
 
@@ -665,16 +671,24 @@ struct VoiceEngine::Impl::SfuListener
     if (!self)
       throw Cancelled();
     token->CheckActive();
-    auto response = self->Request(msg::SFU_PRODUCE,
-                                  {{"channelId", self->config.channel_id},
-                                   {"transportId", transport->GetId()},
-                                   {"kind", kind},
-                                   {"rtpParameters", std::move(parameters)},
-                                   {"appData", app_data}},
-                                  {msg::SFU_PRODUCED});
-    std::promise<std::string> promise;
-    promise.set_value(Text(response.payload, "id"));
-    return promise.get_future();
+    try {
+      auto response = self->Request(msg::SFU_PRODUCE,
+                                    {{"channelId", self->config.channel_id},
+                                     {"transportId", transport->GetId()},
+                                     {"kind", kind},
+                                     {"rtpParameters", std::move(parameters)},
+                                     {"appData", app_data}},
+                                    {msg::SFU_PRODUCED});
+      std::promise<std::string> promise;
+      promise.set_value(Text(response.payload, "id"));
+      return promise.get_future();
+    } catch (const Cancelled &) {
+      throw;
+    } catch (const std::exception &error) {
+      // Only its own error type makes the library stop the transceiver it
+      // opened for this track.
+      throw MediaSoupClientError(error.what());
+    }
   }
   std::future<std::string> OnProduceData(mediasoupclient::SendTransport *,
                                          const Json &, const std::string &,
@@ -691,9 +705,18 @@ struct VoiceEngine::Impl::SfuListener
             (!engine.recv_transport || engine.recv_transport->GetId() != id))
           return;
         engine.sfu_transport_states[id] = state;
-        if (state == "connected" || state == "completed")
+        if (state == "connected" || state == "completed") {
           engine.Emit(EventKind::connected, "SFU transport " + id);
-        else if (state == "disconnected" || state == "failed")
+          // As each P2P peer does, a call that is healthy again starts its
+          // recovery count over: only drops in a row may exhaust it.
+          if (std::none_of(engine.sfu_transport_states.begin(),
+                           engine.sfu_transport_states.end(),
+                           [](const auto &entry) {
+                             return entry.second == "disconnected" ||
+                                    entry.second == "failed";
+                           }))
+            engine.sfu_recovery_attempts = 0;
+        } else if (state == "disconnected" || state == "failed")
           engine.ScheduleSfuRecovery();
       });
     }
@@ -848,7 +871,8 @@ void VoiceEngine::Impl::GateAudio(const std::shared_ptr<CallToken> &call) {
 }
 
 void VoiceEngine::Impl::EnsureMicrophone() {
-  if (microphone || token->muted.load() || token->deafened.load())
+  if (microphone || publish_refused || token->muted.load() ||
+      token->deafened.load())
     return;
   source = factory->CreateAudioSource(webrtc::AudioOptions{});
   if (!source)
@@ -861,11 +885,25 @@ void VoiceEngine::Impl::EnsureMicrophone() {
       throw std::runtime_error("Could not attach microphone to peer " + id);
   if (send_transport) {
     Json codec_options{{"opusDtx", true}};
-    producer.reset(send_transport->Produce(sfu_listener.get(), microphone.get(),
-                                           nullptr, &codec_options, nullptr,
-                                           {{"mediaType", "mic"}}));
-    if (!producer)
-      throw std::runtime_error("SFU microphone production returned null");
+    try {
+      producer.reset(send_transport->Produce(sfu_listener.get(),
+                                             microphone.get(), nullptr,
+                                             &codec_options, nullptr,
+                                             {{"mediaType", "mic"}}));
+      if (!producer)
+        throw std::runtime_error("SFU microphone production returned null");
+    } catch (const Cancelled &) {
+      throw;
+    } catch (const std::exception &error) {
+      // The server may refuse the microphone: no permission to speak, or a
+      // change of room on its way. The call goes on, receiving only.
+      microphone = nullptr;
+      source = nullptr;
+      publish_refused = true;
+      Emit(EventKind::warning,
+           std::string("Microphone not published: ") + error.what());
+      return;
+    }
   }
   ApplyProcessing();
 }
@@ -890,6 +928,8 @@ void VoiceEngine::Impl::ApplyPolicy() {
   token->CheckActive();
   const bool deafened = token->deafened.load();
   const bool muted = token->muted.load() || deafened;
+  // Every policy change gives a refused microphone another chance.
+  publish_refused = false;
   // Stop physical capture before potentially blocking SFU close/produce calls.
   if (muted || deafened) {
     const auto result = worker->BlockingCall([this] {
@@ -918,9 +958,10 @@ void VoiceEngine::Impl::ApplyPolicy() {
   }
   ApplyProcessing();
   token->CheckActive();
-  const auto result = worker->BlockingCall([this] {
+  const bool refused = publish_refused;
+  const auto result = worker->BlockingCall([this, refused] {
     const bool output = !token->cancelled.load() && !token->deafened.load();
-    return adm->SetPolicy(output && !token->muted.load(), output);
+    return adm->SetPolicy(output && !token->muted.load() && !refused, output);
   });
   if (result != 0)
     throw std::runtime_error("Native audio device failed to start");
@@ -972,6 +1013,7 @@ std::string VoiceEngine::Impl::Cleanup() {
   sfu_listener.reset();
   known_producers.clear();
   closed_producers.clear();
+  failed_producers.clear();
   sfu_transport_states.clear();
   microphone = nullptr;
   source = nullptr;
@@ -1006,6 +1048,7 @@ std::string VoiceEngine::Impl::Cleanup() {
   environment.reset();
   applied_devices = nullptr;
   initialized = false;
+  publish_refused = false;
   sfu_recovery_pending = false;
   sfu_recovery_attempts = 0;
   roster.clear();
@@ -1085,6 +1128,18 @@ void VoiceEngine::Impl::Reconcile(std::vector<Participant> participants,
   }
   for (const auto &id : removed)
     RetirePeer(id);
+  // Whether the room lets each one speak can change with any roster.
+  std::vector<std::shared_ptr<Peer>> resuppressed;
+  for (const auto &[id, peer] : peers)
+    if (peer->participant.suppressed != next.at(id).suppressed)
+      resuppressed.push_back(peer);
+  for (const auto &peer : resuppressed) {
+    if (peer->retired.load())
+      continue;
+    peer->participant.suppressed = !peer->participant.suppressed;
+    PeerOperation(peer->participant.session_id,
+                  [&] { ConfigureTracks(*peer); });
+  }
   roster = std::move(next);
   if (config.mode == VoiceMode::p2p) {
     for (const auto &[id, participant] : roster)
@@ -1218,6 +1273,7 @@ void VoiceEngine::Impl::ConfigureTracks(Peer &peer) {
     }
     const bool listen = mic &&
                         peer.participant.user_id != config.self_user_id &&
+                        !peer.participant.suppressed &&
                         !token->deafened.load();
     if (auto track = transceiver->receiver()->track())
       track->set_enabled(listen);
@@ -1523,7 +1579,8 @@ void VoiceEngine::Impl::InitializeSfu() {
     const auto &state = member.at("voiceState");
     if (Text(state, "channelId") != config.channel_id)
       throw std::runtime_error("SFU roster includes another channel");
-    participants.push_back({Text(user, "id"), Text(state, "sessionId")});
+    participants.push_back({Text(user, "id"), Text(state, "sessionId"),
+                            state.value("permissionMuted", false)});
   }
   Reconcile(std::move(participants), false);
   for (const auto &item : response.payload.at("producers"))
@@ -1581,6 +1638,7 @@ void VoiceEngine::Impl::RecoverSfu() {
     sfu_listener.reset();
     device.reset();
     known_producers.clear();
+    failed_producers.clear();
     sfu_transport_states.clear();
     InitializeSfu();
     ApplyPolicy();
@@ -1621,7 +1679,7 @@ void VoiceEngine::Impl::AddProducer(const Json &description) {
 
 void VoiceEngine::Impl::Consume(const std::string &id) {
   if (!recv_transport || consumers.contains(id) ||
-      closed_producers.contains(id))
+      closed_producers.contains(id) || failed_producers.contains(id))
     return;
   const auto found = known_producers.find(id);
   if (found == known_producers.end())
@@ -1632,38 +1690,59 @@ void VoiceEngine::Impl::Consume(const std::string &id) {
   const auto member = roster.find(session);
   if (member == roster.end() || member->second.user_id == config.self_user_id)
     return;
-  auto response = Request(msg::SFU_CONSUME,
-                          {{"channelId", config.channel_id},
-                           {"transportId", recv_transport->GetId()},
-                           {"producerId", id},
-                           {"rtpCapabilities", device->GetRtpCapabilities()}},
-                          {msg::SFU_CONSUMED, msg::SFU_PRODUCER_CLOSED});
-  if (Text(response.payload, "producerId") != id)
-    throw std::runtime_error("SFU consume acknowledged another producer");
-  if (response.type == msg::SFU_PRODUCER_CLOSED) {
-    closed_producers.insert(id);
-    known_producers.erase(id);
+  // Set once the server has created its side of the consumer.
+  std::string server_consumer;
+  try {
+    auto response =
+        Request(msg::SFU_CONSUME,
+                {{"channelId", config.channel_id},
+                 {"transportId", recv_transport->GetId()},
+                 {"producerId", id},
+                 {"rtpCapabilities", device->GetRtpCapabilities()}},
+                {msg::SFU_CONSUMED, msg::SFU_PRODUCER_CLOSED});
+    if (Text(response.payload, "producerId") != id)
+      throw std::runtime_error("SFU consume acknowledged another producer");
+    if (response.type == msg::SFU_PRODUCER_CLOSED) {
+      closed_producers.insert(id);
+      known_producers.erase(id);
+      return;
+    }
+    server_consumer = Text(response.payload, "id");
+    if (Text(response.payload, "kind") != "audio" ||
+        Text(response.payload, "producerSessionId") != session ||
+        response.payload.at("appData").value("mediaType", "") != "mic")
+      throw std::runtime_error(
+          "SFU consumed media differs from selected microphone");
+    auto parameters = response.payload.at("rtpParameters");
+    std::unique_ptr<mediasoupclient::Consumer> consumer(recv_transport->Consume(
+        sfu_listener.get(), server_consumer, id, "audio", &parameters,
+        response.payload.at("appData")));
+    if (!consumer)
+      throw std::runtime_error("SFU Consume returned null");
+    // The transport keeps a pointer to it until it is closed: listed at once,
+    // whatever happens next, it is closed with the call.
+    auto &owned = consumers.emplace(id, std::move(consumer)).first->second;
+    if (token->deafened.load()) {
+      owned->Pause();
+      Notify(msg::SFU_CONSUMER_SET_PAUSED, {{"channelId", config.channel_id},
+                                            {"consumerId", owned->GetId()},
+                                            {"paused", true}});
+    }
+  } catch (const Cancelled &) {
+    throw;
+  } catch (const std::exception &error) {
+    // A microphone the call cannot receive costs only that participant, as a
+    // failing peer does in P2P. The server may refuse it, during a change of
+    // room or of permission, or the local transport may not open it.
+    CloseConsumer(id);
+    if (!server_consumer.empty())
+      Notify(msg::SFU_CONSUMER_CLOSED, {{"channelId", config.channel_id},
+                                        {"consumerId", server_consumer}});
+    failed_producers.insert(id);
+    Emit(EventKind::failed,
+         std::string("SFU microphone not received: ") + error.what(), session);
     return;
   }
-  if (Text(response.payload, "kind") != "audio" ||
-      Text(response.payload, "producerSessionId") != session ||
-      response.payload.at("appData").value("mediaType", "") != "mic")
-    throw std::runtime_error(
-        "SFU consumed media differs from selected microphone");
-  auto parameters = response.payload.at("rtpParameters");
-  auto consumer =
-      std::unique_ptr<mediasoupclient::Consumer>(recv_transport->Consume(
-          sfu_listener.get(), Text(response.payload, "id"), id, "audio",
-          &parameters, response.payload.at("appData")));
-  if (!consumer)
-    throw std::runtime_error("SFU Consume returned null");
-  if (token->deafened.load()) {
-    consumer->Pause();
-    Notify(msg::SFU_CONSUMER_SET_PAUSED, {{"channelId", config.channel_id},
-                                          {"consumerId", consumer->GetId()},
-                                          {"paused", true}});
-  }
-  consumers.emplace(id, std::move(consumer));
   ApplyProcessing();
 }
 
@@ -1871,6 +1950,7 @@ void VoiceEngine::producer_closed(std::string producer_id) {
     self->ForCall(call, [id = std::move(producer_id)](Impl &engine) {
       engine.CloseConsumer(id);
       engine.known_producers.erase(id);
+      engine.failed_producers.erase(id);
       engine.closed_producers.insert(id);
       // IDs are unique. Bound tombstones independently from active consumers.
       if (engine.closed_producers.size() > 4096)

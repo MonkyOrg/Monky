@@ -1,5 +1,6 @@
 import { t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { reportError } from '../utils/feedback';
 import { animateEnter, cancelSurfaceMotion, ownSurface, removeWithMotion } from '../utils/surfaceMotion';
 import { COLOR_PRESETS, hexToHsv, hsvToHex, normalizeHexColor, type HsvColor } from '../utils/colors';
 import { isScreenColorPickerAvailable, pickScreenColor, ScreenColorPickerError } from '../core/ScreenColorPicker';
@@ -29,6 +30,7 @@ export class ColorPicker {
   private opened: AbortController | null = null;
   private sampling: AbortController | null = null;
   private unwatch: (() => void) | null = null;
+  private dismissError: (() => void) | null = null;
 
   public constructor(
     private readonly options: ColorPickerOptions,
@@ -181,7 +183,7 @@ export class ColorPicker {
       <div class="color-picker-entry">
         <label for="${id}-hex">${t('colorPicker.hexLabel')}</label>
         <input id="${id}-hex" data-color-hex type="text" maxlength="7" autocomplete="off" spellcheck="false"
-          aria-label="${escapeHtml(t('colorPicker.hex'))}" aria-describedby="${id}-color-error">
+          aria-label="${escapeHtml(t('colorPicker.hex'))}">
         <button type="button" class="color-picker-eyedropper" data-color-eyedropper ${available ? '' : 'disabled'}
           aria-label="${escapeHtml(t('colorPicker.eyedropper'))}">
           <span class="material-symbols-outlined md-20" aria-hidden="true">colorize</span>
@@ -196,8 +198,7 @@ export class ColorPicker {
             style="--picked-color: ${color}" aria-label="${color.toUpperCase()}" aria-pressed="false"></button>`;
         }).join('')}
       </div>
-      <p class="color-picker-hint" data-color-status role="status">${t(available ? 'colorPicker.hint' : 'colorPicker.unsupported')}</p>
-      <p id="${id}-color-error" class="color-picker-error" data-color-error role="alert" hidden></p>`;
+      <p class="color-picker-hint" data-color-status role="status">${t(available ? 'colorPicker.hint' : 'colorPicker.unsupported')}</p>`;
   }
 
   private field(name: string): HTMLInputElement | null {
@@ -362,9 +363,10 @@ export class ColorPicker {
     }
   }
 
+  /** A refused HEX or a failed eyedropper is explained in the alert toast; the next edit takes it down. */
   private showError(message: string): void {
-    const error = this.panel?.querySelector<HTMLElement>('[data-color-error]');
-    if (error) { error.textContent = message; error.hidden = !message; }
+    this.dismissError?.();
+    this.dismissError = message ? reportError(message) : null;
     this.field('hex')?.setAttribute('aria-invalid', String(Boolean(message) && this.hexChanged));
   }
 

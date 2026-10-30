@@ -9,10 +9,9 @@ const send = value => {
   if (parent) parent.postMessage(bytes);
   else process.send(bytes, error => { if (error) process.exit(71); });
 };
-let engine, parentHandles, surfaceSender, timer, configured = false, closed = false;
+let engine, surfaceSender, timer, configured = false, closed = false;
 let nextEvent = 0, eventBytes = 0;
 const events = new Map(), pending = new Set();
-const inputLeases = new Map();
 const exit = code => { clearInterval(timer); process.exit(code); };
 function publish(event) {
   if (event.type === 'frame' && surfaceSender)
@@ -45,9 +44,7 @@ async function receive(bytes) {
     const addon = require(message.filename);
     const capabilities = addon.capabilities();
     assert.deepEqual(capabilities, message.capabilities, 'RTC binary capabilities differ from the verified build.');
-    if (message.handlesFile && capabilities.decodedOutput !== 'NV12_IOSURFACE_LEASE')
-      parentHandles = require(message.handlesFile).openProcess(message.parentPid);
-    else if (capabilities.decodedOutput === 'NV12_IOSURFACE_LEASE')
+    if (capabilities.decodedOutput === 'NV12_IOSURFACE_LEASE')
       surfaceSender = require(message.handlesFile).openSender(message.surfaceChannel);
     engine = addon.createEngine(message.options, publish);
     await engine.ready;
@@ -67,34 +64,18 @@ async function receive(bytes) {
   assert.ok(METHODS.has(message.method) && Array.isArray(message.args)
     && pending.size < MAX_ORDINARY_CALLS + MAX_RETIREMENT_CALLS);
   pending.add(message.id);
-  let inputLease = null, inputRetired = false;
   try {
-    if (message.method === 'submitFrame') {
-      assert.ok(parentHandles, 'Native input HANDLE duplication is unavailable.');
-      assert.ok(inputLeases.size < 16, 'The native input HANDLE lease budget is full.');
-      inputLease = parentHandles.duplicate(message.args[1].handle);
-      inputLeases.set(message.id, inputLease);
-      message.args[1].handle = inputLease.handle;
-    }
     // Native state may already be gone while asynchronous close is still draining.
     if (message.method === 'close') clearInterval(timer);
     const result = await engine[message.method](...message.args);
-    inputRetired = true;
     if (message.method === 'close') {
       closed = true;
-      for (const lease of inputLeases.values()) lease.close();
-      inputLeases.clear();
       surfaceSender?.close();
     }
     send({ type: 'result', id: message.id, result });
   } catch (error) {
-    inputRetired = error.nativeOwnershipRetained === false;
     send({ type: 'result', id: message.id, error: errorRecord(error) });
   } finally {
-    if (inputLease && inputRetired) {
-      inputLease.close();
-      inputLeases.delete(message.id);
-    }
     pending.delete(message.id);
   }
 }

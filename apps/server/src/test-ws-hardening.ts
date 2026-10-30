@@ -526,10 +526,10 @@ test('a sign-in whose snapshot went stale is caught up with its roles and channe
     // What an administrator's ROLE_ASSIGN and CHANNEL_UPDATE do, landing at that moment of the sign-in.
     const change = async () => {
       assert.equal((await f.roleService.assignRole(owner.id, { userId: member.id, roleId: role.id })).success, true);
-      await f.wsServer['broadcastRolesState']();
+      await f.wsServer['roleAdmin'].broadcastState();
       assert.equal((await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: publicId, name: renamed })).type,
         MessageType.CHANNEL_UPDATED);
-      if (pending) void f.wsServer['mutateLocalAccess'](() => delay(30));
+      if (pending) void f.wsServer['epoch'].change(() => delay(30));
     };
     let restore = () => {};
     if (moment === 'while the snapshot is read') {
@@ -542,12 +542,13 @@ test('a sign-in whose snapshot went stale is caught up with its roles and channe
         });
       restore = () => mocked.mock.restore();
     } else {
-      const ice = f.wsServer['buildIceServersFor'].bind(f.wsServer);
-      f.wsServer['buildIceServersFor'] = async (userId, session) => {
+      const auth = f.wsServer['authentication'];
+      const ice = auth['buildIceServersFor'].bind(auth);
+      auth['buildIceServersFor'] = async (userId, session) => {
         await change();
         return ice(userId, session);
       };
-      restore = () => { f.wsServer['buildIceServersFor'] = ice; };
+      restore = () => { auth['buildIceServersFor'] = ice; };
     }
     const again = await f.human(nickname, member.keys, member.deviceId);
     restore();

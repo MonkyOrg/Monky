@@ -118,7 +118,8 @@ class TrayModel final {
       return true;
     }
     if (name == "media-error" || name == "media-cleanup-error") {
-      mediaConnected_ = false;
+      // A failure tied to one participant costs only that participant's audio.
+      if (stringAt(event, "sessionId").empty()) mediaConnected_ = false;
       alert_ = detail(event);
       return true;
     }
@@ -138,19 +139,22 @@ class TrayModel final {
                                                " — " + result.status;
     result.connected = link_ == Link::ready;
     result.inCall = channelId_.has_value() && mediaConnected_;
-    result.silenced = muted_ || serverMuted_ || deafened_ || serverDeafened_;
+    result.silenced = muted_ || serverMuted_ || permissionMuted_ || deafened_ || serverDeafened_;
     result.channels = channels_;
     for (auto& channel : result.channels) channel.selected = channelId_ && *channelId_ == channel.id;
     result.inputs = select(inputs_, inputPreference_, unavailableInput_);
     result.outputs = select(outputs_, outputPreference_, unavailableOutput_);
     result.canJoin = link_ == Link::ready;
     result.canLeave = channelId_.has_value();
-    result.muteChecked = muted_ || serverMuted_;
-    result.muteEnabled = !serverMuted_;
+    result.muteChecked = muted_ || serverMuted_ || permissionMuted_;
+    result.muteEnabled = !serverMuted_ && !permissionMuted_;
     result.deafenChecked = deafened_ || serverDeafened_;
     result.deafenEnabled = !serverDeafened_;
-    result.muteLabel = label(text_.muteMicrophone, serverMuted_);
-    result.deafenLabel = label(text_.deafen, serverDeafened_);
+    // Who keeps the microphone closed: a moderator, or the room's Speak permission.
+    result.muteLabel = label(text_.muteMicrophone, serverMuted_       ? text_.byServer
+                                                   : permissionMuted_ ? text_.noPermissionToSpeak
+                                                                      : nullptr);
+    result.deafenLabel = label(text_.deafen, serverDeafened_ ? text_.byServer : nullptr);
     return result;
   }
 
@@ -240,6 +244,7 @@ class TrayModel final {
     deafened_ = boolAt(*policy, "deafened");
     serverMuted_ = boolAt(*policy, "serverMuted");
     serverDeafened_ = boolAt(*policy, "serverDeafened");
+    permissionMuted_ = boolAt(*policy, "permissionMuted");
     return true;
   }
 
@@ -287,9 +292,9 @@ class TrayModel final {
     return result;
   }
 
-  std::string label(const char* base, bool byServer) const {
+  std::string label(const char* base, const char* note) const {
     auto result = std::string(base);
-    if (byServer) result += " (" + std::string(text_.byServer) + ")";
+    if (note) result += " (" + std::string(note) + ")";
     return result;
   }
 
@@ -342,6 +347,7 @@ class TrayModel final {
   bool deafened_ = false;
   bool serverMuted_ = false;
   bool serverDeafened_ = false;
+  bool permissionMuted_ = false;
   bool microphoneRefused_ = false;
   bool microphonePending_ = false;
   std::vector<MenuEntry> inputs_;

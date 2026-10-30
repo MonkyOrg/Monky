@@ -1021,7 +1021,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         if (entries.length !== 1 || !entries[0].textContent.includes('Counter-Strike 2'))
           throw new Error('The game guide did not find its documented Counter-Strike alias.');
         document.querySelector('#game-capture-guide-close').click();
-        if (document.querySelector('#game-capture-guide') || document.activeElement !== guideButton
+        await wait(() => !document.querySelector('#game-capture-guide'), 'The game guide did not finish closing.');
+        if (document.activeElement !== guideButton
           || card()?.getAttribute('aria-pressed') !== 'true'
           || document.querySelector('#share-method-game')?.getAttribute('aria-pressed') !== 'true'
           || videoService.getNativeScreenCaptures().length !== 0)

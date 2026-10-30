@@ -1,5 +1,4 @@
-import { captureScreenShareCall, notifyScreenShareState, stopLocalScreenShares } from './screenShareControls';
-import { videoService } from './VideoService';
+import { captureScreenShareCall, discardUnpublishedScreen, notifyScreenShareState } from './screenShareControls';
 import { webRtcManager } from './WebRtcManager';
 import { voiceStore } from '../stores/voiceStore';
 
@@ -10,8 +9,8 @@ import { voiceStore } from '../stores/voiceStore';
  * call as audience. It is only offered while nothing is shared, so there is
  * never a previous share or audio owner to retire.
  *
- * Mirrors the native branch of ScreenSharePickerModal.startSharing; any error
- * is thrown to the caller after the half-started capture is cleaned up.
+ * Mirrors the native start of core/screenShareStart; any error is thrown to
+ * the caller after the half-started capture is cleaned up.
  * `claim` learns the share id right before it is published, so the game strip
  * owns the "live" status from the first voice update on.
  */
@@ -36,14 +35,7 @@ export async function startGameShare(sourceId: string, claim: (shareId: string) 
     notifyScreenShareState(call);
     published = true;
   } catch (error) {
-    if (stream && !published && videoService.getScreenStream(stream.id) === stream) {
-      try {
-        if (call.isCurrent()) await stopLocalScreenShares({ shareIds: [stream.id] });
-        else videoService.stopScreenShare(stream.id);
-      } catch (cleanupError) {
-        console.warn('[GameShare] Failed to clean up the cancelled game share', cleanupError);
-      }
-    }
+    if (stream && !published) await discardUnpublishedScreen(call, stream);
     if (error instanceof Error && error.name === 'AbortError') return;
     throw error;
   }

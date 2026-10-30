@@ -21,6 +21,33 @@ function reveal(element: HTMLElement, modal: HTMLElement | null): void {
   if (container) revealWithin(container, element);
 }
 
+/**
+ * The same reveal for a panel that unfolds through its own CSS transition (the
+ * soundboard's grid rows): once it has unfolded, the modal scrolls the least
+ * needed to show it, and only when the person opened it.
+ */
+export function revealWhenUnfolded(element: HTMLElement): void {
+  const modal = revealTarget(element);
+  if (!modal) return;
+  const animated = getComputedStyle(element).transitionDuration.split(',').some((duration) => parseFloat(duration) > 0);
+  if (reducedMotion() || !animated) {
+    reveal(element, modal);
+    return;
+  }
+  const stop = (): void => {
+    element.removeEventListener('transitionend', unfolded);
+    element.removeEventListener('transitioncancel', stop);
+  };
+  // Folding again before the end cancels the transition, and with it the reveal.
+  const unfolded = (event: TransitionEvent): void => {
+    if (event.target !== element || event.propertyName !== 'grid-template-rows') return;
+    stop();
+    reveal(element, modal);
+  };
+  element.addEventListener('transitionend', unfolded);
+  element.addEventListener('transitioncancel', stop);
+}
+
 export function cancelVisibilityMotion(element: HTMLElement): void {
   expansions.get(element)?.();
   cancelSurfaceMotion(element);

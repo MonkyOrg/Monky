@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No Windows, o seletor de tela lista janelas e monitores também em PCs sem o Visual C++ Redistributable, e várias telas com som ao mesmo tempo não travam mais downloads e arquivos do app.",
+  "en": "On Windows, the screen picker lists windows and monitors even on PCs without the Visual C++ Redistributable, and several screens with sound at once no longer stall the app's downloads and files."
+}

@@ -393,9 +393,10 @@ void AudioRuntime::OnFailure(std::uint64_t epoch, Failure) noexcept {
   try {
     if (!epoch) return;
     OnInvalidated(epoch, PlayoutOutput::StopReason::MixerFailure);
-    host_.Emit("audio.outputError", 0, {{"epoch", epoch}, {"code", "ERR_RTC_AUDIO_OUTPUT"},
-        {"message", "Audio output epoch failed; select/recreate a new output epoch"},
-        {"status", MONKY_ENGINE_FAILURE}, {"hresult", 0}, {"terminal", false}});
+    auto data = ErrorEvent(Error("ERR_RTC_AUDIO_OUTPUT",
+        "Audio output epoch failed; select/recreate a new output epoch"), false);
+    data["epoch"] = epoch;
+    host_.Emit("audio.outputError", 0, std::move(data));
   } catch (...) {}
 }
 void AudioRuntime::ReadOutput(std::uint64_t epoch, std::uint64_t sequence, MonkyEngineAudioPlayout& packet) {

@@ -288,6 +288,8 @@ async function runBotSettingsDomSmoke() {
     check(language.getLanguage() === 'pt-BR', 'The bot-language dropdown does not change the application locale');
     await submit();
     await modal.open('generic-bot');
+    check(document.querySelectorAll('.bot-settings-modal').length === 1,
+      'Reopening replaces the previous settings at once, so their fixed ids never coexist');
     check(find('#bot-settings-form h3').textContent === 'Your preferences',
       'Reopening settings restores the saved language override');
     selectLanguage('auto');
@@ -332,9 +334,11 @@ async function runBotSettingsDomSmoke() {
     toggle('#bot-settings-user-enabled', false);
     type('#bot-settings-user-count', '6');
     await submit();
-    check(find('.bot-settings-message').getAttribute('role') === 'alert' &&
+    const refusal = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+    check(refusal?.getAttribute('role') === 'alert' &&
       find('[data-field-name="count"]').getAttribute('aria-invalid') === 'true', 'Invalid settings are visibly rejected');
-    check(find('.bot-settings-message').textContent.includes('Quantidade'), 'Validation errors use the currently localized field label');
+    check(refusal.textContent.includes('Quantidade') && !find('.bot-settings-message').textContent.includes('Quantidade'),
+      'Validation errors use the currently localized field label, in the toast rather than the layout');
     equal(settingsStore.getBotUserSettings(userKey), {}, 'Invalid settings cannot reach persistence');
     type('#bot-settings-user-count', '2');
     await submit();
@@ -518,15 +522,19 @@ async function runBotSettingsDomSmoke() {
     check(!!document.querySelector('.bot-settings-body .bot-loading-spinner') &&
       getComputedStyle(find('.bot-settings-body .bot-loading-spinner')).animationName === 'reconnect-spin',
     'Bot settings reads retain an animated localized waiting indicator');
+    const leftBehind = find('.bot-settings-modal');
     appEvents.emit('session.changed');
+    check(!leftBehind.isConnected, 'Switching servers removes the previous server\'s bot settings at once, with no exit animation');
     completeRequest(snapshot('audio-bot'));
     await opening;
     check(!document.querySelector('.bot-settings-modal:not([data-ui-closing])'), 'Late reads cannot reopen a closed settings modal');
     deferType = null;
     await modal.open('audio-bot');
+    const pinned = find('.bot-settings-modal');
     connectionId++;
     appEvents.emit('network.status');
-    check(!document.querySelector('.bot-settings-modal:not([data-ui-closing])'), 'Connection replacement closes the pinned modal');
+    check(!pinned.isConnected && !document.querySelector('.bot-settings-modal'),
+      'Connection replacement removes the pinned modal at once');
     await modal.open('audio-bot');
     server.currentUser = { ...caller, id: 'another-identity' };
     appEvents.emit('user.updated');

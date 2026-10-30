@@ -124,6 +124,103 @@ Server messages arrive as `message.<TYPE>`, with the payload of the protocol map
   using them through their own `subscribe()`. `dmStore` has a bus of its own,
   typed by `DmEvents`.
 
+Domain modules, bound once at startup, apply the server's messages to the
+stores: `core/serverStateEvents.ts` (members, roles, channels and settings),
+`core/chatEvents.ts` and `core/voiceEvents.ts`. A server's screen
+(`views/MainView.ts`) composes the parts in `views/main/`: header, channel
+tree, members, user card and call notices.
+
+A view that queries a server by request, such as the audit log and the monitor,
+is tied to the server, connection and member of the moment it opened by a
+`SessionBinding` (`core/sessionBinding.ts`): once any of them changes, it stops
+instead of mixing in another server's data. `BoundRequests` retires each request
+once it settles and the pending ones when the view closes, and
+`watchVisibleSession` (`core/visibleSession.ts`) revalidates access when the
+server changes and closes the view once it is no longer the visible one.
+
+### The UI kit
+
+The pieces every view repeats live in one place, and a new view uses them
+instead of writing them again:
+
+- **Modal shell** (`utils/modalShell.ts`): `openModal({ card, ... })` puts the
+  card on the modal stack and handles the rest. A single capture-phase
+  `keydown` on `document` acts only while the modal is on top with no popup of
+  its own open: Escape closes (or first clears a `data-clear-on-escape` field)
+  and Tab cycles inside the card. The card is always a named modal `dialog`;
+  focus starts on the first control below the header and goes back, on close,
+  to whoever opened it. The shell also closes the modal through
+  `data-modal-close` buttons and a press that starts on the backdrop;
+  `canClose(reason)` holds it open during an operation. When the visible
+  server changes (`closeWithSession`) or the owner's `signal` ends, the modal
+  leaves at once, with no exit animation and with its popups: another
+  server's content must not linger over the new one. Every
+  listener of the content uses `shell.signal`. A view that re-renders writes inside
+  `shell.card`, never replacing it: while a child dialog is open, the stack
+  hides the card below, and a new card would escape that. The order between
+  modals comes from the stack (`utils/modalSurface.ts`), never from a
+  `z-index` of each modal. `openCommunityModal` and the shortcut capture
+  dialog (`ShortcutCaptureDialog`) are thin layers over the shell.
+- **Feedback** (`utils/feedback.ts`): an operation error goes to the shared
+  alert toast through `reportError(message, { field, focus, log, error })`,
+  which also marks the field `aria-invalid` until it is edited again. No error
+  message is ever left loose in the layout. A failed load is something else:
+  the content gives way to a notice with "Try again" (`renderLoadingError`, in
+  `utils/loadingSkeleton.ts`). `copyText` and `openExternalUrl` confirm or
+  explain in the toast. `useAppValidation(form, signal)` replaces the
+  browser's native balloon, which follows the system language, with an
+  explanation in the app's language. Two exceptions are deliberate: a
+  terminal media failure that arrives without an action of the person (voice
+  reconnection, microphone, camera, screen capture) stays in a dialog so it is
+  not missed, and an error of the stage in fullscreen stays inside the
+  fullscreen element, since a toast in `body` would not show.
+- **Choice controls** (`utils/formControls.ts`): on/off is always
+  `renderSwitch({ id, checked, label | labelledBy, ... })`, a hidden checkbox
+  with `role="switch"` and a name, and keyboard focus shows on the track
+  anywhere. A choice among a few options becomes cards (`renderChoiceCards`
+  and `selectChoiceCard`): buttons with `aria-pressed`, styled by
+  `.input-mode-card`, never radio buttons. The P2P/SFU voice mode uses them
+  through `renderVoiceModeCards` (`utils/voiceModeInfo.ts`).
+- **Settings tabs** (`views/settings/settingsLayout.ts`): Settings and Server
+  Settings declare their tabs once, in a table (`SettingsTabEntry`: id, icon,
+  label), and build the sidebar and the title with `renderSettingsTabButtons`
+  and `renderSettingsTabLabel`. In Settings, each tab of the table also says how
+  it renders, binds, shows, hides and cleans up.
+- **Community wizards** (`views/community/wizardShell.ts`): the poll, form and
+  event wizards build the same frame with `mountWizard`. The stepper and the
+  footer stay still while the step slides between them, forward or back, and
+  each new step starts from its top with its title focused. Back and Next wait
+  for the slide to end. Since the footer stays in place, the second click of a
+  double click lands on the button the first one just changed; that click,
+  which the system counts as part of the same gesture (`event.detail` 2 or
+  more), is ignored. So a double click moves a single step and never publishes
+  what nobody reviewed, with or without reduced motion; the keyboard and a new
+  click work as usual. Each wizard says when a step may be left: with a
+  disabled button (`ready`) or with an explanation in the toast (`leave`). The
+  draft closes at once when the visible server changes.
+- **Audience picker** (`views/ResourceAudiencePicker.ts`): who can see a
+  community resource or watch a private screen share. A searchable list that
+  also opens from the keyboard (arrows on the closed field), honors the
+  `AUDIENCE_LIMITS` from `@monky/shared`, and takes its own texts and the
+  on/off switch of whoever uses it (`externalSwitch` with `setPrivate`).
+- **Stage tile volume** (`views/StageVolumeControl.ts`): the mute button with
+  the vertical 0–200% slider above it, the same for a shared screen and a
+  miniapp. It opens on hover and from the keyboard (Tab goes from the button to
+  the slider); Escape closes it, and muted audio keeps it closed.
+- **Motion**: entering and leaving through `utils/surfaceMotion.ts`, the modal
+  stack through `utils/modalSurface.ts`, expansions through `setSurfaceVisible`
+  (`utils/surfaceVisibility.ts`; a panel that unfolds through its own CSS
+  transition, like the soundboard's, calls `revealWhenUnfolded` when opened, so
+  it ends in view the same way), steps that swap the whole card through
+  `replaceModalStep` and steps inside the fixed area of a wizard through
+  `slideStepContent` (both in `utils/modalSteps.ts`), with a forward and a back
+  direction. A tab swap is a `view`: opacity only. Visible scrolling goes
+  through `utils/scroll.ts`. All of them honor `prefers-reduced-motion`.
+- **Resizable panels** (`utils/resizableEdge.ts`): the edge a person drags to
+  widen a panel becomes a window splitter, with a role and bounds for screen
+  readers, arrows, Home and End, and the width saved and restored. The channel
+  list and the voice chat use it.
+
 ### The services
 
 Every large client responsibility lives in its own class, under
@@ -151,7 +248,7 @@ carry a second implementation of capture, quality preferences or codec rules.
 |---|---|
 | Local registry of published screens and their previews | `VideoService`; capture, encoding and audio belong to the native source |
 | Stop/replace controls, associated audio and updating the correct session | `screenShareControls.ts`, used by the picker, views and call departure/switching |
-| Starting, cancelling and retiring each source | `WebRtcManager`'s `startNativeScreenShare()` and `removeNativeScreenSource()`, carried out by `webrtc/NativeScreenController.ts` |
+| Starting, cancelling and retiring each source | `WebRtcManager`'s `startNativeScreenShare()` and `removeNativeScreenSource()`, carried out by `webrtc/NativeScreenController.ts` (local sources in `webrtc/nativeScreen/LocalScreenSources.ts`) |
 | Viewing intent, independent of the view and mute preference | `VoiceStore`, owned by the call session and applied to both transports through `WebRtcManager` |
 | Screen codec and encoding mode | Quality preferences, probed by `core/screenEncoding.ts` and verified when the native source is admitted |
 | Microphone and camera bitrate/FPS limits and adaptation preference | `webrtc/mediaEncodingPolicy.ts`, used by P2P and SFU |
@@ -160,7 +257,7 @@ carry a second implementation of capture, quality preferences or codec rules.
 | Serialized RTP parameter changes | `webrtc/rtpSenderParameters.ts`: overlapping updates do not overwrite each other's transaction |
 | Receiving and associating remote media with the UI | `webrtc/RemoteMediaRouter`, shared by both modes |
 | Native capture/encoding/transport and Main-process ownership | `nativeScreenSharing.ts` and `native/screen-share` |
-| Native-screen subscriptions/presentation or compatible Chromium reception | `webrtc/NativeScreenController.ts` and `webrtc/BrowserScreenSubscription.ts` |
+| Native-screen subscriptions/presentation or compatible Chromium reception | `webrtc/nativeScreen/RemoteScreenPresentations.ts` (automatic reconnection in `RewatchPolicy.ts`) and `webrtc/BrowserScreenSubscription.ts` |
 
 The renderer does not publish screens: the voice connection carries only the
 microphone and camera. Each screen is captured, encoded and sent by its native
@@ -623,7 +720,9 @@ recipient watches at least one screen from that publisher. Microphone, camera,
 other viewers and mute preferences are independent. The last subscription to a
 profile closes its capture, encoder and sending pipeline, including
 publisher-to-SFU upload. RTCP and signaling remain allowed; this does not promise zero bytes in the call.
-The contracts require client and server to share the same `PROTOCOL_VERSION`.
+Client and server negotiate these contracts when they connect, as described in
+"Negotiated compatibility" above: the viewer list, for example, only appears
+when both sides advertised `screen-viewers`.
 
 ### Screen audio: the native module
 
@@ -760,8 +859,10 @@ Things that follow directly from the architecture, and are not bugs:
 - **TURN is off by default.** Very restrictive networks can prevent the media
   connection even when the server is reachable. An optional relay exists, but it
   costs the host bandwidth and only runs on Linux.
-- **The protocol requires an exact match.** Client and server need the same
-  `PROTOCOL_VERSION`; updating only one side breaks the connection.
+- **Compatibility has a floor.** Client and server negotiate version and
+  features when they connect, but only from a floor up (`MIN_CLIENT_PROTOCOL`
+  for clients, `MIN_BOT_PROTOCOL` for bots). Anyone below it cannot join until
+  they update, and a new feature only appears when both sides have it.
 - **Screen audio only on Windows and macOS**, because it depends on each system's
   native API.
 - **Qualification depends on hardware.** The macOS path was exercised on M1

@@ -5,8 +5,7 @@ import { settingsStore } from '../stores/settingsStore';
 import { serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { escapeHtml } from '../utils/html';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
-import { enableBackdropClose } from '../utils/modal';
+import { openModal, type ModalShell } from '../utils/modalShell';
 import { customStatusDotStyle, renderPresenceTag } from '../utils/presenceTag';
 import { COLOR_PRESETS } from '../utils/colors';
 import { ColorPicker } from './ColorPicker';
@@ -210,44 +209,33 @@ export class CustomStatusEditor {
 
 /** Stand-alone editor, opened from the user card where no other modal is up. */
 export class CustomStatusModal {
-  private root: HTMLElement | null = null;
-  private controller: AbortController | null = null;
+  private shell: ModalShell | null = null;
   private readonly editor = new CustomStatusEditor({ idPrefix: 'custom-status', onClose: () => this.close() });
 
   public open(): void {
     this.close();
-    const root = document.createElement('div');
-    root.className = 'modal-backdrop';
-    root.innerHTML = `<div class="modal-card custom-status-modal" role="dialog" aria-modal="true" aria-labelledby="custom-status-title">
+    const shell = openModal({
+      card: `<div class="modal-card custom-status-modal" aria-labelledby="custom-status-title">
       <div class="modal-header">
         <div class="modal-title" id="custom-status-title">${t('customStatus.title')}</div>
-        <button type="button" class="modal-close-btn" data-custom-status-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
+        <button type="button" class="modal-close-btn" data-custom-status-close data-modal-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
       </div>
       ${this.editor.renderHtml()}
-    </div>`;
-    document.body.appendChild(root);
-    this.root = root;
-    enterModal(root);
-    this.editor.mount(root);
-    const controller = new AbortController();
-    this.controller = controller;
-    root.querySelector('[data-custom-status-close]')?.addEventListener('click', () => this.close(), { signal: controller.signal });
-    root.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && handlesModalKey(root, event)) {
-        event.preventDefault();
-        this.close();
-      }
-    }, { signal: controller.signal });
-    enableBackdropClose(root, () => this.close());
+    </div>`,
+      initialFocus: false,
+      onClose: () => {
+        if (this.shell !== shell) return;
+        this.shell = null;
+        this.editor.destroy();
+      },
+    });
+    this.shell = shell;
+    this.editor.mount(shell.card);
     this.editor.focus();
   }
 
   public close(): void {
-    this.controller?.abort();
-    this.controller = null;
-    this.editor.destroy();
-    if (this.root) exitModal(this.root);
-    this.root = null;
+    this.shell?.close('api');
   }
 }
 

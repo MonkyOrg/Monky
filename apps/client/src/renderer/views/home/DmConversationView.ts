@@ -15,23 +15,21 @@ import { connectionStore } from '../../stores/connectionStore';
 import { formatBytes, fileIconName } from '../../utils/attachment';
 import { getAvatarUrl } from '../../utils/avatar';
 import { openFileInputPicker } from '../../utils/buttonLoading';
-import { escapeHtml } from '../../utils/html';
+import { escapeHtml, html, trustedHtml, type SafeHtml } from '../../utils/html';
 import { renderMarkdown } from '../../utils/markdown';
 import type { MessageClipboardContent } from '../../utils/messageClipboard';
-import { highlightMessageJump } from '../../utils/messageJumpHighlight';
 import { formatMessageClock, formatMessageTime, renderReplyPreview } from '../../utils/messageReply';
-import { smoothScrollIntoView } from '../../utils/scroll';
 import { setSurfaceVisible } from '../../utils/surfaceVisibility';
 import { animateEnter } from '../../utils/surfaceMotion';
 import { renderLoadingSkeleton } from '../../utils/loadingSkeleton';
-import { bindChatComposer, renderChatComposer, renderChatEditComposer } from '../ChatComposer';
+import { bindChatComposer, renderChatComposer, renderChatEditComposer, setComposerEditMode } from '../ChatComposer';
 import { contextMenu, type ContextMenuEntry } from '../ContextMenu';
 import { showErrorToast } from '../CopyToast';
 import { showConfirm } from '../Dialog';
 import { EmojiPicker } from '../EmojiPicker';
 import { lightboxModal } from '../LightboxModal';
 import { bindCodeBlockCopyButtons, MessageCopy, messageClipboardContent } from '../MessageCopy';
-import { mountServerInviteCards, openServerInviteLink } from '../ServerInviteCard';
+import { bindMessageLinks, mountServerInviteCards } from '../ServerInviteCard';
 import type { MarkdownInput } from '../MarkdownInput';
 import '../MarkdownInput';
 import { dmFailureMessage } from './dmErrors';
@@ -40,18 +38,25 @@ import { forwardDestinations, openForwardModal } from '../ForwardMessagesModal';
 import type { ForwardItem } from '../../core/MessageForwarder';
 import { downloadFilesWithChoice, type DownloadableFile } from '../../utils/fileDownloads';
 import { archiveDate, renderForwardedBadge } from '../../utils/messageForward';
-
-interface StagedFile {
-  id: string;
-  file: File;
-  previewUrl: string | null;
-}
+import { AttachmentTray, listFileNames } from '../chat/AttachmentTray';
+import { MessageFeed, type FeedEntry } from '../chat/MessageFeed';
+import {
+  renderDeletedNotice,
+  renderEditedBadge,
+  renderMessageRow,
+  renderMessageToolbar,
+  renderReactionButtons,
+  renderReplyReference,
+  type MessageReactionView,
+  type MessageToolbarAction,
+} from '../chat/messageRow';
 
 /** How a message row was last drawn, and what besides the message it depended on. */
 interface RowRender {
   html: string;
   grouped: boolean;
-  reply: string;
+  /** The message it answers, as drawn in its quote; null when there is none. */
+  original: DmMessageView | null | undefined;
   context: string;
 }
 
@@ -63,14 +68,20 @@ interface FeedContext {
 
 const OLDER_KEY = 'older';
 const INTRO_KEY = 'intro';
+/** A reply quotes this much of the message it answers, as server channels do. */
+const REPLY_PREVIEW_LENGTH = 200;
 
 function rowKey(messageId: string): string {
   return `message:${messageId}`;
 }
 
-function elementFromHtml(html: string): HTMLElement | null {
+function isMessageKey(key: string): boolean {
+  return key.startsWith('message:');
+}
+
+function elementFromHtml(markup: string): HTMLElement | null {
   const template = document.createElement('template');
-  template.innerHTML = html.trim();
+  template.innerHTML = markup.trim();
   const element = template.content.firstElementChild;
   return element instanceof HTMLElement ? element : null;
 }
@@ -97,23 +108,28 @@ export class DmConversationView {
   private editing: string | null = null;
   /** Unsent text set aside while a sent message is being edited. */
   private draft = '';
-  private staged: StagedFile[] = [];
   private readonly blobUrls = new Map<string, string>();
   private readonly loadingBlobs = new Set<string>();
   private picker: EmojiPicker | null = null;
   private composerPicker: EmojiPicker | null = null;
-  private pinnedToBottom = true;
   private sending = false;
   /** Whether opening the conversation finished, even without any history. */
   private openSettled = false;
-  /** The node on screen for each feed entry (message rows, "load older", the intro). */
-  private readonly feedNodes = new Map<string, HTMLElement>();
-  /** The markup each node on screen was made from, compared with the next render to leave unchanged rows alone. */
-  private readonly nodeSources = new WeakMap<Element, string>();
+  private feed: MessageFeed | null = null;
   private rowRenders = new WeakMap<DmMessageView, RowRender>();
   /** The context signature of the last full pass (see {@link renderSignature}). */
   private renderedSignature: string | null = null;
   private renderFrame: number | null = null;
+  /** Files wait in the tray until the message goes out: they are read and sent with it. */
+  private readonly tray = new AttachmentTray({
+    maxFiles: DM_MAX_ATTACHMENTS,
+    maxBytes: () => this.peerView()?.maxFileBytes ?? 0,
+    tooLarge: (files, limit) => files.length === 1
+      ? t('dm.errorFileTooLarge', { nickname: this.nickname(), size: formatBytes(limit), name: files[0].name })
+      : t('dm.errorFilesTooLarge', { nickname: this.nickname(), size: formatBytes(limit), names: listFileNames(files) }),
+    tooMany: (max) => t('dm.errorTooManyFiles', { count: max }),
+    hidden: () => this.editing !== null,
+  });
   private readonly copy = new MessageCopy({
     isActive: () => !!this.container?.isConnected,
     feed: () => this.query('[data-dm-feed]'),
@@ -135,6 +151,9 @@ export class DmConversationView {
     this.container = container;
     this.listeners = new AbortController();
     container.innerHTML = this.renderShell();
+    const feedElement = this.query('[data-dm-feed]');
+    this.feed = feedElement ? new MessageFeed(feedElement, { onCreate: (element) => this.bindRow(element) }) : null;
+    this.tray.mount(this.query('#chat-attachment-tray'));
     this.bindEvents();
     this.renderHeader();
     this.restoreDraft();
@@ -185,7 +204,8 @@ export class DmConversationView {
     this.listeners = null;
     if (this.renderFrame !== null) cancelAnimationFrame(this.renderFrame);
     this.renderFrame = null;
-    this.feedNodes.clear();
+    this.feed?.destroy();
+    this.feed = null;
     // Drawn rows may point at image URLs revoked below.
     this.rowRenders = new WeakMap();
     this.renderedSignature = null;
@@ -197,8 +217,7 @@ export class DmConversationView {
     this.composerPicker = null;
     for (const url of this.blobUrls.values()) URL.revokeObjectURL(url);
     this.blobUrls.clear();
-    for (const file of this.staged) if (file.previewUrl) URL.revokeObjectURL(file.previewUrl);
-    this.staged = [];
+    this.tray.destroy();
     this.replyTo = null;
     this.editing = null;
     this.draft = '';
@@ -215,11 +234,6 @@ export class DmConversationView {
     const saved = dmStore.draft(this.peer);
     const input = this.input();
     if (!saved || !input) return;
-    this.staged = saved.files.map((file) => ({
-      id: crypto.randomUUID(),
-      file,
-      previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
-    }));
     const edited = saved.editing ? this.message(saved.editing.messageId) : undefined;
     if (saved.editing && edited && !edited.deleted && this.isMine(edited)) {
       this.editing = edited.id;
@@ -230,7 +244,7 @@ export class DmConversationView {
       input.value = saved.text;
     }
     input.setSelectionRange(input.value.length, input.value.length);
-    if (this.staged.length > 0) this.renderTray();
+    this.tray.restore(saved.files);
     if (this.replyTo) this.renderReplyComposer();
   }
 
@@ -245,7 +259,7 @@ export class DmConversationView {
     dmStore.setDraft(this.peer, {
       text: this.editing ? this.draft : input.value,
       replyTo: this.editing ? null : this.replyTo,
-      files: this.staged.map((entry) => entry.file),
+      files: this.tray.files(),
       // An edit already being saved is not kept: it would come back as an edit of what was just saved.
       editing: this.editing && !this.sending ? { messageId: this.editing, content: input.value } : null,
     });
@@ -340,7 +354,7 @@ export class DmConversationView {
     if (!writable) {
       this.cancelEdit();
       this.clearReply();
-      this.clearStaged();
+      this.tray.clear();
       this.composerPicker?.close();
     }
     const offline = this.query('[data-dm-offline]');
@@ -355,44 +369,24 @@ export class DmConversationView {
   /** The same composer states as a server channel: editing swaps Send for Save and sets attachments aside. */
   private syncComposer(): void {
     const input = this.input();
-    if (!input) return;
+    if (!input || !this.container) return;
     const editing = this.editing !== null;
     const saving = editing && this.sending;
-    this.query('.chat-input-container')?.classList.toggle('chat-input-container--editing', editing);
-    const banner = this.query('#chat-edit-composer');
-    if (banner) banner.hidden = !editing;
-    const cancel = this.query<HTMLButtonElement>('#btn-cancel-message-edit');
-    if (cancel) cancel.disabled = saving;
+    setComposerEditMode(this.container, { editing, saving });
     const placeholder = editing ? t('chat.editingMessage') : t('dm.inputPlaceholder', { nickname: this.nickname() });
     // Each attribute change reconfigures the editor, so only real changes are written.
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     if (input.getAttribute('aria-label') !== placeholder) input.setAttribute('aria-label', placeholder);
-    const describedBy = editing ? 'chat-edit-hint chat-edit-error' : null;
-    if (input.getAttribute('aria-describedby') !== describedBy) {
-      if (describedBy) input.setAttribute('aria-describedby', describedBy);
-      else input.removeAttribute('aria-describedby');
-    }
     if (input.readOnly !== saving) input.readOnly = saving;
     input.classList.toggle('chat-input-field--readonly', saving);
     this.query('.chat-input-wrapper')?.classList.toggle('chat-input-wrapper--disabled', saving);
-    this.container?.querySelectorAll<HTMLButtonElement>('#btn-emoji, #btn-format, [data-format]').forEach((button) => {
+    this.container.querySelectorAll<HTMLButtonElement>('#btn-emoji, #btn-format, [data-format]').forEach((button) => {
       button.disabled = saving;
     });
     const attach = this.query<HTMLButtonElement>('#btn-attach');
-    if (attach) {
-      attach.style.display = editing ? 'none' : '';
-      attach.disabled = editing;
-    }
+    if (attach) attach.disabled = editing;
     const send = this.query<HTMLButtonElement>('#btn-send-message');
-    if (send) {
-      send.disabled = this.sending;
-      send.setAttribute('aria-busy', String(saving));
-      const label = send.querySelector('.chat-send-label');
-      const text = t(saving ? 'chat.editSaving' : editing ? 'common.save' : 'chat.send');
-      if (label && label.textContent !== text) label.textContent = text;
-      const icon = send.querySelector('.material-symbols-outlined');
-      if (icon) icon.textContent = saving ? 'hourglass_empty' : editing ? 'check' : 'send';
-    }
+    if (send) send.disabled = this.sending;
     this.updateCounter();
   }
 
@@ -429,39 +423,36 @@ export class DmConversationView {
   private renderMessages(forceScroll: boolean): void {
     if (this.renderFrame !== null) cancelAnimationFrame(this.renderFrame);
     this.renderFrame = null;
-    const feed = this.query('[data-dm-feed]');
+    const feed = this.feed;
     if (!feed) return;
     const state = dmStore.conversation(this.peer);
     // Nothing of this conversation is loaded yet: show message-shaped
     // placeholders instead of a blank feed.
     if (!state && !this.openSettled) {
-      if (!feed.querySelector(':scope > .loading-skeleton')) feed.innerHTML = renderLoadingSkeleton('messages', 5);
-      this.feedNodes.clear();
+      feed.showState(renderLoadingSkeleton('messages', 5));
       return;
     }
-    const replacingSkeleton = !!feed.querySelector(':scope > .loading-skeleton');
-    const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120;
+    const replacingSkeleton = feed.showsState;
     // A conversation opens at its latest messages.
-    const followEnd = forceScroll || replacingSkeleton || (nearBottom && this.pinnedToBottom);
-    const anchor = followEnd ? null : this.scrollAnchor(feed);
-    const focus = this.focusInFeed(feed);
-    if (this.reconcileFeed(feed, state)) {
-      this.loadImages(feed);
+    const reveal = forceScroll || replacingSkeleton;
+    const followEnd = reveal || feed.followsEnd();
+    const anchor = followEnd ? null : feed.captureAnchor(isMessageKey);
+    if (feed.render(this.feedEntries(state))) {
+      this.loadImages();
       this.selection.sync();
-      if (focus) this.restoreFocus(focus);
     }
-    if (followEnd) feed.scrollTop = feed.scrollHeight;
-    else if (anchor) this.keepAnchor(feed, anchor);
+    if (followEnd) feed.scrollToEnd({ reveal });
+    else if (anchor) feed.restoreAnchor(anchor);
     this.renderTyping();
-    if (replacingSkeleton) animateEnter(feed, 'view');
+    if (replacingSkeleton) animateEnter(feed.element, 'view');
   }
 
-  /** Puts every feed entry on screen in order, reusing the nodes whose markup did not change. Returns whether any node changed. */
-  private reconcileFeed(feed: HTMLElement, state: DmConversationState | undefined): boolean {
+  /** "Load older" or the start of the conversation, then one row per message. */
+  private feedEntries(state: DmConversationState | undefined): FeedEntry[] {
     const messages = state?.messages ?? [];
-    const entries: Array<{ key: string; html: string }> = [];
+    const entries: FeedEntry[] = [];
     if (state?.hasMore) {
-      entries.push({ key: OLDER_KEY, html: `<button type="button" class="btn btn-secondary dm-load-older" data-dm-older>${t('dm.loadOlder')}</button>` });
+      entries.push({ key: OLDER_KEY, html: html`<button type="button" class="btn btn-secondary dm-load-older" data-dm-older>${t('dm.loadOlder')}</button>`.toString() });
     } else if (state) {
       entries.push({ key: INTRO_KEY, html: this.renderIntro() });
     }
@@ -470,43 +461,7 @@ export class DmConversationView {
     messages.forEach((message, index) => {
       entries.push({ key: rowKey(message.id), html: this.rowHtml(message, messages[index - 1], context) });
     });
-
-    const placed: Array<[string, HTMLElement]> = [];
-    const created: HTMLElement[] = [];
-    for (const entry of entries) {
-      const current = this.feedNodes.get(entry.key);
-      if (current && current.parentElement === feed && this.nodeSources.get(current) === entry.html) {
-        placed.push([entry.key, current]);
-        continue;
-      }
-      const node = elementFromHtml(entry.html);
-      if (!node) continue;
-      this.nodeSources.set(node, entry.html);
-      placed.push([entry.key, node]);
-      created.push(node);
-    }
-    const keep = new Set<Node>(placed.map(([, node]) => node));
-    let changed = created.length > 0;
-    for (const child of [...feed.childNodes]) {
-      if (keep.has(child)) continue;
-      child.remove();
-      changed = true;
-    }
-    // Nodes already in the right order are never moved: moving one would drop a selection inside it.
-    let cursor = feed.firstElementChild;
-    for (const [, node] of placed) {
-      if (node === cursor) {
-        cursor = node.nextElementSibling;
-        continue;
-      }
-      feed.insertBefore(node, cursor);
-    }
-    this.feedNodes.clear();
-    for (const [key, node] of placed) this.feedNodes.set(key, node);
-    for (const node of created) {
-      if (node.classList.contains('chat-message-row')) this.bindRow(node);
-    }
-    return changed;
+    return entries;
   }
 
   private feedContext(messages: DmMessageView[]): FeedContext {
@@ -531,66 +486,20 @@ export class DmConversationView {
     ]);
   }
 
-  /** The markup of one message row, drawn again only when the message or what its row depends on changed. */
+  /**
+   * The markup of one message row, drawn again only when the message, the one
+   * it answers or what its row depends on changed. Messages that did not
+   * change keep their object in the store, so the object is the key.
+   */
   private rowHtml(message: DmMessageView, previous: DmMessageView | undefined, context: FeedContext): string {
     const grouped = !!previous && previous.author === message.author && !previous.deleted && !message.replyTo &&
       sameLocalDay(previous.createdAt, message.createdAt);
-    const reply = message.replyTo && !message.deleted ? this.renderReplyReference(context.original(message.replyTo)) : '';
+    const original = message.replyTo && !message.deleted ? context.original(message.replyTo) : null;
     const cached = this.rowRenders.get(message);
-    if (cached && cached.grouped === grouped && cached.reply === reply && cached.context === context.signature) return cached.html;
-    const html = this.renderMessage(message, grouped, reply);
-    this.rowRenders.set(message, { html, grouped, reply, context: context.signature });
-    return html;
-  }
-
-  /** The first message at least partly in view, and where it sits, to keep it there while rows around it change. */
-  private scrollAnchor(feed: HTMLElement): { messageId: string; top: number } | null {
-    const rows = feed.querySelectorAll<HTMLElement>(':scope > .chat-message-row');
-    const top = feed.getBoundingClientRect().top;
-    let low = 0;
-    let high = rows.length - 1;
-    let found: HTMLElement | null = null;
-    while (low <= high) {
-      const middle = (low + high) >> 1;
-      if (rows[middle].getBoundingClientRect().bottom > top) {
-        found = rows[middle];
-        high = middle - 1;
-      } else {
-        low = middle + 1;
-      }
-    }
-    const messageId = found?.dataset.messageId;
-    return found && messageId ? { messageId, top: found.getBoundingClientRect().top } : null;
-  }
-
-  /** Exact restoration of what was on screen, not a navigation: instant on purpose. */
-  private keepAnchor(feed: HTMLElement, anchor: { messageId: string; top: number }): void {
-    const row = this.feedNodes.get(rowKey(anchor.messageId));
-    if (!row?.isConnected) return;
-    const shift = row.getBoundingClientRect().top - anchor.top;
-    if (Math.abs(shift) >= 1) feed.scrollTop += shift;
-  }
-
-  /** Where keyboard focus is inside the feed, to bring it back if its row is redrawn. */
-  private focusInFeed(feed: HTMLElement): { messageId: string; control: string | null } | null {
-    const active = document.activeElement;
-    if (!(active instanceof HTMLElement) || !feed.contains(active)) return null;
-    const row = active.closest<HTMLElement>('.chat-message-row[data-message-id]');
-    const messageId = row?.dataset.messageId;
-    if (!row || !messageId) return null;
-    let control: string | null = null;
-    if (active.dataset.dmAction) control = `[data-dm-action="${CSS.escape(active.dataset.dmAction)}"]`;
-    else if (active.dataset.dmReaction) control = `[data-dm-reaction="${CSS.escape(active.dataset.dmReaction)}"]`;
-    return { messageId, control };
-  }
-
-  private restoreFocus(focus: { messageId: string; control: string | null }): void {
-    // Still where it was: its row was not redrawn.
-    if (document.activeElement && document.activeElement !== document.body) return;
-    const row = this.feedNodes.get(rowKey(focus.messageId));
-    if (!row?.isConnected) return;
-    const target = (focus.control ? row.querySelector<HTMLElement>(focus.control) : null) ?? row;
-    target.focus({ preventScroll: true });
+    if (cached && cached.grouped === grouped && cached.original === original && cached.context === context.signature) return cached.html;
+    const markup = this.renderMessage(message, grouped, original === null ? null : this.renderReplyReference(original));
+    this.rowRenders.set(message, { html: markup, grouped, original, context: context.signature });
+    return markup;
   }
 
   /**
@@ -601,24 +510,23 @@ export class DmConversationView {
    */
   private applyProgress(messageId: string, fileId: string): void {
     if (this.renderFrame !== null) return;
-    const feed = this.query('[data-dm-feed]');
-    const row = this.feedNodes.get(rowKey(messageId));
+    const feed = this.feed;
     const messages = dmStore.conversation(this.peer)?.messages;
-    if (!feed || !row || row.parentElement !== feed || !messages) return;
+    if (!feed?.node(rowKey(messageId)) || !messages) return;
     const index = messages.findIndex((message) => message.id === messageId);
     if (index < 0) return;
     const context = this.feedContext(messages);
-    const html = context.signature === this.renderedSignature
+    const markup = context.signature === this.renderedSignature
       ? this.rowHtml(messages[index], messages[index - 1], context) : null;
     const selector = `[data-dm-file="${CSS.escape(fileId)}"]`;
-    const card = row.querySelector(selector);
-    const fresh = html ? elementFromHtml(html)?.querySelector(selector) : null;
-    if (!html || !card || !fresh) {
-      this.scheduleMessages();
-      return;
-    }
-    card.replaceWith(fresh);
-    this.nodeSources.set(row, html);
+    const patched = markup !== null && feed.patch(rowKey(messageId), markup, (row) => {
+      const card = row.querySelector(selector);
+      const fresh = elementFromHtml(markup)?.querySelector(selector);
+      if (!card || !fresh) return false;
+      card.replaceWith(fresh);
+      return true;
+    });
+    if (!patched) this.scheduleMessages();
   }
 
   private renderIntro(): string {
@@ -646,95 +554,74 @@ export class DmConversationView {
     return { name: this.nickname(), avatar: peer?.avatar ?? null, mine: false };
   }
 
-  private renderMessage(message: DmMessageView, grouped: boolean, replyReference: string): string {
+  private renderMessage(message: DmMessageView, grouped: boolean, reply: SafeHtml | null): string {
     const author = this.authorInfo(message.author);
     const time = formatMessageTime(message.createdAt);
     const writable = this.canWrite();
-    const gutterTime = grouped ? `<span class="dm-grouped-time" aria-hidden="true">${formatMessageClock(message.createdAt)}</span>` : '';
+    const avatarUrl = getAvatarUrl(author.avatar);
+    const lead = grouped ? html`<span class="dm-grouped-time" aria-hidden="true">${formatMessageClock(message.createdAt)}</span>` : undefined;
     if (message.deleted) {
-      return `
-        <div class="chat-message-row chat-message-deleted${grouped ? ' dm-message-row--grouped' : ''}" data-message-id="${escapeHtml(message.id)}">
-          ${gutterTime}
-          <img class="chat-author-avatar" src="${escapeHtml(getAvatarUrl(author.avatar))}" alt="" data-fallback="avatar">
-          <div class="chat-message-body">
-            <div class="chat-author-header">
-              <span class="chat-author-name">${escapeHtml(author.name)}</span>
-              <span class="chat-timestamp">${time}</span>
-            </div>
-            <div class="chat-message-deleted-text">
-              <span class="material-symbols-outlined md-14">block</span>
-              <span>${t('chat.messageDeleted')}</span>
-            </div>
-          </div>
-        </div>
-      `;
+      return renderMessageRow({
+        id: message.id, classes: ['chat-message-deleted', grouped && 'dm-message-row--grouped'], focusable: false,
+        lead, avatarUrl, author: author.name, time, content: renderDeletedNotice(),
+      });
     }
     const pending = author.mine && message.delivery === 'pending';
     const failed = author.mine && message.delivery === 'failed';
-    const editedBadge = message.editedAt
-      ? `<span class="chat-edited-badge" title="${escapeHtml(formatMessageTime(message.editedAt))}">${t('chat.messageEdited')}</span>`
-      : '';
-    const rowClass = `chat-message-row${grouped ? ' dm-message-row--grouped' : ''}${pending ? ' dm-message-row--pending' : ''}`;
-    return `
-      <div class="${rowClass}" tabindex="-1" data-message-id="${escapeHtml(message.id)}"${author.mine ? ` data-delivery="${pending ? 'pending' : failed ? 'failed' : 'sent'}"` : ''}>
-        ${this.renderToolbar(author.mine, writable)}
-        ${gutterTime}
-        <img class="chat-author-avatar" src="${escapeHtml(getAvatarUrl(author.avatar))}" alt="" data-fallback="avatar">
-        <div class="chat-message-body">
-          <div class="chat-author-header">
-            <span class="chat-author-name">${escapeHtml(author.name)}</span>
-            <span class="chat-timestamp">${time}</span>
-            ${grouped ? '' : editedBadge}
-          </div>
-          ${message.forwarded ? renderForwardedBadge(message.forwarded, formatMessageTime) : ''}
-          ${pending ? `<span class="chat-delivery-sr" role="status">${escapeHtml(t('dm.deliveryPending'))}</span>` : ''}
-          ${replyReference}
-          ${message.content.trim() ? `<div class="chat-message-text">${renderMarkdown(message.content, { currentNickname: connectionStore.savedNickname })}${grouped ? editedBadge : ''}</div>` : ''}
-          ${message.attachments.length ? `<div class="dm-attachments">${message.attachments.map((attachment) => this.renderAttachment(message, attachment, author.mine)).join('')}</div>` : ''}
-          ${failed ? `<div class="chat-delivery chat-delivery--failed dm-delivery-failed" role="status">
-            <span class="material-symbols-outlined md-14" aria-hidden="true">error_outline</span>
-            <span>${escapeHtml(t('dm.deliveryFailed'))}</span>
-          </div>` : ''}
-          <div class="chat-reactions">${this.renderReactions(message, writable)}</div>
-        </div>
-      </div>
-    `;
+    const edited = message.editedAt ? renderEditedBadge(formatMessageTime(message.editedAt)) : undefined;
+    return renderMessageRow({
+      id: message.id,
+      classes: [grouped && 'dm-message-row--grouped', pending && 'dm-message-row--pending'],
+      data: { delivery: author.mine ? pending ? 'pending' : failed ? 'failed' : 'sent' : undefined },
+      toolbar: renderMessageToolbar(this.toolbarActions(author.mine, writable)),
+      lead,
+      avatarUrl,
+      author: author.name,
+      time,
+      // A grouped message has no header to hold the mark: it follows the text instead.
+      meta: grouped ? undefined : edited,
+      content: html`
+        ${message.forwarded ? trustedHtml(renderForwardedBadge(message.forwarded, formatMessageTime)) : ''}
+        ${pending ? html`<span class="chat-delivery-sr" role="status">${t('dm.deliveryPending')}</span>` : ''}
+        ${reply}
+        ${message.content.trim() ? html`<div class="chat-message-text">${trustedHtml(renderMarkdown(message.content,
+          { currentNickname: connectionStore.savedNickname }))}${grouped ? edited : ''}</div>` : ''}
+        ${message.attachments.length ? html`<div class="dm-attachments">${message.attachments.map((attachment) =>
+          trustedHtml(this.renderAttachment(message, attachment, author.mine)))}</div>` : ''}
+        ${failed ? html`<div class="chat-delivery chat-delivery--failed dm-delivery-failed" role="status">
+          <span class="material-symbols-outlined md-14" aria-hidden="true">error_outline</span>
+          <span>${t('dm.deliveryFailed')}</span>
+        </div>` : ''}`,
+      reactions: renderReactionButtons(this.reactionViews(message), !writable),
+    });
   }
 
-  private renderToolbar(mine: boolean, writable: boolean): string {
-    const button = (action: string, icon: string, label: string) =>
-      `<button type="button" data-dm-action="${action}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><span class="material-symbols-outlined md-18" aria-hidden="true">${icon}</span></button>`;
-    return `<div class="chat-message-toolbar" role="group" aria-label="${escapeHtml(t('chat.messageActions'))}">
-      ${writable ? button('react', 'add_reaction', t('chat.emojiAction')) : ''}
-      ${writable ? button('reply', 'reply', t('chat.replyMessage')) : ''}
-      ${writable && mine ? button('edit', 'edit', t('chat.editMessage')) : ''}
-      ${button('copy', 'content_copy', t('chat.copyMessage'))}
-      ${mine ? button('delete', 'delete', t('chat.deleteMessage')) : ''}
-    </div>`;
-  }
-
-  private renderReplyReference(original: DmMessageView | undefined): string {
-    if (!original || original.deleted) {
-      return `<div class="chat-reply-reference chat-quote dm-reply-missing">${escapeHtml(t('dm.replyUnavailable'))}</div>`;
+  private toolbarActions(mine: boolean, writable: boolean): MessageToolbarAction[] {
+    const actions: MessageToolbarAction[] = [];
+    if (writable) {
+      actions.push({ action: 'emoji', icon: 'add_reaction', label: t('chat.emojiAction'), popup: 'dialog', className: 'chat-reaction-add' });
+      actions.push({ action: 'reply', icon: 'reply', label: t('chat.replyMessage') });
+      if (mine) actions.push({ action: 'edit', icon: 'edit', label: t('chat.editMessage') });
     }
-    const author = this.authorInfo(original.author);
-    const preview = original.content.trim() || (original.attachments[0]?.name ?? '');
-    return `<button type="button" class="chat-reply-reference chat-quote" data-dm-jump="${escapeHtml(original.id)}" title="${escapeHtml(t('chat.jumpToMessage'))}">
-      <strong>${escapeHtml(author.name)}</strong>
-      <span>${escapeHtml(preview.length > 140 ? `${preview.slice(0, 140)}…` : preview)}</span>
-    </button>`;
+    actions.push({ action: 'copy', icon: 'content_copy', label: t('chat.copyMessage') });
+    if (mine) actions.push({ action: 'delete', icon: 'delete', label: t('chat.deleteMessage') });
+    return actions;
   }
 
-  private renderReactions(message: DmMessageView, writable: boolean): string {
+  /** The quote of the answered message, as in server channels; one not loaded here cannot be shown. */
+  private renderReplyReference(original: DmMessageView | undefined): SafeHtml {
+    if (!original) return html`<div class="chat-reply-reference chat-quote dm-reply-missing">${t('dm.replyUnavailable')}</div>`;
+    return renderReplyReference(this.replyPreview(original));
+  }
+
+  private reactionViews(message: DmMessageView): MessageReactionView[] {
     const me = dmStore.snapshot.me?.publicKey;
-    return message.reactions.filter((reaction) => reaction.users.length > 0).map((reaction) => {
-      const mine = !!me && reaction.users.includes(me);
-      const names = reaction.users.map((user) => this.authorInfo(user).name).join(', ');
-      const title = t('chat.reactedBy', { emoji: reaction.emoji, users: names });
-      return `<button type="button" class="chat-reaction${mine ? ' chat-reaction--mine' : ''}" ${writable ? '' : 'disabled'}
-        data-dm-reaction="${escapeHtml(reaction.emoji)}" aria-pressed="${mine}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
-        ${escapeHtml(reaction.emoji)} <span>${reaction.users.length}</span></button>`;
-    }).join('');
+    return message.reactions.filter((reaction) => reaction.users.length > 0).map((reaction) => ({
+      emoji: reaction.emoji,
+      count: reaction.users.length,
+      mine: !!me && reaction.users.includes(me),
+      names: reaction.users.map((user) => this.authorInfo(user).name),
+    }));
   }
 
   private renderAttachment(message: DmMessageView, attachment: DmAttachmentView, mine: boolean): string {
@@ -794,8 +681,9 @@ export class DmConversationView {
     }
   }
 
-  private loadImages(feed: HTMLElement): void {
-    feed.querySelectorAll<HTMLImageElement>('img[data-dm-image]:not([src])').forEach((image) => {
+  private loadImages(): void {
+    const feed = this.feed;
+    feed?.element.querySelectorAll<HTMLImageElement>('img[data-dm-image]:not([src])').forEach((image) => {
       const key = image.dataset.dmImage!;
       if (this.loadingBlobs.has(key)) return;
       const holder = image.closest<HTMLElement>('[data-dm-file]');
@@ -808,36 +696,12 @@ export class DmConversationView {
         if (!blob || !this.container) return;
         const url = URL.createObjectURL(blob);
         this.blobUrls.set(key, url);
-        const feedNow = this.query('[data-dm-feed]');
-        const nearBottom = feedNow ? feedNow.scrollHeight - feedNow.scrollTop - feedNow.clientHeight < 120 : false;
         this.container.querySelectorAll<HTMLImageElement>(`img[data-dm-image="${CSS.escape(key)}"]`).forEach((target) => {
           target.src = url;
-          if (nearBottom && feedNow) target.addEventListener('load', () => { feedNow.scrollTop = feedNow.scrollHeight; }, { once: true });
+          this.feed?.repinWhileMediaLoads(target);
         });
       });
     });
-  }
-
-  private renderTray(): void {
-    const tray = this.query('#chat-attachment-tray');
-    if (!tray) return;
-    if (this.staged.length === 0) {
-      setSurfaceVisible(tray, false, 'panel', undefined, () => tray.replaceChildren());
-      return;
-    }
-    tray.innerHTML = this.staged.map((entry) => `
-      <div class="tray-item" title="${escapeHtml(entry.file.name)}">
-        ${entry.previewUrl ? `<img class="tray-thumb" src="${entry.previewUrl}" alt="">` : '<span class="material-symbols-outlined md-22 tray-thumb-icon">draft</span>'}
-        <div class="tray-info">
-          <span class="tray-name">${escapeHtml(entry.file.name)}</span>
-          <div class="tray-sub"><span class="tray-size">${formatBytes(entry.file.size)}</span></div>
-        </div>
-        <button type="button" class="tray-remove" data-dm-unstage="${entry.id}" title="${escapeHtml(t('common.remove'))}" aria-label="${escapeHtml(t('common.remove'))}">
-          <span class="material-symbols-outlined md-18">close</span>
-        </button>
-      </div>
-    `).join('');
-    setSurfaceVisible(tray, this.editing === null, 'panel', 'flex');
   }
 
   private renderReplyComposer(): void {
@@ -866,7 +730,7 @@ export class DmConversationView {
     return {
       messageId: message.id,
       userNickname: this.authorInfo(message.author).name,
-      content: message.content,
+      content: message.content.slice(0, REPLY_PREVIEW_LENGTH),
       deleted: message.deleted,
       hasAttachments: message.attachments.length > 0,
       createdAt: message.createdAt,
@@ -881,36 +745,35 @@ export class DmConversationView {
     const root = this.container!;
     const signal = this.listeners!.signal;
     const input = this.input();
-    const fileInput = this.query<HTMLInputElement>('#chat-file-input');
     const attach = this.query<HTMLButtonElement>('#btn-attach');
 
     if (input) {
       this.unsubscribers.push(bindChatComposer(root, {
         input,
         isActive: () => this.container === root && root.isConnected,
-        pasteFiles: (files) => {
+        canAcceptFiles: () => this.canWrite() && !this.editing,
+        acceptFiles: (files) => {
           if (!this.canWrite() || this.editing) return false;
-          this.stageFiles([...files]);
+          this.tray.add(files);
+          this.focusInput();
           return true;
         },
         focus: () => this.focusInput(),
       }));
     }
     this.unsubscribers.push(this.copy.bind());
+    const feed = this.feed?.element;
+    if (feed) this.unsubscribers.push(bindMessageLinks(feed));
 
     root.addEventListener('click', (event) => this.onClick(event), { signal });
-    this.query('[data-dm-feed]')?.addEventListener('contextmenu', (event) => this.onFeedContextMenu(event), { signal });
+    feed?.addEventListener('contextmenu', (event) => this.onFeedContextMenu(event), { signal });
     this.query('#btn-send-message')?.addEventListener('click', () => void this.submit(), { signal });
     this.query('#btn-cancel-message-edit')?.addEventListener('click', () => {
       this.cancelEdit();
       this.focusInput();
     }, { signal });
     attach?.addEventListener('click', () => {
-      if (this.canWrite() && !this.editing) openFileInputPicker(fileInput, attach);
-    }, { signal });
-    fileInput?.addEventListener('change', () => {
-      if (fileInput.files) this.stageFiles([...fileInput.files]);
-      fileInput.value = '';
+      if (this.canWrite() && !this.editing) openFileInputPicker(this.query<HTMLInputElement>('#chat-file-input'), attach);
     }, { signal });
     this.query('#btn-emoji')?.addEventListener('click', (event) => this.toggleComposerEmoji(event.currentTarget as HTMLElement), { signal });
     // The formatting bar leaves the code button to its composer: here it opens a code block in the editor.
@@ -947,46 +810,14 @@ export class DmConversationView {
       if (!this.editing && input.value.trim()) dmStore.typing(this.peer);
     }, { signal });
 
-    const feed = this.query('[data-dm-feed]');
     feed?.addEventListener('scroll', () => {
-      this.pinnedToBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120;
       if (feed.scrollTop < 60) void dmStore.loadOlder(this.peer);
     }, { passive: true, signal });
-
-    const chat = this.query('.chat-container');
-    let dragDepth = 0;
-    root.addEventListener('dragenter', (event) => {
-      if (!this.canWrite() || !event.dataTransfer?.types.includes('Files')) return;
-      event.preventDefault();
-      dragDepth += 1;
-      chat?.classList.add('chat-drag-over');
-    }, { signal });
-    root.addEventListener('dragover', (event) => {
-      if (!this.canWrite() || !event.dataTransfer?.types.includes('Files')) return;
-      event.preventDefault();
-    }, { signal });
-    root.addEventListener('dragleave', () => {
-      dragDepth = Math.max(0, dragDepth - 1);
-      if (dragDepth === 0) chat?.classList.remove('chat-drag-over');
-    }, { signal });
-    root.addEventListener('drop', (event) => {
-      dragDepth = 0;
-      chat?.classList.remove('chat-drag-over');
-      if (!this.canWrite() || !event.dataTransfer?.files.length) return;
-      event.preventDefault();
-      this.stageFiles([...event.dataTransfer.files]);
-    }, { signal });
   }
 
-  /** Wires what a newly drawn row holds: links, server invitations and code blocks. */
+  /** Wires what a newly drawn row holds: server invitations and code blocks. */
   private bindRow(row: HTMLElement): void {
-    row.querySelectorAll<HTMLAnchorElement>('a.md-link').forEach((link) => {
-      link.addEventListener('click', (event) => {
-        event.preventDefault();
-        const url = link.getAttribute('data-external-link');
-        if (url && !openServerInviteLink(url)) void window.api?.openExternal?.(url);
-      });
-    });
+    if (!row.classList.contains('chat-message-row')) return;
     // Only rows of this user's own messages carry a delivery state.
     mountServerInviteCards(row, (element) => element.hasAttribute('data-delivery'));
     bindCodeBlockCopyButtons(row);
@@ -1024,7 +855,7 @@ export class DmConversationView {
     if (writable) {
       // The toolbar button anchors the picker, exactly as the hover action does.
       items.push({ label: t('chat.emojiAction'), icon: 'add_reaction', onClick: () => this.query<HTMLButtonElement>(
-        `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] [data-dm-action="react"]`)?.click() });
+        `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] [data-message-action="emoji"]`)?.click() });
       if (!this.editing) items.push({ label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(messageId) });
     }
     items.push(this.copy.menuItem(messageId));
@@ -1052,14 +883,9 @@ export class DmConversationView {
       void this.report(dmStore.unblock(this.peer));
       return;
     }
-    const unstage = target.closest<HTMLElement>('[data-dm-unstage]');
-    if (unstage) {
-      this.unstage(unstage.dataset.dmUnstage!);
-      return;
-    }
-    const jump = target.closest<HTMLElement>('[data-dm-jump]');
-    if (jump) {
-      this.jumpToMessage(jump.dataset.dmJump!);
+    const jump = target.closest<HTMLButtonElement>('[data-reply-target]');
+    if (jump && row) {
+      if (!jump.disabled) this.jumpToMessage(jump.dataset.replyTarget!);
       return;
     }
     const fileHolder = target.closest<HTMLElement>('[data-dm-file]');
@@ -1079,17 +905,17 @@ export class DmConversationView {
         return;
       }
     }
-    const reaction = target.closest<HTMLButtonElement>('[data-dm-reaction]');
+    const reaction = target.closest<HTMLButtonElement>('[data-reaction-emoji]');
     if (reaction && messageId && !reaction.disabled) {
-      const emoji = reaction.dataset.dmReaction!;
+      const emoji = reaction.dataset.reactionEmoji!;
       void this.report(dmStore.react(this.peer, messageId, emoji, reaction.getAttribute('aria-pressed') !== 'true'));
       return;
     }
-    const action = target.closest<HTMLButtonElement>('[data-dm-action]');
+    const action = target.closest<HTMLButtonElement>('[data-message-action]');
     if (action && messageId) {
       event.stopPropagation();
-      switch (action.dataset.dmAction) {
-        case 'react':
+      switch (action.dataset.messageAction) {
+        case 'emoji':
           this.openReactionPicker(action, messageId);
           break;
         case 'reply':
@@ -1188,14 +1014,7 @@ export class DmConversationView {
    * shows which row it is, and focus moves there for the keyboard.
    */
   private jumpToMessage(messageId: string): void {
-    const row = this.feedNodes.get(rowKey(messageId));
-    if (!row?.isConnected) return;
-    // The scroll is on its way: the next update must not pull the feed back to the end.
-    this.pinnedToBottom = false;
-    smoothScrollIntoView(row, { block: 'center' });
-    row.tabIndex = -1;
-    row.focus({ preventScroll: true });
-    highlightMessageJump(row);
+    this.feed?.jumpTo(rowKey(messageId));
   }
 
   private startReply(messageId: string): void {
@@ -1221,7 +1040,7 @@ export class DmConversationView {
     this.replyTo = null;
     this.composerPicker?.close();
     this.renderReplyComposer();
-    this.renderTray();
+    this.tray.render();
     input.value = message.content;
     input.setSelectionRange(message.content.length, message.content.length);
     this.syncComposer();
@@ -1235,7 +1054,7 @@ export class DmConversationView {
     const input = this.input();
     if (input) input.value = this.draft;
     this.draft = '';
-    this.renderTray();
+    this.tray.render();
     this.syncComposer();
   }
 
@@ -1360,44 +1179,6 @@ export class DmConversationView {
     if (failed > 0) showErrorToast(t('chat.deleteSomeFailed', { failed, total: ids.length }), 7000);
   }
 
-  private stageFiles(files: File[]): void {
-    if (!this.canWrite() || this.editing || files.length === 0) return;
-    const peer = this.peerView();
-    const limit = peer?.maxFileBytes ?? 0;
-    for (const file of files) {
-      if (this.staged.length >= DM_MAX_ATTACHMENTS) {
-        showErrorToast(t('dm.errorTooManyFiles', { count: DM_MAX_ATTACHMENTS }));
-        break;
-      }
-      if (limit > 0 && file.size > limit) {
-        showErrorToast(t('dm.errorFileTooLarge', { nickname: this.nickname(), size: formatBytes(limit), name: file.name }), 7000);
-        continue;
-      }
-      this.staged.push({
-        id: crypto.randomUUID(),
-        file,
-        previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
-      });
-    }
-    this.renderTray();
-    this.focusInput();
-  }
-
-  private unstage(id: string): void {
-    const index = this.staged.findIndex((entry) => entry.id === id);
-    if (index < 0) return;
-    const [removed] = this.staged.splice(index, 1);
-    if (removed.previewUrl) URL.revokeObjectURL(removed.previewUrl);
-    this.renderTray();
-  }
-
-  private clearStaged(): void {
-    if (this.staged.length === 0) return;
-    for (const entry of this.staged) if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
-    this.staged = [];
-    this.renderTray();
-  }
-
   private async submit(): Promise<void> {
     const input = this.input();
     if (!input || this.sending || !this.canWrite()) return;
@@ -1429,13 +1210,13 @@ export class DmConversationView {
       }
       return;
     }
-    if (!content && this.staged.length === 0) return;
+    if (!content && this.tray.count === 0) return;
     const root = this.container;
     const peer = this.peer;
     const outgoing: DmComposerDraft = {
       text: input.value,
       replyTo: this.replyTo,
-      files: this.staged.map((entry) => entry.file),
+      files: this.tray.files(),
       editing: null,
     };
     this.sending = true;
@@ -1462,9 +1243,10 @@ export class DmConversationView {
       }
       if (this.container !== root) return;
       input.value = '';
-      this.clearStaged();
+      this.tray.clear();
       this.clearReply();
-      this.pinnedToBottom = true;
+      // Sending brings the author back to the newest message, as in channels (#270).
+      this.feed?.scrollToEnd();
     } finally {
       if (this.container === root) {
         this.sending = false;

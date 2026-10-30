@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Importar um backup com dados de DM fora do formato não trava mais a conversa, e aparelhos da mesma conta não reenviam mais sem parar o histórico de DM quando uma mensagem editada é apagada.",
+  "en": "Importing a backup with malformed DM data no longer breaks the conversation, and devices of the same account no longer keep resending DM history when an edited message is deleted."
+}

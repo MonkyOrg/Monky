@@ -477,7 +477,7 @@ export class MonkyServer {
       new SqliteMessageSearchRepository(db), messageRepo, channelService, permissionService, chatService,
       () => wsServer.getChannelAccessVersion(),
     );
-    const wsServer: WebSocketServer = new WebSocketServer(
+    const wsServer: WebSocketServer = new WebSocketServer({
       httpServer,
       authService,
       userService,
@@ -494,12 +494,12 @@ export class MonkyServer {
       botService,
       commandRegistry,
       selectorService,
-      new BotSettingsService(new SqliteBotSettingsRepository(db), botPermissions),
+      botSettings: new BotSettingsService(new SqliteBotSettingsRepository(db), botPermissions),
       monitorService,
-      resolveServerVersion(config.version),
+      serverVersion: resolveServerVersion(config.version),
       communityService,
       messageSearchService,
-      new ForumService(
+      forumService: new ForumService(
         new SqliteForumRepository(db),
         channelService,
         permissionService,
@@ -508,9 +508,9 @@ export class MonkyServer {
       ),
       pollService,
       recentSoundCache,
-      new ServerAuditService(serverRecord.id, new SqliteServerAuditRepository(db), rateLimiter),
-      botStorage,
-    );
+      audit: new ServerAuditService(serverRecord.id, new SqliteServerAuditRepository(db), rateLimiter),
+      botStorageService: botStorage,
+    });
     resources.defer('WebSocket server', () => wsServer.close(instance?.shutdownReason ?? 'stopped'));
 
     getOnlineUsers = () => wsServer.getOnlineUsersMap();

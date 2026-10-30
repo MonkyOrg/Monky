@@ -12,6 +12,7 @@ import { CameraEffectsControl } from '../CameraEffectsControl';
 import { populateCameraDeviceSelect } from '../CameraDeviceSelection';
 import { appEvents } from '../../../core/EventBus';
 import { renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
+import { reportError } from '../../../utils/feedback';
 
 export class VoiceVideoTab {
   private unbindVadMeter: (() => void) | null = null;
@@ -155,7 +156,7 @@ export class VoiceVideoTab {
               </div>
             </div>
             <label class="toggle-switch" aria-label="${t('settings.pttSoundCue')}">
-              <input id="checkbox-ptt-sound" type="checkbox" ${settingsStore.pttSoundCue ? 'checked' : ''}>
+              <input id="checkbox-ptt-sound" type="checkbox" role="switch" ${settingsStore.pttSoundCue ? 'checked' : ''}>
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -401,7 +402,7 @@ export class VoiceVideoTab {
           await selectAudioDevice(kind, select.value, selectionAbort.signal);
         } catch (error) {
           select.value = selectedAudioDevice(kind) === 'default' ? '' : selectedAudioDevice(kind);
-          if (status && !selectionAbort.signal.aborted) status.textContent = audioDeviceError(error);
+          if (!selectionAbort.signal.aborted) reportError(audioDeviceError(error), { field: select });
         } finally {
           if (!selectionAbort.signal.aborted) select.disabled = false;
         }

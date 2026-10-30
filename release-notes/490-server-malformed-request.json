@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Uma requisição malformada não derruba mais o servidor, e envios grandes em conexões lentas não são mais cortados depois de 5 minutos.",
+  "en": "A malformed request no longer takes the server down, and large uploads over slow connections are no longer cut off after 5 minutes."
+}

@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import { BrowserWindow, NativeImage, nativeImage, nativeTheme, screen } from 'electron';
 import type { IpcEventChannel, TrayVoiceStatus } from '@monky/shared';
 import { mt } from './i18n';
+import { sendEvent, windowContents } from './ipc/registry';
 import { TASKBAR_ICON_MASKS, type TaskbarGlyph } from './taskbarCallIcons';
 
 type CallAction = Extract<IpcEventChannel, 'tray:toggle-mute' | 'tray:toggle-deafen' | 'tray:leave-call'>;
@@ -136,7 +137,7 @@ export class TaskbarCallControls {
       // default 'enabled' included, so only actual modifiers are listed.
       flags: button.disabled ? ['disabled'] : [],
       click: () => {
-        if (!this.window.isDestroyed()) this.window.webContents.send(button.action);
+        sendEvent(windowContents(this.window), button.action);
       },
     })));
   };

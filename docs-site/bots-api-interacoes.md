@@ -295,7 +295,7 @@ export type BotFormValues = {
 
 ## `BotInputResult` {#botinputresult}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L599)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L605)
 
 ```ts
 export type BotInputResult<T> = {
@@ -1388,7 +1388,7 @@ type Output = {
 
 ## `BotSettingsSnapshot` {#botsettingssnapshot}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L579)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L585)
 
 ```ts
 export type BotSettingsSnapshot = {
@@ -1652,7 +1652,7 @@ export type BotSettingsSnapshot = {
 
 ## `botSettingsSnapshotSchema` {#botsettingssnapshotschema}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L557)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L563)
 
 Este é um validador Zod. `parse(valor)` retorna `Output` ou lança erro; `safeParse(valor)` retorna um resultado discriminado de sucesso/erro. `Input` descreve a estrutura aceita; a origem também aplica refinamentos e limites de tamanho.
 
@@ -2175,7 +2175,7 @@ type Output = {
 
 ## `BotSettingsSummary` {#botsettingssummary}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L555)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L561)
 
 ```ts
 export type BotSettingsSummary = {
@@ -2221,10 +2221,15 @@ type Output = {
 
 ## `ChatMessage` {#chatmessage}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L206)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L218)
 
 ```ts
 export interface ChatMessage {
+    /**
+     * Marks a message forwarded from elsewhere (message-forward). In a channel the
+     * server fills it from the original; the original author is never shown.
+     */
+    forwarded?: MessageForward;
     botComponents?: import('./botCarousels.js').BotMessageComponent[];
     blocks?: import('./messageBlocks.js').ResolvedMessageBlock[];
     localizations?: import('./botMessages.js').BotMessageLocalizations;
@@ -2394,7 +2399,7 @@ export type CommandLocalizations = {
 
 ## `CommandOption` {#commandoption}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L323)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L346)
 
 ```ts
 export interface CommandOption {
@@ -2427,7 +2432,7 @@ export interface CommandPresentation {
 
 ## `CommandResponsePayload` {#commandresponsepayload}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1311)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1344)
 
 ```ts
 export interface CommandResponsePayload {
@@ -2460,7 +2465,7 @@ export type CommandValues = {
 
 ## `CommandVoiceRequirement` {#commandvoicerequirement}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L338)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L361)
 
 ```ts
 export type CommandVoiceRequirement = "joined" | "same-bot-channel";
@@ -2877,7 +2882,7 @@ export function resolveBotLocale(requested: unknown, supported?: readonly BotLoc
 
 ## `resolveBotSettingsValues` {#resolvebotsettingsvalues}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L608)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L614)
 
 ```ts
 export function resolveBotSettingsValues(form: BotForm | undefined, input: unknown): BotInputResult<BotFormValues>;
@@ -2906,7 +2911,7 @@ export type SelectionChoice = {
 
 ## `SlashCommand` {#slashcommand}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L341)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L364)
 
 ```ts
 export interface SlashCommand {

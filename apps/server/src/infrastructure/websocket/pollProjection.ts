@@ -11,6 +11,23 @@ function legacyChatMessage(message: ChatMessage): ChatMessage {
 
 const hasPoll = (message: ChatMessage): boolean => !!message.poll;
 
+/** The poll an event is about, by its message or by the poll itself; undefined for every other event. */
+export function pollReference(message: ServerMessage): { messageId: string } | { pollId: string } | undefined {
+  switch (message.type) {
+    case MessageType.CHAT_MESSAGE:
+      return { messageId: message.payload.id };
+    case MessageType.CHAT_MESSAGE_UPDATED:
+      return { messageId: message.payload.message.id };
+    case MessageType.CHAT_REACTION_ADDED:
+    case MessageType.CHAT_REACTION_REMOVED:
+      return { messageId: message.payload.messageId };
+    case MessageType.POLL_UPDATED:
+      return { pollId: message.payload.id };
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Clients and bots without `poll-voters` validate polls with the earlier strict
  * schema, so every message that embeds a poll reaches them without anonymity or

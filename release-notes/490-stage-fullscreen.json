@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quem assiste a uma tela em tela cheia não sai mais dela quando alguém entra, liga a câmera, cai ou sai da chamada, e o menu de qualidade aberto não fecha mais sozinho.",
+  "en": "Viewers watching a screen in fullscreen no longer leave it when someone joins, turns on their camera, drops or leaves the call, and an open quality menu no longer closes by itself."
+}

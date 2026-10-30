@@ -4,15 +4,17 @@ const path = require('node:path');
 const test = require('node:test');
 const ts = require('typescript');
 const vm = require('node:vm');
+const { loadMain, fakeIpcMain } = require('./mainModules.cjs');
 
-const windowActivitySlice = () => {
-  const file = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ipcHandlers.ts'), 'utf8');
-  const start = file.indexOf('const isWindowAway =');
-  const end = file.indexOf("ipcMain.handle('window:minimize'", start);
-  assert.ok(start >= 0 && end > start);
-  return ts.transpileModule(file.slice(start, end), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
+/** The real window module, behind a real registry whose main window is `mainWindow`. */
+const registerWindow = (mainWindow, pipWindows) => {
+  const ipc = fakeIpcMain();
+  const quiet = { ...console, warn: () => {} };
+  const { IpcRegistry, windowContents } = loadMain('ipc/registry', { globals: { console: quiet } });
+  const registry = new IpcRegistry(ipc, { main: () => windowContents(mainWindow), overlay: () => null });
+  loadMain('ipc/windowIpc', { packages: { electron: { screen: {} } }, globals: { console: quiet } })
+    .registerWindowIpc(registry, { window: mainWindow, pipWindows });
+  return ipc.handlers;
 };
 
 const loadWindowModule = (screen, globals = {}) => {
@@ -38,22 +40,15 @@ const plain = value => JSON.parse(JSON.stringify(value));
 test('screen PiP popups are authorized only for the main frame, and automatic ones only while Monky is away', async () => {
   const requestId = '0bb2238a-3560-4dc1-bb1c-72b6978aa96a';
   let focused = true, minimized = false, visible = true, destroyed = false;
-  const events = new Map(), notifications = [], handlers = new Map(), grants = [], owners = [];
+  const events = new Map(), notifications = [], grants = [];
   const mainWindow = {
     isDestroyed: () => destroyed, isFocused: () => focused, isMinimized: () => minimized, isVisible: () => visible,
     on: (name, callback) => events.set(name, callback),
     webContents: { isDestroyed: () => destroyed, send: name => notifications.push(name), mainFrame: {} },
   };
-  class ScreenPictureInPictureWindows {
-    constructor(owner) { owners.push(owner); }
-    authorize(id, aspectRatio) { grants.push([id, aspectRatio]); }
-  }
-  vm.runInNewContext(windowActivitySlice(), {
-    mainWindow, ScreenPictureInPictureWindows,
-    ipcMain: { handle: (channel, callback) => handlers.set(channel, callback) },
-  });
-  assert.deepEqual([...handlers.keys()], ['screen-pip:open', 'screen-pip:return']);
-  assert.deepEqual(owners, [mainWindow], 'Only the main window owns screen PiP popups');
+  const handlers = registerWindow(mainWindow, { authorize: (id, aspectRatio) => grants.push([id, aspectRatio]) });
+  assert.deepEqual([...handlers.keys()], ['screen-pip:open', 'screen-pip:return', 'window:minimize',
+    'window:toggle-maximize', 'window:maximize', 'window:close', 'window:set-in-server', 'window:fit-home-content']);
   const handler = handlers.get('screen-pip:open');
   const event = { sender: mainWindow.webContents, senderFrame: mainWindow.webContents.mainFrame };
   assert.equal(events.has('blur'), false, 'Losing focus is never a reason for automatic PiP');
@@ -88,28 +83,29 @@ test('screen PiP popups are authorized only for the main frame, and automatic on
   visible = true; focused = true;
   assert.equal(handler(event, requestId, false, 0.5), true, 'Navigation and the PiP button work while the app is focused');
   assert.deepEqual(grants, [[requestId, 16 / 9], [requestId, 4 / 3], [requestId, 0.5]]);
-  for (const [sender, token, inactive, aspect] of [
-    [{ ...event, sender: {} }, requestId, false, 1],
-    [{ ...event, senderFrame: {} }, requestId, false, 1],
-    [event, 'invalid"); alert(1)', false, 1],
-    [event, requestId, 'false', 1],
-    [event, requestId, false, '1.7'],
-    [event, requestId, false, 0],
-    [event, requestId, false, -1],
-    [event, requestId, false, Number.NaN],
-    [event, requestId, false, Number.POSITIVE_INFINITY],
-  ]) assert.throws(() => handler(sender, token, inactive, aspect), /Invalid screen/);
+  for (const sender of [{ ...event, sender: {} }, { ...event, senderFrame: {} }]) {
+    assert.throws(() => handler(sender, requestId, false, 1), /'screen-pip:open' only answers the main window/);
+  }
+  for (const [token, inactive, aspect] of [
+    ['invalid"); alert(1)', false, 1],
+    [requestId, 'false', 1],
+    [requestId, false, '1.7'],
+    [requestId, false, 0],
+    [requestId, false, -1],
+    [requestId, false, Number.NaN],
+    [requestId, false, Number.POSITIVE_INFINITY],
+  ]) assert.throws(() => handler(event, token, inactive, aspect), /Invalid screen/);
   destroyed = true;
   events.get('minimize')();
   events.get('restore')();
   assert.equal(notifications.length, 4, 'Destroyed windows never send activity notifications');
-  assert.throws(() => handler(event, requestId, false, 1), /Invalid screen/);
+  assert.throws(() => handler(event, requestId, false, 1), /only answers the main window/);
   assert.equal(grants.length, 3, 'Invalid requests never authorize a popup');
 });
 
 test('PiP back to Monky restores, shows and focuses only the owning main window', async () => {
   let minimized = true, visible = true, focused = false, destroyed = false;
-  const calls = [], handlers = new Map();
+  const calls = [];
   const mainWindow = {
     isDestroyed: () => destroyed, isMinimized: () => minimized, isVisible: () => visible, isFocused: () => focused,
     on: () => {},
@@ -118,11 +114,7 @@ test('PiP back to Monky restores, shows and focuses only the owning main window'
     focus: () => { calls.push('focus'); focused = true; },
     webContents: { isDestroyed: () => destroyed, send: () => {}, mainFrame: {} },
   };
-  vm.runInNewContext(windowActivitySlice(), {
-    mainWindow, ScreenPictureInPictureWindows: class { authorize() {} },
-    ipcMain: { handle: (channel, callback) => handlers.set(channel, callback) },
-  });
-  const returnToMonky = handlers.get('screen-pip:return');
+  const returnToMonky = registerWindow(mainWindow, { authorize() {} }).get('screen-pip:return');
   const event = { sender: mainWindow.webContents, senderFrame: mainWindow.webContents.mainFrame };
   await returnToMonky(event);
   assert.deepEqual(calls, ['restore', 'focus'], 'A minimized window is restored and focused');
@@ -134,10 +126,10 @@ test('PiP back to Monky restores, shows and focuses only the owning main window'
   assert.deepEqual(calls, ['focus'], 'A visible window is only focused');
   calls.length = 0;
   for (const invalid of [{ ...event, sender: {} }, { ...event, senderFrame: {} }]) {
-    assert.throws(() => returnToMonky(invalid), /Invalid screen/);
+    assert.throws(() => returnToMonky(invalid), /'screen-pip:return' only answers the main window/);
   }
   destroyed = true;
-  assert.throws(() => returnToMonky(event), /Invalid screen/);
+  assert.throws(() => returnToMonky(event), /only answers the main window/);
   assert.deepEqual(calls, [], 'Foreign frames or a destroyed window never move the main window');
 });
 

@@ -2,8 +2,9 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { soundEffects, getSoundLabels, isSoundEffectType, SOUND_EFFECT_TYPES } from '../../../core/SoundEffects';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { renderSwitch } from '../../../utils/formControls';
 import { clientLog } from '../../../core/ClientLogService';
-import { showAlert } from '../../Dialog';
+import { reportError } from '../../../utils/feedback';
 import { setButtonLoading } from '../../../utils/buttonLoading';
 
 export class NotificationsTab {
@@ -38,10 +39,7 @@ export class NotificationsTab {
                 ${t('settings.chatSoundEnabledDesc')}
               </div>
             </div>
-            <label class="toggle-switch" aria-label="${escapeHtml(t('settings.chatSoundEnabled'))}">
-              <input id="checkbox-chat-sound" type="checkbox" ${settingsStore.chatMessageSoundEnabled ? 'checked' : ''}>
-              <span class="toggle-slider"></span>
-            </label>
+            ${renderSwitch({ id: 'checkbox-chat-sound', label: t('settings.chatSoundEnabled'), checked: settingsStore.chatMessageSoundEnabled })}
           </div>
         </div>
         <div class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin-bottom: 0;">
@@ -55,10 +53,7 @@ export class NotificationsTab {
                 ${t('settings.chatSoundMentionsDesc')}
               </div>
             </div>
-            <label class="toggle-switch" aria-label="${t('settings.chatSoundMentionsOnly')}">
-              <input id="checkbox-chat-sound-mentions" type="checkbox" ${settingsStore.chatMessageSoundMentionsOnly ? 'checked' : ''}>
-              <span class="toggle-slider"></span>
-            </label>
+            ${renderSwitch({ id: 'checkbox-chat-sound-mentions', label: t('settings.chatSoundMentionsOnly'), checked: settingsStore.chatMessageSoundMentionsOnly })}
           </div>
         </div>
       </div>
@@ -184,9 +179,7 @@ export class NotificationsTab {
       clientLog.warn('AUDIO', 'Could not update custom sound preferences', {
         error: error instanceof Error ? error.message : String(error),
       });
-      if (generation === this.generation && container.isConnected) {
-        await showAlert({ message: t('settings.customSoundFailed'), variant: 'danger' });
-      }
+      if (generation === this.generation && container.isConnected) reportError(t('settings.customSoundFailed'));
     } finally {
       if (button.isConnected) {
         if (nativePicker) setButtonLoading(button, false);

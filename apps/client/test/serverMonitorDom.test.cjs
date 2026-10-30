@@ -183,6 +183,34 @@ async function runRegression(config) {
   check(document.querySelector('#monitor-source').textContent.includes('server-b'), 'remote source is explicitly identified');
   check(localReads === 0 && logListeners.size === 0, 'remote monitoring never opens local IPC stats or logs');
   check(document.querySelector('[role="dialog"]').getAttribute('aria-modal') === 'true', 'monitor is an accessible modal dialog');
+  // The look lives in serverMonitor.css (#490): a filter shows that it is on through
+  // aria-pressed alone, and the compact toolbar keeps its size over the base rules.
+  const dialog = document.querySelector('[role="dialog"]');
+  const levelButton = (level) => dialog.querySelector(`.server-monitor-level[data-level="${level}"]`);
+  const paint = (element) => {
+    for (const animation of element.getAnimations()) animation.finish();
+    return getComputedStyle(element).backgroundColor;
+  };
+  check(!dialog.querySelector('[style]') && getComputedStyle(dialog).maxWidth === '860px',
+    'the monitor carries no inline styles and keeps its wide card');
+  check(levelButton('ALL').getAttribute('aria-pressed') === 'true' && levelButton('ERROR').getAttribute('aria-pressed') === 'false',
+    'the level filter opens on All');
+  const pressedPaint = paint(levelButton('ALL'));
+  const restingPaint = paint(levelButton('ERROR'));
+  levelButton('ERROR').click();
+  check(levelButton('ERROR').getAttribute('aria-pressed') === 'true' && levelButton('ALL').getAttribute('aria-pressed') === 'false',
+    'the chosen level is the pressed filter');
+  check(pressedPaint !== restingPaint && paint(levelButton('ERROR')) === pressedPaint && paint(levelButton('ALL')) === restingPaint,
+    'the pressed filter is painted by its state');
+  check(document.querySelector('#monitor-logs').textContent.includes(t('serverMonitor.noMatches')), 'a level filter hides the other levels');
+  levelButton('ALL').click();
+  check(dialog.querySelector('.server-monitor-category')?.dataset.level === log.level, 'each line carries its level for its colour');
+  const compact = (element, padding) => {
+    const style = getComputedStyle(element);
+    return style.height === '26px' && `${style.paddingTop} ${style.paddingLeft}` === padding;
+  };
+  check(compact(levelButton('ALL'), '4px 10px') && compact(dialog.querySelector('#monitor-search'), '5px 10px'),
+    'the toolbar stays compact over the base button and field rules');
   const closeButton = document.querySelector('#modal-close');
   const clearButton = document.querySelector('#btn-clear-logs');
   closeButton.focus();
@@ -193,11 +221,12 @@ async function runRegression(config) {
   document.querySelector('#btn-copy-logs').click();
   await flush();
   check(copied.includes(log.message), 'copy exports the visible logs');
-  check(document.querySelector('#monitor-action-status').textContent === t('serverMonitor.copied'), 'copy feedback is localized');
+  check(document.querySelector('.chat-copy-toast:not([data-ui-closing])')?.textContent.includes(t('serverMonitor.copied')), 'copy feedback is localized, in the shared toast');
   refuseCopy = true;
   document.querySelector('#btn-copy-logs').click();
   await flush();
-  check(document.querySelector('#monitor-action-status').textContent === t('serverMonitor.copyFailed'), 'clipboard failures are visible and localized');
+  check(document.querySelector('.chat-copy-toast:not([data-ui-closing])')?.getAttribute('role') === 'alert' && document.querySelector('.chat-copy-toast:not([data-ui-closing])').textContent.includes(t('serverMonitor.copyFailed')),
+    'clipboard failures are visible and localized, as an alert');
   clearButton.click();
   check(!document.querySelector('#monitor-logs').textContent.includes(log.message), 'clear affects the displayed entries');
   check(localClears === 0 && requests.length === 2, 'clear never mutates local or remote history');
@@ -207,7 +236,8 @@ async function runRegression(config) {
   appEvents.emit('server.roles_updated');
   check(cancelled.includes(requests[2].requestId), 'revocation cancels the pending request');
   check(scheduled.size === 0, 'revocation removes polling');
-  check(document.querySelector('#monitor-error').textContent === t('serverMonitor.permissionDenied'), 'permission revocation is localized');
+  check(document.querySelector('.chat-copy-toast:not([data-ui-closing])')?.textContent.includes(t('serverMonitor.permissionDenied')) && !document.querySelector('#monitor-error'),
+    'permission revocation is localized');
   check(second.client.getStatus() === 'CONNECTED' && sessionManager.get(second.key) === second, 'revocation does not disconnect the user');
   requests[2].resolve(result('server-b', 2));
   await flush();
@@ -215,19 +245,22 @@ async function runRegression(config) {
   modal.close();
   check(listenerCount() === initialListeners, 'remote close removes all monitor bus listeners');
   second.serverStore.myPermissions = config.manage;
+  document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
   await modal.openRemote(second);
   check(requests.length === 3 && localReads === 0, 'manage-server is not a viewing grant or local fallback');
-  check(document.querySelector('#monitor-error').textContent === t('serverMonitor.permissionDenied'), 'initial denial is explicit');
+  check(document.querySelector('.chat-copy-toast:not([data-ui-closing])')?.textContent.includes(t('serverMonitor.permissionDenied')), 'initial denial is explicit');
   second.serverStore.myPermissions = config.view;
+  document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
   const timeoutOpening = modal.openRemote(second);
   requests[3].reject(new RequestTimeoutError(config.requestType));
   await timeoutOpening;
-  check(document.querySelector('#monitor-error').textContent === t('serverMonitor.timeout'), 'timeouts are localized');
+  check(document.querySelector('.chat-copy-toast:not([data-ui-closing])')?.textContent.includes(t('serverMonitor.timeout')), 'timeouts are localized');
   check(localReads === 0 && scheduled.size === 0, 'timeout has no local fallback or retries');
   const switchOpening = modal.openRemote(second);
+  const otherServerLogs = document.querySelector('.modal-backdrop:not([data-ui-closing]) #monitor-title').closest('.modal-backdrop');
   sessionManager.activate(first.key);
-  check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) [role="dialog"]'),
-    'switching servers closes the remote monitor logically immediately');
+  check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) [role="dialog"]') && !otherServerLogs.isConnected,
+    'switching servers removes the other server\'s monitor at once, with no exit animation');
   requests[4].resolve(result('server-b', 3));
   await switchOpening;
   await sessionManager.removeAll();

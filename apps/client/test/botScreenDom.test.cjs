@@ -341,7 +341,12 @@ if (!process.versions.electron) {
     await waitFor(async () => await run(aliceWindow, '!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'), 'denied review closes');
     assert.equal(frames(aliceWindow).length, 0);
     assert.equal(leaks, beforeConsent, 'Denied miniapps cannot issue HTTP requests');
-    assert.equal(await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] .bot-error").textContent.includes("não foi executado")'), true);
+    assert.equal(await run(aliceWindow, `(() => {
+      const tile = document.querySelector("[data-bot-screen-id=game]");
+      return tile.querySelector(".bot-screen-placeholder [role=status]").textContent === "Abertura cancelada. O miniapp não foi executado."
+        && tile.querySelector(".bot-error").hidden
+        && ![...document.querySelectorAll(".chat-copy-toast")].some(toast => toast.textContent.includes("não foi executado"));
+    })()`), true, 'Declining is a neutral note on the closed tile, not an alert');
     aliceWindow.setContentSize(1280, 1000);
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
     await waitFor(async () => await run(aliceWindow, '!!document.fullscreenElement'), 'fullscreen before review');
@@ -533,6 +538,52 @@ if (!process.versions.electron) {
     await waitFor(async () => !(await run(aliceWindow, popupOpen)) &&
       await run(aliceWindow, `document.activeElement === document.querySelector(${JSON.stringify(secondMute)})`), 'Escape closes the slider and returns focus');
     assert.equal(await run(aliceWindow, 'JSON.parse(localStorage.getItem("monky_settings")).miniappVolumes.bot'), keyboardVolume);
+    // A screen share's volume is the same control, so the keyboard reaches and adjusts it too.
+    const screenVolume = '#stage-participants-area [data-kind=screen] .stage-volume-wrapper';
+    const screenMute = JSON.stringify(`${screenVolume} .stage-volume-btn`);
+    const screenSlider = JSON.stringify(`${screenVolume} input`);
+    const screenPopupOpen = `getComputedStyle(document.querySelector(${JSON.stringify(`${screenVolume} .stage-volume-popup`)})).display !== "none"`;
+    await run(aliceWindow, 'document.querySelector("#stage-participants-area [data-kind=screen] .stage-stopwatch-btn").focus()');
+    aliceWindow.webContents.focus();
+    for (const type of ['rawKeyDown', 'keyUp']) {
+      await aliceWindow.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type, key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, modifiers: 8,
+      });
+    }
+    await waitFor(async () => await run(aliceWindow, `document.activeElement === document.querySelector(${screenMute})`) &&
+      await run(aliceWindow, screenPopupOpen), 'keyboard focus on a screen volume opens its slider');
+    assert.deepEqual(await run(aliceWindow, `[document.querySelector(${screenMute}).getAttribute("aria-label"),
+      document.querySelector(${screenMute}).getAttribute("aria-pressed"), document.querySelector(${screenSlider}).getAttribute("aria-label")]`),
+    ['Mutar áudio da tela', 'false', 'Volume do áudio da tela'], 'The screen volume names its mute button and slider');
+    await key('Tab', 9);
+    assert.equal(await run(aliceWindow, `document.activeElement === document.querySelector(${screenSlider})`), true, 'Tab reaches the screen slider');
+    const screenBefore = await run(aliceWindow, `document.querySelector(${screenSlider}).valueAsNumber`);
+    await key('ArrowUp', 38);
+    let screenKeyboardVolume = screenBefore;
+    await waitFor(async () => {
+      screenKeyboardVolume = await run(aliceWindow, `document.querySelector(${screenSlider}).valueAsNumber`);
+      return screenKeyboardVolume !== screenBefore;
+    }, 'keyboard screen volume adjustment');
+    assert.deepEqual(await run(aliceWindow, `(() => {
+      const session = document.querySelector("#stage-participants-area [data-kind=screen]").dataset.sessionId;
+      return [JSON.parse(localStorage.getItem("monky_settings")).screenAudioVolumes[session],
+        document.querySelector(${screenSlider}).getAttribute("aria-valuetext")];
+    })()`), [screenKeyboardVolume, `${screenKeyboardVolume}%`], 'The screen volume chosen by keyboard is saved and announced');
+    assert.equal(Math.abs(screenKeyboardVolume - screenBefore), 1, 'An arrow key moves the screen slider by one step');
+    await key('Escape', 27);
+    await waitFor(async () => !(await run(aliceWindow, screenPopupOpen)) &&
+      await run(aliceWindow, `document.activeElement === document.querySelector(${screenMute})`), 'Escape closes the screen slider and returns focus');
+    const space = async () => {
+      for (const type of ['rawKeyDown', 'keyUp']) {
+        await aliceWindow.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type, key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+      }
+    };
+    await space();
+    await waitFor(async () => await run(aliceWindow, `document.querySelector(${screenMute}).getAttribute("aria-pressed") === "true"
+      && !(${screenPopupOpen})`), 'the keyboard mutes the screen audio and keeps its slider closed');
+    await space();
+    await waitFor(async () => await run(aliceWindow, `document.querySelector(${screenMute}).getAttribute("aria-pressed") === "false"`),
+      'the keyboard unmutes the screen audio');
     await run(aliceWindow, 'document.querySelector("#stage-participants-area [data-kind=screen] .stage-stopwatch-btn").click()');
     assert.equal(await run(aliceWindow, '!!document.querySelector("[data-kind=screen] .screen-locked") && !!document.querySelector(".stage-focused-main[data-bot-screen-slot=second]")'), true, 'Stopping an unfocused share applies its gate without changing miniapp focus');
     await run(aliceWindow, 'document.querySelector("#stage-participants-area [data-kind=screen] .stage-watch-btn").click()');
@@ -644,6 +695,8 @@ if (!process.versions.electron) {
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
     await waitFor(async () => await run(aliceWindow, '!document.fullscreenElement'), 'fullscreen exit after local view closes');
     assert.equal(await run(aliceWindow, '!!document.querySelector("#stage-participants-area .stage-focused-main[data-bot-screen-slot=game]")'), true, 'Leaving a view does not change its focus');
+    assert.equal(await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] .bot-screen-placeholder [role=status]").textContent'),
+      'Opening or leaving here only changes your view, not your participation in the miniapp.', 'An approved review clears the earlier declined note');
     assert.deepEqual(await run(aliceWindow, 'window.screenFixture.snapshot().state.players'), ['alice', 'bob']);
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
     await approveMiniapp(aliceWindow);
@@ -652,6 +705,27 @@ if (!process.versions.electron) {
     await waitFor(async () => await alice.executeJavaScript('window.lastState?.count === 1'), 'reopen restores shared state');
     assert.deepEqual(await alice.executeJavaScript('window.lastState.players'), ['alice', 'bob'], 'Opening or closing a view never changes player/spectator roles');
     assert.deepEqual(await alice.executeJavaScript(probeVolume), [0.8, keyboardLevel], 'A reopened view starts at the saved volume of its bot');
+
+    // A failed action is an alert in the shared toast, never text that shrinks the miniapp; a
+    // fullscreen tile, where that toast would not show, says it itself until it leaves fullscreen.
+    await run(aliceWindow, 'window.screenFixture.failNextAction("Move refused by the bot.")');
+    await alice.executeJavaScript('monkyScreen.sendAction("move", {cell: 3})');
+    await waitFor(async () => await run(aliceWindow, `[...document.querySelectorAll(".chat-copy-toast:not([data-ui-closing])")]
+      .some(toast => toast.getAttribute("role") === "alert" && toast.textContent.includes("Move refused by the bot."))`), 'failed action toast');
+    assert.equal(await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] .bot-error").hidden'), true, 'A failed action leaves the tile layout alone');
+    await run(aliceWindow, 'document.querySelector(".chat-copy-toast:not([data-ui-closing]) .chat-copy-toast-close").click()');
+    await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
+    await waitFor(async () => await run(aliceWindow, 'document.fullscreenElement?.dataset.botScreenId === "game"'), 'open tile fullscreen');
+    await run(aliceWindow, 'window.screenFixture.failNextAction("Move refused in fullscreen.")');
+    await alice.executeJavaScript('monkyScreen.sendAction("move", {cell: 3})');
+    await waitFor(async () => await run(aliceWindow,
+      'document.fullscreenElement?.querySelector(".bot-error[role=alert]:not([hidden]):not([data-ui-closing])")?.textContent === "Move refused in fullscreen."'),
+    'failed action explained inside the fullscreen tile');
+    await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
+    await waitFor(async () => await run(aliceWindow, '!document.fullscreenElement && document.querySelector("[data-bot-screen-id=game] .bot-error").hidden'),
+      'the fullscreen explanation leaves with fullscreen');
+    assert.equal(await run(aliceWindow, '!document.querySelector(".chat-copy-toast:not([data-ui-closing])")'), true, 'A failure explained in fullscreen is not repeated in a toast');
+    assert.equal(await alice.executeJavaScript('window.lastState.count'), 1, 'Refused actions change nothing');
 
     const requestsBefore = leaks;
     await alice.executeJavaScript('window.name = ""; location.href = "file:///not-a-monky-resource"');
@@ -1371,6 +1445,7 @@ async function setupVoiceStage(id, locale, adminPermission) {
   let resolveList;
   let holdEnd = false;
   let resolveEnd;
+  let failAction;
   let lastRemoval;
   let safeNotifications = true;
   let trayWatching = false;
@@ -1411,6 +1486,11 @@ async function setupVoiceStage(id, locale, adminPermission) {
       return removed;
     }
     if (type !== 'BOT_SCREEN_ACTION') throw new Error(`Unexpected request: ${type}`);
+    if (failAction) {
+      const message = failAction;
+      failAction = undefined;
+      throw new Error(message);
+    }
     actions.push({ actor: id, ...payload });
     let screen = screens.get(payload.id);
     if (id === 'alice' && payload.action === 'move' && screen.revision === payload.revision) {
@@ -1459,6 +1539,7 @@ async function setupVoiceStage(id, locale, adminPermission) {
     reloadWithout(screenId) { screens.delete(screenId); appEvents.emit('voice.bot_screens_reload'); },
     otherServerHasGame: () => !!other.botScreenStore.get('game'),
     delayEnd() { holdEnd = true; },
+    failNextAction(message) { failAction = message; },
     endPending: () => typeof resolveEnd === 'function',
     resolveEnd() { resolveEnd(); },
     setAdmin(enabled) {

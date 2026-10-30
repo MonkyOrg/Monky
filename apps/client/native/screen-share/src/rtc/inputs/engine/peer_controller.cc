@@ -369,13 +369,11 @@ class PeerObserver final : public webrtc::PeerConnectionObserver {
     try { RethrowReceiverFailure(failure); }
     catch (const Error& error) {
       try {
-        Emit("error", {{"code", error.code}, {"message", error.what()}, {"status", error.status},
-                      {"hresult", error.hr}, {"terminal", false}});
+        Emit("error", ErrorEvent(error, false));
       } catch (...) { CallbackFailure(); }
     } catch (...) {
       try {
-        Emit("error", {{"code", "ERR_RTC_CALLBACK"}, {"message", "Receiver callback failed"},
-                      {"status", MONKY_ENGINE_FAILURE}, {"hresult", 0}, {"terminal", false}});
+        Emit("error", ErrorEvent(Error("ERR_RTC_CALLBACK", "Receiver callback failed"), false));
       } catch (...) { CallbackFailure(); }
     }
   }
@@ -424,7 +422,7 @@ struct Publication {
   bool SourceEnabled() const { return source ? source->Enabled() : audio_source->Enabled(); }
 };
 
-class NativePeerController final : public PeerController {
+class NativePeerController final : public MediaController {
  public:
   explicit NativePeerController(Host& host) : host_(host) { PrivateRtcLogging(); }
   ~NativePeerController() override { CloseAll(); }
@@ -437,13 +435,6 @@ class NativePeerController final : public PeerController {
     cancellation->Check();
     CheckJson(data);
     if (operation == "peer.create") return Create(target, data, cancellation);
-    if (operation == "resource.close") {
-      Keys(data, {});
-      if (!Contains(target))
-        throw Error("ERR_RTC_NOT_FOUND", "Peer resource not found", MONKY_ENGINE_NOT_FOUND);
-      Close(target);
-      return Json::object();
-    }
     if (operation == "peer.setPublicationEnabled") {
       Keys(data, {"enabled"});
       if (!data.contains("enabled")) Invalid("enabled is required");
@@ -1038,7 +1029,7 @@ class NativePeerController final : public PeerController {
 
 }  // namespace
 
-std::unique_ptr<PeerController> CreatePeerController(Host& host) {
+std::unique_ptr<MediaController> CreatePeerController(Host& host) {
   return std::make_unique<NativePeerController>(host);
 }
 

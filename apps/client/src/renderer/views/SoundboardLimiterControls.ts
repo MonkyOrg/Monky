@@ -4,6 +4,7 @@ import { soundboardService } from '../core/SoundboardService';
 import { settingsStore } from '../stores/settingsStore';
 import { getLanguage, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { revealWhenUnfolded } from '../utils/surfaceVisibility';
 import { showAlert } from './Dialog';
 
 function intensityPosition(value: number): number {
@@ -99,9 +100,11 @@ export function bindSoundboardLimiterControls(container: HTMLElement): () => voi
     toggle.checked = enabled;
     toggle.disabled = busy;
     if (!enabled && details.contains(document.activeElement) && !toggle.disabled) toggle.focus({ preventScroll: true });
+    const unfolding = enabled && !details.classList.contains('is-expanded');
     details.inert = !enabled;
     details.setAttribute('aria-hidden', String(!enabled));
     details.classList.toggle('is-expanded', enabled);
+    if (unfolding) revealWhenUnfolded(details);
     controls.setAttribute('aria-busy', String(busy));
     const value = settingsStore.soundboardLoudnessLimit;
     if (ceiling.value !== String(value)) ceiling.value = String(value);

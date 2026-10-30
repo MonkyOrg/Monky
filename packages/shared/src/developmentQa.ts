@@ -47,6 +47,17 @@ export const developmentQaConfigSchema = z.object({
 });
 export type DevelopmentQaConfig = z.infer<typeof developmentQaConfigSchema>;
 
+/**
+ * Name of a run's directory under `.qa/runs`. Kept short because the client
+ * profile lives inside it, and the native screen capture refuses paths over
+ * 240 characters: in a checkout with a long path, `<scenario>-<uuid>` already
+ * pushed the capture cache past it. The full id still identifies the run in
+ * `launch.json` and over IPC.
+ */
+export function developmentQaRunName(runId: string): string {
+  return runId.slice(0, 8);
+}
+
 export const developmentQaReportSchema = z.object({
   runId: z.string().uuid(),
   scenario: z.enum(DEVELOPMENT_QA_SCENARIOS),

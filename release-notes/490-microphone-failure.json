@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Se o microfone falhar durante a chamada, você continua ouvindo todos e recebe um aviso, em vez de ficar reconectando sem parar. O ping do palco e o da barra lateral mostram o mesmo valor.",
+  "en": "If the microphone fails during a call, you keep hearing everyone and get a notice instead of reconnecting endlessly. The stage and the sidebar now show the same ping."
+}

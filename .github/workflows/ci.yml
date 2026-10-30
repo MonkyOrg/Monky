@@ -180,7 +180,7 @@ jobs:
           npm run build --workspace=apps/server
           npm run test:bots --workspace=apps/server
           npm run test:community --workspace=apps/server
-          node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js apps/server/dist/test-voice-afk.js apps/server/dist/test-voice-mode.js apps/server/dist/test-screen-subscriptions.js apps/server/dist/test-server-settings.js apps/server/dist/test-startup-lifecycle.js apps/server/dist/test-game-activity.js apps/server/dist/test-game-share-request.js apps/server/dist/test-ws-hardening.js apps/server/dist/test-cli-identity.js apps/server/test/cliWriteGuard.test.cjs apps/server/test/cliUpdateRecovery.test.cjs apps/server/test/cliPrompts.test.cjs apps/server/test/cliPm2Reads.test.cjs apps/server/dist/test-logger.js apps/server/dist/test-message-composition.js apps/server/test/cliProcess.test.cjs apps/server/test/cliServerRules.test.cjs apps/server/dist/test-image-uploads.js
+          node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js apps/server/dist/test-voice-afk.js apps/server/dist/test-voice-mode.js apps/server/dist/test-screen-subscriptions.js apps/server/dist/test-server-settings.js apps/server/dist/test-startup-lifecycle.js apps/server/dist/test-game-activity.js apps/server/dist/test-game-share-request.js apps/server/dist/test-ws-hardening.js apps/server/dist/test-cli-identity.js apps/server/test/cliWriteGuard.test.cjs apps/server/test/cliUpdateRecovery.test.cjs apps/server/test/cliPrompts.test.cjs apps/server/test/cliPm2Reads.test.cjs apps/server/dist/test-logger.js apps/server/dist/test-message-composition.js apps/server/test/cliProcess.test.cjs apps/server/test/cliServerRules.test.cjs apps/server/dist/test-image-uploads.js apps/server/dist/test-message-router.js apps/server/dist/test-message-routes.js
           # libuiohook initializes X11 even when the tests inject a passive mock.
           xvfb-run -a npm run test --workspace=apps/client
           npm exec -- tsc -p apps/client/tsconfig.electron.json
@@ -321,9 +321,11 @@ jobs:
           fi
           exit $fail
 
-      # Subir o PROTOCOL_VERSION faz cliente e servidor se recusarem (validators
-      # exige igualdade exata), entao e breaking change e precisa sair como
-      # major. Ja passou como `feat:` uma vez e publicou uma minor (#338).
+      # Subir o PROTOCOL_VERSION muda o que cliente e servidor trocam. Eles
+      # negociam versao e recursos (protocolCompatibility.ts), mas quem nao
+      # atualizar perde os recursos novos ou, se o piso subir, deixa de conectar.
+      # Por isso sai como major. Ja passou como `feat:` uma vez e publicou uma
+      # minor (#338).
       - name: Mudanca de protocolo exige release major
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

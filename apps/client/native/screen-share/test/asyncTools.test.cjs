@@ -61,5 +61,9 @@ test('notifyObserver delivers every argument and logs synchronous or asynchronou
   notifyObserver('Rejecting observer', async () => { throw rejected; });
   notifyObserver('Quiet observer', async () => 'handled');
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(logged, [['Throwing observer failed:', thrown], ['Rejecting observer failed:', rejected]]);
+  // Node prints its own process warnings through console.error too (on the CI's Node, the MockTimers
+  // ExperimentalWarning of the first test lands here); everything else must be exactly the observers'.
+  const nodeWarning = /^\(node:\d+\) \w*Warning: /u;
+  const observerLogs = logged.filter(([first]) => !(typeof first === 'string' && nodeWarning.test(first)));
+  assert.deepEqual(observerLogs, [['Throwing observer failed:', thrown], ['Rejecting observer failed:', rejected]]);
 });

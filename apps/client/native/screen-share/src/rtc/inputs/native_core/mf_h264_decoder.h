@@ -1,14 +1,71 @@
 #pragma once
 
-#include "mf_h264_encoder.h"
+#include <Windows.h>
+#include <d3d11_4.h>
+#include <winrt/base.h>
 
+#include "h264_bitstream.h"
+#include "surface_recycler.h"
+
+#include <chrono>
+#include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace monky::screen_video {
+
+// A real GPU frame. A caller may use an aliasing shared_ptr to retain its own
+// lease; readers release only their reference after their copy fence.
+struct GpuNv12Frame {
+  winrt::com_ptr<ID3D11Texture2D> texture;
+  winrt::com_ptr<ID3D11Fence> readyFence;
+  std::uint64_t readyValue = 0;
+  UINT subresource = 0;
+  std::int64_t timestampUs = 0;
+  std::int64_t durationUs = 0;
+};
+
+struct EncodedPacket {
+  std::vector<std::uint8_t> data;
+  std::int64_t timestampUs = 0;
+  std::int64_t durationUs = 0;
+  bool keyFrame = false;
+};
+
+struct TimingAggregate {
+  using Clock = std::chrono::steady_clock;
+  std::uint64_t count = 0, invalidIntervals = 0;
+  double totalMs = 0, maxMs = 0;
+
+  void Observe(Clock::time_point begin, Clock::time_point end) noexcept {
+    if (end < begin) { ++invalidIntervals; return; }
+    const auto elapsed = std::chrono::duration<double, std::milli>(end - begin).count();
+    ++count;
+    totalMs += elapsed;
+    if (elapsed > maxMs) maxMs = elapsed;
+  }
+  std::optional<double> MeanMs() const { return count ? std::optional(totalMs / count) : std::nullopt; }
+  std::optional<double> MaximumMs() const { return count ? std::optional(maxMs) : std::nullopt; }
+};
+
+// Records only a completed invocation, including failures/throws. Reading a
+// snapshot never finishes an in-progress call or samples another clock domain.
+template <typename Function>
+decltype(auto) MeasureCall(TimingAggregate& aggregate, Function&& function) {
+  struct Measurement {
+    TimingAggregate& aggregate;
+    TimingAggregate::Clock::time_point begin = TimingAggregate::Clock::now();
+    ~Measurement() { aggregate.Observe(begin, TimingAggregate::Clock::now()); }
+  } measurement{aggregate};
+  return std::forward<Function>(function)();
+}
 
 class DecoderError : public std::runtime_error {
  public:
@@ -64,27 +121,49 @@ struct GpuDecodedFrame : GpuNv12Frame {
   UINT originalSubresource = 0;
 };
 
-struct FrameInspection {
-  std::string hash;
-  double meanLuma = 0, stddevLuma = 0;
-  std::uint32_t minLuma = 0, maxLuma = 0;
-  static constexpr std::uint32_t width = 24, height = 24;
+// What a decoded frame presents, plus the staging texture a CPU producer
+// writes it through. Both go back to their recycler with the frame.
+struct DecodedSurface {
+  winrt::com_ptr<ID3D11Texture2D> texture, staging;
 };
+using DecodedSurfaces = SurfaceRecycler<DecodedSurface>;
+
+// The frame presenting surface.texture; its last owner gives the surface back.
+// Every reader reads a decoded frame on the producer's immediate context and
+// waits for that read before releasing it (exporter RetireInput, ReadI420), so
+// the next write into a recycled texture is queued after those reads.
+inline std::shared_ptr<GpuDecodedFrame> RecycledFrame(
+    const std::shared_ptr<DecodedSurfaces>& surfaces, DecodedSurface surface, SurfaceSize size) {
+  struct Recycle {
+    std::weak_ptr<DecodedSurfaces> surfaces;
+    winrt::com_ptr<ID3D11Texture2D> staging;
+    SurfaceSize size;
+    std::uint64_t generation = 0;
+    void operator()(GpuDecodedFrame* frame) noexcept {
+      const std::unique_ptr<GpuDecodedFrame> owned(frame);
+      if (const auto target = surfaces.lock(); target && frame->texture)
+        target->Return({std::move(frame->texture), std::move(staging)}, size, generation);
+    }
+  };
+  auto frame = std::make_unique<GpuDecodedFrame>();
+  frame->texture = std::move(surface.texture);
+  Recycle recycle{surfaces, std::move(surface.staging), size, surfaces->Generation()};
+  return std::shared_ptr<GpuDecodedFrame>(frame.release(), std::move(recycle));
+}
 
 struct I420Image {
   std::uint32_t width = 0, height = 0;
   std::vector<std::uint8_t> y, u, v;
 };
 
-// Pure layout helpers also exercised by no-media contract tests.
+// Pure layout helper also exercised by no-media contract tests.
 I420Image CopyNv12ToI420(std::span<const std::uint8_t> mapped, std::size_t rowPitch,
                          std::uint32_t textureWidth, std::uint32_t textureHeight, VideoFrameRect crop);
-FrameInspection InspectLuma(std::span<const std::uint8_t> mapped, std::size_t rowPitch);
 
 struct DecoderSchedulingStats {
-  EncoderTimingAggregate enqueueToFirstProcessInput, enqueueToAccepted;
-  EncoderTimingAggregate processInput, processOutput, acceptedToOutputSample;
-  EncoderTimingAggregate copyOutput, acceptedCallback, frameSink;
+  TimingAggregate enqueueToFirstProcessInput, enqueueToAccepted;
+  TimingAggregate processInput, processOutput, acceptedToOutputSample;
+  TimingAggregate copyOutput, acceptedCallback, frameSink;
   std::uint64_t outputCapacityChecks = 0, outputCapacityDeferrals = 0;
   std::uint64_t processInputOtherHresults = 0, processOutputOtherHresults = 0;
   std::uint64_t pumpBudgetYields = 0;
@@ -100,7 +179,7 @@ bool DecoderSamplesReadyForTransform(Retire&& retire, Pending&& pending) {
 // One scalar stamp per existing queued AU; retries keep that AU and its first
 // attempt. These steady-clock intervals never replace its original media PTS.
 struct DecoderInputTiming {
-  using Clock = EncoderTimingAggregate::Clock;
+  using Clock = TimingAggregate::Clock;
   Clock::time_point enqueuedAt{};
   bool attempted = false;
   void BeforeProcessInput(DecoderSchedulingStats& stats, Clock::time_point now) noexcept {
@@ -132,7 +211,6 @@ struct DecoderStats {
   std::uint64_t droppedInput = 0, droppedAfterSubmit = 0, errors = 0;
   std::uint64_t pendingPackets = 0, pendingBytes = 0, pendingGpuCopies = 0;
   std::uint64_t awaitingOutput = 0, peakAwaitingOutput = 0, peakGpuCopies = 0;
-  std::uint64_t diagnosticReadbacks = 0, diagnosticReadbackBytes = 0;
   std::uint64_t i420Readbacks = 0, i420ReadbackBytes = 0;
   double totalDecodeLatencyMs = 0, maxDecodeLatencyMs = 0;
   double totalGpuHoldMs = 0, maxGpuHoldMs = 0;
@@ -162,7 +240,6 @@ class MfH264Decoder {
   bool Finished() const;
   HANDLE WakeEvent() const;
   DecoderStats GetStats() const;
-  FrameInspection Inspect(const std::shared_ptr<const GpuDecodedFrame>& frame);
   // Explicit, full-frame readback for a future real kNative ToI420 implementation.
   // Never called by normal decoding. Caller retains frame and invokes on this worker.
   I420Image ReadI420(const std::shared_ptr<const GpuDecodedFrame>& frame);

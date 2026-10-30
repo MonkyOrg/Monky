@@ -39,7 +39,7 @@ async function run() {
   const { installWebContentsPolicy } = require(built('main/webContentsPolicy.js'));
   let disposePolicy = installWebContentsPolicy(app);
   const { MEDIA_FOLDERS_IPC, SHORTCUT_IPC } = require('@monky/shared');
-  const { mainFrameHandle } = require(built('main/ipcSender.js'));
+  const { IpcRegistry, windowContents } = require(built('main/ipc/registry.js'));
   // The packaged native helper is not built in DOM lanes; the overlay only needs its window to resize.
   require('@monky/screen-audio').setWindowResizeAspect = () => {};
   const { OverlayManager } = require(built('main/overlayManager.js'));
@@ -106,7 +106,8 @@ async function run() {
     } };
     const owner = track(new BrowserWindow(probeOptions));
     const intruder = track(new BrowserWindow(probeOptions));
-    mainFrameHandle(ipcMain, owner)('security:probe', (_event, value) => `ok:${value}`);
+    const registry = new IpcRegistry(ipcMain, { main: () => windowContents(owner), overlay: () => null });
+    registry.handle('security:probe', 'main', (_event, value) => `ok:${value}`);
     await owner.loadURL(`${origin}/host`);
     await intruder.loadURL(`${origin}/child`);
     const attempt = 'window.probe.invoke("security:probe", "x").then(value => value, error => String(error.message))';
@@ -114,7 +115,7 @@ async function run() {
     const frame = await until(() => owner.webContents.mainFrame.frames[0], 'embedded frame');
     check(/only answers the main window/.test(await frame.executeJavaScript(attempt)), 'An embedded frame is refused.');
     check(/only answers the main window/.test(await intruder.webContents.executeJavaScript(attempt)), 'Another window is refused.');
-    ipcMain.removeHandler('security:probe');
+    registry.dispose();
 
     // --- The main preload reports the saved folders once per document; nothing else does. ---
     const reports = [];

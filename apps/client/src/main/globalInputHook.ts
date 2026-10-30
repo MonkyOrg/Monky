@@ -4,6 +4,7 @@ import { SHORTCUT_MODIFIERS, type ShortcutModifier } from '@monky/shared';
 import { parseAcceleratorToHotkey, type ParsedHotkey } from './shortcutParser';
 import { windowsKeyboardLayout, type WindowsKeyboardLayout } from './windowsKeyboardLayout';
 import type { ShortcutConfiguration } from './shortcutWorkerProtocol';
+import { isRecord } from './ipc/guards';
 export { parseAcceleratorToHotkey } from './shortcutParser';
 
 const KEYCODE_TO_NAME = new Map<number, string>(
@@ -40,10 +41,6 @@ export function formatKeyDisplay(name: string): string {
     ArrowLeft: 'Seta Esquerda', ArrowRight: 'Seta Direita', PageUp: 'Page Up', PageDown: 'Page Down',
   };
   return overrides[name] || name;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function isPttConfig(value: unknown): value is PttConfig {

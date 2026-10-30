@@ -1,4 +1,5 @@
 import { escapeHtml, html } from '../../../utils/html';
+import { renderSwitch } from '../../../utils/formControls';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { serverStore } from '../../../stores/serverStore';
@@ -10,6 +11,7 @@ import logoUrl from '../../../assets/Logo.png';
 import {
   renderWhatPassesWhereTableHtml,
   renderCapacityEstimatorHtml,
+  renderVoiceModeCards,
   attachCapacityEstimatorEvents,
 } from '../../../utils/voiceModeInfo';
 
@@ -70,11 +72,8 @@ export class ServerGeneralTab {
       <div data-settings-section="message-limit" data-settings-label="${escapeHtml(t('serverSettings.messageLimit'))}" class="form-group">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <label for="input-message-limit">${t('serverSettings.messageLimit')}</label>
-          <label class="toggle-switch" aria-label="${t('serverSettings.messageLimit')}">
-            <input id="toggle-message-limit" type="checkbox" ${(s.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH) > 0 ? 'checked' : ''}
-              ${s.protocol?.features.includes('message-length-setting') ? '' : 'disabled'}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'toggle-message-limit', label: t('serverSettings.messageLimit'),
+    checked: (s.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH) > 0, disabled: !s.protocol?.features.includes('message-length-setting') })}
         </div>
         ${html`<input id="input-message-limit" type="number" min="1" step="1" value="${s.maxMessageLength || LIMITS.MAX_MESSAGE_LENGTH}"
           ${s.protocol?.features.includes('message-length-setting') && s.maxMessageLength !== 0 ? '' : 'disabled'}>`}
@@ -83,13 +82,10 @@ export class ServerGeneralTab {
       <div data-settings-section="member-limit" data-settings-label="${escapeHtml(t('serverSettings.memberLimitLabel'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; margin-bottom: 16px;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div>
-            <div style="font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px;">${t('serverSettings.memberLimitLabel')}</div>
-            <div style="font-size: 11px; color: var(--text-muted);">${t('serverSettings.memberLimitDesc')}</div>
+            <div id="server-member-limit-label" style="font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px;">${t('serverSettings.memberLimitLabel')}</div>
+            <div id="server-member-limit-desc" style="font-size: 11px; color: var(--text-muted);">${t('serverSettings.memberLimitDesc')}</div>
           </div>
-          <label class="toggle-switch">
-            <input id="checkbox-limit-members" type="checkbox" ${hasLimit ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
+          ${renderSwitch({ id: 'checkbox-limit-members', labelledBy: 'server-member-limit-label', describedBy: 'server-member-limit-desc', checked: hasLimit })}
         </div>
 
         <div id="max-users-group" class="form-group" style="margin-top: 12px; margin-bottom: 0;" ${hasLimit ? '' : 'hidden'}>
@@ -110,22 +106,7 @@ export class ServerGeneralTab {
           ${t('serverSettings.voiceModeDesc')}
         </div>
 
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;" id="server-voice-mode-cards">
-          <button type="button" class="voice-mode-card ${(s.voiceMode || 'p2p') === 'p2p' ? 'selected' : ''}" data-mode="p2p" aria-pressed="${s.voiceMode !== 'sfu'}" style="padding: 12px 14px; border: 1.5px solid ${(s.voiceMode || 'p2p') === 'p2p' ? 'var(--accent-primary)' : 'var(--border-color)'}; background: ${(s.voiceMode || 'p2p') === 'p2p' ? 'rgba(88, 101, 242, 0.1)' : 'var(--bg-card-secondary)'}; border-radius: var(--radius-md); cursor: pointer; transition: all 0.15s ease;">
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-              <span class="material-symbols-outlined md-18" style="color: ${(s.voiceMode || 'p2p') === 'p2p' ? 'var(--accent-primary)' : 'var(--text-muted)'};">wifi_tethering</span>
-              <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${t('serverSettings.voiceModeP2pTitle')}</span>
-            </div>
-            <div style="font-size: 11px; color: var(--text-muted); line-height: 1.4;">${t('serverSettings.voiceModeP2pDesc')}</div>
-          </button>
-          <button type="button" class="voice-mode-card ${s.voiceMode === 'sfu' ? 'selected' : ''}" data-mode="sfu" aria-pressed="${s.voiceMode === 'sfu'}" style="padding: 12px 14px; border: 1.5px solid ${s.voiceMode === 'sfu' ? 'var(--accent-primary)' : 'var(--border-color)'}; background: ${s.voiceMode === 'sfu' ? 'rgba(88, 101, 242, 0.1)' : 'var(--bg-card-secondary)'}; border-radius: var(--radius-md); cursor: pointer; transition: all 0.15s ease;">
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-              <span class="material-symbols-outlined md-18" style="color: ${s.voiceMode === 'sfu' ? 'var(--accent-primary)' : 'var(--text-muted)'};">hub</span>
-              <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">${t('serverSettings.voiceModeSfuTitle')}</span>
-            </div>
-            <div style="font-size: 11px; color: var(--text-muted); line-height: 1.4;">${t('serverSettings.voiceModeSfuDesc')}</div>
-          </button>
-        </div>
+        ${renderVoiceModeCards('server-voice-mode-cards', s.voiceMode === 'sfu' ? 'sfu' : 'p2p')}
         ${html`<input type="hidden" id="input-server-voice-mode" value="${s.voiceMode || 'p2p'}" />`}
 
         ${renderWhatPassesWhereTableHtml()}

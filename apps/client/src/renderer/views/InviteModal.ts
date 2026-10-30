@@ -1,15 +1,14 @@
 import { createServerInviteLink, MessageType, PUBLIC_IP_INTERFACE_NAME, ServerInviteInfoPayload, ServerNetworkInterface } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
 import { getActiveNetworkClient, networkClient, type NetworkClient } from '../core/NetworkClient';
-import { appEvents } from '../core/EventBus';
 import { serverStore } from '../stores/serverStore';
 import { sessionManager } from '../core/SessionManager';
 import { findOwnedServer } from '../core/hostedServerStart';
 import { escapeHtml } from '../utils/html';
-import { enableBackdropClose } from '../utils/modal';
 import { getLanguage, t } from '../i18n';
-import { enterModal, exitModal } from '../utils/modalSurface';
-import { showAlert } from './Dialog';
+import { openModal, type ModalShell } from '../utils/modalShell';
+import { copyText, reportError } from '../utils/feedback';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 
 function isNetworkInterface(value: unknown): value is ServerNetworkInterface {
@@ -64,6 +63,7 @@ function describeServerInterface(iface: ServerNetworkInterface): string {
 }
 
 export class InviteModal {
+  private shell: ModalShell | null = null;
   private modalEl: HTMLElement | null = null;
   private selectedIp: string = '';
   private selectedPort: number = 3000;
@@ -72,8 +72,6 @@ export class InviteModal {
   private isLoading = true;
   private requestAbort: AbortController | null = null;
   private pendingRequest: { client: NetworkClient; id: string } | null = null;
-  private unbindSession: (() => void) | null = null;
-  private copyTimer: ReturnType<typeof setTimeout> | null = null;
   private knownPassword: string | undefined;
 
   public async open(): Promise<void> {
@@ -89,16 +87,15 @@ export class InviteModal {
     this.knownPassword = active?.password
       || (active ? findOwnedServer(active.host, active.port)?.password : undefined);
 
-    this.modalEl = document.createElement('div');
-    this.modalEl.className = 'modal-backdrop';
-    this.modalEl.innerHTML = `
+    const shell = openModal({
+      card: `
       <div class="modal-card" style="max-width: 520px;">
         <div class="modal-header">
           <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
-            <span class="material-symbols-outlined" style="color: var(--accent-primary);">person_add</span>
+            <span class="material-symbols-outlined" style="color: var(--accent-primary);" aria-hidden="true">person_add</span>
             <span>${t('invite.title')}</span>
           </div>
-          <button id="modal-close" class="modal-close-btn">&times;</button>
+          <button type="button" id="modal-close" class="modal-close-btn" data-modal-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
         </div>
 
         <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.5;">
@@ -112,7 +109,7 @@ export class InviteModal {
           </div>
 
           <div class="form-group" style="margin-bottom: 0;">
-            <label style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; font-size: 12px;">
+            <label for="select-invite-ip" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; font-size: 12px;">
               <span>${t('invite.ipLabel')}</span>
             </label>
             <div id="invite-loading-tag">${renderLoadingSkeleton('lines', 2)}</div>
@@ -122,8 +119,8 @@ export class InviteModal {
             <div id="invite-network-error" hidden></div>
           </div>
 
-          <div id="custom-ip-container" style="display: none; margin-top: -4px;">
-            <input id="input-custom-ip" type="text" placeholder="${t('invite.customIpPlaceholder')}" style="width: 100%; font-size: 12px; padding: 6px 10px;">
+          <div id="custom-ip-container" hidden style="margin-top: -4px;">
+            <input id="input-custom-ip" type="text" placeholder="${t('invite.customIpPlaceholder')}" aria-label="${escapeHtml(t('invite.customIpPlaceholder'))}" style="width: 100%; font-size: 12px; padding: 6px 10px;">
           </div>
 
           <div style="display: flex; justify-content: space-between; align-items: center; font-size: 13px; border-top: 1px solid var(--border-color); padding-top: 10px; margin-top: 2px;">
@@ -135,8 +132,8 @@ export class InviteModal {
           <div style="border-top: 1px solid var(--border-color); padding-top: 10px; margin-top: 2px; display: flex; flex-direction: column; gap: 8px;">
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
               <label for="chk-invite-password" style="font-size: 12px; font-weight: 500; color: var(--text-primary); cursor: pointer; user-select: none;">${t('invite.includePassword')}</label>
-              <label class="toggle-switch" aria-label="${t('invite.includePassword')}">
-                <input id="chk-invite-password" type="checkbox" ${this.knownPassword ? '' : 'disabled'}>
+              <label class="toggle-switch">
+                <input id="chk-invite-password" type="checkbox" role="switch" ${this.knownPassword ? '' : 'disabled'}>
                 <span class="toggle-slider"></span>
               </label>
             </div>
@@ -157,24 +154,20 @@ export class InviteModal {
           </div>
         </div>
 
-        <div id="copy-success-msg" style="display: none; font-size: 12px; color: var(--success); text-align: center; font-weight: 500;">
-          <span class="material-symbols-outlined md-14" style="vertical-align: middle; margin-right: 4px;">check_circle</span>
-          ${t('invite.copied')}
-        </div>
-
         <div class="modal-footer">
-          <button id="btn-copy-invite" class="btn btn-primary" disabled style="width: 100%; font-size: 13px; padding: 10px 16px; display: flex; align-items: center; justify-content: center; gap: 8px;">
+          <button type="button" id="btn-copy-invite" class="btn btn-primary" disabled style="width: 100%; font-size: 13px; padding: 10px 16px; display: flex; align-items: center; justify-content: center; gap: 8px;">
             <span class="material-symbols-outlined md-18">content_copy</span>
             <span>${t('invite.copyButton')}</span>
           </button>
         </div>
       </div>
-    `;
-
-    document.body.appendChild(this.modalEl);
-    enterModal(this.modalEl);
+    `,
+      closeWithSession: true,
+      onClose: () => this.teardown(shell),
+    });
+    this.shell = shell;
+    this.modalEl = shell.element;
     this.attachEvents();
-    this.unbindSession = appEvents.on('session.changed', () => this.close());
     await this.fetchServerInviteInfo();
   }
 
@@ -334,7 +327,7 @@ export class InviteModal {
     this.selectedIp = firstIp || this.getFallbackHost();
     selectEl.value = this.selectedIp;
     const custom = this.modalEl.querySelector<HTMLElement>('#custom-ip-container');
-    if (custom) custom.style.display = 'none';
+    if (custom) setSurfaceVisible(custom, false);
     this.updateTip(this.selectedIp);
   }
 
@@ -367,80 +360,64 @@ export class InviteModal {
   }
 
   private attachEvents(): void {
-    if (!this.modalEl) return;
-    const modal = this.modalEl;
+    const shell = this.shell;
+    if (!shell) return;
+    const modal = shell.element;
+    const options = { signal: shell.signal };
 
-    const btnClose = this.modalEl.querySelector('#modal-close');
-    const btnCopy = this.modalEl.querySelector('#btn-copy-invite');
-    const selectIp = this.modalEl.querySelector('#select-invite-ip') as HTMLSelectElement | null;
-    const customContainer = this.modalEl.querySelector('#custom-ip-container') as HTMLElement | null;
-    const inputCustomIp = this.modalEl.querySelector('#input-custom-ip') as HTMLInputElement | null;
-    const chkPassword = this.modalEl.querySelector('#chk-invite-password') as HTMLInputElement | null;
-    const copyMsg = this.modalEl.querySelector('#copy-success-msg') as HTMLElement | null;
-
-    btnClose?.addEventListener('click', () => this.close());
-    enableBackdropClose(this.modalEl, () => this.close());
+    const btnCopy = modal.querySelector('#btn-copy-invite');
+    const selectIp = modal.querySelector('#select-invite-ip') as HTMLSelectElement | null;
+    const customContainer = modal.querySelector('#custom-ip-container') as HTMLElement | null;
+    const inputCustomIp = modal.querySelector('#input-custom-ip') as HTMLInputElement | null;
+    const chkPassword = modal.querySelector('#chk-invite-password') as HTMLInputElement | null;
 
     selectIp?.addEventListener('change', () => {
       if (selectIp.value === '__custom__') {
-        if (customContainer) customContainer.style.display = 'block';
+        if (customContainer) setSurfaceVisible(customContainer, true);
         inputCustomIp?.focus();
         this.selectedIp = inputCustomIp?.value.trim() || '';
       } else {
-        if (customContainer) customContainer.style.display = 'none';
+        if (customContainer) setSurfaceVisible(customContainer, false);
         this.selectedIp = selectIp.value;
       }
       this.updateTip(this.selectedIp);
-    });
+    }, options);
 
     inputCustomIp?.addEventListener('input', () => {
       this.selectedIp = inputCustomIp.value.trim();
       this.updateTip(this.selectedIp);
-    });
+    }, options);
 
-    const triggerCopyFeedback = (text: string) => {
-      if (copyMsg) {
-        copyMsg.innerHTML = `<span class="material-symbols-outlined md-14" style="vertical-align: middle; margin-right: 4px;">check_circle</span> ${text}`;
-        copyMsg.style.display = 'block';
-        if (this.copyTimer) clearTimeout(this.copyTimer);
-        this.copyTimer = setTimeout(() => {
-          this.copyTimer = null;
-          if (copyMsg) copyMsg.style.display = 'none';
-        }, 3000);
-      }
-    };
-
-    btnCopy?.addEventListener('click', async () => {
-      if (this.isLoading || this.modalEl !== modal) return;
+    btnCopy?.addEventListener('click', () => {
+      if (this.isLoading || shell.closed) return;
+      let link: string;
       try {
-        const textToCopy = createServerInviteLink({
+        link = createServerInviteLink({
           v: 1, name: this.serverName, host: this.selectedIp, port: this.selectedPort,
           ...(chkPassword?.checked && this.knownPassword ? { password: this.knownPassword } : {}),
         }, getLanguage());
-        await navigator.clipboard.writeText(textToCopy);
-        if (this.modalEl === modal) triggerCopyFeedback(t('invite.copied'));
-      } catch (err) {
-        console.warn('[InviteModal] Could not create or copy the invitation.');
-        if (this.modalEl === modal) await showAlert({ message: t('invite.copyFailed'), variant: 'danger' });
+      } catch (error: unknown) {
+        reportError(t('invite.copyFailed'), { log: 'APP', error });
+        return;
       }
-    });
+      void copyText(link, { copied: t('invite.copied'), failed: t('invite.copyFailed') });
+    }, options);
   }
 
   public close(): void {
+    this.shell?.close('api');
+  }
+
+  private teardown(shell: ModalShell): void {
+    if (this.shell !== shell) return;
     this.knownPassword = undefined;
     this.requestAbort?.abort();
     this.requestAbort = null;
     if (this.pendingRequest) this.pendingRequest.client.cancelRequest(this.pendingRequest.id);
     this.pendingRequest = null;
-    this.unbindSession?.();
-    this.unbindSession = null;
-    if (this.copyTimer) clearTimeout(this.copyTimer);
-    this.copyTimer = null;
     this.networkInterfaces = [];
-    if (this.modalEl) {
-      exitModal(this.modalEl);
-      this.modalEl = null;
-    }
+    this.shell = null;
+    this.modalEl = null;
   }
 }
 

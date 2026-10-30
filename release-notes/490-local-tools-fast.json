@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Ferramentas locais, prévia de música e compartilhamento de tela respondem mais rápido: o Monky confere os arquivos dessas ferramentas uma vez por execução, e a primeira abertura do seletor de tela não trava a janela.",
+  "en": "Local tools, music previews and screen sharing respond faster: Monky checks these tools' files once per run, and opening the screen picker for the first time no longer freezes the window."
+}

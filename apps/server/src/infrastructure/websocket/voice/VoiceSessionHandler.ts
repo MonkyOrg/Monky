@@ -288,10 +288,9 @@ export class VoiceSessionHandler {
     const attempt = {};
     if (session.isBot) session.botVoiceJoinAttempt = attempt;
     const accessVersion = this.host.botSettingsPermissionVersion;
-    if (session.isBot) {
-      if (!(await this.host.requirePermission(session, Permission.SPEAK, requestId,
-        payload.invocationId !== undefined ? undefined : payload.channelId))) return;
-    } else if (!(await this.host.requireChannelAccess(session, payload.channelId, requestId))) return;
+    // A person's access to the room is checked once, below, as for a bot not invoked into it (S-WS-5).
+    if (session.isBot && !(await this.host.requirePermission(session, Permission.SPEAK, requestId,
+      payload.invocationId !== undefined ? undefined : payload.channelId))) return;
     let authorization: Awaited<ReturnType<BotInteractionHandler['authorizeVoiceJoin']>>;
     if (session.isBot && payload.invocationId !== undefined) {
       authorization = await this.host.botInteractions.authorizeVoiceJoin(session, payload.invocationId, payload.channelId);

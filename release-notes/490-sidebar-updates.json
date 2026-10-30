@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "A barra de canais e membros atualiza só o que mudou, então mutar, falar ou alguém entrar não refaz a lista nem tira o foco do teclado. Arrastar um controle de volume só salva ao soltar.",
+  "en": "The channel and member sidebar updates only what changed, so muting, speaking or someone joining no longer rebuilds the list or moves keyboard focus. Dragging a volume slider only saves when you let go."
+}

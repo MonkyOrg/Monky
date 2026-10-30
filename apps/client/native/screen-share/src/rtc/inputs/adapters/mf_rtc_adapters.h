@@ -1,7 +1,6 @@
 #pragma once
 
 #include "mf_h264_decoder.h"
-#include "mf_rtc_encoder_diagnostics.h"
 #include "mf_rtc_decoder_diagnostics.h"
 
 #include "api/scoped_refptr.h"
@@ -22,7 +21,6 @@ namespace monky::native_rtc::mf {
 
 namespace detail {
 class SharedState;
-class SourceWorker;
 }
 
 struct AdapterOptions {
@@ -48,22 +46,6 @@ struct AdapterDiagnostic {
   std::array<char, 512> message{};
 };
 
-struct EncoderRuntimeSnapshot {
-  std::uint64_t session_id = 0, encode_requests = 0;
-  screen_video::EncoderConfig configured;
-  std::uint32_t maximum_bitrate_bps = 0, requested_keyframe_interval = 0;
-  double requested_fps = 0;
-  std::optional<double> rtc_requested_fps;
-  std::uint32_t requested_bitrate_bps = 0;
-  std::size_t pending_frames = 0, submitted_metadata = 0;
-  bool core_observed = false;
-  screen_video::EncoderStats core;
-  std::optional<EncoderDiagnosticSnapshot> diagnostics;
-  // Worker slots retain only the ledger. SharedState::Snapshot copies its live
-  // values and clears this pointer in the returned, independently owned value.
-  std::shared_ptr<const detail::EncoderDiagnosticLedger> diagnostic_ledger;
-};
-
 struct DecoderRuntimeSnapshot {
   std::uint64_t session_id = 0, loss_epoch = 0, core_generation = 0, observation_sequence = 0;
   std::optional<std::int64_t> observed_at_rtc_us, core_observed_at_rtc_us;
@@ -80,6 +62,8 @@ struct DecoderRuntimeSnapshot {
   screen_video::DecoderConfig configured;
   screen_video::DecoderStats core;
   std::optional<DecoderDiagnosticSnapshot> diagnostics;
+  // Worker slots retain only the ledger. SharedState::Snapshot copies its live
+  // values and clears this pointer in the returned, independently owned value.
   std::shared_ptr<const detail::DecoderDiagnosticLedger> diagnostic_ledger;
 };
 
@@ -87,44 +71,14 @@ struct AdapterSnapshot {
   std::size_t live_workers = 0;
   std::size_t native_buffers = 0;
   std::uint64_t diagnostics_overwritten = 0;
-  std::uint64_t encoded_access_units = 0;
-  std::uint64_t rtc_rejected_access_units = 0;
   std::uint64_t decoded_gpu_frames = 0;
   std::uint64_t i420_readbacks = 0;
   std::uint64_t i420_failures = 0;
-  std::vector<EncoderRuntimeSnapshot> encoders;
   std::vector<DecoderRuntimeSnapshot> decoders;
   std::optional<bool> hardware_execution_observed;
 };
 
 struct FactoryBundle;
-
-class NativeGpuSource {
- public:
-  ~NativeGpuSource();
-  NativeGpuSource(const NativeGpuSource&) = delete;
-  NativeGpuSource& operator=(const NativeGpuSource&) = delete;
-
-  // The supplied shared_ptr must retain the producer's immutable texture lease,
-  // not just AddRef its texture. Timestamp/duration are the actual source times.
-  // Pixels must be BT.709-limited NV12; there is no implicit color conversion.
-  // Ready fences must be monotonic. Pending fence registrations retain their
-  // owner even after Close/Release; stopping the producer must retire its fences.
-  // Keyed textures use key 0 with nonblocking acquisition, as in the MF core.
-  // External keyed-mutex owners must not prevent the consumer's GPU copy.
-  // Returns nullptr with a diagnostic on invalid input or bounded admission loss.
-  webrtc::scoped_refptr<webrtc::VideoFrameBuffer> WrapFrame(
-      std::shared_ptr<const screen_video::GpuNv12Frame> frame);
-
-  // Revokes new input. Existing buffers retain their MTA readback owner.
-  // Returns a WebRTC codec status; a timeout never terminates a native thread.
-  std::int32_t Close();
-
- private:
-  friend class NativeRtcContext;
-  explicit NativeGpuSource(std::shared_ptr<detail::SourceWorker> worker);
-  std::shared_ptr<detail::SourceWorker> worker_;
-};
 
 class NativeRtcContext {
  public:
@@ -132,23 +86,16 @@ class NativeRtcContext {
   NativeRtcContext(const NativeRtcContext&) = delete;
   NativeRtcContext& operator=(const NativeRtcContext&) = delete;
 
-  // Borrows and AddRefs an existing device/context; never creates a device.
-  // One source worker serves all buffers from this source, including ToI420.
-  std::shared_ptr<NativeGpuSource> CreateSource(
-      ID3D11Device* device, ID3D11DeviceContext4* context);
-
   // Identity-checked lookup, with no RTTI requirement on upstream WebRTC.
-  // The aliasing pointers retain the COMPLETE lease, including its readback
-  // worker. Null means a foreign buffer, or (for GetDecodedFrame) a source frame.
-  std::shared_ptr<const screen_video::GpuNv12Frame> GetGpuFrame(
-      const webrtc::scoped_refptr<webrtc::VideoFrameBuffer>& buffer) const;
+  // The aliasing pointer retains the COMPLETE lease, including its readback
+  // worker. Null means a foreign buffer.
   std::shared_ptr<const screen_video::GpuDecodedFrame> GetDecodedFrame(
       const webrtc::scoped_refptr<webrtc::VideoFrameBuffer>& buffer) const;
 
   std::vector<AdapterDiagnostic> TakeDiagnostics();
   AdapterSnapshot Snapshot() const;
 
-  // Observation only: first Release codecs, Close sources, and release buffers.
+  // Observation only: first Release codecs and release buffers.
   // Waits for actual OS thread exit, not merely a stop-request acknowledgement.
   // The DLL and this context must remain alive until this returns true.
   bool WaitForIdle(std::chrono::milliseconds timeout);
@@ -160,6 +107,8 @@ class NativeRtcContext {
   std::shared_ptr<detail::SharedState> state_;
 };
 
+// Media Foundation only decodes. Publication uses externally encoded frames, so
+// encoder_factory stays empty here and encoded engines install their own.
 struct FactoryBundle {
   std::shared_ptr<NativeRtcContext> context;
   std::unique_ptr<webrtc::VideoEncoderFactory> encoder_factory;
@@ -174,7 +123,7 @@ struct FactoryBundle {
 // an existing invocation unless called by that invocation. Callback objects
 // must remain alive until then, must not throw, and must return promptly.
 // Release clears registration; register again before using a released codec.
-// InitEncode/Configure reconfiguration preserves a still-live registration.
+// Configure reconfiguration preserves a still-live registration.
 // Release from a callback requests asynchronous retirement (never self-join).
 // Retained buffers may still issue explicit ToI420 after codec Release.
 FactoryBundle CreateFactoryBundle(const AdapterOptions& options = {});

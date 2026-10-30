@@ -78,6 +78,20 @@ std::vector<webrtc::SdpVideoFormat> SupportedFormats(std::uint8_t maximum_level)
   }
   return formats;
 }
+webrtc::SdpVideoFormat ScreenAv1Format() {
+  return webrtc::SdpVideoFormat("AV1", {{"profile", "0"}, {"level-idx", "23"}, {"tier", "0"}});
+}
+bool IsScreenAv1Format(const webrtc::SdpVideoFormat& format) {
+  if (format.name != "AV1") return false;
+  for (const auto& [name, value] : format.parameters) {
+    if (name == "profile" && value != "0") return false;
+    if (name == "tier" && value != "0") return false;
+    if (name == "level-idx" && (value.empty() || value.size() > 2 ||
+        !std::all_of(value.begin(), value.end(), [](char c) { return c >= '0' && c <= '9'; }) ||
+        std::stoi(value) > 23)) return false;
+  }
+  return true;
+}
 webrtc::ColorSpace Bt709Limited() {
   return {webrtc::ColorSpace::PrimaryID::kBT709, webrtc::ColorSpace::TransferID::kBT709,
           webrtc::ColorSpace::MatrixID::kBT709, webrtc::ColorSpace::RangeID::kLimited};

@@ -1,8 +1,7 @@
 import { t } from '../i18n';
 import { connectionStore, DEFAULT_FOLDER_COLOR } from '../stores/connectionStore';
 import { escapeHtml } from '../utils/html';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
-import { enableBackdropClose } from '../utils/modal';
+import { openModal, type ModalShell } from '../utils/modalShell';
 import { normalizeHexColor } from '../utils/colors';
 import { ColorPicker } from './ColorPicker';
 
@@ -17,12 +16,11 @@ export const FOLDER_SWATCHES = [
  * closing any other way discards them.
  */
 export class FolderSettingsModal {
+  private shell: ModalShell | null = null;
   private root: HTMLElement | null = null;
-  private controller: AbortController | null = null;
   private readonly colorPicker = new ColorPicker({ id: 'folder-settings-custom-color', label: 'folderSettings.customColor', presets: FOLDER_SWATCHES });
   private folderId: string | null = null;
   private color = DEFAULT_FOLDER_COLOR;
-  private returnFocus: HTMLElement | null = null;
 
   public open(folderId: string, returnFocus?: HTMLElement | null): void {
     const folder = connectionStore.findFolder(folderId);
@@ -30,13 +28,11 @@ export class FolderSettingsModal {
     this.close();
     this.folderId = folderId;
     this.color = folder.color ?? DEFAULT_FOLDER_COLOR;
-    this.returnFocus = returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-    const root = document.createElement('div');
-    root.className = 'modal-backdrop';
-    root.innerHTML = `<div class="modal-card folder-settings-modal" role="dialog" aria-modal="true" aria-labelledby="folder-settings-title">
+    const shell = openModal({
+      card: `<div class="modal-card folder-settings-modal" aria-labelledby="folder-settings-title">
       <div class="modal-header">
         <div class="modal-title" id="folder-settings-title">${t('folderSettings.title')}</div>
-        <button type="button" class="modal-close-btn" data-folder-settings-cancel aria-label="${escapeHtml(t('common.close'))}">&times;</button>
+        <button type="button" class="modal-close-btn" data-folder-settings-cancel data-modal-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
       </div>
       <form class="folder-settings-form" novalidate>
         <div class="form-group">
@@ -60,24 +56,26 @@ export class FolderSettingsModal {
           <button type="submit" class="btn btn-primary folder-settings-done" data-folder-settings-done>${t('folderSettings.done')}</button>
         </div>
       </form>
-    </div>`;
-    document.body.appendChild(root);
-    this.root = root;
-    enterModal(root);
-    this.bind(root);
+    </div>`,
+      // Opened from a menu that is gone by now: focus goes back to the folder itself.
+      returnFocus: returnFocus ?? document.activeElement,
+      initialFocus: '#folder-settings-name',
+      onClose: () => {
+        if (this.shell !== shell) return;
+        this.colorPicker.cleanup();
+        this.shell = null;
+        this.root = null;
+        this.folderId = null;
+      },
+    });
+    this.shell = shell;
+    this.root = shell.card;
+    this.bind(shell.card, shell.signal);
     this.renderSelection();
-    root.querySelector<HTMLInputElement>('#folder-settings-name')?.focus();
   }
 
   public close(): void {
-    this.controller?.abort();
-    this.controller = null;
-    this.colorPicker.cleanup();
-    if (this.root) exitModal(this.root);
-    this.root = null;
-    this.folderId = null;
-    if (this.returnFocus?.isConnected) this.returnFocus.focus({ preventScroll: true });
-    this.returnFocus = null;
+    this.shell?.close('api');
   }
 
   private swatch(color: string, extraClass: string, label: string): string {
@@ -87,10 +85,8 @@ export class FolderSettingsModal {
     </button>`;
   }
 
-  private bind(root: HTMLElement): void {
-    const controller = new AbortController();
-    this.controller = controller;
-    const options = { signal: controller.signal };
+  private bind(root: HTMLElement, signal: AbortSignal): void {
+    const options = { signal };
     const swatches = () => [...root.querySelectorAll<HTMLButtonElement>('[data-folder-color]')];
     root.querySelector('.folder-settings-swatches')?.addEventListener('click', (event) => {
       const swatch = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-folder-color]');
@@ -110,18 +106,10 @@ export class FolderSettingsModal {
       if (next.dataset.folderColor) this.setColor(next.dataset.folderColor);
     }, options);
     this.colorPicker.attachEvents(root, (color) => this.setColor(color, false));
-    root.querySelectorAll('[data-folder-settings-cancel]').forEach((button) => button.addEventListener('click', () => this.close(), options));
     root.querySelector('form')?.addEventListener('submit', (event) => {
       event.preventDefault();
       this.save();
     }, options);
-    root.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && handlesModalKey(root, event)) {
-        event.preventDefault();
-        this.close();
-      }
-    }, options);
-    enableBackdropClose(root, () => this.close());
   }
 
   private setColor(value: string, syncPicker = true): void {

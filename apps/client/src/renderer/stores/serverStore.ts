@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, VoiceRestrictions, canAccessChannel, hasPermission } from '@monky/shared';
+import { ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceRestrictions, canAccessChannel, hasPermission, type ServerSettingsUpdatedPayload } from '@monky/shared';
 import { appEvents, type AppEventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
@@ -305,71 +305,40 @@ export class ServerStore {
     }
   }
 
-  public updateServerMeta(
-    name: string,
-    hasPassword: boolean,
-    allowSoundboard?: boolean,
-    iconUrl?: string | null,
-    attachmentStorage?: AttachmentStorageInfo,
-    maxUsers?: number,
-    turnEnabled?: boolean,
-    allowEveryoneMention?: boolean,
-    allowMessageEdit?: boolean,
-    voiceMode?: VoiceMode,
-    showRoleBadgesToEveryone?: boolean,
-    maxMessageLength?: number,
-    messageDeleteUndoSeconds?: number,
-    recentSoundCacheEnabled?: boolean,
-    recentSoundCacheLimit?: number,
-    dmRelayEnabled?: boolean,
-    afk?: { channelId?: string | null; timeoutSeconds?: number },
-  ): void {
-    if (this.serverDetails) {
-      if (maxMessageLength !== undefined) this.serverDetails.maxMessageLength = maxMessageLength;
-      if (afk?.channelId !== undefined) this.serverDetails.afkChannelId = afk.channelId;
-      if (afk?.timeoutSeconds !== undefined) this.serverDetails.afkTimeoutSeconds = afk.timeoutSeconds;
-      this.serverDetails.name = name;
-      this.serverDetails.hasPassword = hasPassword;
-      if (allowSoundboard !== undefined) {
-        this.serverDetails.allowSoundboard = allowSoundboard;
-      }
-      if (iconUrl !== undefined) {
-        this.serverDetails.iconUrl = iconUrl;
-      }
-      if (attachmentStorage !== undefined) {
-        this.serverDetails.attachmentStorage = attachmentStorage;
-      }
-      if (maxUsers !== undefined) {
-        this.serverDetails.maxUsers = maxUsers;
-      }
-      if (turnEnabled !== undefined) {
-        this.serverDetails.turnEnabled = turnEnabled;
-      }
-      if (allowEveryoneMention !== undefined) {
-        this.serverDetails.allowEveryoneMention = allowEveryoneMention;
-      }
-      if (allowMessageEdit !== undefined) {
-        this.serverDetails.allowMessageEdit = allowMessageEdit;
-      }
-      if (messageDeleteUndoSeconds !== undefined) this.serverDetails.messageDeleteUndoSeconds = messageDeleteUndoSeconds;
-      if (recentSoundCacheEnabled !== undefined) this.serverDetails.recentSoundCacheEnabled = recentSoundCacheEnabled;
-      if (recentSoundCacheLimit !== undefined) this.serverDetails.recentSoundCacheLimit = recentSoundCacheLimit;
-      if (dmRelayEnabled !== undefined) this.serverDetails.dmRelayEnabled = dmRelayEnabled;
-      if (voiceMode !== undefined) {
-        this.serverDetails.voiceMode = voiceMode;
-      }
-      if (showRoleBadgesToEveryone !== undefined) {
-        this.serverDetails.showRoleBadgesToEveryone = showRoleBadgesToEveryone;
-      }
-      this.bus.emit('server.updated');
-      this.bus.emit('server.meta_updated', this.serverDetails);
-    }
+  /**
+   * Applies a SERVER_SETTINGS_UPDATED. Name and password always come; every
+   * other setting only when the server sent it, so a server that does not know
+   * a setting leaves the value from login untouched.
+   */
+  public applySettings(settings: ServerSettingsUpdatedPayload): void {
+    const details = this.serverDetails;
+    if (!details) return;
+    details.name = settings.name;
+    details.hasPassword = settings.hasPassword;
+    if (settings.maxMessageLength !== undefined) details.maxMessageLength = settings.maxMessageLength;
+    if (settings.afkChannelId !== undefined) details.afkChannelId = settings.afkChannelId;
+    if (settings.afkTimeoutSeconds !== undefined) details.afkTimeoutSeconds = settings.afkTimeoutSeconds;
+    if (settings.allowSoundboard !== undefined) details.allowSoundboard = settings.allowSoundboard;
+    if (settings.iconUrl !== undefined) details.iconUrl = settings.iconUrl;
+    if (settings.attachmentStorage !== undefined) details.attachmentStorage = settings.attachmentStorage;
+    if (settings.maxUsers !== undefined) details.maxUsers = settings.maxUsers;
+    if (settings.turnEnabled !== undefined) details.turnEnabled = settings.turnEnabled;
+    if (settings.allowEveryoneMention !== undefined) details.allowEveryoneMention = settings.allowEveryoneMention;
+    if (settings.allowMessageEdit !== undefined) details.allowMessageEdit = settings.allowMessageEdit;
+    if (settings.messageDeleteUndoSeconds !== undefined) details.messageDeleteUndoSeconds = settings.messageDeleteUndoSeconds;
+    if (settings.recentSoundCacheEnabled !== undefined) details.recentSoundCacheEnabled = settings.recentSoundCacheEnabled;
+    if (settings.recentSoundCacheLimit !== undefined) details.recentSoundCacheLimit = settings.recentSoundCacheLimit;
+    if (settings.dmRelayEnabled !== undefined) details.dmRelayEnabled = settings.dmRelayEnabled;
+    if (settings.voiceMode !== undefined) details.voiceMode = settings.voiceMode;
+    if (settings.showRoleBadgesToEveryone !== undefined) details.showRoleBadgesToEveryone = settings.showRoleBadgesToEveryone;
+    this.bus.emit('server.updated');
+    this.bus.emit('server.meta_updated', details);
   }
 
   /**
    * Refreshes what the host can do about the relay (#438).
    *
-   * Separate from `updateServerMeta` because this is not a setting somebody
+   * Separate from `applySettings` because this is not a setting somebody
    * chose: it is the host reporting a capability that may have changed on its
    * own — switching the relay on installs coturn, and from then on the answer
    * from login is stale.

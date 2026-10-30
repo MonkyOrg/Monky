@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quem não tem acesso a uma sala de voz privada não fica mais sabendo quem entrou ou saiu dela, e expulsar ou mover alguém da chamada não é anunciado para o servidor inteiro.",
+  "en": "People without access to a private voice room no longer learn who joined or left it, and kicking or moving someone from a call is no longer announced to the whole server."
+}

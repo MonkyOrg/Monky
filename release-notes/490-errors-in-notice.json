@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Erros de operação aparecem sempre no aviso do app, lido pelos leitores de tela, em vez de surgirem soltos na tela. A validação de formulários fala o idioma do app.",
+  "en": "Operation errors always show in the app's notice, which screen readers announce, instead of appearing loose on screen. Form validation speaks the app's language."
+}

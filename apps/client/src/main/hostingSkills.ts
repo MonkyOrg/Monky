@@ -1,10 +1,11 @@
-import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
+import { app, dialog, type BrowserWindow } from 'electron';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   HOSTING_SKILL_IPC, hostingSkillIdSchema, hostingSkillName, type HostingSkillId, type HostingSkillSaveResult,
 } from '@monky/shared';
 import { mt } from './i18n';
+import type { IpcRegistry } from './ipc/registry';
 import { createZip } from './zipWriter';
 
 const SKILLS_DIRECTORY = path.join(__dirname, '..', '..', 'hosting-skills');
@@ -28,11 +29,12 @@ export async function composeHostingSkill(id: HostingSkillId, directory = SKILLS
 }
 
 /** The skill is saved as `<name>.zip` holding `<name>/SKILL.md`, the layout agent skill folders and uploads expect. */
-export function setupHostingSkillIpc(mainWindow: BrowserWindow): () => void {
+export function registerHostingSkillIpc(registry: IpcRegistry, mainWindow: BrowserWindow): void {
   let saving = false, disposed = false;
-  ipcMain.handle(HOSTING_SKILL_IPC, async (event, input: unknown): Promise<HostingSkillSaveResult> => {
-    if (disposed || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
-      || event.senderFrame !== mainWindow.webContents.mainFrame || saving) {
+  registry.onDispose(() => { disposed = true; });
+  const refused: HostingSkillSaveResult = { status: 'failed', error: mt('hostingSkill.failed') };
+  registry.handle(HOSTING_SKILL_IPC, { from: 'main', refused }, async (_event, input): Promise<HostingSkillSaveResult> => {
+    if (disposed || mainWindow.isDestroyed() || saving) {
       console.warn('[Onboarding] Rejected hosting skill download from an unavailable sender or while saving.');
       return { status: 'failed', error: mt('hostingSkill.failed') };
     }
@@ -54,5 +56,4 @@ export function setupHostingSkillIpc(mainWindow: BrowserWindow): () => void {
       return { status: 'failed', error: mt('hostingSkill.failed') };
     } finally { saving = false; }
   });
-  return () => { disposed = true; ipcMain.removeHandler(HOSTING_SKILL_IPC); };
 }

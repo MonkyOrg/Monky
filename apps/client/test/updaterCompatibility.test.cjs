@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const test = require('node:test');
 const ts = require('typescript');
 const shared = require('@monky/shared');
+const { loadMain, fakeIpcMain } = require('./mainModules.cjs');
 
 function fixture(compatibility, options = {}) {
   const handlers = new Map();
@@ -45,7 +46,6 @@ function fixture(compatibility, options = {}) {
   const dependencies = new Map([
     ['electron', {
       app: { isPackaged: true, getVersion: () => '17.0.3-beta', getPath: () => 'synthetic-temp' },
-      ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
       net: { fetch: request },
       shell: { openPath: async () => { actions.push('openDmg'); return ''; } },
     }],
@@ -56,7 +56,8 @@ function fixture(compatibility, options = {}) {
       return compatibility;
     } }],
     ['./i18n', { mt: (key) => key }],
-    ['./updateInstall', { consumeUpdateOutcome: () => null, beginUpdateInstall: () => assert.fail('No installer') }],
+    ['./updateInstall', { consumeUpdateOutcome: () => null, beginUpdateInstall: options.beginUpdateInstall
+      ?? (() => assert.fail('No installer')) }],
     ['./updateLog', { updateLog() {} }],
     ['./releaseNotes', { fetchVersionReleaseNotes: async () => ({ status: 'unavailable' }) }],
     ['./updateDownload', { downloadToFile: async (_url, _path, signal, progress) => {
@@ -90,9 +91,15 @@ function fixture(compatibility, options = {}) {
     }, { filename });
     return module.exports;
   };
-  load('updater').setupUpdater({ webContents: { send: (...args) => sent.push(args) } },
-    options.inventory ?? (async () => []));
-  return { handlers, actions, events, sent, updater, metadataCalls: () => metadataCalls, fetchSignal: () => fetchSignal,
+  // The real registry is exercised by ipcRegistry.test; here every call already comes from the main window.
+  const registry = options.registry ?? {
+    handle: (name, _policy, handler) => handlers.set(name, handler),
+    send: (_to, ...args) => { sent.push(args); return true; },
+    onDispose() {},
+  };
+  load('updater').registerUpdaterIpc(registry, { window: options.window ?? { isDestroyed: () => false },
+    getInventory: options.inventory ?? (async () => []) });
+  return { handlers, actions, events, sent, updater, load, metadataCalls: () => metadataCalls, fetchSignal: () => fetchSignal,
     updaterLoads: () => updaterLoads };
 }
 
@@ -268,4 +275,75 @@ test('changing release channel invalidates the previous consent/download target'
   await handlers.get(shared.UPDATER_IPC.setChannel)(null, true);
   assert.equal((await handlers.get(shared.UPDATER_IPC.download)(null, '18.0.0-beta')).ok, false);
   assert.deepEqual(actions, []);
+});
+
+test('progress, completion and errors after the window is gone never throw "Object has been destroyed" (#454)', async () => {
+  // The crash recovery screen replaces the main window while the process, and a download, live on.
+  let destroyed = false;
+  const sent = [];
+  const contents = { mainFrame: {}, isDestroyed: () => destroyed, send: (...args) => {
+    if (destroyed) throw new TypeError('Object has been destroyed');
+    sent.push(args);
+  } };
+  const window = { isDestroyed: () => destroyed, get webContents() {
+    if (destroyed) throw new TypeError('Object has been destroyed');
+    return contents;
+  } };
+  const quiet = { globals: { console: { ...console, warn: () => {} } } };
+  const { IpcRegistry, windowContents } = loadMain('ipc/registry', quiet);
+  const ipc = fakeIpcMain();
+  const registry = new IpcRegistry(ipc, { main: () => windowContents(window), overlay: () => null });
+  const installs = [];
+  const f = fixture(manifest, {
+    registry, window,
+    beginUpdateInstall: async (version, owner) => { installs.push([version, owner]); },
+    download: async (_token, events) => {
+      events.get('download-progress')({ percent: 40 });
+      // What main.ts does when the window closes.
+      destroyed = true;
+      registry.dispose();
+      assert.doesNotThrow(() => events.get('download-progress')({ percent: 80 }));
+      assert.doesNotThrow(() => events.get('update-downloaded')({ version: '18.0.0-beta' }));
+    },
+  });
+  const event = { sender: contents, senderFrame: contents.mainFrame };
+  await ipc.handlers.get(shared.UPDATER_IPC.check)(event, 'check');
+  assert.equal((await ipc.handlers.get(shared.UPDATER_IPC.download)(event, '18.0.0-beta', 'download-a')).ok, true);
+  assert.deepEqual(sent, [['updater:progress', 40]], 'Only the window that still existed heard about the download');
+  assert.equal(ipc.handlers.size, 0, 'The updater channels left with the window');
+  assert.doesNotThrow(() => f.events.get('error')(new Error('Late electron-updater failure')));
+});
+
+test('a recreated window registers the updater again and hears the download in progress', async () => {
+  const first = { sent: [], contents: null }, second = { sent: [], contents: null };
+  for (const page of [first, second]) {
+    page.contents = { mainFrame: {}, isDestroyed: () => false, send: (...args) => page.sent.push(args) };
+  }
+  const quiet = { globals: { console: { ...console, warn: () => {} } } };
+  const { IpcRegistry } = loadMain('ipc/registry', quiet);
+  const ipc = fakeIpcMain();
+  const firstRegistry = new IpcRegistry(ipc, { main: () => first.contents, overlay: () => null });
+  let events;
+  let resume;
+  const f = fixture(manifest, {
+    registry: firstRegistry,
+    download: async (_token, registered) => {
+      events = registered;
+      await new Promise(resolve => { resume = resolve; });
+    },
+  });
+  const event = page => ({ sender: page.contents, senderFrame: page.contents.mainFrame });
+  await ipc.handlers.get(shared.UPDATER_IPC.check)(event(first), 'check');
+  const pending = ipc.handlers.get(shared.UPDATER_IPC.download)(event(first), '18.0.0-beta', 'download-a');
+  while (!events) await new Promise(resolve => setImmediate(resolve));
+  firstRegistry.dispose();
+  const secondRegistry = new IpcRegistry(ipc, { main: () => second.contents, overlay: () => null });
+  f.load('updater').registerUpdaterIpc(secondRegistry, { window: { isDestroyed: () => false }, getInventory: async () => [] });
+  events.get('download-progress')({ percent: 55 });
+  assert.deepEqual(first.sent, []);
+  assert.deepEqual(second.sent, [['updater:progress', 55]]);
+  assert.equal((await ipc.handlers.get(shared.UPDATER_IPC.cancel)(event(second), 'download-a')).cancelled, true);
+  resume();
+  assert.equal((await pending).cancelled, true);
+  secondRegistry.dispose();
 });

@@ -1517,7 +1517,6 @@ for (const phase of ['connect', 'produce', 'initial-pause', 'enable', 'raw-sourc
     Object.assign(f.engine, {
       ready: Promise.resolve(),
       submitEncodedFrame() { assert.fail('The drain fixture must not submit media.'); },
-      submitFrame() { assert.fail('The drain fixture must not submit textures.'); },
       releaseFrame() { assert.fail('The drain fixture must not own textures.'); },
     });
     f.nativeHooks.set('source.createEncodedVideo', async () => ({ sourceId: 1000 }));

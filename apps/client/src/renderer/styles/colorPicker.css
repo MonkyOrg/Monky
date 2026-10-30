@@ -218,23 +218,11 @@
   outline-offset: 2px;
 }
 
-.color-picker-hint,
-.color-picker-error {
+.color-picker-hint {
   margin: 8px 0 0;
   font-size: 10px;
   line-height: 1.5;
-}
-
-.color-picker-hint {
   color: var(--text-muted);
-}
-
-.color-picker-error {
-  color: var(--danger, #ed4245);
-}
-
-.color-picker-error[hidden] {
-  display: none;
 }
 
 .color-picker-popover button:focus-visible,

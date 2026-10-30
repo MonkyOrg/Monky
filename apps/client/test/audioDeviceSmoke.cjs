@@ -486,7 +486,10 @@ async function runAudioDeviceSmoke() {
     mic.dispatchEvent(new Event('change'));
     await wait();
     check(settings.selectedMicrophoneId === 'mic-1' && mic.value === 'mic-1', 'failed replacement retains previous selection');
-    check(Boolean(panel().querySelector('[role="status"]').textContent), 'failed switch shown');
+    const switchError = document.querySelector('.chat-copy-toast[role="alert"]:not([data-ui-closing]) .chat-copy-toast-label');
+    check(Boolean(switchError?.textContent) && !panel().querySelector('[role="status"]').textContent,
+      'failed switch shown in the alert toast, not in the popover layout');
+    switchError?.closest('.chat-copy-toast').querySelector('.chat-copy-toast-close').click();
     pendingSwitch = {};
     mic.value = 'mic-2';
     mic.dispatchEvent(new Event('change'));

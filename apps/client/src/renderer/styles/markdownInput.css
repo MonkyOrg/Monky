@@ -69,7 +69,6 @@ monky-markdown-input .md-editor-code-widget { margin: 6px 0; min-width: 0; white
 .floating-context-menu .server-dropdown-item:disabled { opacity: 0.45; cursor: default; background: transparent; }
 .chat-undo-delete { border: 0; border-radius: 4px; padding: 3px 7px; background: var(--bg-card); color: var(--accent-primary); cursor: pointer; font: inherit; }
 .chat-undo-delete:disabled { opacity: 0.5; cursor: wait; }
-.chat-restore-error { color: var(--danger); font-size: 12px; margin-top: 4px; }
 
 .chat-quote-preview { white-space: normal; }
 .chat-quote-preview .md-p { margin: 0; }

@@ -40,7 +40,7 @@ function mainHandlers() {
       }
       if (ts.isCallExpression(node) && node.arguments.length >= 2) {
         const callee = node.expression.getText(source);
-        if (callee === 'handle' || callee === 'handleFromMainFrame' || callee.endsWith('.handle')) {
+        if (callee === 'handle' || callee.endsWith('.handle')) {
           const channel = channelOf(node.arguments[0], source, constants);
           if (channel) handled.add(channel);
         }

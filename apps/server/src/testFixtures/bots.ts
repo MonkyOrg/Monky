@@ -245,7 +245,7 @@ export async function createFixture(options: {
     new SqliteMessageSearchRepository(db), messageRepo, channelService, permissions, chatService,
     () => wsServer.getChannelAccessVersion(),
   );
-  const wsServer: WebSocketServer = new WebSocketServer(
+  const wsServer: WebSocketServer = new WebSocketServer({
     httpServer,
     authService,
     userService,
@@ -254,17 +254,21 @@ export async function createFixture(options: {
     signalingService,
     serverRepo,
     attachmentService,
-    permissions,
+    permissionService: permissions,
     roleService,
     coturnManager,
     rateLimiter,
-    new SfuManager(),
+    sfuManager: new SfuManager(),
     botService,
-    registry,
+    commandRegistry: registry,
     selectorService,
-    new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()), botPermissions),
-    undefined, null, communityService, searchService, forumService, pollService, undefined, undefined, botStorage,
-  );
+    botSettings: new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()), botPermissions),
+    communityService,
+    messageSearchService: searchService,
+    forumService,
+    pollService,
+    botStorageService: botStorage,
+  });
   online = () => wsServer.getOnlineUsersMap();
   httpServer.listen(0, '127.0.0.1');
   await once(httpServer, 'listening');

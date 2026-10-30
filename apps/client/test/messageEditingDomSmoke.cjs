@@ -239,7 +239,8 @@ async function runNativeSmoke(window) {
     current = await state();
     check(current.editing && !current.pending && current.value === '/ping this is literal\nmessage text' && current.draft === 'Original unsent draft',
       'A server rejection keeps both texts available for retry');
-    check(current.error.includes('Could not save'), 'The failure is announced inline, not silently discarded');
+    check(current.alert.includes('Could not save') && !current.error,
+      'The failure is announced in the alert toast, not left in the edit banner or silently discarded');
     await enter();
     await fixture('replyEdit("a")');
     await fixture('settle()');
@@ -257,11 +258,18 @@ async function runNativeSmoke(window) {
     await replace('');
     await enter();
     current = await state();
-    check(current.editing && current.edits.length === 0 && current.error.includes('Write a message'), 'Empty text is rejected without silently deleting the message or draft');
+    check(current.editing && current.edits.length === 0 && current.alert.includes('Write a message') && current.invalid === 'true',
+      'Empty text is rejected in the alert toast, marking the editor invalid, without silently deleting the message or draft');
+    await evaluate("document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-close')?.click()");
+    await enter();
+    current = await state();
+    check(current.editing && current.edits.length === 0 && current.alert.includes('Write a message'),
+      'Refusing the same empty text again explains it again');
     await replace('Do not replace me');
     await fixture('trySecondEdit()');
     current = await state();
-    check(current.value === 'Do not replace me' && current.error.includes('Finish or cancel'), 'Selecting another message never discards the unfinished edit');
+    check(current.value === 'Do not replace me' && current.alert.includes('Finish or cancel') && current.invalid !== 'true',
+      'Selecting another message never discards the unfinished edit, and says why in the alert toast');
     await fixture('replaceHistory()');
     current = await state();
     check(current.value === 'Do not replace me' && current.editing, 'Loading a different history window does not reset the composer');
@@ -1450,14 +1458,14 @@ async function installFixture() {
         active.holdDeliveryAck = true;
         const files = new DataTransfer();
         files.items.add(new File(['Fixture content'], 'fixture.txt', { type: 'text/plain' }));
-        view.addFiles(files.files);
+        view.composer.addFiles(files.files);
         await settle();
-        check(view.pending.length === 1 && view.pending[0].status === 'done', 'The ordinary file upload completes before queuing');
+        check(view.composer.tray.count === 1 && view.composer.tray.uploaded().length === 1 && !view.composer.tray.uploading, 'The ordinary file upload completes before queuing');
         find('#btn-send-message').click();
         const fileRequest = active.deliveryRequests.at(-1);
         check(fileRequest.payload.attachmentIds[0] === 'fixture-file-1'
           && row(fileRequest.message.id).querySelector('.chat-attachments')
-          && view.pending.length === 0, 'Attachment-only messages retain their preview while awaiting server confirmation');
+          && view.composer.tray.count === 0, 'Attachment-only messages retain their preview while awaiting server confirmation');
         client.rejectPendingRequests();
         await settle();
         const before = active.deliveryRequests.length;
@@ -1465,12 +1473,18 @@ async function installFixture() {
         row(fileRequest.message.id).querySelector('[data-retry-message]').click();
         check(active.deliveryRequests.length === before && store.getOutgoing(fileRequest.message.id).status === 'failed',
           'Revoked permissions block retry without discarding the attachment');
-        find('.dialog-card [data-action="confirm"]').click();
+        // A refused retry explains itself in the shared alert toast, never in a dialog (#490).
+        const explained = (label) => {
+          const failure = find('.chat-copy-toast--danger:not([data-ui-closing])');
+          check(failure.getAttribute('role') === 'alert' && !document.querySelector('.dialog-card:not([data-ui-closing])'), label);
+          failure.querySelector('.chat-copy-toast-close').click();
+        };
+        explained('A retry without permission is explained in the alert toast');
         server.myPermissions = saved.permissions;
         server.serverDetails.protocol = { ...saved.protocol, features: saved.protocol.features.filter(feature => feature !== 'chat-delivery') };
         row(fileRequest.message.id).querySelector('[data-retry-message]').click();
         check(active.deliveryRequests.length === before, 'A server without the negotiated delivery feature cannot receive a retry');
-        find('.dialog-card [data-action="confirm"]').click();
+        explained('A retry the server cannot receive is explained in the alert toast');
         server.serverDetails.protocol = saved.protocol;
         active.holdDeliveryAck = false;
         row(fileRequest.message.id).querySelector('[data-retry-message]').click();
@@ -1479,7 +1493,7 @@ async function installFixture() {
           && row(fileRequest.message.id).querySelector('.chat-attachments'), 'Retry confirms the same uploaded file without another upload');
         stickerService.toFile = async () => new File(['Synthetic sticker'], 'fixture.png', { type: 'image/png' });
         active.holdDeliveryAck = true;
-        await view.sendSticker({ name: 'fixture', filePath: 'fixture-sticker', sizeBytes: 17 });
+        await view.composer.sendSticker({ name: 'fixture', filePath: 'fixture-sticker', sizeBytes: 17 });
         const stickerRequest = active.deliveryRequests.at(-1);
         check(stickerRequest.payload.attachmentIds[0] === 'fixture-file-2'
           && row(stickerRequest.message.id).querySelector('.chat-sticker')
@@ -1491,6 +1505,82 @@ async function installFixture() {
         await settle();
         check(uploads === 2 && !store.getOutgoing(stickerRequest.message.id)
           && row(stickerRequest.message.id).querySelector('[data-delivery="sent"]'), 'Sticker retry reuses its upload and confirms delivery');
+        // The tray marks what will not go, and each batch is explained in one alert, in the app's language (#490).
+        const alertText = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-label')?.textContent ?? '';
+        const closeAlert = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-close')?.click();
+        const trayItems = () => [...document.querySelectorAll('#chat-attachment-tray .tray-item')].map(item => ({
+          name: item.title, marked: item.classList.contains('is-error'), status: item.querySelector('.tray-status')?.textContent.trim() ?? '',
+        }));
+        const batch = (...files) => {
+          const data = new DataTransfer();
+          for (const [name, content] of files) data.items.add(new File([content], name, { type: 'text/plain' }));
+          return data.files;
+        };
+        const listed = (...names) => new Intl.ListFormat(language.getLanguage(), { type: 'conjunction' }).format(names.map(name => `"${name}"`));
+        const storage = server.serverDetails.attachmentStorage;
+        server.serverDetails.attachmentStorage = { ...storage, maxFileBytes: 4 };
+        view.composer.addFiles(batch(['large-1.txt', 'Larger than four bytes'], ['large-2.txt', 'Also too large'], ['small.txt', 'abc']));
+        await settle();
+        const over = language.t('chat.attachmentOverLimit', { size: '4 B' });
+        let shown = trayItems();
+        check(alertText() === language.t('chat.attachmentsTooLarge', { names: listed('large-1.txt', 'large-2.txt'), size: '4 B' }),
+          `Every file over the limit in one batch is named in a single alert: ${alertText()}`);
+        check(JSON.stringify(shown) === JSON.stringify([
+          { name: 'large-1.txt', marked: true, status: over }, { name: 'large-2.txt', marked: true, status: over },
+          { name: 'small.txt', marked: false, status: language.t('common.done') },
+        ]) && view.composer.tray.count === 1 && view.composer.tray.uploaded().length === 1,
+        `Files over the limit stay marked in the tray and never go with the message: ${JSON.stringify(shown)}`);
+        closeAlert();
+        view.composer.tray.clear();
+        view.composer.addFiles(batch(['large.txt', 'Larger than four bytes'],
+          ...Array.from({ length: 10 }, (_, index) => [`small-${index}.txt`, 'abc'])));
+        await settle();
+        shown = trayItems();
+        check(alertText() === [language.t('chat.attachmentTooLarge', { name: 'large.txt', size: '4 B' }),
+          language.t('chat.tooManyAttachments', { max: 10 }), language.t('chat.attachmentsOverLimitTakeSlots')].join(' '),
+          `A file over the limit and the per-message maximum are explained together, with the slot the marked file takes: ${alertText()}`);
+        check(shown.length === 10 && shown[0].marked && shown.slice(1).every(item => !item.marked) && view.composer.tray.count === 9,
+          `The tray holds the per-message maximum, the refused file included: ${JSON.stringify(shown)}`);
+        closeAlert();
+        view.composer.tray.clear();
+        view.composer.addFiles(batch(...Array.from({ length: 11 }, (_, index) => [`only-${index}.txt`, 'abc'])));
+        await settle();
+        check(alertText() === language.t('chat.tooManyAttachments', { max: 10 }) && view.composer.tray.count === 10,
+          `Without marked files in the tray the maximum is explained alone: ${alertText()}`);
+        closeAlert();
+        view.composer.tray.clear();
+        server.serverDetails.attachmentStorage = storage;
+        const Uploader = window.XMLHttpRequest;
+        window.XMLHttpRequest = class extends Uploader {
+          send() {
+            this.status = 507;
+            this.response = {};
+            queueMicrotask(() => this.onload?.());
+          }
+        };
+        view.composer.addFiles(batch(['failing-1.txt', 'x'], ['failing-2.txt', 'y']));
+        await settle();
+        const failed = [...document.querySelectorAll('#chat-attachment-tray .tray-item.is-error')];
+        check(failed.length === 2 && failed.every(item => !item.textContent.includes(language.t('upload.storageFull')))
+          && alertText() === language.t('chat.attachmentsUploadFailed', {
+            names: listed('failing-1.txt', 'failing-2.txt'), reason: language.t('upload.storageFull') }),
+        `Failed uploads stay marked in the tray, and one alert names every one of them: ${alertText()}`);
+        closeAlert();
+        view.composer.tray.clear();
+        await settle();
+        view.composer.addFiles(batch(['failing.txt', 'x']));
+        await settle();
+        const single = document.querySelector('#chat-attachment-tray .tray-item.is-error');
+        check(single && alertText() === language.t('chat.attachmentUploadFailed', { name: 'failing.txt', reason: language.t('upload.storageFull') }),
+          'A single failed upload is explained by name in the alert toast');
+        closeAlert();
+        single.querySelector('[data-tray-remove]').click();
+        await settle();
+        const emptied = document.getElementById('chat-attachment-tray');
+        // The tray leaves with motion: its last item stays drawn until it is gone.
+        check(view.composer.tray.count === 0
+          && (emptied.hidden || emptied.hasAttribute('data-ui-closing') || !emptied.querySelector('.tray-item')),
+        'A failed upload can be removed from the tray');
         return checks;
       } finally {
         window.XMLHttpRequest = saved.xhr;
@@ -1680,7 +1770,10 @@ async function installFixture() {
         payload: { code: 'RATE_LIMITED', message: 'fixture' } });
       await settle();
       check(store.getBlockDraft('chat').length === 5 && !find('#chat-message-input').readOnly, 'A rejected send preserves every block and unlocks editing');
-      find('.dialog-card [data-action="confirm"]').click();
+      const rejectedSend = find('.chat-copy-toast--danger:not([data-ui-closing])');
+      check(rejectedSend.getAttribute('role') === 'alert' && !document.querySelector('.dialog-card:not([data-ui-closing])'),
+        'A rejected send is explained in the alert toast, never in a dialog');
+      rejectedSend.querySelector('.chat-copy-toast-close').click();
       await settle();
       active.holdBlockAck = false;
       find('#btn-send-message').click();
@@ -1690,7 +1783,7 @@ async function installFixture() {
       type(find('#chat-message-input'), '```');
       check(store.getBlockDraft('chat')[0]?.type === 'code', 'Triple backticks create an inline code block');
       store.setBlockDraft('chat', []);
-      view.renderComposerBlocks();
+      view.composer.renderBlocks();
       server.serverDetails.maxMessageLength = 0;
       appEvents.emit('server.updated', server.serverDetails);
       check(!find('#chat-message-input').hasAttribute('maxlength'), 'Unlimited messages remove the native maxlength');
@@ -1786,6 +1879,8 @@ async function installFixture() {
         cancelLabel: cancel.textContent.trim(), saveDisabled: save.disabled, cancelDisabled: cancel.disabled,
         editLabel: find('#chat-edit-label').textContent, hint: find('#chat-edit-hint').textContent,
         error: find('#chat-edit-error').textContent, description: input.getAttribute('aria-describedby') ?? '',
+        alert: document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-label')?.textContent ?? '',
+        invalid: input.querySelector('.cm-content')?.getAttribute('aria-invalid') ?? '',
         replyId: store.getReplyDraft(channel)?.messageId,
         replyHidden: find('#chat-reply-composer').hidden || find('#chat-reply-composer').hasAttribute('data-ui-closing'),
         readOnly: input.readOnly, focus: document.activeElement?.closest('monky-markdown-input')?.id ?? document.activeElement?.id,
@@ -1834,7 +1929,7 @@ async function installFixture() {
       }
     },
     async startEdit() {
-      view.startEditingMessage('original');
+      view.composer.startEditingMessage('original');
       await settle();
     },
     editMenuIndex() {
@@ -1879,10 +1974,15 @@ async function installFixture() {
       await settle();
     },
     stageUploadingAttachment() {
-      view.pending.push({ localId: 'fixture-upload', name: 'fixture.txt', size: 12, isImage: false,
-        previewUrl: null, status: 'uploading', progress: 0.5 });
-      view.renderTray();
-      view.updateSendButtonState();
+      // A real upload still waiting for its token: it stays in flight for the rest of the scenario.
+      const client = active.session.client;
+      const request = client.sendRequest;
+      client.sendRequest = (type, ...args) => type === 'CHAT_REQUEST_UPLOAD_TOKEN'
+        ? new Promise(() => {}) : request.call(client, type, ...args);
+      const files = new DataTransfer();
+      files.items.add(new File(['fixture text'], 'fixture.txt', { type: 'text/plain' }));
+      view.composer.addFiles(files.files);
+      client.sendRequest = request;
     },
     attachOriginal() {
       active.session.chatStore.updateMessage({ ...original, content: 'Attachment caption', attachments: [{
@@ -1892,7 +1992,7 @@ async function installFixture() {
     },
     async beginCodeEdit(content) {
       active.session.chatStore.updateMessage({ ...original, content });
-      view.startEditingMessage(original.id);
+      view.composer.startEditingMessage(original.id);
       await settle();
     },
     async deletedUndo(duration) {
@@ -1905,10 +2005,10 @@ async function installFixture() {
     async setReplyContent(content) {
       const updated = { ...reply, content };
       active.session.chatStore.updateMessage(updated);
-      view.startReply(updated.id);
+      view.composer.startReply(updated.id);
       await settle();
     },
-    trySecondEdit() { view.startEditingMessage('second'); },
+    trySecondEdit() { view.composer.startEditingMessage('second'); },
     replaceHistory() { active.session.chatStore.setHistory('chat', [reply], 'reply-source'); },
     deleteOriginal() {
       active.session.client.handleIncomingMessage({
@@ -1916,7 +2016,7 @@ async function installFixture() {
       });
     },
     attemptForbiddenEdits() {
-      for (const id of ['other-user', 'system', 'deleted', 'private']) view.startEditingMessage(id);
+      for (const id of ['other-user', 'system', 'deleted', 'private']) view.composer.startEditingMessage(id);
     },
     setEditPermission(allowed) {
       active.session.serverStore.serverDetails.allowMessageEdit = allowed;

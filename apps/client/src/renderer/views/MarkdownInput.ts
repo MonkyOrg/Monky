@@ -239,7 +239,7 @@ function selectedClipboard(view: EditorView) {
 
 /** Markdown is the document model; decorations never rewrite the user's text. */
 export class MarkdownInput extends HTMLElement {
-  static observedAttributes = ['placeholder', 'readonly', 'disabled', 'aria-label', 'aria-describedby',
+  static observedAttributes = ['placeholder', 'readonly', 'disabled', 'aria-label', 'aria-describedby', 'aria-invalid',
     'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant', 'role'];
   private editor: EditorView | null = null;
   private documentValue = '';

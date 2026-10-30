@@ -73,6 +73,15 @@ bool CaptureClockRequiresReset(CaptureClockStatus status) noexcept {
          status == CaptureClockStatus::kClosed;
 }
 
+CaptureClockAction CaptureClockActionFor(CaptureClockStatus status) noexcept {
+  if (status == CaptureClockStatus::kOk) return CaptureClockAction::kUse;
+  // A timestamp outside the safe range is a broken input contract, not clock jitter.
+  if (CaptureClockRequiresReset(status) || status == CaptureClockStatus::kInvalidTimestamp ||
+      status == CaptureClockStatus::kCount)
+    return CaptureClockAction::kReset;
+  return CaptureClockAction::kDropFrame;
+}
+
 bool CaptureQpcMicroseconds(std::int64_t ticks, std::int64_t frequency,
                             std::int64_t& microseconds) noexcept {
   if (ticks < 0 || frequency <= 0) return false;

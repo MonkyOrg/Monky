@@ -116,9 +116,9 @@ test('a build lock records its owner and replaces only a lock whose build is gon
 
 test('every native build and preparation takes its lock through withBuildLock', () => {
   const scripts = path.join(__dirname, '..', 'scripts');
-  // buildThumbnails, buildMac and buildMacRtc keep their old lock: each built runtime pins their exact bytes
-  // (sourceRecipe), so editing them invalidates installed and cached runtimes. Move them with the next rebuild.
-  for (const name of ['buildRtc.cjs', 'buildCapture.cjs', 'prepareMacRtc.cjs']) {
+  // buildMac and buildMacRtc keep their old lock: each built runtime pins their exact bytes (sourceRecipe), so
+  // editing them invalidates installed and cached runtimes. Move them with the next rebuild.
+  for (const name of ['buildRtc.cjs', 'buildCapture.cjs', 'buildThumbnails.cjs', 'prepareMacRtc.cjs']) {
     const script = fs.readFileSync(path.join(scripts, name), 'utf8');
     assert.match(script, /return withBuildLock\(path\.join\([^)]+\.lock'\), \(\) => \{/u, name);
     assert.doesNotMatch(script, /openSync\(/u, name);

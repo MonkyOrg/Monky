@@ -209,9 +209,9 @@ async function runRendererSecurity() {
   const legit = chatRoot.querySelector('[data-message-id="legit-message"] .chat-attachment-download');
   check(legit?.dataset.downloadUrl === `${location.origin}/attachments/legit-1.png`,
     'The server\'s own attachment paths keep resolving against its address');
-  chat.mentionMatches = [{ kind: 'user', user: hostileMember }];
-  chat.mentionActiveIndex = 0;
-  chat.renderMentionDropup();
+  chat.mentions.matches = [{ kind: 'user', user: hostileMember }];
+  chat.mentions.activeIndex = 0;
+  chat.mentions.render();
   await settle();
   const mention = chatRoot.querySelector('#mention-dropup .mention-item');
   check(mention?.querySelector('.mention-avatar').getAttribute('src') === DEFAULT_AVATAR_URL
@@ -333,7 +333,8 @@ async function runRendererSecurity() {
   inert(stageRoot, 'Voice stage');
   check([...stageRoot.querySelectorAll('[data-watch-session]')].some(button => button.dataset.watchSession === HOSTILE),
     'A locked broadcast keeps the session id as attribute text');
-  check([...stageRoot.querySelectorAll('.stage-screen-volume-slider')].some(slider => slider.dataset.sessionId === HOSTILE)
+  check([...stageRoot.querySelectorAll('[data-kind="screen"]')].some(card => card.dataset.sessionId === HOSTILE
+      && card.querySelector('.stage-volume-wrapper .stage-screen-volume-slider'))
     && [...stageRoot.querySelectorAll('[data-stopwatch-session]')].some(button => button.dataset.stopwatchSession === HOSTILE),
   'Watched broadcast controls keep the session id as attribute text');
   const cameraId = `video-${HOSTILE}-camera`;
@@ -462,9 +463,11 @@ async function runRendererSecurity() {
     await settle();
     pendingCameras.shift().reject(new DOMException('Camera unavailable', 'NotReadableError'));
     await settle();
-    check(dialog().querySelector('#identity-import-error').textContent === 'Camera unavailable'
+    const refusal = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+    check(refusal?.getAttribute('role') === 'alert' && refusal.textContent.includes('Camera unavailable')
+      && !dialog().querySelector('#identity-import-error')
       && !scanButton().disabled && scanButton().getAttribute('aria-busy') === null,
-    'A refused camera reports the error and frees the scan button');
+    'A refused camera reports the error in the alert toast and frees the scan button');
     dialog().querySelector('[data-action="cancel"]').click();
     await closed;
   } finally {

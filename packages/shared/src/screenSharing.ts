@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { AUDIENCE_LIMITS } from './resourceAudience.js';
+import { errorChain } from './screenShareFailures.js';
 
 const utf8 = new TextEncoder();
 const reference = (bytes: number) => z.string().min(1).max(bytes)
@@ -30,7 +32,8 @@ export interface ScreenEncodingSelection {
 }
 export interface ScreenEncodingAvailability {
   selection: ScreenEncodingSelection | null;
-  hardware: { available: boolean; reason: string | null; error?: boolean };
+  /** `reason` is technical, for the log; `codes` are the native codes behind it, which the app explains. */
+  hardware: { available: boolean; reason: string | null; codes?: readonly string[]; error?: boolean };
   fallback: boolean;
   reason?: string;
 }
@@ -96,8 +99,8 @@ export const nativeScreenRenditionSchema = z.object({
 export type NativeScreenRendition = z.infer<typeof nativeScreenRenditionSchema>;
 
 export const screenShareAudienceSchema = z.object({
-  userIds: z.array(reference(128)).max(256),
-  roleIds: z.array(reference(128)).max(128),
+  userIds: z.array(reference(128)).max(AUDIENCE_LIMITS.users),
+  roleIds: z.array(reference(128)).max(AUDIENCE_LIMITS.roles),
 }).strict().refine(value => value.userIds.length + value.roleIds.length > 0,
   'A private screen share requires at least one user or role.');
 export type ScreenShareAudience = z.infer<typeof screenShareAudienceSchema>;
@@ -261,20 +264,11 @@ const failureCode = (value: unknown): string => {
  * the AggregateError/cause chain wins. Only `connection-failed` makes a viewer reconnect by itself.
  */
 export function nativeScreenFailureReason(error: unknown): NativeScreenFailure {
-  const pending: unknown[] = [error], seen = new Set<unknown>();
-  while (pending.length && seen.size < 12) {
-    const current = pending.shift();
-    if (seen.has(current)) continue;
-    seen.add(current);
+  for (const current of errorChain(error)) {
     const code = failureCode(current);
     if (code === 'ERR_SCREEN_CAPACITY') return 'capacity-exceeded';
     if (unsupportedScreenFailures.has(code)) return 'unsupported';
     if (unavailableScreenSources.has(code)) return 'source-unavailable';
-    if (current instanceof AggregateError) {
-      const nested: readonly unknown[] = current.errors;
-      pending.push(...nested.slice(0, 8));
-    }
-    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
   }
   return failureCode(error).includes('CAPTURE') ? 'capture-failed' : 'connection-failed';
 }

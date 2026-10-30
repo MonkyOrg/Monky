@@ -2,6 +2,7 @@ import { silentBus } from './activeProxy';
 import { createNetworkClient, networkClient, type NetworkClient } from './NetworkClient';
 import { createParticipantManager, participantManager, type ParticipantManager } from './ParticipantManager';
 import { sessionManager } from './SessionManager';
+import { currentEventOrigin } from './sessionRouting';
 import { createServerStore, serverStore, type ServerStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
 
@@ -60,6 +61,20 @@ export function callServerOrClosed(): CallServer {
 /** Connection of the server hosting the current call — see `callServerOrClosed`. */
 export function callClient(): NetworkClient {
   return callServerOrClosed().client;
+}
+
+/**
+ * Whether the server event being handled came from the server hosting the call.
+ *
+ * Voice, microphone and peer connections are global — there is only one of
+ * each machine-wide — so handlers that touch them must ignore events from the
+ * other connected servers (#400).
+ */
+export function eventOwnsCall(): boolean {
+  const voiceKey = voiceStore.voiceSessionKey;
+  if (!voiceKey) return true;
+  const origin = currentEventOrigin();
+  return !origin || origin === voiceKey;
 }
 
 /**

@@ -12,11 +12,14 @@ import { voiceStore } from '../stores/voiceStore';
 import { formatBytes } from '../utils/attachment';
 import { botRequestError } from '../utils/botInputs';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
+import { reportError } from '../utils/feedback';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { BotScreenFrame } from './BotScreenFrame';
 import { botSettingsModal } from './BotSettingsModal';
-import { BotScreenVolumeControl } from './BotScreenVolumeControl';
+import { StageVolumeControl, type StageVolumeTexts } from './StageVolumeControl';
 import { showConfirm, showConfirmWithChoice } from './Dialog';
+
+const MINIAPP_VOLUME: StageVolumeTexts = { volume: 'botScreen.volume', muted: 'botScreen.audioMuted', mute: 'botScreen.mute' };
 
 /** What the person may decide about storing data on this computer when opening the view. */
 interface StorageOffer {
@@ -35,13 +38,17 @@ export class BotScreenView {
   private endButton = document.createElement('button');
   private focus = document.createElement('button');
   private fullscreen = document.createElement('button');
-  private volumeControl = new BotScreenVolumeControl((percent, timing) => this.setVolume(percent, timing), () => {
+  private volumeControl = new StageVolumeControl(MINIAPP_VOLUME, (percent, timing) => this.setVolume(percent, timing), () => {
     voiceStore.setMiniappMuted(this.screen.botId, !voiceStore.isMiniappMuted(this.screen.botId));
   });
+  private volumeControls = document.createElement('div');
   private notice = document.createElement('p');
   private body = document.createElement('div');
   private placeholder = document.createElement('div');
   private placeholderHint = document.createElement('p');
+  /** What the closed tile says: how viewing works, or that this person declined to open it. */
+  private hint: TranslationKey = 'botScreen.viewHint';
+  /** Only while the tile is fullscreen, where the shared toast would not show. */
   private error = document.createElement('p');
   /** Rendered by Monky, so every miniapp shows it and none can hide or imitate it. */
   private storageBadge = document.createElement('button');
@@ -110,6 +117,7 @@ export class BotScreenView {
     this.error.className = 'bot-error';
     this.error.setAttribute('role', 'alert');
     this.error.hidden = true;
+    this.placeholderHint.setAttribute('role', 'status');
     this.storageBadge.type = 'button';
     this.storageBadge.className = 'bot-screen-storage-badge';
     this.storageBadge.dataset.botScreenAction = 'storage';
@@ -124,11 +132,21 @@ export class BotScreenView {
     this.placeholder.className = 'bot-screen-placeholder';
     this.placeholder.append(this.openButton, this.placeholderHint);
     this.body.append(this.placeholder);
+    this.volumeControls.className = 'stage-card-controls';
+    this.volumeControl.element.dataset.botScreenVolume = '';
+    this.volumeControl.button.dataset.botScreenAction = 'mute';
+    this.volumeControls.append(this.volumeControl.element);
+    // Controls must not reach the tile, whose click toggles focus.
+    this.volumeControls.addEventListener('click', (event) => event.stopPropagation());
     // The volume overlays the tile's bottom-right corner; right after the toolbar in focus order.
-    this.element.append(header, this.volumeControl.element, this.storageBadge, this.notice, this.body, this.error);
+    this.element.append(header, this.volumeControls, this.storageBadge, this.notice, this.body, this.error);
     this.localize();
     this.syncVolume();
+    // A failure shown inside the fullscreen tile is stale once the tile is back on the stage.
+    const leftFullscreen = (): void => { if (document.fullscreenElement !== this.element) this.clearError(); };
+    document.addEventListener('fullscreenchange', leftFullscreen);
     this.unbind = [
+      () => document.removeEventListener('fullscreenchange', leftFullscreen),
       appEvents.on('i18n.language_changed', () => this.localize()),
       appEvents.on('server.roles_updated', () => this.localize()),
       appEvents.on('server.updated', () => this.localize()),
@@ -159,7 +177,7 @@ export class BotScreenView {
     const controller = new AbortController();
     this.pendingConsent = controller;
     const screen = this.screen;
-    this.error.hidden = true;
+    this.clearError();
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
       if (controller.signal.aborted || this.pendingConsent !== controller || !this.canRead()) return;
@@ -193,8 +211,9 @@ export class BotScreenView {
       }
       if (controller.signal.aborted || this.pendingConsent !== controller || !this.canRead()) return;
       if (!approved) {
-        this.error.textContent = t('botScreen.permissionDenied');
-        this.error.hidden = false;
+        // This person's own choice, not a failure: a note on the closed tile.
+        this.hint = 'botScreen.permissionDenied';
+        this.localize();
         return;
       }
       if (this.screen.id !== screen.id || this.screen.instanceId !== screen.instanceId ||
@@ -210,8 +229,7 @@ export class BotScreenView {
       }, (action) => { void this.act(action); }, error => {
         console.error('[Bot screens] Could not open miniapp document.', error);
         this.leave();
-        this.error.textContent = t('botScreen.openError');
-        this.error.hidden = false;
+        this.report(t('botScreen.openError'));
         appEvents.emit('stage.bot_screens_changed');
       }, this.outputVolume(), (state) => {
         if (this.frame !== frame) return;
@@ -219,6 +237,7 @@ export class BotScreenView {
         this.renderStorageBadge();
       }, this.stageVisible);
       this.frame = frame;
+      this.hint = 'botScreen.viewHint';
       this.body.append(frame.element);
       this.placeholder.hidden = true;
       this.localize();
@@ -299,7 +318,7 @@ export class BotScreenView {
     this.renderStorageBadge();
     this.volumeControl.close();
     this.placeholder.hidden = false;
-    this.error.hidden = true;
+    this.clearError();
     this.localize();
   }
 
@@ -414,14 +433,15 @@ export class BotScreenView {
     label(this.fullscreen, 'stage.fullscreen', 'fullscreen', false);
     this.close.hidden = !this.isWatching;
     // Only an open view plays audio.
-    this.volumeControl.element.hidden = !this.isWatching;
+    this.volumeControls.hidden = !this.isWatching;
     this.volumeControl.localize();
     if (this.confirming) this.element.setAttribute('aria-busy', 'true');
     else this.element.removeAttribute('aria-busy');
     // A live region: only an actual change may be announced.
     const notice = this.confirming ? t('botScreen.confirmingClose', { title: this.screen.title }) : t('botScreen.publicNotice');
     if (this.notice.textContent !== notice) this.notice.textContent = notice;
-    this.placeholderHint.textContent = t('botScreen.viewHint');
+    const hint = t(this.hint);
+    if (this.placeholderHint.textContent !== hint) this.placeholderHint.textContent = hint;
   }
 
   private outputVolume(): number {
@@ -453,11 +473,28 @@ export class BotScreenView {
     }
   }
 
+  /**
+   * An operation's failure goes to the shared toast (#490). A toast on the page would
+   * not show over this tile in fullscreen, so there the tile says it itself, until it
+   * leaves fullscreen or an action goes through.
+   */
+  private report(message: string): void {
+    if (document.fullscreenElement !== this.element) {
+      reportError(message);
+      return;
+    }
+    this.error.textContent = message;
+    setSurfaceVisible(this.error, true, 'notice');
+  }
+
+  private clearError(): void {
+    setSurfaceVisible(this.error, false, 'notice');
+  }
+
   private async end(): Promise<void> {
     if (this.endRequestId || this.confirming || !this.canRead()) return;
     if (!this.canEnd()) {
-      this.error.textContent = t('botChat.commandsPermissionDenied');
-      this.error.hidden = false;
+      this.report(t('botChat.commandsPermissionDenied'));
       return;
     }
     // This person's open miniapp may ask its own question (e.g. to save) before ending for everyone.
@@ -480,8 +517,7 @@ export class BotScreenView {
       session.botScreenStore.remove(removed);
     } catch (error: unknown) {
       if (!this.canRead() || this.endRequestId !== requestId) return;
-      this.error.textContent = botRequestError(error);
-      this.error.hidden = false;
+      this.report(botRequestError(error));
       appEvents.emit('voice.bot_screens_reload');
     } finally {
       if (this.endRequestId === requestId) {
@@ -496,8 +532,7 @@ export class BotScreenView {
     if (!this.frame || this.requestId || this.endRequestId || action.id !== this.screen.id ||
         action.instanceId !== this.screen.instanceId || !this.canRead()) return;
     if (!session.serverStore.hasPermission(Permission.USE_BOT_COMMANDS, this.context.channelId)) {
-      this.error.textContent = t('botChat.commandsPermissionDenied');
-      this.error.hidden = false;
+      this.report(t('botChat.commandsPermissionDenied'));
       return;
     }
     const requestId = crypto.randomUUID();
@@ -510,11 +545,10 @@ export class BotScreenView {
           screen.instanceId !== this.screen.instanceId || session.botScreenStore.get(screen.id)?.instanceId !== screen.instanceId ||
           screen.channelId !== this.context.channelId || screen.botId !== this.screen.botId) return;
       session.botScreenStore.upsert(screen);
-      this.error.hidden = true;
+      this.clearError();
     } catch (error: unknown) {
       if (!this.canRead() || this.requestId !== requestId) return;
-      this.error.textContent = botRequestError(error);
-      this.error.hidden = false;
+      this.report(botRequestError(error));
       appEvents.emit('voice.bot_screens_reload');
     } finally {
       if (this.requestId === requestId) this.requestId = null;

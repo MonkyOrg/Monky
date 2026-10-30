@@ -734,7 +734,8 @@ async function runLiveAudioDeviceSmoke() {
       toggleAdvanced.checked = true;
       toggleAdvanced.dispatchEvent(new Event('change'));
       for (let attempt = 0; attempt < 100 && toggleAdvanced.disabled; attempt++) await tick();
-      check(!settings.advancedAudioOutputs && panel.querySelector('#advanced-audio-outputs').hidden
+      const advancedOutputs = panel.querySelector('#advanced-audio-outputs');
+      check(!settings.advancedAudioOutputs && (advancedOutputs.hidden || advancedOutputs.hasAttribute('data-ui-closing'))
         && !outputReset.hidden && !outputReset.disabled, 'Missing saved category devices block activation but leave explicit recovery reachable');
       const routingError = panel.querySelector('#advanced-audio-output-status').textContent;
       settings.save();

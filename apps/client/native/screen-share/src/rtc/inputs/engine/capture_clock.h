@@ -36,6 +36,12 @@ const char* CaptureClockErrorCode(CaptureClockStatus status) noexcept;
 const char* CaptureClockErrorMessage(CaptureClockStatus status) noexcept;
 bool CaptureClockRequiresReset(CaptureClockStatus status) noexcept;
 
+// What a source does with one mapping. Every source follows this one policy: a transient status (sampling,
+// staleness, ordering) drops that frame or block without retiming it, never the source; only a broken
+// timestamp, a discontinuity or a closed clock requires recreation.
+enum class CaptureClockAction { kUse, kDropFrame, kReset };
+CaptureClockAction CaptureClockActionFor(CaptureClockStatus status) noexcept;
+
 struct CaptureClockSample {
   bool valid = false;
   std::int64_t qpc_before_us = 0;

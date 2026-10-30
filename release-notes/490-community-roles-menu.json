@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Um evento grande demais explica o motivo em vez de derrubar a conexão. Dar ou tirar cargos pelo menu do membro mostra a recusa do servidor e segue a regra da aba Membros: só o dono gerencia administradores.",
+  "en": "An event that is too large explains why instead of dropping the connection. Giving or removing roles from the member menu shows the server's refusal and follows the Members tab rule: only the owner manages administrators."
+}

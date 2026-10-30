@@ -12,6 +12,7 @@ import { showConfirm } from './Dialog';
 import { fileIconName, formatBytes, resolveAttachmentUrl } from '../utils/attachment';
 import { imageCarouselNavigationButton, moveImageCarousel } from './ImageCarousel';
 import { showErrorToast } from './CopyToast';
+import { useAppValidation } from '../utils/feedback';
 import { openFileInputPicker } from '../utils/buttonLoading';
 
 interface ForumAttachmentSelection {
@@ -594,8 +595,11 @@ export class ForumView {
       </footer>
     </form>`;
     const title = modal.content.querySelector<HTMLInputElement>('input[name=title]')!;
+    const renameForm = modal.content.querySelector('form')!;
+    // A missing title is explained in the app's language, not in the browser's balloon.
+    useAppValidation(renameForm, modal.signal);
     modal.content.querySelector('[data-rename-cancel]')?.addEventListener('click', () => modal.close(), { signal: modal.signal });
-    modal.content.querySelector('form')?.addEventListener('submit', event => {
+    renameForm.addEventListener('submit', event => {
       event.preventDefault();
       void modal.run(async () => {
         const next = title.value.trim();
@@ -802,7 +806,9 @@ export class ForumView {
     }, { signal: modal.signal });
     const detach = attachInputEmojiPicker(content ?? title, modal.content.querySelector<HTMLElement>('[data-post-emoji]')!);
     modal.signal.addEventListener('abort', detach, { once: true });
-    modal.content.querySelector('form')!.addEventListener('submit', event => {
+    const postForm = modal.content.querySelector('form')!;
+    useAppValidation(postForm, modal.signal);
+    postForm.addEventListener('submit', event => {
       event.preventDefault();
       void modal.run(async () => {
         const submit = modal.content.querySelector<HTMLButtonElement>('button[type=submit]')!;

@@ -104,11 +104,6 @@ const char* mediaEventName(media::EventKind kind) {
   throw std::logic_error("Unknown media event");
 }
 
-void writeEvent(const Json& event) {
-  std::cout << event.dump() << '\n' << std::flush;
-  if (!std::cout) throw std::runtime_error("Headless output stream is unavailable");
-}
-
 std::optional<std::string> passwordFromEnvironment() {
 #ifdef _WIN32
   wchar_t* value = nullptr;
@@ -232,7 +227,16 @@ class Application final {
 
   void output(Json event) {
     if (observer_) observer_(event);
-    writeEvent(event);
+    if (outputLost_) return;
+    std::cout << event.dump() << '\n' << std::flush;
+    if (std::cout) return;
+    // Nobody reads the events anymore. Leave the call and the server properly,
+    // then stop. Losing whoever ran the core is a failure; losing the console
+    // is how closing it ends the core on Windows 10 and Windows Server 2022,
+    // which stop serving a closed console before its programs are done.
+    outputLost_ = true;
+    if (!outputIsConsole_) exitCode_ = 1;
+    loop_.post([this] { quit(); });
   }
 
   void closeSocket() {
@@ -257,10 +261,22 @@ class Application final {
         });
       },
       [this, attempt](std::string frame) {
+        // What this client never reads is dropped here, before it takes room
+        // in the queue: a soundboard broadcast alone carries up to ~4 MiB.
+        if (overrun_.load() == attempt || reader::discardable(frame)) return;
         const auto bytes = frame.size();
-        loop_.post([this, attempt, frame = std::move(frame)] {
-          if (attempt == attempt_ && epoch_) session_.receive(*epoch_, frame, Clock::now());
-        }, bytes);
+        if (loop_.offer([this, attempt, frame = std::move(frame)] {
+              if (attempt == attempt_ && epoch_) session_.receive(*epoch_, frame, Clock::now());
+            }, bytes)) return;
+        // The core fell behind its own connection, as when the console holds
+        // its output, and a message is lost: the session no longer knows what
+        // the server said. Start over on a new connection, never mid-stream.
+        overrun_.store(attempt);
+        loop_.post([this, attempt] {
+          if (attempt != attempt_ || closing_) return;
+          output({{"event", "warning"}, {"detail", "Incoming messages outpaced the core; reconnecting"}});
+          restartConnection();
+        });
       },
       [this, attempt](WebSocketClose reason) {
         loop_.post([this, attempt, reason] {
@@ -288,6 +304,14 @@ class Application final {
     output({{"event", "transport-error"}, {"detail", "Native transport rejected an outgoing message"},
             {"reason", static_cast<int>(result)}});
     if (epoch_) session_.disconnected(*epoch_, Clock::now());
+    else session_.connectFailed(Clock::now());
+  }
+
+  // Drops the connection, and the session reconnects as after any loss.
+  void restartConnection() {
+    const auto epoch = epoch_;
+    closeSocket();
+    if (epoch) session_.disconnected(*epoch, Clock::now());
     else session_.connectFailed(Clock::now());
   }
 
@@ -325,7 +349,9 @@ class Application final {
     std::vector<media::Participant> result;
     if (session_.admission()) {
       for (const auto& [id, participant] : session_.admission()->participants) {
-        result.push_back({participant.userId, id});
+        // Read and validated by the session; absent on servers that predate it.
+        const bool denied = participant.voiceState.value("permissionMuted", false);
+        result.push_back({participant.userId, id, denied});
       }
     }
     return result;
@@ -652,9 +678,7 @@ class Application final {
                 {"generation", session_.generation()}, {"connection", session_.connection()},
                 {"voiceMode", session_.voiceMode() == VoiceMode::sfu ? "sfu" : "p2p"},
                 {"mediaActive", active_ != nullptr}, {"retiringMedia", retired_.size()},
-                {"policy", {{"muted", session_.policy().muted}, {"deafened", session_.policy().deafened},
-                            {"serverMuted", session_.policy().serverMuted},
-                            {"serverDeafened", session_.policy().serverDeafened}}},
+                {"policy", session_.policy().describe()},
                 {"audioDevice", audio_.diagnostics ? audio_.diagnostics() : Json(nullptr)}};
     result["microphoneAccessPending"] = microphoneRequestPending_;
     result["channelId"] = session_.admission() ? Json(session_.admission()->channelId) : Json(nullptr);
@@ -695,12 +719,8 @@ class Application final {
       else if (name == "leave") session_.leave();
       else if (name == "mute") session_.setMuted(value.at("enabled").get<bool>());
       else if (name == "deafen") session_.setDeafened(value.at("enabled").get<bool>());
-      else if (name == "reconnect") {
-        const auto epoch = epoch_;
-        closeSocket();
-        if (epoch) session_.disconnected(*epoch, Clock::now());
-        else session_.connectFailed(Clock::now());
-      } else if (name != "quit") {
+      else if (name == "reconnect") restartConnection();
+      else if (name != "quit") {
         throw std::invalid_argument("Unknown command; use join, leave, mute, deafen, devices, set-input, "
                                     "set-output, stats, channels, reconnect or quit");
       }
@@ -720,6 +740,8 @@ class Application final {
   ProtocolSession session_;
   std::unique_ptr<WebSocket> socket_;
   std::uint64_t attempt_ = 0;
+  // The connection attempt whose input outran the core; written by the transport.
+  std::atomic<std::uint64_t> overrun_ = 0;
   std::optional<std::uint64_t> epoch_;
   std::unique_ptr<media::VoiceEngine> active_;
   std::uint64_t activeGeneration_ = 0;
@@ -735,6 +757,9 @@ class Application final {
   ApplicationLoop::Deadline drainDeadline_;
   bool closing_ = false;
   bool waitingLogoutEvent_ = false;
+  bool outputLost_ = false;
+  // Read at start: once the console is closed it can no longer be told apart.
+  const bool outputIsConsole_ = standardOutputIsConsole();
   bool microphoneAuthorized_ = false;
   bool microphoneRequestPending_ = false;
   CancelMicrophoneAccess cancelMicrophoneAccess_;

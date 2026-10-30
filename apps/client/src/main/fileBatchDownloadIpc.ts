@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
+import { app, dialog, type BrowserWindow } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -6,6 +6,7 @@ import {
   type FileBatchDownloadFile, type FileBatchDownloadRequest, type FileBatchDownloadResult,
 } from '@monky/shared';
 import { mt } from './i18n';
+import type { IpcRegistry } from './ipc/registry';
 import { writeStoredZip, ZipTooLargeError } from './zipWriter';
 
 /** Writes one requested file to `destination`: an HTTP download, or a DM attachment copied out. */
@@ -85,15 +86,14 @@ async function saveAsZip(
   }
 }
 
-export function setupFileBatchDownloadIpc(
+export function registerFileBatchDownloadIpc(
+  registry: IpcRegistry,
   mainWindow: BrowserWindow,
   sanitizeFileName: (name: string) => string,
   download: Download,
-): () => void {
-  ipcMain.handle(FILE_BATCH_DOWNLOAD_IPC, async (event, input: unknown): Promise<FileBatchDownloadResult> => {
-    if (mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
-      return { status: 'failed', saved: 0, error: 'Unavailable sender' };
-    }
+): void {
+  const refused = { status: 'failed', saved: 0, error: 'Unavailable sender' } as const;
+  registry.handle(FILE_BATCH_DOWNLOAD_IPC, { from: 'main', refused }, async (_event, input): Promise<FileBatchDownloadResult> => {
     const parsed = fileBatchDownloadRequestSchema.safeParse(input);
     if (!parsed.success) return { status: 'failed', saved: 0, error: 'Invalid download request' };
     try {
@@ -104,5 +104,4 @@ export function setupFileBatchDownloadIpc(
       return { status: 'failed', saved: 0, error: errorMessage(error) };
     }
   });
-  return () => ipcMain.removeHandler(FILE_BATCH_DOWNLOAD_IPC);
 }

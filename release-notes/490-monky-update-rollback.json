@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O monky update faz backup do banco, confere se o servidor voltou e desfaz a atualização se ele não subir; \"forçar reinstalação\" não faz mais downgrade.",
+  "en": "monky update now backs up the database, checks that the server came back and rolls back if it doesn't start; \"force reinstall\" no longer downgrades."
+}

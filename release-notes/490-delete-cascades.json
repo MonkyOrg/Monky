@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Excluir canais, cargos e bots agora apaga de verdade o que dependia deles, e tirar alguém do público de um evento, enquete ou formulário privado remove o acesso dessa pessoa.",
+  "en": "Deleting channels, roles and bots now really removes what depended on them, and removing someone from a private event, poll or form audience revokes their access."
+}

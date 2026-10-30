@@ -6,7 +6,7 @@ import { videoService } from './VideoService';
 import { webRtcManager } from './WebRtcManager';
 import type { ServerStore } from '../stores/serverStore';
 
-interface ScreenShareCall {
+export interface ScreenShareCall {
   readonly client: NetworkClient | null;
   readonly serverStore: ServerStore | null;
   readonly isCurrent: () => boolean;
@@ -31,6 +31,17 @@ export function screenShareLimit(call: Pick<ScreenShareCall, 'serverStore'>): nu
 export function notifyScreenShareState(call: Pick<ScreenShareCall, 'client' | 'isCurrent'>): void {
   if (!call.isCurrent() || !call.client) return;
   call.client.send(MessageType.VOICE_STATE_UPDATE, webRtcManager.getLocalScreenState());
+}
+
+/** Retires a capture that started but never went on air; the call never heard of it. */
+export async function discardUnpublishedScreen(call: Pick<ScreenShareCall, 'isCurrent'>, stream: MediaStream): Promise<void> {
+  if (videoService.getScreenStream(stream.id) !== stream) return;
+  try {
+    if (call.isCurrent()) await stopLocalScreenShares({ shareIds: [stream.id] });
+    else videoService.stopScreenShare(stream.id);
+  } catch (cleanupError) {
+    console.warn('[ScreenShare] Failed to finish cancelled screen cleanup', cleanupError);
+  }
 }
 
 /** Capture, transport and store cleanup share one boundary; native sources own their audio. */

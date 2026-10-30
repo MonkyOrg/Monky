@@ -93,7 +93,7 @@ export class SoundboardTab {
             </div>
           </div>
           <label class="toggle-switch" aria-label="${t('settings.soundboardMute')}">
-            <input id="checkbox-soundboard-mute" type="checkbox" ${settingsStore.soundboardMuted ? 'checked' : ''}>
+            <input id="checkbox-soundboard-mute" type="checkbox" role="switch" ${settingsStore.soundboardMuted ? 'checked' : ''}>
             <span class="toggle-slider"></span>
           </label>
         </div>

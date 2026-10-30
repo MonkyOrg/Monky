@@ -2,6 +2,7 @@
 #include "liveNative.h"
 #include "platformContract.h"
 #include "amfProbe.h"
+#include "../win/monitorIdentityChecks.h"
 #include <iostream>
 
 using namespace monky::screen_capture;
@@ -88,26 +89,55 @@ static std::vector<std::uint8_t> ParameterSets(const VideoConfiguration& video, 
 
 int main(int argc, char** argv) {
   try {
-    if ((argc == 4 || argc == 5) && std::string_view(argv[1]) == "--window-fixture") {
+    if (argc >= 4 && argc <= 6 && std::string_view(argv[1]) == "--window-fixture") {
       const std::string className = argv[2], nonce = argv[3];
       Require(className == "WinUIDesktopWin32WindowClass" || className == "ApplicationFrameWindow",
           "Unexpected fixture window class");
       Require(nonce.size() == 32 && std::all_of(nonce.begin(), nonce.end(),
           [](char value) { return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'); }),
           "Window fixture requires a private nonce");
+      // Options: a parent HWND, "minimized" (created minimized), "offscreen" (restored, but placed past every monitor),
+      // "long-title" and "unpaired-surrogate" (half an emoji, as a page cutting its title can leave). Minimized and
+      // off-screen fixtures never appear on screen.
+      HWND parent = nullptr;
+      bool minimized = false, offscreen = false, longTitle = false, unpairedSurrogate = false;
+      for (int index = 4; index < argc; ++index) {
+        const std::string_view option = argv[index];
+        if (option == "minimized" && !minimized) minimized = true;
+        else if (option == "offscreen" && !offscreen) offscreen = true;
+        else if (option == "long-title" && !longTitle) longTitle = true;
+        else if (option == "unpaired-surrogate" && !unpairedSurrogate) unpairedSurrogate = true;
+        else {
+          Require(!parent && !option.empty() && option.find_first_not_of("0123456789") == std::string_view::npos,
+              "Unexpected window fixture option");
+          parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(std::stoull(std::string(option))));
+        }
+      }
       const std::wstring wideClass(className.begin(), className.end());
-      const std::wstring title = L"Monky owned window fixture " + std::wstring(nonce.begin(), nonce.end());
-      const auto parent = argc == 5 ? reinterpret_cast<HWND>(static_cast<std::uintptr_t>(std::stoull(argv[4]))) : nullptr;
+      const std::wstring title = L"Monky owned window fixture " + std::wstring(nonce.begin(), nonce.end()) +
+          (longTitle ? L" " + std::wstring(600, L'x') : std::wstring()) +
+          (unpairedSurrogate ? std::wstring(L" \xd83d") + L" cut" : std::wstring());
       Require(!parent || IsWindow(parent), "Foreign fixture parent must exist");
+      Require(!parent || (!minimized && !offscreen), "A child fixture cannot be minimized or off-screen");
+      Require(!minimized || !offscreen, "A window fixture is either minimized or off-screen");
       WNDCLASSW windowClass{};
       windowClass.lpfnWndProc = DefWindowProcW; windowClass.hInstance = GetModuleHandleW(nullptr);
       windowClass.lpszClassName = wideClass.c_str();
       Require(RegisterClassW(&windowClass) != 0, "Cannot register fixture window class");
+      const int offscreenX = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 640;
       const auto window = CreateWindowExW(0, wideClass.c_str(), title.c_str(),
-          WS_VISIBLE | (parent ? WS_CHILD : WS_OVERLAPPEDWINDOW),
-          parent ? 0 : CW_USEDEFAULT, parent ? 0 : CW_USEDEFAULT, 640, 480,
+          (minimized ? WS_MINIMIZE : offscreen ? 0 : WS_VISIBLE) | (parent ? WS_CHILD : WS_OVERLAPPEDWINDOW),
+          parent ? 0 : offscreen ? offscreenX : CW_USEDEFAULT, parent ? 0 : offscreen ? 0 : CW_USEDEFAULT, 640, 480,
           parent, nullptr, windowClass.hInstance, nullptr);
       Require(window != nullptr, "Cannot create owned window fixture");
+      // Explicit shows that never activate are never replaced by the launcher's STARTUPINFO, unlike a WS_VISIBLE
+      // creation.
+      if (minimized) ShowWindow(window, SW_SHOWMINNOACTIVE);
+      if (offscreen) ShowWindow(window, SW_SHOWNOACTIVATE);
+      Require(!minimized || (IsIconic(window) && IsWindowVisible(window)), "Minimized window fixture is not minimized");
+      Require(!offscreen || (!IsIconic(window) && IsWindowVisible(window) &&
+                             MonitorFromWindow(window, MONITOR_DEFAULTTONULL) == nullptr),
+          "Off-screen window fixture is minimized, hidden or on a monitor");
       Require(CreateWindowExW(0, L"Static", L"Owned same-process child", WS_CHILD | WS_VISIBLE,
           0, 0, 100, 100, window, nullptr, windowClass.hInstance, nullptr) != nullptr,
           "Cannot create same-process child fixture");
@@ -326,6 +356,82 @@ int main(int argc, char** argv) {
         check(false);
       } catch (const ContractError& error) { check(error.code == "ERR_SCREEN_CAPTURE_HOOK_IDENTITY"); }
     }
+    {
+      // Every window is listed, minimized ones included: another window's undecodable or overlong entry must not
+      // fail the admission of the selected one, and a long own title matches through its live title.
+      const SourceKey selected{"Notes", "Notepad", "notepad.exe"};
+      const std::string longTitle(700, 'x');
+      const std::vector<WindowListEntry> entries{
+        {"Other:Chrome_WidgetWin_1:chrome.exe", SourceKey{"Other", "Chrome_WidgetWin_1", "chrome.exe"}},
+        {"undecodable-long-title", std::nullopt},
+        {"Notes:Notepad:notepad.exe", selected},
+        {"Notes renamed:Notepad:notepad.exe", SourceKey{"Notes renamed", "Notepad", "notepad.exe"}},
+        {"long:Notepad:notepad.exe", SourceKey{longTitle, "Notepad", "notepad.exe"}},
+      };
+      check(SelectWindowSetting(entries, selected, std::nullopt) == "Notes:Notepad:notepad.exe");
+      check(SelectWindowSetting(entries, selected, std::string("Notes renamed")) == "Notes renamed:Notepad:notepad.exe");
+      const SourceKey labelled{WindowTitleLabel(longTitle), "Notepad", "notepad.exe"};
+      ValidateKey(labelled);
+      check(labelled.title.size() == 512);
+      check(SelectWindowSetting(entries, labelled, longTitle) == "long:Notepad:notepad.exe");
+      rejects([&] { SelectWindowSetting(entries, {"Absent", "Notepad", "notepad.exe"}, std::nullopt); });
+      rejects([&] { SelectWindowSetting(entries, {"Notes", "Notepad", "other.exe"}, std::string("Notes")); });
+      const std::vector<WindowListEntry> conflicting{{"a", selected}, {"b", selected}};
+      rejects([&] { SelectWindowSetting(conflicting, selected, std::nullopt); });
+      std::string wide = "a";
+      for (int index = 0; index < 200; ++index) wide += "\xF0\x9F\x98\x80";
+      const auto cut = WindowTitleLabel(wide);
+      check(cut.size() == 509 && ValidUtf8(cut) && WindowTitleLabel("short") == "short");
+      // The label keeps a character that ends exactly at byte 512 and drops one that would cross it.
+      std::string exact(4, 'a');
+      for (int index = 0; index < 130; ++index) exact += "\xF0\x9F\x98\x80";
+      check(WindowTitleLabel(exact) == exact.substr(0, 512));
+      check(WindowTitleLabel(std::string(509, 'a') + "\xE2\x82\xAC" "b") == std::string(509, 'a') + "\xE2\x82\xAC");
+      check(WindowTitleLabel(std::string(510, 'a') + "\xE2\x82\xAC" "b") == std::string(510, 'a'));
+      check(WindowTitleLabel(std::string(511, 'a') + "\xC3\xA9") == std::string(511, 'a'));
+      check(WindowTitleLabel(std::string(512, 'a')) == std::string(512, 'a') &&
+            WindowTitleLabel(std::string(513, 'a')) == std::string(512, 'a'));
+    }
+    {
+      // Stock entries are other windows' strings: a long title decodes up to the entry bound, and one past it or not
+      // UTF-8 (an encoded surrogate) leaves that entry without a key instead of failing the selection.
+      const std::string title700(700, 'x'), titleAtBound(kMaxWindowSetting, 'x'), titlePastBound(kMaxWindowSetting + 1, 'x');
+      check(WindowEntryKey(title700.c_str(), "Notepad", "notepad.exe") == SourceKey{title700, "Notepad", "notepad.exe"});
+      check(WindowEntryKey(titleAtBound.c_str(), "Notepad", "notepad.exe")->title == titleAtBound);
+      check(!WindowEntryKey(titlePastBound.c_str(), "Notepad", "notepad.exe"));
+      check(!WindowEntryKey("Notes \xED\xA0\xBD", "Notepad", "notepad.exe"));
+      check(!WindowEntryKey(nullptr, "Notepad", "notepad.exe"));
+      check(!WindowEntryKey("Notes", std::string(257, 'c').c_str(), "notepad.exe"));
+      check(!WindowEntryKey("Notes", "Notepad", std::string(261, 'e').c_str()));
+      check(OptionalString(titleAtBound.c_str(), kMaxWindowSetting) == titleAtBound &&
+            !OptionalString(titlePastBound.c_str(), kMaxWindowSetting));
+      const SourceKey selected{WindowTitleLabel(title700), "Notepad", "notepad.exe"};
+      const std::vector<WindowListEntry> entries{
+        {"past", WindowEntryKey(titlePastBound.c_str(), "Notepad", "notepad.exe")},
+        {"surrogate", WindowEntryKey("Notes \xED\xA0\xBD", "Notepad", "notepad.exe")},
+        {"own", WindowEntryKey(title700.c_str(), "Notepad", "notepad.exe")},
+      };
+      check(SelectWindowSetting(entries, selected, title700) == "own");
+      // An unpaired surrogate, which a page can put in its title and a cut of a long title can leave, becomes U+FFFD
+      // as in the stock list, so the window still matches its entry. Identity strings keep refusing it.
+      const auto page = WindowTitleUtf8(L"Page \xd83d" L" - Browser");
+      check(page == "Page \xEF\xBF\xBD - Browser" && WindowTitleUtf8(L"\xde00" L"Page") == "\xEF\xBF\xBD" "Page");
+      const std::vector<WindowListEntry> pages{
+        {"page", WindowEntryKey("Page \xEF\xBF\xBD - Browser", "Chrome_WidgetWin_1", "chrome.exe")}};
+      check(SelectWindowSetting(pages, {WindowTitleLabel(page), "Chrome_WidgetWin_1", "chrome.exe"}, page) == "page");
+      rejects([&] { Utf8(L"Page \xd83d"); });
+      // GetWindowTextW cuts a title longer than its buffer, which can split a surrogate pair.
+      const auto split = WindowTitleUtf8(std::wstring(kMaxWindowSetting - 1, L'x') + L'\xd83d');
+      check(split == std::string(kMaxWindowSetting - 1, 'x') + "\xEF\xBF\xBD" &&
+            WindowTitleLabel(split) == std::string(512, 'x'));
+      check(WindowTitleUtf8(std::wstring(kMaxWindowSetting - 2, L'x') + L"\xd83d\xde00") ==
+            std::string(kMaxWindowSetting - 2, 'x') + "\xF0\x9F\x98\x80");
+      rejects([&] { WindowTitleUtf8(L""); });
+    }
+    monky::win::checks::RunMonitorIdentityChecks([&](bool condition, const char* message) {
+      Require(condition, message);
+      ++checks;
+    });
     rejects([&] { ScaleTime(INT64_MAX, 1, 120); });
     check(ScaleTime(120 * 60 * 60 * 8, 1, 120) == 28800000000LL);
     check(ScaleTime(18000, 1, 30) == 600000000);
@@ -650,6 +756,54 @@ int main(int argc, char** argv) {
                                    {854, 480, 30, 1000}, {2, 2, 1, 50},
                                    {1920, 1080, 241, 5000}, {1920, 1080, 0, 5000}, {1920, 1080, 120, 5010}})
       rejects([&] { ValidateVideoConfiguration(invalidVideo); });
+    {
+      // The one Annex B walk the capture host, the encoded input and the decoder adapters share.
+      using monky::screen_video::AnnexBError;
+      std::vector<std::vector<std::uint8_t>> nals;
+      const auto walk = [&](std::vector<std::uint8_t> bytes, std::size_t maximum = 4096) {
+        nals.clear();
+        return monky::screen_video::ForEachAnnexBNal(bytes, maximum,
+            [&](std::span<const std::uint8_t> nal) { nals.emplace_back(nal.begin(), nal.end()); });
+      };
+      check(walk({0, 0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 2, 0, 0}) == AnnexBError::kNone && nals.size() == 2 &&
+            nals[0] == std::vector<std::uint8_t>{0x67, 1} && nals[1] == std::vector<std::uint8_t>{0x68, 2});
+      check(walk({0, 0, 2}) == AnnexBError::kNoStartCode && walk({0x65}) == AnnexBError::kNoStartCode);
+      check(walk({0, 0, 1, 0x65, 0, 0, 1}) == AnnexBError::kEmptyNal && nals.size() == 1);
+      check(walk({0, 0, 1, 0x65, 0, 0, 1, 0x41}, 1) == AnnexBError::kTooManyNals && nals.size() == 1);
+    }
+    {
+      // An AV1 keyframe a viewer can start from: the sequence header it carries, or the encoder's current one prepended.
+      const auto frame = [](std::size_t payload, std::uint8_t first) {
+        std::vector<std::uint8_t> bytes{0x32};
+        for (auto value = payload;; value >>= 7) {
+          if (value >> 7) bytes.push_back(static_cast<std::uint8_t>((value & 127) | 128));
+          else { bytes.push_back(static_cast<std::uint8_t>(value)); break; }
+        }
+        bytes.push_back(first);
+        bytes.resize(bytes.size() + payload - 1, 0);
+        return bytes;
+      };
+      const std::vector<std::uint8_t> sequence{0x0a, 0x01, 0x00}, carriedSequence{0x0a, 0x01, 0x01};
+      const auto key = frame(1, 0x10), inter = frame(1, 0x30);
+      std::vector<std::vector<std::uint8_t>> validated;
+      const auto validate = [&](std::span<const std::uint8_t> header) { validated.emplace_back(header.begin(), header.end()); };
+      auto prefixed = sequence;
+      prefixed.insert(prefixed.end(), key.begin(), key.end());
+      const auto prepended = CompleteAv1Keyframe(key, sequence, validate);
+      check(prepended.sequenceHeader == sequence && prepended.bytes == prefixed && validated.back() == sequence);
+      auto carried = carriedSequence;
+      carried.insert(carried.end(), key.begin(), key.end());
+      const auto own = CompleteAv1Keyframe(carried, sequence, validate);
+      check(own.sequenceHeader == carriedSequence && own.bytes == carried && validated.back() == carriedSequence);
+      rejects([&] { CompleteAv1Keyframe(inter, sequence, validate); });
+      rejects([&] { CompleteAv1Keyframe(key, key, validate); });
+      rejects([&] { CompleteAv1Keyframe(key, sequence, [](std::span<const std::uint8_t>) {
+        Require(false, "The sequence header does not describe the configured video", "ERR_SCREEN_CAPTURE_AV1");
+      }); });
+      const auto largest = frame(kMaxPacketBytes - 6, 0x10);
+      check(largest.size() == kMaxPacketBytes - 1);
+      rejects([&] { CompleteAv1Keyframe(largest, sequence, validate); });
+    }
     check(RetirementJson({true, true, false, true, false}).find("\"sourceReleased\":false") != std::string::npos);
     OutputBudget budget;
     for (unsigned index = 0; index < 2048; ++index) budget.Add(1024);

@@ -45,6 +45,20 @@ class Error : public std::runtime_error {
   std::int32_t hr;
 };
 
+// The four error fields every failed reply and the engine snapshot carry.
+inline Json ErrorJson(const Error& error) {
+  return {{"code", error.code}, {"message", error.what()}, {"status", error.status},
+          {"hresult", static_cast<std::int32_t>(error.hr)}};
+}
+
+// The payload of an "error" event: exactly the fields the addon requires. A missing one is a contract violation that
+// ends the RTC process.
+inline Json ErrorEvent(const Error& error, bool terminal) {
+  auto data = ErrorJson(error);
+  data["terminal"] = terminal;
+  return data;
+}
+
 struct Cancellation {
   std::uint64_t request_id = 0, target = 0;
   std::atomic<bool> cancelled{false};
@@ -87,20 +101,6 @@ class Host {
   virtual void ReceiveFrame(const FrameRoute& route, const webrtc::VideoFrame& frame) noexcept = 0;
 };
 
-struct InputFrame {
-#if defined(_WIN32)
-  HANDLE texture = nullptr;
-#endif
-  std::uint64_t id = 0;
-  std::int64_t timestamp_us = 0, duration_us = 0, ntp_time_ms = -1;
-#if defined(_WIN32)
-  ~InputFrame() { if (texture) CloseHandle(texture); }
-#endif
-  InputFrame() = default;
-  InputFrame(const InputFrame&) = delete;
-  InputFrame& operator=(const InputFrame&) = delete;
-};
-
 class VideoSource {
  public:
   virtual ~VideoSource() = default;
@@ -109,45 +109,29 @@ class VideoSource {
   virtual bool Enabled() const = 0;
   virtual void SetEnabled(bool enabled) = 0;
   virtual bool AcceptsSendCodec(const webrtc::SdpVideoFormat&) const { return true; }
-  virtual void Submit(std::shared_ptr<InputFrame>) {
-    throw Error("ERR_RTC_INPUT_MODE", "This source does not accept raw GPU frames", MONKY_ENGINE_UNSUPPORTED);
-  }
-  virtual void SubmitEncoded(const MonkyEngineEncodedFrame&) {
-    throw Error("ERR_RTC_INPUT_MODE", "This source does not accept externally encoded H264", MONKY_ENGINE_UNSUPPORTED);
-  }
+  virtual void SubmitEncoded(const MonkyEngineEncodedFrame&) = 0;
   virtual void Close() = 0;
   virtual Json Snapshot() const = 0;
 };
-std::shared_ptr<VideoSource> CreateGpuSource(
-    Host& host, std::uint64_t id, const Json& options, const std::shared_ptr<Cancellation>& cancellation);
 
-class PeerController {
+// The P2P and SFU media controllers share one contract. Their implementations keep what really differs: receiver
+// epochs against one consumer per route, local sender gating against server-acknowledged producers, and a failure
+// that retires the peer against one that retires the transport.
+class MediaController {
  public:
-  virtual ~PeerController() = default;
+  virtual ~MediaController() = default;
   virtual Json Execute(std::string_view operation, std::uint64_t target, const Json& data,
                        const std::shared_ptr<Cancellation>& cancellation) = 0;
   virtual bool Contains(std::uint64_t target) const = 0;
   virtual bool UsesSource(std::uint64_t source) const = 0;
   virtual void SourceEnabledChanged(std::uint64_t source) = 0;
+  // May retire the enclosing peer or transport when the resource cannot be retired alone.
   virtual void Close(std::uint64_t target) = 0;
   virtual void CloseAll() = 0;
   virtual Json Snapshot() const = 0;
 };
-std::unique_ptr<PeerController> CreatePeerController(Host& host);
-
-class SfuController {
- public:
-  virtual ~SfuController() = default;
-  virtual Json Execute(std::string_view operation, std::uint64_t target, const Json& data,
-                       const std::shared_ptr<Cancellation>& cancellation) = 0;
-  virtual bool Contains(std::uint64_t target) const = 0;
-  virtual bool UsesSource(std::uint64_t source) const = 0;
-  virtual void SourceEnabledChanged(std::uint64_t source) = 0;
-  virtual void Close(std::uint64_t target) = 0;
-  virtual void CloseAll() = 0;
-  virtual Json Snapshot() const = 0;
-};
-std::unique_ptr<SfuController> CreateSfuController(Host& host);
+std::unique_ptr<MediaController> CreatePeerController(Host& host);
+std::unique_ptr<MediaController> CreateSfuController(Host& host);
 
 inline std::string Text(const Json& data, const char* key, std::size_t maximum = 512) {
   if (!data.is_object() || !data.contains(key) || !data.at(key).is_string())

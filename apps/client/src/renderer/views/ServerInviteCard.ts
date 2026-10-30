@@ -1,6 +1,7 @@
 import { createServerInviteAppLink, parseServerInviteLink, type ServerInvite } from '@monky/shared';
 import { clientLog } from '../core/ClientLogService';
 import { t } from '../i18n';
+import { openExternalUrl } from '../utils/feedback';
 import { escapeHtml } from '../utils/html';
 import { joinInviteModal } from './JoinInviteModal';
 
@@ -63,6 +64,23 @@ export function openServerInviteLink(url: string | null | undefined): boolean {
   if (!invite) return false;
   joinInviteModal.open(invite).catch(() => clientLog.warn('CONNECTION', 'Could not open the invitation from chat'));
   return true;
+}
+
+/**
+ * Opens the Markdown links of the messages under `root` in the browser, with
+ * one listener for the whole feed or result list. An invitation opens the
+ * join review directly instead, without the round trip through the browser.
+ */
+export function bindMessageLinks(root: HTMLElement): () => void {
+  const onClick = (event: MouseEvent) => {
+    const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a.md-link') : null;
+    if (!link || !root.contains(link)) return;
+    event.preventDefault();
+    const url = link.getAttribute('data-external-link');
+    if (url && !openServerInviteLink(url)) void openExternalUrl(url, t('chat.linkOpenFailed'));
+  };
+  root.addEventListener('click', onClick);
+  return () => root.removeEventListener('click', onClick);
 }
 
 /**

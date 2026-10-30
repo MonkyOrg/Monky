@@ -543,9 +543,11 @@ async function runUserContextMenuSmoke() {
     network.sendRequest = async () => { throw new Error('Policy lookup failed'); };
     menu.open(30, 30, remote);
     await delay();
-    check(!document.querySelector('.user-context-menu:not([data-ui-closing])') && document.querySelector('.modal-backdrop:not([data-ui-closing])')?.textContent.includes('Policy lookup failed'),
-      'A failed lookup is surfaced instead of guessing an unmuted state');
-    document.querySelector('.modal-backdrop [data-action="confirm"]').click();
+    const lookupFailure = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+    check(!document.querySelector('.user-context-menu:not([data-ui-closing])') && lookupFailure?.getAttribute('role') === 'alert'
+      && lookupFailure.textContent.includes('Policy lookup failed') && !document.querySelector('.modal-backdrop:not([data-ui-closing])'),
+      'A failed lookup is explained in the alert toast instead of guessing an unmuted state');
+    lookupFailure.querySelector('.chat-copy-toast-close').click();
     network.sendRequest = request;
     await delay();
 

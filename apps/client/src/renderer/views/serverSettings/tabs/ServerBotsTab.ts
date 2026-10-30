@@ -10,12 +10,14 @@ import {
 import type { NetworkClient } from '../../../core/NetworkClient';
 import { appEvents } from '../../../core/EventBus';
 import { escapeHtml } from '../../../utils/html';
-import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
+import { cancelVisibilityMotion, setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { formatBytes } from '../../../utils/attachment';
 import { getLanguage, t } from '../../../i18n';
 import { serverStore } from '../../../stores/serverStore';
-import { showAlert, showConfirm } from '../../Dialog';
+import { showConfirm } from '../../Dialog';
+import { showSuccessToast } from '../../CopyToast';
+import { reportError } from '../../../utils/feedback';
 import { botSettingsModal } from '../../BotSettingsModal';
 import { BotStorageSettings } from '../../BotStorageSettings';
 import { showBotPermissionReview } from '../../BotPermissionReview';
@@ -40,7 +42,6 @@ export class ServerBotsTab {
   private listRequest = 0;
   private creating = false;
   private hadPermission = false;
-  private statusTimer: ReturnType<typeof setTimeout> | null = null;
   private manualLinkExpanded = false;
   private hasLoadedList = false;
   private reviewAbort = new AbortController();
@@ -67,7 +68,7 @@ export class ServerBotsTab {
               ${t('bots.installBtn')}
             </button>
           </div>
-          <div id="bot-install-status" style="display: none; margin-top: 8px; font-size: 12px; padding: 8px; border-radius: var(--radius-sm);"></div>
+          <div id="bot-install-status" role="status" hidden style="margin-top: 8px; font-size: 12px; padding: 8px; border-radius: var(--radius-sm); background: var(--bg-elevated); color: var(--text-muted);"></div>
         </div>
 
         <div data-settings-section="manual-link-bot" data-settings-label="${escapeHtml(t('bots.createTitle'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
@@ -93,7 +94,7 @@ export class ServerBotsTab {
           </div>
         </div>
 
-        <div id="bot-token-reveal" style="display: none; background: var(--bg-card); border: 1px solid var(--warning-color, #f0b232); border-radius: var(--radius-md); padding: 14px;">
+        <div id="bot-token-reveal" hidden style="background: var(--bg-card); border: 1px solid var(--warning-color, #f0b232); border-radius: var(--radius-md); padding: 14px;">
           <div style="font-size: 12px; font-weight: 700; color: var(--warning-color, #f0b232); margin-bottom: 6px;">
             <span class="material-symbols-outlined md-14" style="vertical-align: middle;">warning</span>
             ${t('bots.tokenWarning')}
@@ -166,8 +167,6 @@ export class ServerBotsTab {
     this.reviewAbort.abort();
     for (const fn of this.unbind) fn();
     this.unbind = [];
-    if (this.statusTimer) clearTimeout(this.statusTimer);
-    this.statusTimer = null;
     this.pendingToken = null;
     this.creating = false;
     this.hadPermission = false;
@@ -199,8 +198,12 @@ export class ServerBotsTab {
       this.pendingToken = null;
       this.bots = [];
       this.renderBotList();
+      // A revoked token disappears at once, without an exit animation.
       const reveal = this.root.querySelector<HTMLElement>('#bot-token-reveal');
-      if (reveal) reveal.style.display = 'none';
+      if (reveal) {
+        cancelVisibilityMotion(reveal);
+        reveal.hidden = true;
+      }
       const token = this.root.querySelector('#bot-token-value');
       if (token) token.textContent = '';
     }
@@ -227,7 +230,7 @@ export class ServerBotsTab {
     if (!client || !context || button?.disabled || context.operations.isPending('bot-install')) return;
     const url = urlInput?.value.trim();
     if (!url) {
-      showAlert({ message: t('bots.manifestUrlRequired') });
+      reportError(t('bots.manifestUrlRequired'), { field: urlInput, focus: true });
       return;
     }
 
@@ -235,11 +238,11 @@ export class ServerBotsTab {
       const parsed = new URL(url);
       if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
     } catch {
-      showAlert({ message: t('bots.manifestUrlInvalid') });
+      reportError(t('bots.manifestUrlInvalid'), { field: urlInput, focus: true });
       return;
     }
 
-    this.showInstallStatus('loading', t('botPermissions.loadingPreview'));
+    this.setInstallStatus(t('botPermissions.loadingPreview'));
     if (button) button.disabled = true;
 
     try {
@@ -247,55 +250,36 @@ export class ServerBotsTab {
         const response = await context.request<unknown>([MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: url }], Permission.MANAGE_BOTS, 15000);
         if (!this.isAttached(generation, client)) return false;
         const preview = botInstallPreviewSchema.parse(response);
-        this.showInstallStatus('loading', t('botPermissions.reviewHint'));
+        this.setInstallStatus(t('botPermissions.reviewHint'));
         const grantedCapabilities = await showBotPermissionReview(preview, this.reviewAbort.signal);
         if (!grantedCapabilities || !this.isAttached(generation, client)) return false;
-        this.showInstallStatus('loading', t('bots.installing'));
+        this.setInstallStatus(t('bots.installing'));
         await context.request<unknown>([MessageType.BOT_INSTALL, { previewId: preview.previewId, grantedCapabilities }], Permission.MANAGE_BOTS, 30000);
         return true;
       });
       if (!result.ok) throw new Error(result.message);
       if (!this.isAttached(generation, client)) return;
-      if (!result.value) {
-        const status = this.root?.querySelector<HTMLElement>('#bot-install-status');
-        if (status) status.style.display = 'none';
-        return;
-      }
+      this.setInstallStatus(null);
+      if (!result.value) return;
       if (urlInput) urlInput.value = '';
-      this.showInstallStatus('success', t('bots.installSuccess'));
+      showSuccessToast(t('bots.installSuccess'));
       void this.refreshList();
     } catch (error) {
       if (!this.isAttached(generation, client)) return;
+      this.setInstallStatus(null);
       const raw = error instanceof Error ? error.message : '';
-      const message = raw.includes('Timeout')
-        ? t('bots.installTimeout')
-        : raw || t('bots.installError');
-      this.showInstallStatus('error', message);
+      reportError(raw.includes('Timeout') ? t('bots.installTimeout') : raw || t('bots.installError'));
     } finally {
       if (button && generation === this.generation) button.disabled = false;
     }
   }
 
-  private showInstallStatus(type: 'loading' | 'success' | 'error', message: string): void {
+  /** What an installation in progress is doing; how it ended is told by a toast. */
+  private setInstallStatus(message: string | null): void {
     const el = this.root?.querySelector<HTMLElement>('#bot-install-status');
     if (!el) return;
-    if (this.statusTimer) clearTimeout(this.statusTimer);
-    this.statusTimer = null;
-    el.style.display = 'block';
-    el.textContent = message;
-    if (type === 'success') {
-      el.style.background = 'var(--success-color-bg, rgba(59,165,93,0.15))';
-      el.style.color = 'var(--success-color, #3ba55d)';
-    } else if (type === 'error') {
-      el.style.background = 'var(--danger-color-bg, rgba(237,66,69,0.15))';
-      el.style.color = 'var(--danger-color, #ed4245)';
-    } else {
-      el.style.background = 'var(--bg-elevated)';
-      el.style.color = 'var(--text-muted)';
-    }
-    if (type === 'success') {
-      this.statusTimer = setTimeout(() => { el.style.display = 'none'; this.statusTimer = null; }, 5000);
-    }
+    if (message) el.textContent = message;
+    setSurfaceVisible(el, !!message);
   }
 
   private async handleCreate(): Promise<void> {
@@ -322,13 +306,13 @@ export class ServerBotsTab {
       const token = this.root?.querySelector<HTMLElement>('#bot-token-value');
       if (reveal && token) {
         token.textContent = response.token;
-        reveal.style.display = 'block';
+        setSurfaceVisible(reveal, true);
       }
       this.bots = [...this.bots.filter((bot) => bot.id !== response.bot.id), response.bot];
       this.renderBotList();
       void this.refreshList();
     } catch (error) {
-      if (this.isAttached(generation, client)) void showAlert({ message: botRequestError(error) });
+      if (this.isAttached(generation, client)) reportError(botRequestError(error));
     } finally {
       if (generation === this.generation) {
         this.creating = false;
@@ -358,16 +342,9 @@ export class ServerBotsTab {
       const container = this.root?.querySelector<HTMLElement>('#bot-list-container');
       if (container) {
         container.setAttribute('aria-busy', 'false');
-        if (!this.hasLoadedList) {
-          container.innerHTML = renderLoadingError(botRequestError(error));
-          return;
-        }
-        const message = document.createElement('p');
-        message.className = 'bot-error';
-        message.setAttribute('role', 'alert');
-        message.textContent = botRequestError(error);
-        container.querySelector('.bot-error')?.remove();
-        container.prepend(message);
+        // The list already shown stays; only a first load that failed takes its place.
+        if (!this.hasLoadedList) container.innerHTML = renderLoadingError(botRequestError(error));
+        else reportError(botRequestError(error));
       }
     }
   }

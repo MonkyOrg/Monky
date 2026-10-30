@@ -209,10 +209,8 @@ de outra operação MFT de processamento/encerramento. Leituras pendentes cedem 
 inclusive durante abort/shutdown: a capacidade privada de apresentação não é
 uma garantia sobre o pool interno do decoder. `sampleRetirementDeferrals` conta
 essas esperas, sem impor FPS, sleeps ou um novo limite arbitrário de superfícies.
-O envio de tela usa AUs comprimidos, não empréstimos de textura. Para o
-`submitFrame` NV12 legado, morte do filho sem recibo do reader/fence **não**
-autoriza reutilizar a textura do produtor: a API retém esse guard e rejeita
-o comprovante de fechamento, em vez de inventar aposentadoria de GPU.
+O envio de tela usa somente AUs comprimidos: nenhuma textura de entrada entra no
+processo RTC, e o Media Foundation fica restrito à decodificação H.264.
 
 A entrega de texturas usa a API pública `sharedTexture.subtle` do Electron com
 um MessagePort privado, tipado e reutilizável por destino, em vez de criar um
@@ -333,12 +331,20 @@ e quando o Windows informa uma mudança de telas (`WM_DISPLAYCHANGE`,
 essa leitura consulta o registro segurando o bloqueio de exibição do sistema, e
 repeti-la enquanto outro programa grava no registro congelava todas as telas.
 A cada ciclo, a captura confere só o nome GDI e os limites, que vêm de metadados
-em cache. No processo principal, a mesma leitura acompanha os eventos de tela do
-Electron.
+em cache. As miniaturas seguem a mesma regra, com o mesmo código
+(`src/win/monitorIdentity.h`): leem a interface uma vez, ao começar. No processo
+principal, a mesma leitura acompanha os eventos de tela do Electron.
 Minimizar ou ocultar uma janela/jogo é tratado como pausa, não como perda da
-identidade. Restaurar permite retomar os frames. O título também não faz parte
+identidade: uma janela minimizada também pode ser escolhida, e a prévia fica
+pausada até ela ser restaurada. O título também não faz parte
 da identidade: navegadores, editores e players renomeiam a janela a cada página
-ou arquivo, e o compartilhamento continua. Trocar a classe da janela ou o
+ou arquivo, e o compartilhamento continua. O título de outra janela aberta nunca impede o
+compartilhamento. O da janela escolhida também não, desde que caiba na lista de janelas do OBS: título,
+classe e executável formam uma entrada de no máximo 4096 bytes em UTF-8, em que `:` e `#` ocupam 3 bytes.
+Na prática, cerca de 4 mil caracteres sem acento, ou 1.300 caracteres chineses. Um título maior faz o
+compartilhamento falhar com `ERR_SCREEN_CAPTURE_SOURCE_IDENTITY`, porque a janela não é encontrada na
+lista. Meio emoji no título (um surrogate UTF-16 órfão, que uma página pode deixar ao cortar o próprio
+título) vira `�`, como na lista do OBS, e também não impede o compartilhamento. Trocar a classe da janela ou o
 executável encerra a fonte. Fechar ou substituir a
 janela/processo encerra o anúncio mesmo sem espectadores.
 
@@ -416,7 +422,12 @@ Sem comprovação, a operação continua falhando e preserva os proprietários p
 
 Uma amostragem QPC/RTC que excede 2 ms descarta o quadro e invalida seus
 dependentes, solicitando um IDR real pela recuperação existente (limite de
-1,5 s). Não aumenta a tolerância do relógio, não inventa timestamps e não
+1,5 s). O mesmo vale para todo resultado que o relógio de captura classifica como
+descarte de quadro (quadro antigo, adiantado, fora de ordem ou que faria o tempo
+RTC recuar após uma correção do offset): a recuperação informa o motivo
+`clock-frame-dropped` e o código em `clockStatus`, e a transmissão continua. Só
+timestamp inválido, descontinuidade ou relógio fechado encerram a fonte. Não
+aumenta a tolerância do relógio, não inventa timestamps e não
 transforma descontinuidades em sucesso. Avisos de conexão usam toast de
 8 segundos, para não deixar um diálogo bloqueando o jogo após a recuperação.
 
@@ -621,11 +632,13 @@ O timer de diagnóstico RTC é suspenso antes de iniciar o fechamento nativo,
 para não consultar estado já desmontado enquanto os recursos ainda encerram.
 
 Uma coleta pareada QPC/RTC que leva mais de 2 ms
-não invalida, por si só, PCM contínuo. Somente nesse caso o bloco segue sem
+não invalida, por si só, PCM contínuo. Nesse caso, e em todo resultado que o
+relógio de captura classifica como descarte de quadro (inclusive dois blocos no
+mesmo milissegundo RTC após uma correção do offset), o bloco segue sem
 timestamp absoluto, com `clockObservationsUnavailable` incrementado no
 diagnóstico da fonte. A próxima observação válida retoma os timestamps sem
 reiniciar a época. Não se amplia o limite do relógio, inventa timestamp ou
-descarta PCM; descontinuidade, retrocesso e outros erros continuam explícitos.
+descarta PCM; timestamp inválido, descontinuidade e outros erros continuam explícitos.
 
 Na reprodução, `currentFrame` é uma observação do relógio do grafo, não do
 alto-falante. O Chromium 152.0.7977.130 [avança o grafo antes de atualizar o
@@ -1085,7 +1098,10 @@ WinUI/ApplicationFrameWindow. Verifica captura WGC real com filhos do mesmo
 processo e distingue as duas janelas com títulos duplicados, recusando
 remapeamento para filhos de outro processo e identidade de processo alterada.
 Também renomeia a janela durante a captura (título novo, com mais de 512
-caracteres e vazio) e exige que os frames continuem.
+caracteres e vazio) e exige que os frames continuem. Antes disso, admite uma janela
+minimizada, uma com título longo, uma com meio emoji no título e uma enquanto outra janela
+restaurada tem título longo; cada sonda isola um desses motivos. Essas janelas nunca aparecem na
+tela (as restauradas ficam fora de todos os monitores), e `--offscreen-only` roda só essas sondas.
 Não captura janelas pessoais
 nem grava vídeo; `--contracts=<executável_absoluto>` permite outro diretório
 de build.

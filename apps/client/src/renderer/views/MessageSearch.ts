@@ -13,6 +13,7 @@ import { dateFieldValue, formatCalendarValue, setDateFieldValue, todayCalendarVa
 import { renderMarkdown } from '../utils/markdown';
 import { fileIconName, formatBytes, getAttachmentUrl } from '../utils/attachment';
 import { downloadLightboxFile, lightboxModal, type LightboxMedia } from './LightboxModal';
+import { bindMessageLinks } from './ServerInviteCard';
 import { initializeCustomMediaPlayers } from '../utils/videoPlayer';
 
 export interface MessageSearchOptions {
@@ -122,6 +123,8 @@ export class MessageSearch {
     this.suggestions.hidden = true;
     this.suggestions.setAttribute('aria-label', text('messageSearch.filters'));
     host.append(this.panel, this.suggestions);
+    // Links in results open like links in the chat: an invitation goes to the join review.
+    this.lifetime.signal.addEventListener('abort', bindMessageLinks(this.panel), { once: true });
     this.launch.addEventListener('click', () => {
       if (!this.isOpen()) this.open();
       else if (!this.advanced && !this.suggestionsOpen()) {

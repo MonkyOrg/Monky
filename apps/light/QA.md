@@ -41,6 +41,8 @@ três ou mais pessoas. Execute tudo em **P2P e em SFU**.
 | 1.8 | Moderador expulsa o Light da chamada | O Light sai e não reentra sozinho após `reconnect` | | |
 | 1.9 | Administrador troca P2P ↔ SFU com a chamada ativa | A chamada continua nos dois sentidos, preservando moderação | | |
 | 1.10 | Chamada de pelo menos 30 minutos | Sem cortes, atraso crescente ou robotização | | |
+| 1.11 | Moderador move o Light duas vezes seguidas, para salas que ele vê; repetir com salas que ele não vê | Nos dois casos, o Light termina na última sala, ouvindo e sendo ouvido | | |
+| 1.12 | Administrador nega `Falar` a todos no canal da chamada, depois libera | O Light continua na chamada ouvindo, sem transmitir (o Monky completo não o ouve); ao liberar, volta a transmitir | | |
 
 ## 2. Dispositivos físicos
 
@@ -135,3 +137,5 @@ valendo, então o terminal serve para conferir o que cada clique fez.
 | 6.17 | Sistema em português e em inglês | Menu e dica no idioma do sistema | | |
 | 6.18 | Leitor de tela (Narrador, VoiceOver) sobre o ícone | Lê o estado atual, não apenas "ícone" | | |
 | 6.19 | Medir a mesma fase com `--tray` e sem | A bandeja não muda o consumo em repouso de forma perceptível | | |
+| 6.20 | Canal sem `Falar` | O mute fica marcado e desabilitado, com a nota de que falta permissão para falar | | |
+| 6.21 | Fechar a janela do console durante uma chamada (só Windows) | Os outros veem o Light sair na hora (logout), o ícone desaparece e não sobra processo | | |

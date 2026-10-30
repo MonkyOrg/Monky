@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import { reportError } from '../utils/feedback';
 import { ImageClipboard } from '../utils/imageClipboard';
 import {
   combinedMessageClipboard,
@@ -13,7 +14,6 @@ import {
 import { isEditableTarget } from './ChatComposer';
 import type { ContextMenuSubmenu } from './ContextMenu';
 import { showCopyToast } from './CopyToast';
-import { showAlert } from './Dialog';
 
 export interface MessageCopySource {
   /** False once the owning view no longer shows this conversation. */
@@ -118,7 +118,7 @@ export class MessageCopy {
       }
     } catch (error) {
       console.warn('[MessageCopy] Could not copy message', error);
-      if (requestId === this.requestId) void showAlert({ message: t('chat.copyFailed'), variant: 'danger' });
+      if (requestId === this.requestId) this.clearFeedback = reportError(t('chat.copyFailed'));
       return;
     }
     if (requestId !== this.requestId) return;

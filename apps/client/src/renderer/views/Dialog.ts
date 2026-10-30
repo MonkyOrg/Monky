@@ -1,6 +1,7 @@
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { openModal } from '../utils/modalShell';
+import { reportError } from '../utils/feedback';
 
 type DialogVariant = 'info' | 'warning' | 'danger' | 'success';
 
@@ -87,17 +88,16 @@ function buildDialog(params: {
     return;
   }
   const { icon, color } = VARIANT_ICON[params.variant];
-  const previousFocus = document.activeElement;
   const inputId = `dialog-input-${++dialogId}`;
   let choice = params.choices?.selected ?? null;
+  let confirmed = false;
 
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  backdrop.innerHTML = `
-    <div class="modal-card dialog-card" role="dialog" aria-modal="true">
+  const shell = openModal({
+    card: `
+    <div class="modal-card dialog-card">
       <div class="modal-header">
         <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
-          <span class="material-symbols-outlined" style="color: ${color};">${icon}</span>
+          <span class="material-symbols-outlined" style="color: ${color};" aria-hidden="true">${icon}</span>
           <span>${escapeHtml(params.title)}</span>
         </div>
       </div>
@@ -120,11 +120,10 @@ function buildDialog(params: {
         <div class="dialog-text-input-row">
           <input class="input-field" type="text" id="${inputId}-${index}" data-dialog-input autocomplete="off" spellcheck="false"
             value="${escapeHtml(field.value)}" ${field.maxLength !== undefined ? `maxlength="${field.maxLength}"` : ''}
-            aria-describedby="${inputId}-${index}-hint ${inputId}-${index}-error">
+            ${field.hint ? `aria-describedby="${inputId}-${index}-hint"` : ''}>
           ${field.suffix ? `<span class="dialog-text-suffix" aria-hidden="true">${escapeHtml(field.suffix)}</span>` : ''}
         </div>
-        <small id="${inputId}-${index}-hint">${escapeHtml(field.hint ?? '')}</small>
-        <p class="dialog-input-error" id="${inputId}-${index}-error" data-dialog-input-error role="alert" hidden></p>
+        ${field.hint ? `<small id="${inputId}-${index}-hint">${escapeHtml(field.hint)}</small>` : ''}
       </div>`).join('')}
       ${
         params.checkboxLabel
@@ -141,107 +140,87 @@ function buildDialog(params: {
       <div class="modal-footer">
         ${
           params.showCancel
-            ? `<button type="button" class="btn btn-secondary" data-action="cancel">${escapeHtml(params.cancelLabel)}</button>`
+            ? `<button type="button" class="btn btn-secondary" data-action="cancel" data-modal-close>${escapeHtml(params.cancelLabel)}</button>`
             : ''
         }
         <button type="button" class="btn ${params.confirmClass}" data-action="confirm">${escapeHtml(params.confirmLabel)}</button>
       </div>
     </div>
-  `;
-
-  const checkbox = backdrop.querySelector('[data-action="remember"]') as HTMLInputElement | null;
-  const inputs = [...backdrop.querySelectorAll<HTMLInputElement>('[data-dialog-input]')];
-  const errors = [...backdrop.querySelectorAll<HTMLElement>('[data-dialog-input-error]')];
+  `,
+    signal: params.signal,
+    initialFocus: false,
+    onKeydown: (event) => onEnter(event),
+    onClose: () => params.onResolve(confirmed, !!checkbox?.checked, inputs[0]?.value ?? '', inputs.map(field => field.value), choice),
+  });
+  const card = shell.card;
+  const checkbox = card.querySelector<HTMLInputElement>('[data-action="remember"]');
+  const inputs = [...card.querySelectorAll<HTMLInputElement>('[data-dialog-input]')];
   const input = inputs[params.focusInput ?? 0];
-  const confirmButton = backdrop.querySelector<HTMLButtonElement>('[data-action="confirm"]');
-  const validateInput = (): boolean => {
-    let valid = true;
+  const confirmButton = card.querySelector<HTMLButtonElement>('[data-action="confirm"]');
+  const errors = new Map<HTMLInputElement, string>();
+  /**
+   * Typing only marks a refused value and holds confirmation back; the reason
+   * goes to the shared toast when a value turns invalid and on every attempt to confirm.
+   */
+  const validateInput = (announce: 'changes' | 'first' | 'none'): boolean => {
+    let reported = false;
     inputs.forEach((field, index) => {
       const error = fields[index].validate?.(field.value);
-      errors[index].textContent = error ?? '';
-      errors[index].hidden = !error;
+      const previous = errors.get(field);
+      if (error) errors.set(field, error); else errors.delete(field);
       field.setAttribute('aria-invalid', String(!!error));
-      if (error) valid = false;
+      const explain = announce === 'first' ? !reported : announce === 'changes' && error !== previous;
+      if (error && explain) {
+        // The mark above follows every edit, so the toast must not clear it on the next keystroke.
+        reportError(error);
+        if (announce === 'first') field.focus();
+        reported = true;
+      }
     });
-    if (confirmButton) confirmButton.disabled = !valid;
-    return valid;
+    if (confirmButton) confirmButton.disabled = errors.size > 0;
+    return errors.size === 0;
   };
 
-  let settled = false;
-  const settle = (confirmed: boolean): void => {
-    if (settled) return;
-    if (confirmed && !validateInput()) { inputs.find(field => field.getAttribute('aria-invalid') === 'true')?.focus(); return; }
-    settled = true;
-    const checked = !!checkbox?.checked;
-    document.removeEventListener('keydown', onKeyDown, true);
-    params.signal?.removeEventListener('abort', onAbort);
-    exitModal(backdrop);
-    if (previousFocus instanceof HTMLElement && previousFocus.isConnected && !previousFocus.closest('[inert], [hidden], [data-ui-closing]')) {
-      previousFocus.focus();
+  const settle = (value: boolean): void => {
+    if (shell.closed) return;
+    if (value && !validateInput('first')) return;
+    confirmed = value;
+    shell.close('button');
+  };
+
+  const choiceCards = [...card.querySelectorAll<HTMLButtonElement>('[data-dialog-choice]')];
+  const select = (choiceCard: HTMLButtonElement): void => {
+    choice = choiceCard.dataset.dialogChoice ?? choice;
+    for (const other of choiceCards) other.setAttribute('aria-pressed', String(other === choiceCard));
+  };
+  for (const choiceCard of choiceCards) choiceCard.addEventListener('click', () => select(choiceCard), { signal: shell.signal });
+
+  function onEnter(e: KeyboardEvent): void {
+    if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (params.requireUserGesture && (!e.isTrusted || e.repeat)) return;
+    if (e.target === checkbox) return;
+    if (e.target instanceof HTMLButtonElement && choiceCards.includes(e.target)) {
+      // Enter picks the focused card; confirming stays a separate, deliberate action.
+      select(e.target);
+      return;
     }
-    params.onResolve(confirmed, checked, inputs[0]?.value ?? '', inputs.map(field => field.value), choice);
-  };
-
-  const choiceCards = [...backdrop.querySelectorAll<HTMLButtonElement>('[data-dialog-choice]')];
-  const select = (card: HTMLButtonElement): void => {
-    choice = card.dataset.dialogChoice ?? choice;
-    for (const other of choiceCards) other.setAttribute('aria-pressed', String(other === card));
-  };
-  for (const card of choiceCards) card.addEventListener('click', () => select(card));
-
-  const onAbort = (): void => settle(false);
-  const onKeyDown = (e: KeyboardEvent): void => {
-    if (!handlesModalKey(backdrop, e)) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopImmediatePropagation();
+    if (e.target instanceof HTMLElement && e.target.dataset.action === 'cancel') {
       settle(false);
-    } else if (e.key === 'Enter') {
-      if (e.isComposing || e.keyCode === 229) return;
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      if (params.requireUserGesture && (!e.isTrusted || e.repeat || e.isComposing || e.keyCode === 229)) return;
-      if (e.target === checkbox) return;
-      if (e.target instanceof HTMLButtonElement && choiceCards.includes(e.target)) {
-        // Enter picks the focused card; confirming stays a separate, deliberate action.
-        select(e.target);
-        return;
-      }
-      if (e.target instanceof HTMLElement && e.target.dataset.action === 'cancel') {
-        settle(false);
-        return;
-      }
-      settle(true);
-    } else if (e.key === 'Tab') {
-      const controls = [...backdrop.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)')];
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last?.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first?.focus();
-      }
+      return;
     }
-  };
+    settle(true);
+  }
 
   confirmButton?.addEventListener('click', (event) => {
     if (!params.requireUserGesture || event.isTrusted) settle(true);
-  });
-  backdrop.querySelector('[data-action="cancel"]')?.addEventListener('click', () => settle(false));
-  backdrop.addEventListener('mousedown', (e) => {
-    if (e.target === backdrop) settle(false);
-  });
-  document.addEventListener('keydown', onKeyDown, true);
-  params.signal?.addEventListener('abort', onAbort, { once: true });
-  inputs.forEach(field => field.addEventListener('input', validateInput));
+  }, { signal: shell.signal });
+  inputs.forEach(field => field.addEventListener('input', () => validateInput('changes'), { signal: shell.signal }));
 
-  document.body.appendChild(backdrop);
-  enterModal(backdrop);
-  if (params.signal?.aborted) { settle(false); return; }
-  validateInput();
-  if (params.focusCancel && params.showCancel) backdrop.querySelector<HTMLElement>('[data-action="cancel"]')?.focus();
+  if (shell.closed) return;
+  validateInput('none');
+  if (params.focusCancel && params.showCancel) card.querySelector<HTMLElement>('[data-action="cancel"]')?.focus();
   else if (input) { input.focus(); input.select(); }
   else confirmButton?.focus();
 }

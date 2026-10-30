@@ -4,16 +4,17 @@ import { settingsStore } from '../../stores/settingsStore';
 import { t } from '../../i18n';
 import { escapeHtml } from '../../utils/html';
 import { nicknameError } from '../../utils/nickname';
-import { enterModal, exitModal, handlesModalKey } from '../../utils/modalSurface';
+import { openModal, type ModalShell } from '../../utils/modalShell';
 import { cancelModalStep, replaceModalStep } from '../../utils/modalSteps';
 import { setSurfaceVisible } from '../../utils/surfaceVisibility';
-import { animateEnter, cancelSurfaceMotion } from '../../utils/surfaceMotion';
-import { attachCapacityEstimatorEvents, renderCapacityEstimatorHtml, renderWhatPassesWhereTableHtml } from '../../utils/voiceModeInfo';
+import { errorMessage, reportError, useAppValidation } from '../../utils/feedback';
+import { attachCapacityEstimatorEvents, renderCapacityEstimatorHtml, renderVoiceModeCards, renderWhatPassesWhereTableHtml } from '../../utils/voiceModeInfo';
+import { selectChoiceCard } from '../../utils/formControls';
 import { clientLog } from '../../core/ClientLogService';
 import { assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, updateSessionAvatar } from '../../core/serverConnection';
 import { ensureHostedServerStarted, findOwnedServer } from '../../core/hostedServerStart';
 import { checkServerOnline } from '../../utils/serverStatus';
-import { showAlert, showConfirm } from '../Dialog';
+import { showConfirm } from '../Dialog';
 import { joinInviteModal } from '../JoinInviteModal';
 import { onboardingWizard, type WizardExit } from '../OnboardingWizard';
 
@@ -36,6 +37,7 @@ interface DiscoveredServer {
 }
 
 class AddServerModal {
+  private shell: ModalShell | null = null;
   private modalEl: HTMLElement | null = null;
   private screen: AddServerScreen = 'choice';
   private connectionPending = false;
@@ -48,10 +50,8 @@ class AddServerModal {
   public open(screen: AddServerScreen = 'choice'): void {
     this.close(true);
     this.screen = screen;
-    const modal = this.createBackdrop();
-    modal.innerHTML = this.cardMarkup();
-    this.bindCard(modal);
-    enterModal(modal);
+    const shell = this.openShell(this.cardMarkup());
+    this.bindCard(shell.card);
   }
 
   /**
@@ -62,51 +62,50 @@ class AddServerModal {
   public openGuide(onClosed?: () => void): void {
     if (this.guide) return;
     const opening = !this.modalEl;
-    const modal = this.modalEl ?? this.createBackdrop();
+    const modal = this.modalEl ?? this.openShell('<section class="modal-card onboarding-card" aria-labelledby="onboarding-title"></section>').element;
     this.stopLanDiscovery();
     this.guide = { returnTo: opening ? null : this.screen, parked: null, onClosed };
     onboardingWizard.start(modal, 'guide', (result) => this.leaveGuide(result), opening ? 0 : 1);
-    if (opening) enterModal(modal);
+    if (opening) modal.querySelector<HTMLElement>(':scope > .modal-card button')?.focus({ preventScroll: true });
   }
 
   public close(immediate = false): void {
-    if (!this.modalEl) return;
-    const element = this.modalEl;
-    const guide = this.guide;
-    this.modalEl = null;
-    this.guide = null;
-    if (guide) onboardingWizard.stop();
-    this.stopLanDiscovery();
-    for (const off of this.unbindLanListeners.splice(0)) off();
-    document.removeEventListener('keydown', this.handleKeyDown, true);
-    exitModal(element, immediate);
-    guide?.onClosed?.();
+    this.shell?.close('api', immediate);
   }
 
-  private createBackdrop(): HTMLElement {
+  /** The guide and the forms take turns in this one card; the shell owns its lifecycle. */
+  private openShell(card: string): ModalShell {
     this.setupLanDiscoveryListeners();
-    const modal = document.createElement('div');
-    modal.className = 'modal-backdrop';
-    modal.id = 'add-server-modal';
-    modal.addEventListener('mousedown', (event) => {
-      if (event.target === modal) this.close();
+    const shell = openModal({
+      card,
+      initialFocus: false,
+      onClose: () => {
+        if (this.shell !== shell) return;
+        const guide = this.guide;
+        this.shell = null;
+        this.modalEl = null;
+        this.guide = null;
+        if (guide) onboardingWizard.stop();
+        this.stopLanDiscovery();
+        for (const off of this.unbindLanListeners.splice(0)) off();
+        guide?.onClosed?.();
+      },
     });
-    document.body.appendChild(modal);
-    this.modalEl = modal;
-    document.removeEventListener('keydown', this.handleKeyDown, true);
-    document.addEventListener('keydown', this.handleKeyDown, true);
-    return modal;
+    shell.element.id = 'add-server-modal';
+    this.shell = shell;
+    this.modalEl = shell.element;
+    return shell;
   }
 
   private cardMarkup(): string {
     return `
-      <section class="modal-card add-server-card" role="dialog" aria-modal="true" aria-labelledby="add-server-title">
+      <section class="modal-card add-server-card" aria-labelledby="add-server-title">
         <header class="modal-header">
           <div class="modal-title" id="add-server-title">
             <span class="material-symbols-outlined" aria-hidden="true">add_circle</span>
             <span>${t('addServer.title')}</span>
           </div>
-          <button type="button" class="btn btn-secondary" id="add-server-close" aria-label="${t('common.close')}">×</button>
+          <button type="button" class="btn btn-secondary" id="add-server-close" data-modal-close aria-label="${t('common.close')}">×</button>
         </header>
         <div id="add-server-content">
           ${this.renderContent()}
@@ -296,10 +295,7 @@ class AddServerModal {
             <span>${t('serverSettings.voiceModeLabel')}</span>
           </div>
           <p>${t('serverSettings.voiceModeDesc')}</p>
-          <div class="add-server-choice-row" id="add-server-voice-mode-cards">
-            ${this.renderVoiceModeCard('p2p', true)}
-            ${this.renderVoiceModeCard('sfu', false)}
-          </div>
+          ${renderVoiceModeCards('add-server-voice-mode-cards', 'p2p')}
           <input type="hidden" id="add-server-voice-mode" value="p2p">
           ${renderWhatPassesWhereTableHtml()}
           ${renderCapacityEstimatorHtml('add-server')}
@@ -311,17 +307,6 @@ class AddServerModal {
           </button>
         </div>
       </form>
-    `;
-  }
-
-  private renderVoiceModeCard(mode: VoiceMode, selected: boolean): string {
-    const isP2p = mode === 'p2p';
-    return `
-      <button type="button" class="voice-mode-card ${selected ? 'selected' : ''}" data-mode="${mode}" aria-pressed="${selected}">
-        <span class="material-symbols-outlined md-18" aria-hidden="true">${isP2p ? 'wifi_tethering' : 'hub'}</span>
-        <strong>${t(isP2p ? 'serverSettings.voiceModeP2pTitle' : 'serverSettings.voiceModeSfuTitle')}</strong>
-        <small>${t(isP2p ? 'serverSettings.voiceModeP2pDesc' : 'serverSettings.voiceModeSfuDesc')}</small>
-      </button>
     `;
   }
 
@@ -356,11 +341,10 @@ class AddServerModal {
 
   private attachEvents(): void {
     if (!this.modalEl) return;
-    this.modalEl.querySelector('#add-server-close')?.addEventListener('click', () => this.close());
-    this.modalEl.querySelector('#add-server-option-create')?.addEventListener('click', () => this.switchScreen('create'));
-    this.modalEl.querySelector('#add-server-option-join')?.addEventListener('click', () => this.switchScreen('join'));
-    this.modalEl.querySelector('#add-server-join-back')?.addEventListener('click', () => this.switchScreen('choice'));
-    this.modalEl.querySelector('#add-server-create-back')?.addEventListener('click', () => this.switchScreen('choice'));
+    this.modalEl.querySelector('#add-server-option-create')?.addEventListener('click', () => this.switchScreen('create', 1));
+    this.modalEl.querySelector('#add-server-option-join')?.addEventListener('click', () => this.switchScreen('join', 1));
+    this.modalEl.querySelector('#add-server-join-back')?.addEventListener('click', () => this.switchScreen('choice', -1));
+    this.modalEl.querySelector('#add-server-create-back')?.addEventListener('click', () => this.switchScreen('choice', -1));
     this.modalEl.querySelector('#add-server-open-tutorials')?.addEventListener('click', () => this.openHostTutorials());
     this.modalEl.querySelector('#add-server-open-guide')?.addEventListener('click', () => this.openGuide());
     this.attachJoinEvents();
@@ -377,7 +361,9 @@ class AddServerModal {
       event.preventDefault();
       reviewInvite();
     });
-    this.modalEl.querySelector<HTMLFormElement>('#add-server-join-form')?.addEventListener('submit', async (event) => {
+    const form = this.modalEl.querySelector<HTMLFormElement>('#add-server-join-form');
+    if (form && this.shell) useAppValidation(form, this.shell.signal);
+    form?.addEventListener('submit', async (event) => {
       event.preventDefault();
       await this.submitJoin();
     });
@@ -392,20 +378,17 @@ class AddServerModal {
       if (limitGroup) setSurfaceVisible(limitGroup, limitToggle.checked);
     });
     const modeInput = this.modalEl.querySelector<HTMLInputElement>('#add-server-voice-mode');
-    this.modalEl.querySelectorAll<HTMLButtonElement>('#add-server-voice-mode-cards .voice-mode-card').forEach((card) => {
-      card.addEventListener('click', () => {
-        const mode = card.dataset.mode as VoiceMode | undefined;
-        if (!mode) return;
-        if (modeInput) modeInput.value = mode;
-        this.modalEl?.querySelectorAll<HTMLButtonElement>('#add-server-voice-mode-cards .voice-mode-card').forEach((item) => {
-          const selected = item.dataset.mode === mode;
-          item.classList.toggle('selected', selected);
-          item.setAttribute('aria-pressed', String(selected));
-        });
-      });
+    const modeCards = this.modalEl.querySelector<HTMLElement>('#add-server-voice-mode-cards');
+    modeCards?.addEventListener('click', (event) => {
+      const mode = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-mode]')?.dataset.mode : undefined;
+      if (mode !== 'p2p' && mode !== 'sfu') return;
+      if (modeInput) modeInput.value = mode;
+      selectChoiceCard(modeCards, 'data-mode', mode);
     });
     attachCapacityEstimatorEvents(this.modalEl, 'add-server');
-    this.modalEl.querySelector<HTMLFormElement>('#add-server-create-form')?.addEventListener('submit', async (event) => {
+    const form = this.modalEl.querySelector<HTMLFormElement>('#add-server-create-form');
+    if (form && this.shell) useAppValidation(form, this.shell.signal);
+    form?.addEventListener('submit', async (event) => {
       event.preventDefault();
       await this.submitCreate();
     });
@@ -440,21 +423,15 @@ class AddServerModal {
     });
   }
 
-  private switchScreen(screen: AddServerScreen): void {
+  /** Forward to a form or back to the choice: the card slides the way the person is going. */
+  private switchScreen(screen: AddServerScreen, direction: number): void {
     this.screen = screen;
     if (screen !== 'join') this.stopLanDiscovery();
-    if (!this.modalEl) return;
-    const content = this.modalEl.querySelector<HTMLElement>('#add-server-content');
-    if (!content) return;
-    cancelSurfaceMotion(content);
-    content.innerHTML = this.renderContent();
-    animateEnter(content, 'panel');
-    this.attachEvents();
+    if (this.modalEl) this.showCard(this.modalEl, direction);
   }
 
   private async submitJoin(): Promise<void> {
     if (!this.modalEl || this.connectionPending) return;
-    this.hideError();
     const invitation = this.modalEl.querySelector<HTMLInputElement>('#add-server-invite')?.value.trim();
     if (invitation) {
       await this.reviewInviteLink(invitation);
@@ -468,7 +445,6 @@ class AddServerModal {
 
   private async submitCreate(): Promise<void> {
     if (!this.modalEl || this.connectionPending) return;
-    this.hideError();
     const serverName = this.modalEl.querySelector<HTMLInputElement>('#add-server-name')?.value.trim() ?? '';
     const port = Number(this.modalEl.querySelector<HTMLInputElement>('#add-server-local-port')?.value ?? 0);
     const password = this.modalEl.querySelector<HTMLInputElement>('#add-server-access-password')?.value || undefined;
@@ -513,7 +489,7 @@ class AddServerModal {
       clientLog.warn('SERVER_HOST', 'Could not create the local server from the add-server modal', {
         error: error instanceof Error ? error.message : String(error),
       });
-      this.showError(error instanceof Error && error.message ? error.message : t('connection.createServerError'));
+      this.showError(errorMessage(error, t('connection.createServerError')));
     } finally {
       this.setConnectionPending(false);
     }
@@ -566,7 +542,7 @@ class AddServerModal {
       clientLog.warn('CONNECTION', 'Could not join the server from the add-server modal', {
         error: error instanceof Error ? error.message : String(error),
       });
-      this.showError(error instanceof Error && error.message ? error.message : t('connection.connectError'));
+      this.showError(errorMessage(error, t('connection.connectError')));
     } finally {
       this.setConnectionPending(false);
       await window.api?.stopLanDiscovery?.();
@@ -627,24 +603,8 @@ class AddServerModal {
   }
 
   private showError(message: string): void {
-    void showAlert({ title: t('common.error'), message, variant: 'danger' });
+    if (this.modalEl) reportError(message);
   }
-
-  private hideError(): void {
-    const error = this.modalEl?.querySelector<HTMLElement>('#add-server-error');
-    if (!error) return;
-    error.textContent = '';
-    error.hidden = true;
-  }
-
-  private readonly handleKeyDown = (event: KeyboardEvent): void => {
-    if (!handlesModalKey(this.modalEl, event)) return;
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      this.close();
-    }
-  };
 }
 
 export const addServerModal = new AddServerModal();

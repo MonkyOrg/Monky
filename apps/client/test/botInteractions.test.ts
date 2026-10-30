@@ -365,7 +365,8 @@ test('successful forms disappear and discard inputs, while failed submissions re
   assert.match(renderBotInvocation(invocation), /data-loading="1" aria-busy="true"/);
   store.failFormSubmit('invoke-one', 'step-one', 'Try again');
   assert.match(renderBotInvocation(invocation), /Private input/);
-  assert.match(renderBotInvocation(invocation), /Try again/);
+  // Why it failed goes to the alert toast; the card only keeps the form open for another try.
+  assert.doesNotMatch(renderBotInvocation(invocation), /Try again|bot-error|data-loading="1"/);
   store.beginFormSubmit('invoke-one', 'step-one');
   store.acknowledgeForm({ invocationId: 'invoke-one', interactionId: 'step-one', values: { title: 'Private input' } });
   assert.deepEqual(invocation.forms[0].values, {});

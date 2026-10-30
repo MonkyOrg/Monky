@@ -10,8 +10,11 @@ import type {
 } from '@monky/shared';
 import { getLanguage, t, type TranslationKey } from '../../../i18n';
 import { formatBytes } from '../../../utils/attachment';
+import { reportError } from '../../../utils/feedback';
 import { escapeHtml } from '../../../utils/html';
 import { renderLoadingIndicator } from '../../../utils/loadingIndicator';
+import { renderLoadingError } from '../../../utils/loadingSkeleton';
+import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { BotDeviceStorageList } from '../BotDeviceStorageList';
 
 type Mutation =
@@ -53,13 +56,29 @@ function sectionHtml(id: string, label: TranslationKey, content: string): string
   </section>`;
 }
 
-function identityHtml(): string {
+/** A collapsed panel under its button; `toggleDisclosure` opens it with the app's motion. */
+function disclosureHtml(id: string, label: string, panelField: string): string {
+  return `<button type="button" class="local-tools-disclosure" data-local-disclosure aria-expanded="false" aria-controls="${id}">
+      <span class="material-symbols-outlined md-16" data-disclosure-icon aria-hidden="true">expand_more</span>
+      <span data-field="${panelField}-label">${escapeHtml(label)}</span>
+    </button>
+    <div id="${id}" data-field="${panelField}" style="white-space: pre-wrap; color: var(--text-muted); margin-top: 4px;" hidden></div>`;
+}
+
+function toggleDisclosure(button: HTMLButtonElement): void {
+  const panel = document.getElementById(button.getAttribute('aria-controls') ?? '');
+  if (!panel) return;
+  const expanded = button.getAttribute('aria-expanded') !== 'true';
+  button.setAttribute('aria-expanded', String(expanded));
+  const icon = button.querySelector('[data-disclosure-icon]');
+  if (icon) icon.textContent = expanded ? 'expand_less' : 'expand_more';
+  setSurfaceVisible(panel, expanded);
+}
+
+function identityHtml(id: string): string {
   return `<strong data-field="identity-title"></strong>
     <div data-field="identity-origin" style="color: var(--text-muted); margin-top: 4px;"></div>
-    <details style="margin-top: 4px;">
-      <summary style="cursor: pointer; color: var(--text-muted);">${escapeHtml(t('localExecution.identityDetails'))}</summary>
-      <div data-field="identity-details" style="white-space: pre-wrap; color: var(--text-muted); margin-top: 4px;"></div>
-    </details>`;
+    <div style="margin-top: 4px;">${disclosureHtml(`${id}-identity`, t('localExecution.identityDetails'), 'identity-details')}</div>`;
 }
 
 function renderIdentity(row: HTMLElement, bot: LocalBotIdentity): void {
@@ -102,7 +121,7 @@ function reconcileRows<T>(
 export class LocalToolsTab {
   private root: HTMLElement | null = null;
   private readonly tabId = ++nextTabId;
-  private nextPermissionId = 0;
+  private nextRowId = 0;
   private generation = 0;
   private readSequence = 0;
   private readController: AbortController | null = null;
@@ -114,7 +133,6 @@ export class LocalToolsTab {
   private loading = false;
   private loadFailure: LocalExecutionFailure | null = null;
   private feedback = '';
-  private feedbackError = false;
   private pending: Mutation | { kind: 'source'; tool: LocalToolId } | null = null;
   private permissionIntent: Extract<Mutation, { kind: 'permission' }> | null = null;
   private tools = new Map<string, HTMLElement>();
@@ -127,10 +145,10 @@ export class LocalToolsTab {
       <p style="margin-top: 0; color: var(--text-secondary);">${escapeHtml(t('localExecution.description'))}</p>
       <p style="color: var(--text-muted);">${escapeHtml(t('localExecution.safety'))}</p>
       <div data-local-loading role="status">${renderLoadingIndicator(t('localExecution.loading'))}</div>
-      <div data-local-load-error class="bot-error" role="alert" hidden></div>
+      <div data-local-load-error hidden></div>
       <p data-local-unsupported role="status" hidden>${escapeHtml(t('localExecution.unsupported'))}</p>
       <div data-local-feedback role="status" aria-live="polite" aria-atomic="true"
-        style="position: sticky; top: 0; background: var(--bg-secondary); z-index: 1; overflow-wrap: anywhere;" hidden></div>
+        style="position: sticky; top: 0; background: var(--bg-secondary); color: var(--text-secondary); z-index: 1; overflow-wrap: anywhere;" hidden></div>
       ${sectionHtml('local-tools-storage', 'localExecution.storage', `
         <div style="display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 10px;">
           <div>${escapeHtml(t('localExecution.toolsSize'))}<br><strong data-local-tools-size>${escapeHtml(t('localExecution.notLoaded'))}</strong></div>
@@ -169,6 +187,17 @@ export class LocalToolsTab {
     for (const list of root.querySelectorAll('[data-local-list]')) list.replaceChildren();
     const click = (event: Event) => {
       if (!this.isCurrent(root, generation) || !(event.target instanceof Element)) return;
+      const disclosure = event.target.closest<HTMLButtonElement>('button[data-local-disclosure]');
+      if (disclosure && root.contains(disclosure)) {
+        toggleDisclosure(disclosure);
+        return;
+      }
+      // The notice of a read that failed offers to read again, like Refresh.
+      const retry = event.target.closest<HTMLButtonElement>('button[data-loading-retry]');
+      if (retry && root.contains(retry)) {
+        if (!this.loading && this.subscribe(root, generation)) void this.refreshState(root, generation);
+        return;
+      }
       const button = event.target.closest<HTMLButtonElement>('button[data-local-action]');
       if (!button || !root.contains(button) || button.disabled || button.getAttribute('aria-disabled') === 'true' || this.pending) return;
       this.handleAction(button);
@@ -179,7 +208,7 @@ export class LocalToolsTab {
       if (!input.hasAttribute('data-local-permission')) return;
       const permission = this.snapshot?.permissions.find((entry) => entry.id === input.dataset.localPermission);
       if (!permission) {
-        this.setFeedback(t('localExecution.failure.invalid_request'), true);
+        this.fail(t('localExecution.failure.invalid_request'));
       } else if (!this.pending && !input.disabled && input.getAttribute('aria-disabled') !== 'true'
         && input.checked !== (permission.decision !== 'deny')) {
         void this.mutate({ kind: 'permission', permissionId: permission.id, enabled: input.checked });
@@ -265,7 +294,7 @@ export class LocalToolsTab {
       return;
     }
     if (!this.snapshot || this.loadFailure) {
-      this.setFeedback(t('localExecution.failure.executor_unavailable'), true);
+      this.fail(t('localExecution.failure.executor_unavailable'));
       return;
     }
     switch (button.dataset.localAction) {
@@ -278,7 +307,7 @@ export class LocalToolsTab {
         if (tool) {
           if (button.dataset.localAction === 'remove') void this.mutate({ kind: 'remove', tool: tool.id });
           else if (tool.sourceUrl) void this.openSource(tool.id, tool.sourceUrl);
-          else this.setFeedback(t('localExecution.failure.invalid_request'), true);
+          else this.fail(t('localExecution.failure.invalid_request'));
           return;
         }
         break;
@@ -292,7 +321,7 @@ export class LocalToolsTab {
         break;
       }
     }
-    this.setFeedback(t('localExecution.failure.invalid_request'), true);
+    this.fail(t('localExecution.failure.invalid_request'));
   }
 
   private requestMutation(mutation: Mutation): Promise<LocalExecutionMutationResult> {
@@ -332,7 +361,7 @@ export class LocalToolsTab {
         this.setFeedback(t('localExecution.actionCancelled'));
         break;
       case 'failed':
-        this.setFeedback(t(`localExecution.failure.${result.reason}`), true);
+        this.fail(t(`localExecution.failure.${result.reason}`));
         break;
     }
     await this.refreshState(root, generation);
@@ -355,13 +384,20 @@ export class LocalToolsTab {
     }
     if (!this.isCurrent(root, generation)) return;
     this.pending = null;
-    this.setFeedback(success ? '' : t('localExecution.sourceFailed'), !success);
+    if (success) this.setFeedback('');
+    else this.fail(t('localExecution.sourceFailed'));
   }
 
-  private setFeedback(message: string, error = false): void {
+  /** The band above the panel only tells what is pending or done. */
+  private setFeedback(message: string): void {
     this.feedback = message;
-    this.feedbackError = error;
     this.renderState();
+  }
+
+  /** A failed action is explained in the shared alert toast, never in the panel. */
+  private fail(message: string): void {
+    this.setFeedback('');
+    reportError(message);
   }
 
   private setControl(control: HTMLButtonElement | HTMLInputElement, disabled: boolean): void {
@@ -381,9 +417,17 @@ export class LocalToolsTab {
     const unavailable = !snapshot || !!this.loadFailure;
     show(requiredElement(root, '[data-local-loading]'), this.loading && !snapshot);
     const error = requiredElement(root, '[data-local-load-error]');
-    show(error, !!this.loadFailure);
-    setText(root, '[data-local-load-error]', this.loadFailure
-      ? t('localExecution.loadFailed', { reason: t(`localExecution.failure.${this.loadFailure}`) }) : '');
+    const failure = this.loadFailure
+      ? t('localExecution.loadFailed', { reason: t(`localExecution.failure.${this.loadFailure}`) }) : '';
+    // Focus on the notice's retry moves to Refresh once the notice goes.
+    let handOff = false;
+    if (error.dataset.message !== failure) {
+      handOff = !failure && error.contains(document.activeElement);
+      error.dataset.message = failure;
+      // A read that failed gives way to the kit's notice with a retry, never a loose alert (#490).
+      error.innerHTML = failure ? renderLoadingError(failure) : '';
+    }
+    show(error, !!failure);
     show(requiredElement(root, '[data-local-unsupported]'), snapshot?.supported === false);
     const feedback = requiredElement(root, '[data-local-feedback]');
     show(feedback, !!this.feedback);
@@ -395,11 +439,11 @@ export class LocalToolsTab {
       else feedback.textContent = this.feedback;
     }
     feedback.setAttribute('aria-busy', String(busy));
-    const color = this.feedbackError ? 'var(--text-danger)' : 'var(--text-secondary)';
-    if (feedback.style.color !== color) feedback.style.color = color;
     setText(root, '[data-local-tools-size]', snapshot ? formatBytes(snapshot.toolsBytes) : t('localExecution.notLoaded'));
     setText(root, '[data-local-cache-size]', snapshot ? formatBytes(snapshot.cacheBytes) : t('localExecution.notLoaded'));
-    this.setControl(requiredElement<HTMLButtonElement>(root, '[data-local-action="refresh"]'), this.loading);
+    const refresh = requiredElement<HTMLButtonElement>(root, '[data-local-action="refresh"]');
+    this.setControl(refresh, this.loading);
+    if (handOff) refresh.focus({ preventScroll: true });
     this.setControl(requiredElement<HTMLButtonElement>(root, '[data-local-action="cache"]'), unavailable || snapshot?.cacheBytes === 0);
     for (const kind of ['tools', 'permissions', 'tasks'] as const) {
       show(requiredElement(root, `[data-local-empty="${kind}"]`), !!snapshot && snapshot[kind].length === 0);
@@ -414,9 +458,14 @@ export class LocalToolsTab {
       () => this.createTaskRow(), (row, task) => this.renderTask(row, task, unavailable));
   }
 
+  private rowId(kind: string): string {
+    return `local-${kind}-${this.tabId}-${++this.nextRowId}`;
+  }
+
   private createToolRow(): HTMLElement {
     const row = document.createElement('article');
     row.style.cssText = CARD_STYLE;
+    const id = this.rowId('tool');
     row.innerHTML = `<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
         <strong data-field="tool-name"></strong>
         <button type="button" data-local-action="remove" class="btn btn-secondary">${escapeHtml(t('common.remove'))}</button>
@@ -427,26 +476,22 @@ export class LocalToolsTab {
         <div data-field="progress-label"></div>
         <progress style="width: 100%; height: 8px; accent-color: var(--accent-primary);"></progress>
       </div>
-      <div data-field="tool-failure" class="bot-error" hidden></div>
       <div data-field="tool-source" style="overflow-wrap: anywhere;" hidden>
         <button type="button" data-local-action="source" class="bot-field-clear" style="text-align: left; overflow-wrap: anywhere;"></button>
       </div>
-      <details style="margin-top: 8px;">
-        <summary data-field="dependents-label" style="cursor: pointer;"></summary>
-        <div data-field="dependents" style="white-space: pre-wrap; color: var(--text-muted); margin-top: 4px;"></div>
-      </details>`;
+      <div style="margin-top: 8px;">${disclosureHtml(`${id}-dependents`, '', 'dependents')}</div>`;
     return row;
   }
 
   private renderTool(row: HTMLElement, tool: LocalToolInfo, permissions: Map<string, LocalPermissionInfo>, unavailable: boolean): void {
     row.dataset.localToolRow = tool.id;
     setText(row, '[data-field="tool-name"]', TOOL_NAMES[tool.id]);
-    setText(row, '[data-field="tool-status"]', t(`localExecution.toolStatus.${tool.status}`));
+    // Why a tool failed is part of its state, told in its own status line.
+    const status = t(`localExecution.toolStatus.${tool.status}`);
+    setText(row, '[data-field="tool-status"]', tool.failure ? `${status} · ${t(`localExecution.failure.${tool.failure}`)}` : status);
     setText(row, '[data-field="tool-details"]', t('localExecution.toolDetails', {
       version: tool.version ?? t('localExecution.versionUnknown'), size: formatBytes(tool.sizeBytes),
     }));
-    show(requiredElement(row, '[data-field="tool-failure"]'), !!tool.failure);
-    setText(row, '[data-field="tool-failure"]', tool.failure ? t(`localExecution.failure.${tool.failure}`) : '');
     show(requiredElement(row, '[data-field="tool-progress"]'), !!tool.progress);
     if (tool.progress) {
       const { stage, downloadedBytes, totalBytes } = tool.progress;
@@ -492,9 +537,9 @@ export class LocalToolsTab {
     const row = document.createElement('article');
     row.className = 'bot-field';
     row.style.cssText = CARD_STYLE;
-    const id = `local-permission-${this.tabId}-${++this.nextPermissionId}`;
+    const id = this.rowId('permission');
     row.innerHTML = `<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-        <div style="min-width: 0;">${identityHtml()}</div>
+        <div style="min-width: 0;">${identityHtml(id)}</div>
         <label class="toggle-switch">
           <input type="checkbox" role="switch" data-local-permission aria-describedby="${id}-capability ${id}-decision ${id}-identity">
           <span class="toggle-slider"></span>
@@ -502,7 +547,6 @@ export class LocalToolsTab {
       </div>
       <div id="${id}-capability" data-field="permission-capability" style="margin-top: 8px;"></div>
       <div id="${id}-decision" data-field="permission-decision" style="color: var(--text-muted);"></div>`;
-    requiredElement(row, '[data-field="identity-details"]').id = `${id}-identity`;
     return row;
   }
 
@@ -525,7 +569,7 @@ export class LocalToolsTab {
     const row = document.createElement('article');
     row.style.cssText = CARD_STYLE;
     row.innerHTML = `<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-        <div style="min-width: 0;">${identityHtml()}</div>
+        <div style="min-width: 0;">${identityHtml(this.rowId('task'))}</div>
         <button type="button" data-local-action="cancel" class="btn btn-secondary">${escapeHtml(t('common.cancel'))}</button>
       </div>
       <div data-field="task-operation" style="margin-top: 8px;"></div>
@@ -567,7 +611,6 @@ export class LocalToolsTab {
     this.loading = false;
     this.loadFailure = null;
     this.feedback = '';
-    this.feedbackError = false;
     this.tools.clear();
     this.permissions.clear();
     this.tasks.clear();

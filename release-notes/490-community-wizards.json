@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Os assistentes de enquete, formulário e evento ficaram iguais entre si e deslizam entre as etapas; um clique duplo não publica mais sem passar pela revisão, e com o movimento reduzido as etapas trocam sem animação.",
+  "en": "The poll, form and event wizards now look and behave alike and slide between steps; a double click no longer publishes without the review step, and with reduced motion steps change without animation."
+}

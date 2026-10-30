@@ -668,7 +668,7 @@ async function setupModalSmoke() {
       await settle(true);
       check(root.querySelector('#checkbox-soundboard-limiter').checked, 'Modal activation synchronizes the settings view');
       check(document.activeElement === toggle(), 'Keyboard focus survives asynchronous preparation');
-      check(getComputedStyle(toggle().closest('.toggle-switch')).outlineStyle === 'solid',
+      check(getComputedStyle(toggle().closest('.toggle-switch').querySelector('.toggle-slider')).outlineStyle === 'solid',
         `Switch focus is visible (document=${document.hasFocus()}, focus-visible=${toggle().matches(':focus-visible')})`);
     },
     sliderFocused() {

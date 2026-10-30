@@ -3,7 +3,10 @@ import QRCode from 'qrcode';
 import { IDENTITY_EXPORT_PREFIX, isSecretEnvelope, type AppIdentityImportResult, type DmExportMode } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { openModal } from '../utils/modalShell';
+import { setSurfaceVisible } from '../utils/surfaceVisibility';
+import { showWithMotion } from '../utils/surfaceMotion';
+import { copyText, errorMessage, reportError } from '../utils/feedback';
 import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBackup, scopesInBackup } from '../utils/backup';
 import { isButtonLoading, setButtonLoading, withButtonLoading } from '../utils/buttonLoading';
 import { showConfirm } from './Dialog';
@@ -18,136 +21,99 @@ export interface IdentityInfo {
   extrasFailed?: boolean;
 }
 
+/** One "include in the code" switch; its label names the switch. */
+function includeRow(id: string, label: string, options: { checked?: boolean; hint?: string } = {}): string {
+  const control = `<label class="toggle-switch">
+      <input type="checkbox" role="switch" id="${id}"${options.hint ? ` aria-describedby="${id}-hint"` : ''}${options.checked ? ' checked' : ''}>
+      <span class="toggle-slider"></span>
+    </label>`;
+  const name = `<label style="font-size: 13px; cursor: pointer;" for="${id}">${escapeHtml(label)}</label>`;
+  return options.hint
+    ? `<div id="${id}-row" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-left: 16px;">
+        <div style="display: grid; gap: 2px;">${name}<span id="${id}-hint" style="font-size: 11px; color: var(--text-muted);">${escapeHtml(options.hint)}</span></div>
+        ${control}
+      </div>`
+    : `<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">${name}${control}</div>`;
+}
+
 export async function showIdentityExportDialog(currentClientId: string): Promise<void> {
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  backdrop.style.zIndex = '10002';
-  backdrop.innerHTML = `
-    <div class="modal-card dialog-card" role="dialog" aria-modal="true" style="max-width: 520px; width: min(92vw, 520px);">
+  const shell = openModal({
+    card: `
+    <div class="modal-card dialog-card" style="max-width: 520px; width: min(92vw, 520px);">
       <div class="modal-header">
         <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
-          <span class="material-symbols-outlined" style="color: var(--accent-primary);">qr_code_2</span>
-          <span>${t('identity.exportTitle')}</span>
+          <span class="material-symbols-outlined" style="color: var(--accent-primary);" aria-hidden="true">qr_code_2</span>
+          <span>${escapeHtml(t('identity.exportTitle'))}</span>
         </div>
-        <button class="modal-close-btn" data-action="cancel">&times;</button>
+        <button type="button" class="modal-close-btn" data-action="cancel" data-modal-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
       </div>
-      <div id="identity-export-error" class="error-banner"></div>
       <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 12px;">
-        ${t('identity.exportIntro')}
+        ${escapeHtml(t('identity.exportIntro'))}
       </div>
-      <p class="dialog-option-hint" id="identity-export-compatibility" style="margin: 0 0 12px;">${t('identity.exportCompatibility')}</p>
+      <p class="dialog-option-hint" id="identity-export-compatibility" style="margin: 0 0 12px;">${escapeHtml(t('identity.exportCompatibility'))}</p>
       <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">
-        ${t('identity.clientIdLabel')} <span style="font-family: var(--font-mono); color: var(--text-primary);">${escapeHtml(currentClientId)}</span>
+        ${escapeHtml(t('identity.clientIdLabel'))} <span style="font-family: var(--font-mono); color: var(--text-primary);">${escapeHtml(currentClientId)}</span>
       </div>
       <div class="form-group">
-        <label for="identity-export-password">${t('identity.passwordLabel')}</label>
-        <input id="identity-export-password" type="password" placeholder="${t('identity.passwordPlaceholder')}" aria-describedby="identity-export-password-hint">
-        <p class="dialog-option-hint" id="identity-export-password-hint">${exportPasswordHint()}</p>
+        <label for="identity-export-password">${escapeHtml(t('identity.passwordLabel'))}</label>
+        <input id="identity-export-password" type="password" placeholder="${escapeHtml(t('identity.passwordPlaceholder'))}" aria-describedby="identity-export-password-hint">
+        <p class="dialog-option-hint" id="identity-export-password-hint">${escapeHtml(exportPasswordHint())}</p>
       </div>
       <div style="display: grid; gap: 10px; margin-bottom: 14px;">
-        <div style="font-size: 11px; color: var(--text-muted);">${t('backup.includeLabel')}</div>
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-          <label style="font-size: 13px; cursor: pointer;" for="identity-export-include-servers">${t('backup.scopeServers')}</label>
-          <label class="toggle-switch" aria-label="${t('backup.scopeServers')}">
-            <input type="checkbox" id="identity-export-include-servers">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-          <label style="font-size: 13px; cursor: pointer;" for="identity-export-include-settings">${t('backup.scopeSettings')}</label>
-          <label class="toggle-switch" aria-label="${t('backup.scopeSettings')}">
-            <input type="checkbox" id="identity-export-include-settings">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-          <label style="font-size: 13px; cursor: pointer;" for="identity-export-include-friends">${t('backup.scopeFriends')}</label>
-          <label class="toggle-switch" aria-label="${t('backup.scopeFriends')}">
-            <input type="checkbox" id="identity-export-include-friends" checked>
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div id="identity-export-history-row" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-left: 16px;">
-          <div style="display: grid; gap: 2px;">
-            <label style="font-size: 13px; cursor: pointer;" for="identity-export-include-history">${t('backup.scopeDmHistory')}</label>
-            <span style="font-size: 11px; color: var(--text-muted);">${t('backup.scopeDmHistoryHint')}</span>
-          </div>
-          <label class="toggle-switch" aria-label="${t('backup.scopeDmHistory')}">
-            <input type="checkbox" id="identity-export-include-history">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
+        <div style="font-size: 11px; color: var(--text-muted);">${escapeHtml(t('backup.includeLabel'))}</div>
+        ${includeRow('identity-export-include-servers', t('backup.scopeServers'))}
+        ${includeRow('identity-export-include-settings', t('backup.scopeSettings'))}
+        ${includeRow('identity-export-include-friends', t('backup.scopeFriends'), { checked: true })}
+        ${includeRow('identity-export-include-history', t('backup.scopeDmHistory'), { hint: t('backup.scopeDmHistoryHint') })}
       </div>
       <div style="display: flex; gap: 8px; margin-bottom: 14px;">
-        <button type="button" id="btn-run-export-identity" class="btn btn-primary" style="flex: 1;">${t('identity.exportAction')}</button>
-        <button type="button" id="btn-copy-export-identity" class="btn btn-secondary" style="display: none;">${t('identity.copyCode')}</button>
-        <button type="button" id="btn-file-export-identity" class="btn btn-secondary" style="display: none;">${t('backup.saveToFile')}</button>
+        <button type="button" id="btn-run-export-identity" class="btn btn-primary" style="flex: 1;">${escapeHtml(t('identity.exportAction'))}</button>
+        <button type="button" id="btn-copy-export-identity" class="btn btn-secondary" hidden>${escapeHtml(t('identity.copyCode'))}</button>
+        <button type="button" id="btn-file-export-identity" class="btn btn-secondary" hidden>${escapeHtml(t('backup.saveToFile'))}</button>
       </div>
-      <div id="identity-export-result" style="display: none;">
+      <div id="identity-export-result" hidden>
         <div id="identity-export-qr-wrap" style="display: flex; justify-content: center; margin-bottom: 12px;">
-          <img id="identity-export-qr" alt="${t('identity.qrAlt')}" style="width: 220px; height: 220px; border-radius: 12px; background: white; padding: 8px;">
+          <img id="identity-export-qr" alt="${escapeHtml(t('identity.qrAlt'))}" style="width: 220px; height: 220px; border-radius: 12px; background: white; padding: 8px;">
         </div>
-        <div id="identity-export-qr-warning" style="display: none; font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">
-          ${t('backup.qrTooLarge')}
+        <div id="identity-export-qr-warning" hidden style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">
+          ${escapeHtml(t('backup.qrTooLarge'))}
         </div>
         <div class="form-group" style="margin-bottom: 0;">
-          <label for="identity-export-code">${t('identity.codeLabel')}</label>
+          <label for="identity-export-code">${escapeHtml(t('identity.codeLabel'))}</label>
           <textarea id="identity-export-code" readonly style="min-height: 120px; resize: vertical; font-size: 11px; font-family: var(--font-mono);"></textarea>
         </div>
       </div>
     </div>
-  `;
+  `,
+    initialFocus: '#identity-export-password',
+  });
+  const card = shell.card;
+  const options = { signal: shell.signal };
 
-  const cleanup = () => {
-    document.removeEventListener('keydown', onKeyDown, true);
-    exitModal(backdrop);
-  };
-
-  const close = () => cleanup();
-  const onKeyDown = (event: KeyboardEvent) => {
-    if (!handlesModalKey(backdrop, event)) return;
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      close();
-    }
-  };
-
-  const errorBanner = backdrop.querySelector('#identity-export-error') as HTMLElement;
-  const passwordInput = backdrop.querySelector('#identity-export-password') as HTMLInputElement;
-  const exportButton = backdrop.querySelector('#btn-run-export-identity') as HTMLButtonElement;
-  const copyButton = backdrop.querySelector('#btn-copy-export-identity') as HTMLButtonElement;
-  const fileButton = backdrop.querySelector('#btn-file-export-identity') as HTMLButtonElement;
-  const includeServers = backdrop.querySelector('#identity-export-include-servers') as HTMLInputElement;
-  const includeSettings = backdrop.querySelector('#identity-export-include-settings') as HTMLInputElement;
-  const includeFriends = backdrop.querySelector('#identity-export-include-friends') as HTMLInputElement;
-  const includeHistory = backdrop.querySelector('#identity-export-include-history') as HTMLInputElement;
-  const historyRow = backdrop.querySelector('#identity-export-history-row') as HTMLElement;
+  const passwordInput = card.querySelector('#identity-export-password') as HTMLInputElement;
+  const exportButton = card.querySelector('#btn-run-export-identity') as HTMLButtonElement;
+  const copyButton = card.querySelector('#btn-copy-export-identity') as HTMLButtonElement;
+  const fileButton = card.querySelector('#btn-file-export-identity') as HTMLButtonElement;
+  const includeServers = card.querySelector('#identity-export-include-servers') as HTMLInputElement;
+  const includeSettings = card.querySelector('#identity-export-include-settings') as HTMLInputElement;
+  const includeFriends = card.querySelector('#identity-export-include-friends') as HTMLInputElement;
+  const includeHistory = card.querySelector('#identity-export-include-history') as HTMLInputElement;
+  const historyRow = card.querySelector('#identity-export-include-history-row') as HTMLElement;
   // History travels with the friends list; without friends it has no owner.
   const syncHistoryRow = () => {
     includeHistory.disabled = !includeFriends.checked;
     historyRow.style.opacity = includeFriends.checked ? '1' : '0.5';
   };
-  includeFriends.addEventListener('change', syncHistoryRow);
+  includeFriends.addEventListener('change', syncHistoryRow, options);
   syncHistoryRow();
-  const resultWrapper = backdrop.querySelector('#identity-export-result') as HTMLElement;
-  const qrImage = backdrop.querySelector('#identity-export-qr') as HTMLImageElement;
-  const qrWrap = backdrop.querySelector('#identity-export-qr-wrap') as HTMLElement;
-  const qrWarning = backdrop.querySelector('#identity-export-qr-warning') as HTMLElement;
-  const codeTextarea = backdrop.querySelector('#identity-export-code') as HTMLTextAreaElement;
+  const resultWrapper = card.querySelector('#identity-export-result') as HTMLElement;
+  const qrImage = card.querySelector('#identity-export-qr') as HTMLImageElement;
+  const qrWrap = card.querySelector('#identity-export-qr-wrap') as HTMLElement;
+  const qrWarning = card.querySelector('#identity-export-qr-warning') as HTMLElement;
+  const codeTextarea = card.querySelector('#identity-export-code') as HTMLTextAreaElement;
 
-  const showError = (message: string) => {
-    errorBanner.textContent = message;
-    errorBanner.classList.add('show');
-  };
-
-  const clearError = () => {
-    errorBanner.textContent = '';
-    errorBanner.classList.remove('show');
-  };
-
-  passwordInput.addEventListener('input', () => passwordInput.removeAttribute('aria-invalid'));
+  passwordInput.addEventListener('input', () => passwordInput.removeAttribute('aria-invalid'), options);
   exportButton.addEventListener('click', async () => {
-    clearError();
     if (!acceptExportPassword(passwordInput)) return;
     exportButton.disabled = true;
     exportButton.textContent = t('identity.exporting');
@@ -160,129 +126,120 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
 
       const dmMode: DmExportMode = !includeFriends.checked ? 'none' : includeHistory.checked ? 'history' : 'friends';
       const exported = await window.api.exportIdentity(passwordInput.value, extras, dmMode);
+      if (shell.closed) return;
       codeTextarea.value = exported;
-      resultWrapper.style.display = 'block';
-      copyButton.style.display = 'inline-flex';
-      fileButton.style.display = 'inline-flex';
 
       // A QR code tops out at a couple of kilobytes, and servers plus settings
       // blow past that easily. When it does not fit we drop the QR instead of
       // failing the whole export: the text code and the file still work.
+      let fitsQr = true;
       try {
         qrImage.src = await QRCode.toDataURL(exported, { margin: 1, width: 220 });
-        qrWrap.style.display = 'flex';
-        qrWarning.style.display = 'none';
       } catch {
         qrImage.removeAttribute('src');
-        qrWrap.style.display = 'none';
-        qrWarning.style.display = 'block';
+        fitsQr = false;
       }
-    } catch (error: any) {
-      showError(error?.message || t('identity.exportError'));
+      if (shell.closed) return;
+      qrWrap.hidden = !fitsQr;
+      qrWarning.hidden = fitsQr;
+      for (const button of [copyButton, fileButton]) if (button.hidden) showWithMotion(button, 'notice');
+      setSurfaceVisible(resultWrapper, true);
+    } catch (error: unknown) {
+      if (!shell.closed) reportError(errorMessage(error, t('identity.exportError')), { log: 'IDENTITY', error });
     } finally {
       exportButton.disabled = false;
       exportButton.textContent = t('identity.exportAction');
     }
-  });
+  }, options);
 
   copyButton.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(codeTextarea.value);
-      copyButton.textContent = t('identity.copied');
-      setTimeout(() => {
-        copyButton.textContent = t('identity.copyCode');
-      }, 1500);
-    } catch {
-      codeTextarea.focus();
-      codeTextarea.select();
-    }
-  });
+    if (await copyText(codeTextarea.value, { copied: t('identity.copied'), failed: t('identity.copyFailed') })) return;
+    // Copying by hand stays one keystroke away.
+    codeTextarea.focus();
+    codeTextarea.select();
+  }, options);
 
   fileButton.addEventListener('click', async () => {
-    const result = await withButtonLoading(fileButton, () =>
-      window.api.saveBackupFile(codeTextarea.value, `monky-identidade.${BACKUP_FILE_EXTENSION}`));
-    if (!result) return;
-    if (!result.success && result.error) showError(result.error);
-  });
-
-  backdrop.querySelectorAll('[data-action="cancel"]').forEach((element) => {
-    element.addEventListener('click', close);
-  });
-  backdrop.addEventListener('mousedown', (event) => {
-    if (event.target === backdrop) close();
-  });
-  document.addEventListener('keydown', onKeyDown, true);
-  document.body.appendChild(backdrop);
-  enterModal(backdrop);
-  passwordInput.focus();
+    try {
+      const result = await withButtonLoading(fileButton, () =>
+        window.api.saveBackupFile(codeTextarea.value, `monky-identidade.${BACKUP_FILE_EXTENSION}`));
+      if (result && !result.success && result.error && !shell.closed) reportError(result.error);
+    } catch (error: unknown) {
+      if (!shell.closed) reportError(errorMessage(error, t('identity.exportError')), { log: 'IDENTITY', error });
+    }
+  }, options);
 }
 
 export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
   return await new Promise((resolve) => {
-    const backdrop = document.createElement('div');
-    backdrop.className = 'modal-backdrop';
-    backdrop.style.zIndex = '10002';
-    backdrop.innerHTML = `
-      <div class="modal-card dialog-card" role="dialog" aria-modal="true" style="max-width: 560px; width: min(94vw, 560px);">
-        <div class="modal-header">
-          <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
-            <span class="material-symbols-outlined" style="color: var(--accent-primary);">manage_accounts</span>
-            <span>${t('identity.importTitle')}</span>
-          </div>
-          <button class="modal-close-btn" data-action="cancel">&times;</button>
-        </div>
-        <div id="identity-import-error" class="error-banner"></div>
-        <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 12px;">
-          ${t('identity.importIntro')}
-        </div>
-        <div class="form-group">
-          <label for="identity-import-code">${t('identity.codeLabel')}</label>
-          <textarea id="identity-import-code" placeholder="${IDENTITY_EXPORT_PREFIX}..." style="min-height: 110px; resize: vertical; font-size: 11px; font-family: var(--font-mono);"></textarea>
-        </div>
-        <div class="form-group">
-          <label for="identity-import-password">${t('identity.passwordLabel')}</label>
-          <input id="identity-import-password" type="password" placeholder="${t('identity.passwordPlaceholder')}">
-        </div>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
-          <button type="button" id="btn-import-identity-run" class="btn btn-primary">${t('identity.importAction')}</button>
-          <button type="button" id="btn-import-identity-scan" class="btn btn-secondary">${t('identity.scanQr')}</button>
-          <button type="button" id="btn-import-identity-file" class="btn btn-secondary">${t('backup.loadFromFile')}</button>
-        </div>
-        <div id="identity-import-scan-wrap" style="display: none; border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 10px; background: var(--bg-card);">
-          <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">${t('identity.scanHint')}</div>
-          <video id="identity-import-video" autoplay playsinline muted style="width: 100%; max-height: 260px; border-radius: 10px; background: #000;"></video>
-        </div>
-      </div>
-    `;
-
     let stream: MediaStream | null = null;
     let scanFrame: number | null = null;
     // Every start and stop gets a new generation: a camera that only answers after the scan
     // was stopped or the dialog closed is switched off at once instead of staying on unseen.
     let scanGeneration = 0;
+    let imported: IdentityInfo | null = null;
+    const shell = openModal({
+      card: `
+      <div class="modal-card dialog-card" style="max-width: 560px; width: min(94vw, 560px);">
+        <div class="modal-header">
+          <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
+            <span class="material-symbols-outlined" style="color: var(--accent-primary);" aria-hidden="true">manage_accounts</span>
+            <span>${escapeHtml(t('identity.importTitle'))}</span>
+          </div>
+          <button type="button" class="modal-close-btn" data-action="cancel" data-modal-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
+        </div>
+        <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 12px;">
+          ${escapeHtml(t('identity.importIntro'))}
+        </div>
+        <div class="form-group">
+          <label for="identity-import-code">${escapeHtml(t('identity.codeLabel'))}</label>
+          <textarea id="identity-import-code" placeholder="${escapeHtml(IDENTITY_EXPORT_PREFIX)}..." style="min-height: 110px; resize: vertical; font-size: 11px; font-family: var(--font-mono);"></textarea>
+        </div>
+        <div class="form-group">
+          <label for="identity-import-password">${escapeHtml(t('identity.passwordLabel'))}</label>
+          <input id="identity-import-password" type="password" placeholder="${escapeHtml(t('identity.passwordPlaceholder'))}">
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+          <button type="button" id="btn-import-identity-run" class="btn btn-primary">${escapeHtml(t('identity.importAction'))}</button>
+          <button type="button" id="btn-import-identity-scan" class="btn btn-secondary">${escapeHtml(t('identity.scanQr'))}</button>
+          <button type="button" id="btn-import-identity-file" class="btn btn-secondary">${escapeHtml(t('backup.loadFromFile'))}</button>
+        </div>
+        <div id="identity-import-scan-wrap" hidden style="border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 10px; background: var(--bg-card);">
+          <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">${escapeHtml(t('identity.scanHint'))}</div>
+          <video id="identity-import-video" autoplay playsinline muted style="width: 100%; max-height: 260px; border-radius: 10px; background: #000;"></video>
+        </div>
+      </div>
+    `,
+      initialFocus: '#identity-import-code',
+      // The camera goes off before the dialog starts to leave.
+      onClose: () => {
+        stopScan();
+        resolve(imported);
+      },
+    });
+    const card = shell.card;
+    const options = { signal: shell.signal };
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d', { willReadFrequently: true });
 
-    const errorBanner = backdrop.querySelector('#identity-import-error') as HTMLElement;
-    const codeInput = backdrop.querySelector('#identity-import-code') as HTMLTextAreaElement;
-    const passwordInput = backdrop.querySelector('#identity-import-password') as HTMLInputElement;
-    const importButton = backdrop.querySelector('#btn-import-identity-run') as HTMLButtonElement;
-    const scanButton = backdrop.querySelector('#btn-import-identity-scan') as HTMLButtonElement;
-    const fileButton = backdrop.querySelector('#btn-import-identity-file') as HTMLButtonElement;
-    const scanWrap = backdrop.querySelector('#identity-import-scan-wrap') as HTMLElement;
-    const video = backdrop.querySelector('#identity-import-video') as HTMLVideoElement;
+    const codeInput = card.querySelector('#identity-import-code') as HTMLTextAreaElement;
+    const passwordInput = card.querySelector('#identity-import-password') as HTMLInputElement;
+    const importButton = card.querySelector('#btn-import-identity-run') as HTMLButtonElement;
+    const scanButton = card.querySelector('#btn-import-identity-scan') as HTMLButtonElement;
+    const fileButton = card.querySelector('#btn-import-identity-file') as HTMLButtonElement;
+    const scanWrap = card.querySelector('#identity-import-scan-wrap') as HTMLElement;
+    const video = card.querySelector('#identity-import-video') as HTMLVideoElement;
 
-    const showError = (message: string) => {
-      errorBanner.textContent = message;
-      errorBanner.classList.add('show');
+    let dismissError: (() => void) | null = null;
+    const showError = (message: string, error?: unknown) => {
+      if (!shell.closed) dismissError = reportError(message, { log: 'IDENTITY', error: error ?? message });
     };
-
     const clearError = () => {
-      errorBanner.textContent = '';
-      errorBanner.classList.remove('show');
+      dismissError?.();
+      dismissError = null;
     };
 
-    const stopScan = () => {
+    function stopScan(): void {
       scanGeneration++;
       setButtonLoading(scanButton, false);
       if (scanFrame !== null) {
@@ -294,22 +251,13 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
         stream = null;
       }
       video.srcObject = null;
-      scanWrap.style.display = 'none';
+      setSurfaceVisible(scanWrap, false);
       scanButton.textContent = t('identity.scanQr');
-    };
+    }
 
-    const cleanup = () => {
-      stopScan();
-      document.removeEventListener('keydown', onKeyDown, true);
-      exitModal(backdrop);
-    };
-
-    // Set once the dialog is gone, so an import still on its way cannot ask anything afterwards.
-    let closed = false;
     const settle = (identity: IdentityInfo | null) => {
-      closed = true;
-      cleanup();
-      resolve(identity);
+      imported = identity;
+      shell.close('button');
     };
 
     const scanLoop = () => {
@@ -349,23 +297,13 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
         }
         stream = camera;
         video.srcObject = camera;
-        scanWrap.style.display = 'block';
+        setSurfaceVisible(scanWrap, true);
         scanButton.textContent = t('identity.stopScan');
         scanFrame = requestAnimationFrame(scanLoop);
       } catch (error: unknown) {
-        if (generation === scanGeneration) {
-          showError(error instanceof Error && error.message ? error.message : t('identity.cameraError'));
-        }
+        if (generation === scanGeneration) showError(errorMessage(error, t('identity.cameraError')), error);
       } finally {
         if (generation === scanGeneration) setButtonLoading(scanButton, false);
-      }
-    };
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!handlesModalKey(backdrop, event)) return;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        settle(null);
       }
     };
 
@@ -379,7 +317,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
       const password = passwordInput.value;
       const outcome = await window.api.importIdentity(code, password);
       if (outcome.status === 'imported') return outcome;
-      if (closed) return null;
+      if (shell.closed) return null;
       const confirmed = await showConfirm({
         title: t('identity.importReplaceTitle'),
         message: t('identity.importReplaceMessage'),
@@ -387,7 +325,7 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
         variant: 'danger',
         focusCancel: true,
       });
-      if (!confirmed || closed) return null;
+      if (!confirmed || shell.closed) return null;
       const replaced = await window.api.importIdentity(code, password, outcome.publicKey);
       if (replaced.status !== 'imported') throw new Error(t('identity.importError'));
       return replaced;
@@ -414,12 +352,12 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
         }
         settle({ publicKey: identity.publicKey, clientId: identity.clientId, restoredScopes, extrasFailed });
       } catch (error: unknown) {
-        showError(error instanceof Error && error.message ? error.message : t('identity.importError'));
+        showError(errorMessage(error, t('identity.importError')), error);
       } finally {
         importButton.disabled = false;
         importButton.textContent = t('identity.importAction');
       }
-    });
+    }, options);
 
     scanButton.addEventListener('click', async () => {
       if (stream) {
@@ -428,29 +366,22 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
       }
       if (isButtonLoading(scanButton)) return;
       await startScan();
-    });
+    }, options);
 
     fileButton.addEventListener('click', async () => {
       clearError();
-      const result = await withButtonLoading(fileButton, () => window.api.openBackupFile());
-      if (!result) return;
-      if (!result.success) {
-        if (result.error) showError(result.error);
-        return;
+      try {
+        const result = await withButtonLoading(fileButton, () => window.api.openBackupFile());
+        if (!result || shell.closed) return;
+        if (!result.success) {
+          if (result.error) showError(result.error);
+          return;
+        }
+        codeInput.value = (result.contents || '').trim();
+        passwordInput.focus();
+      } catch (error: unknown) {
+        showError(errorMessage(error, t('identity.importError')), error);
       }
-      codeInput.value = (result.contents || '').trim();
-      passwordInput.focus();
-    });
-
-    backdrop.querySelectorAll('[data-action="cancel"]').forEach((element) => {
-      element.addEventListener('click', () => settle(null));
-    });
-    backdrop.addEventListener('mousedown', (event) => {
-      if (event.target === backdrop) settle(null);
-    });
-    document.addEventListener('keydown', onKeyDown, true);
-    document.body.appendChild(backdrop);
-    enterModal(backdrop);
-    codeInput.focus();
+    }, options);
   });
 }

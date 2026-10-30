@@ -210,25 +210,50 @@ async function runInviteCardSmoke(language, fixture) {
   check(cards.openServerInviteLink(fixture.pt) === true, 'clicking the invitation link itself opens the review');
   await flush();
   check(document.querySelector('#join-invite-form [data-invite-host]')?.textContent === fixture.server.host, 'the review shows the address');
-  // Nickname rule (#567): a refusal explains itself on the field; accents and emoji go through.
+  // Nickname rule (#567): a refusal explains itself in the alert toast and marks the field; accents and emoji go through.
   const reviewForm = document.querySelector('#join-invite-form');
   const reviewNickname = reviewForm.querySelector('#invite-join-nickname');
-  const reviewError = document.querySelector('[data-invite-error]');
+  const errorToast = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
   check(!!reviewNickname, 'without an identity the review asks for a nickname');
+  check(!document.querySelector('[data-invite-error]'), 'the review has no error text of its own in the layout');
   reviewNickname.value = 'Ad\u200Bmin';
   reviewForm.requestSubmit();
-  check(reviewNickname.validationMessage === t('identity.nicknameInvalidCharacters') && reviewError.hidden,
-    'an invisible character is refused with its reason and never reaches the connection');
+  check(errorToast()?.textContent.includes(t('identity.nicknameInvalidCharacters'))
+    && reviewNickname.getAttribute('aria-invalid') === 'true' && document.activeElement === reviewNickname,
+  'an invisible character is refused with its reason and never reaches the connection');
   reviewNickname.value = 'Ângela 🐒';
   reviewNickname.dispatchEvent(new Event('input', { bubbles: true }));
-  check(reviewNickname.validationMessage === '', 'editing the nickname clears the previous reason');
+  check(!reviewNickname.hasAttribute('aria-invalid'), 'editing the nickname clears the previous mark');
   reviewForm.requestSubmit();
-  check(!reviewError.hidden && reviewError.textContent === t('connection.connectError'),
+  check(errorToast()?.textContent.includes(t('connection.connectError')),
     'accents and emoji pass the nickname check and the join is attempted');
   document.querySelector('#join-invite-form [data-invite-cancel]').click();
   for (let attempt = 0; attempt < 100 && document.querySelector('#join-invite-form'); attempt++) {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   check(!document.querySelector('#join-invite-form'), 'cancelling closes the review');
+
+  // One listener per feed opens message links: invitations go to the review, other links to the browser.
+  const opened = [];
+  window.api.openExternal = async url => { opened.push(url); return { success: true }; };
+  const unbindLinks = cards.bindMessageLinks(feed);
+  const links = [...document.querySelectorAll('[data-message-id="mine"] .chat-message-text a.md-link')];
+  const external = links.find(link => link.dataset.externalLink === 'https://example.org/page');
+  const invitation = links.find(link => cards.serverInviteFromLink(link.dataset.externalLink));
+  const outside = new MouseEvent('click', { bubbles: true, cancelable: true });
+  external.dispatchEvent(outside);
+  await flush();
+  check(outside.defaultPrevented && opened.length === 1 && opened[0] === 'https://example.org/page',
+    'a message link opens in the browser, never inside the app');
+  invitation.click();
+  await flush();
+  check(opened.length === 1 && document.querySelector('#join-invite-form [data-invite-host]')?.textContent === fixture.server.host,
+    'an invitation link opens the join review instead of the browser');
+  unbindLinks();
+  document.querySelector('#join-invite-form [data-invite-cancel]').click();
+  for (let attempt = 0; attempt < 100 && document.querySelector('#join-invite-form'); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  check(!document.querySelector('#join-invite-form'), 'the review opened from the link closes again');
   return checks;
 }

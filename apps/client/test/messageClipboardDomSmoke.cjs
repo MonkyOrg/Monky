@@ -914,18 +914,23 @@ async function installFixture(systemClipboard = false) {
   const trackedTypes = new Set(['copy', 'paste', 'keydown', 'pointerdown', 'contextmenu', 'resize', 'scroll']);
   const listenerKey = (target, type, options) =>
     `${target === document ? 'document' : 'window'}:${type}:${typeof options === 'boolean' ? options : !!options?.capture}`;
+  const untrack = (callback, key) => {
+    tracked.get(callback)?.delete(key);
+    if (tracked.get(callback)?.size === 0) tracked.delete(callback);
+  };
   EventTarget.prototype.addEventListener = function(type, callback, options) {
-    if ((this === document || this === window) && trackedTypes.has(type) && callback) {
+    const signal = typeof options === 'object' ? options?.signal : undefined;
+    if ((this === document || this === window) && trackedTypes.has(type) && callback && !signal?.aborted) {
       if (!tracked.has(callback)) tracked.set(callback, new Set());
-      tracked.get(callback).add(listenerKey(this, type, options));
+      const key = listenerKey(this, type, options);
+      tracked.get(callback).add(key);
+      // Like the platform: a listener bound to a signal goes away when it aborts, without removeEventListener.
+      signal?.addEventListener('abort', () => untrack(callback, key), { once: true });
     }
     return originalAdd.call(this, type, callback, options);
   };
   EventTarget.prototype.removeEventListener = function(type, callback, options) {
-    if (this === document || this === window) {
-      tracked.get(callback)?.delete(listenerKey(this, type, options));
-      if (tracked.get(callback)?.size === 0) tracked.delete(callback);
-    }
+    if (this === document || this === window) untrack(callback, listenerKey(this, type, options));
     return originalRemove.call(this, type, callback, options);
   };
   const listenerCount = () => [...tracked.values()].reduce((total, keys) => total + keys.size, 0);
@@ -1028,7 +1033,13 @@ async function installFixture(systemClipboard = false) {
     input.setSelectionRange(start, end);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   };
-  const dismissAlert = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card [data-action="confirm"]')?.click();
+  const openDialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card');
+  const successToast = () => document.querySelector('.chat-copy-toast:not(.chat-copy-toast--danger):not([data-ui-closing])');
+  const alertText = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-label')?.textContent ?? '';
+  const dismissAlert = () => {
+    openDialog()?.querySelector('[data-action="confirm"]')?.click();
+    document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-close')?.click();
+  };
   const openMenu = (id = 'rich') => {
     clearSelection();
     find(`[data-message-id="${id}"] [data-message-action="more"]`).click();
@@ -1057,7 +1068,7 @@ async function installFixture(systemClipboard = false) {
     filePastes = 0;
     historyInputType = '';
     view = new ChatView(root);
-    view.addFiles = () => { filePastes++; };
+    view.composer.addFiles = () => { filePastes++; };
     view.setChannel('chat');
     await document.fonts.ready;
     await settle();
@@ -1113,7 +1124,7 @@ async function installFixture(systemClipboard = false) {
           `${locale}: replies render the same localized Markdown, not its raw delimiters`);
         check(root.querySelector('[data-message-id="reader-reply"] .chat-message-text').textContent.includes('User text is not translated'),
           `${locale}: human-authored text remains unchanged`);
-        const copied = view.messageClipboard(bot.id);
+        const copied = view.actions.messageClipboard(bot.id);
         check(copied.text === expected && copied.markdown === bot.localizations[locale],
           `${locale}: copying preserves both plain and formatted text in the reader language`);
         check(session.chatStore.getMessages('chat')[0].content === 'Default text', 'Rendering never destroys the fallback or other variants');
@@ -1121,7 +1132,7 @@ async function installFixture(systemClipboard = false) {
       session.chatStore.updateMessage({ ...bot, content: '', localizations: undefined, deletedAt: 3 });
       await settle();
       check(!root.textContent.includes('Track added to the queue.'), 'Deleting a localized original clears its reply previews');
-      check(view.messageClipboard(bot.id) === null, 'Deleted bot translations cannot be copied');
+      check(view.actions.messageClipboard(bot.id) === null, 'Deleted bot translations cannot be copied');
       return count;
     },
     async testImages() {
@@ -1151,7 +1162,7 @@ async function installFixture(systemClipboard = false) {
           'Image copy success is localized and shown after encoding');
         find('[data-message-id="jpeg"] .chat-attachment-copy').click();
         await expectImage(false);
-        await view.copyMessage('photo', 'plain');
+        await view.actions.copyMessage('photo', 'plain');
         expect((await last()).text === 'Photo caption', 'Copy message keeps its text semantics after adding a separate image action');
         for (const id of ['jpeg', 'image-sticker']) {
           clearSelection();
@@ -1163,7 +1174,7 @@ async function installFixture(systemClipboard = false) {
           copy.dispatchEvent(shortcut);
           expect(shortcut.defaultPrevented, 'Whole-message Ctrl+C handles image-only and sticker-only messages');
           await expectImage(id !== 'jpeg');
-          await view.copyMessage(id, 'plain');
+          await view.actions.copyMessage(id, 'plain');
           expect((await last()).kind !== 'image', 'Explicit plain copying preserves attachment filename semantics');
         }
 
@@ -1238,7 +1249,7 @@ async function installFixture(systemClipboard = false) {
         return !!rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.closest('button') === close;
       };
       const noDialog = () => !document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card');
-      await view.copyAttachmentImage(find('[data-message-id="photo"] .chat-attachment-image'));
+      await view.actions.copyAttachmentImage(find('[data-message-id="photo"] .chat-attachment-image'));
       await waitForFailure(copyFailed, 'Clipboard rejection is reported in the shared error toast');
       expect(failure().getAttribute('role') === 'alert' && noDialog()
         && !document.querySelector('.chat-copy-toast:not(.chat-copy-toast--danger):not([data-ui-closing])'),
@@ -1308,7 +1319,7 @@ async function installFixture(systemClipboard = false) {
       try { await writeImageClipboard(`${window.clipboardImageOrigin}/authored.png`, aborted.signal); } catch {}
       expect(writes.length === before, 'An already cancelled image copy never requests clipboard access');
       writeMode = 'hold';
-      const copying = view.copyAttachmentImage(find('[data-message-id="photo"] .chat-attachment-image'));
+      const copying = view.actions.copyAttachmentImage(find('[data-message-id="photo"] .chat-attachment-image'));
       await settle();
       expect(pending.length === 1, 'An in-flight image write is exercised before teardown');
       view.destroy();
@@ -1479,9 +1490,9 @@ async function installFixture(systemClipboard = false) {
       expect(!paste(input, data), 'A read-only composer is not changed by formatted paste');
       input.readOnly = false;
       preparePaste('draft before editing');
-      view.startEditingMessage('second');
+      view.composer.startEditingMessage('second');
       expect(!keyboard(input) && !keyboard(input, { shiftKey: true }), 'Message editing does not lose native editor copy shortcuts');
-      view.cancelMessageEdit();
+      view.composer.cancelMessageEdit();
 
       select('[data-message-id=rich] strong', 1, 3);
       const before = writes.length;
@@ -1626,7 +1637,7 @@ async function installFixture(systemClipboard = false) {
       document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
       expect(!document.querySelector('.floating-context-menu:not([data-ui-closing])'), 'Outside pointerdown closes parent and submenu');
       const anchor = find('[data-message-id="rich"] [data-message-action="more"]');
-      contextMenu.open(innerWidth - 1, innerHeight - 1, view.buildMessageMenuItems('rich'), anchor);
+      contextMenu.open(innerWidth - 1, innerHeight - 1, view.actions.menuItems('rich'), anchor);
       find('.floating-context-menu:not([data-ui-closing]) [aria-haspopup="menu"] .context-menu-trailing').click();
       await Promise.all([...document.querySelectorAll('.floating-context-menu:not([data-ui-closing])')]
         .flatMap(menu => menu.getAnimations().map(animation => animation.finished)));
@@ -1664,26 +1675,24 @@ async function installFixture(systemClipboard = false) {
       expect(document.querySelectorAll('.chat-copy-toast:not([data-ui-closing])').length === 1, 'Repeated successful copies replace rather than stack feedback');
       for (const mode of ['formatted', 'plain']) {
         writeMode = 'reject';
-        await view.copyMessage('rich', mode);
-        expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])')
-          && find('.modal-backdrop:not([data-ui-closing]) .dialog-card .dialog-message').textContent === 'Could not copy the message.',
-          `${mode} clipboard rejection uses localized error feedback, never a success toast or silent mode downgrade`);
+        await view.actions.copyMessage('rich', mode);
+        expect(!successToast() && !openDialog() && alertText() === 'Could not copy the message.',
+          `${mode} clipboard rejection uses the localized alert toast, never a dialog, a success toast or a silent mode downgrade`);
         dismissAlert();
       }
       writeMode = 'hold';
-      void view.copyMessage('rich');
+      void view.actions.copyMessage('rich');
       const older = pending.shift();
       writeMode = 'reject';
-      await view.copyMessage('rich', 'plain');
+      await view.actions.copyMessage('rich', 'plain');
       dismissAlert();
       older.resolve();
       await settle();
-      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])'), 'An older success cannot overwrite the failure of a newer copy request');
+      expect(!successToast(), 'An older success cannot overwrite the failure of a newer copy request');
       const nativeWrite = clipboardSink.write;
       clipboardSink.write = undefined;
-      await view.copyMessage('rich');
-      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])')
-        && !!document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card .dialog-message'),
+      await view.actions.copyMessage('rich');
+      expect(!successToast() && alertText() === 'Could not copy the message.',
         'Unavailable rich clipboard support fails visibly instead of pretending plain text preserved formatting');
       dismissAlert();
       clipboardSink.write = nativeWrite;
@@ -1693,13 +1702,12 @@ async function installFixture(systemClipboard = false) {
       const failingData = new DataTransfer();
       failingData.setData = () => { throw new Error('DataTransfer denied by fixture'); };
       expect(!copyEvent(document.activeElement, failingData).prevented, 'A failing native copy serializer leaves the browser fallback available');
-      expect(!document.querySelector('.chat-copy-toast:not([data-ui-closing])')
-        && !!document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card .dialog-message'),
+      expect(!successToast() && alertText() === 'Could not copy the message.',
         'Synchronous copy-event failures use the same failure feedback');
       dismissAlert();
       clearSelection();
       writeMode = 'hold';
-      void view.copyMessage('rich');
+      void view.actions.copyMessage('rich');
       const changing = pending.shift();
       view.setChannel('other');
       changing.resolve();
@@ -1708,7 +1716,7 @@ async function installFixture(systemClipboard = false) {
       view.setChannel('chat');
       await settle();
       writeMode = 'hold';
-      void view.copyMessage('rich');
+      void view.actions.copyMessage('rich');
       const destroying = pending.shift();
       openMenu();
       view.destroy();
@@ -1719,16 +1727,15 @@ async function installFixture(systemClipboard = false) {
       )].map(element => element.className);
       expect(remainingSurfaces.length === 0,
         `Destroyed views suppress late successes, failures and all open submenus: ${JSON.stringify(remainingSurfaces)}`);
-      expect(listenerCount() === 0, 'View destruction releases every tracked global listener');
+      expect(listenerCount() === 0, `View destruction releases every tracked global listener: ${JSON.stringify(listenerSummary())}`);
       const count = writes.length;
       select('[data-message-id=rich] strong', 1, 3);
       expect(!keyboard(document.activeElement) && !copyEvent(document.activeElement).prevented && writes.length === count,
         'Old chat DOM cannot keep handling copies after its view is destroyed');
       await prepare('pt-BR');
       writeMode = 'reject';
-      await view.copyMessage('rich');
-      expect(find('.modal-backdrop:not([data-ui-closing]) .dialog-message').textContent === 'Não foi possível copiar a mensagem.',
-        'Clipboard failure is also localized in Portuguese');
+      await view.actions.copyMessage('rich');
+      expect(alertText() === 'Não foi possível copiar a mensagem.', 'Clipboard failure is also localized in Portuguese');
       dismissAlert();
       writeMode = 'resolve';
       return checks;

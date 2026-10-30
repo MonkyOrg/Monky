@@ -289,6 +289,33 @@ test('an @everyone mention checks its whole audience at once and pings only read
   assert.ok(many.count - few.count <= 50 + 5, `150 more members cost ${many.count - few.count} more statements`);
 });
 
+test('a message sent over the WebSocket resolves its channel access once there, not three times (S-WS-5)', async t => {
+  const f = await setup(t);
+  const channelReads = (sql: string[]) => sql.filter(statement => /FROM channels WHERE id = \?$/.test(statement)).length;
+  const overSocket = await f.counter.measure(async () => {
+    const sent = await f.owner.peer.request(MessageType.CHAT_SEND, { channelId: f.textId, content: 'over the socket' });
+    assert.equal(sent.type, MessageType.CHAT_MESSAGE);
+    // Queued behind the send, so its broadcast is over as well.
+    await f.owner.peer.request(MessageType.COMMANDS_LIST);
+  });
+  const direct = await f.counter.measure(() => f.chatService.sendMessage(f.owner.id, f.textId, 'straight to the service'));
+  assert.ok(direct.result.success);
+  assert.equal(channelReads(overSocket.sql) - channelReads(direct.sql), 2,
+    'the socket reads the channel once to authorize the message and once to find who receives it');
+});
+
+test('a person joining a voice room has access to it resolved once, not twice in a row (S-WS-5)', async t => {
+  const f = await setup(t);
+  const checks = t.mock.method(f.channelService, 'canUserAccessChannel');
+  const answer = await f.owner.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  assert.equal(answer.type, MessageType.VOICE_USER_JOINED);
+  // Queued behind the join, so whatever it awaited is over as well.
+  await f.owner.peer.request(MessageType.COMMANDS_LIST);
+  // Whether they may speak there is a question of its own (resolvePermissionMuted), asked with SPEAK.
+  const access = checks.mock.calls.filter(call => call.arguments[1] === f.voiceId && call.arguments[2] === undefined);
+  assert.equal(access.length, 1);
+});
+
 test('searching reads access once, however many channels and forum topics the server has', async t => {
   const f = await setup(t);
   const viewer = await f.member('Search viewer');
@@ -526,7 +553,7 @@ test('a bot settings broadcast reads the bots once and builds each kind of messa
   };
   const broadcast = async () => {
     const since = people.map(({ peer }) => peer.messages.length);
-    const measured = await f.counter.measure(() => f.wsServer['broadcastBotSettings'](botId));
+    const measured = await f.counter.measure(() => f.wsServer['botManagement'].broadcastSettings(botId));
     await Promise.all(people.map(({ peer }) => peer.barrier()));
     const received = people.map(({ peer }, index) => peer.messages.slice(since[index]).filter(message =>
       message.type === MessageType.BOT_SETTINGS_LIST_RESPONSE || message.type === MessageType.BOT_SETTINGS_SNAPSHOT));
@@ -580,10 +607,10 @@ test('bot settings broadcasts arrive in the order of the changes, even when one 
     return allowed;
   });
   const since = reader.peer.messages.length;
-  const first = f.wsServer['broadcastBotSettings']();
+  const first = f.wsServer['botManagement'].broadcastSettings();
   await holding;
   assert.equal((await f.botService.updateProfile(botId, { name: 'After' })).success, true);
-  const second = f.wsServer['broadcastBotSettings'](botId);
+  const second = f.wsServer['botManagement'].broadcastSettings(botId);
   // Reading and sending involve no I/O: a broadcast that did not wait for the first one would be done by now.
   await new Promise(resolve => setTimeout(resolve, 20));
   release();

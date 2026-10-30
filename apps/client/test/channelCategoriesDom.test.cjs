@@ -873,7 +873,7 @@ async function regression(locale) {
     store.myPermissions = managing;
   }
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  view.openChannelMenu('voice', 10, 10);
+  view.channels.openChannelMenu('voice', 10, 10);
   check(document.querySelector('[aria-haspopup="menu"]'), 'channel movement is offered through contextual submenu');
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 
@@ -984,13 +984,48 @@ async function regression(locale) {
   await flush();
   check(requests.length === requestsBeforeAfk && [...document.querySelectorAll('.chat-copy-toast')]
     .some(toast => toast.textContent.includes(t('afk.joinBlocked'))), 'clicking the AFK room explains instead of joining');
-  view.openChannelMenu('afk', 10, 10);
+  view.channels.openChannelMenu('afk', 10, 10);
   check(menuItems().some(item => menuLabel(item) === t('afk.deleteDisabled') && item.disabled)
     && !menuItems().some(item => menuLabel(item) === t('main.deleteChannel')), 'the AFK room is not deleted from the channel list');
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  view.openChannelMenu('voice', 10, 10);
+  view.channels.openChannelMenu('voice', 10, 10);
   check(menuItems().some(item => menuLabel(item) === t('main.deleteChannel') && !item.disabled), 'other rooms are still deleted from the list');
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  {
+    // Deleting waits for the server: a refusal is explained and the call in the room goes on.
+    const { voiceStore } = await import('/stores/voiceStore.ts');
+    const deletions = [];
+    let refuse = true;
+    const previousRequest = client.sendRequest;
+    client.sendRequest = async (type, payload) => {
+      if (type !== 'CHANNEL_DELETE') return previousRequest(type, payload);
+      deletions.push(payload.channelId);
+      if (refuse) throw new Error('Controlled delete refusal');
+      return { channelId: payload.channelId };
+    };
+    const deleteVoiceRoom = async () => {
+      view.channels.openChannelMenu('voice', 10, 10);
+      menuItems().find(item => menuLabel(item) === t('main.deleteChannel')).click();
+      await flush();
+      field('[data-action="confirm"]').click();
+      await flush();
+    };
+    voiceStore.setChannel('voice');
+    try {
+      await deleteVoiceRoom();
+      check(deletions.join() === 'voice' && voiceStore.currentVoiceChannelId === 'voice'
+        && [...document.querySelectorAll('.chat-copy-toast')].some(toast => toast.textContent.includes('Controlled delete refusal')),
+      'a refused deletion is explained and the call in that room goes on');
+      refuse = false;
+      await deleteVoiceRoom();
+      check(deletions.join() === 'voice,voice' && voiceStore.currentVoiceChannelId === 'voice',
+        'an accepted deletion leaves the call to the server, which takes everyone out of the room');
+    } finally {
+      client.sendRequest = previousRequest;
+      voiceStore.setChannel(null);
+      document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+    }
+  }
   store.setServerDetails(details, user);
   view.renderChannels();
 

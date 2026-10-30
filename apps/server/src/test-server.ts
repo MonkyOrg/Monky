@@ -1408,7 +1408,8 @@ async function runTests() {
     // que aparece mudo para sempre. A limpeza vive em closeSfuSession(), e o
     // risco real é um caminho de saída novo (ou existente) esquecer de chamá-la
     // — por isso a asserção é sobre os caminhos, não sobre um deles.
-    // A voz mora em módulos próprios (S-VOICE-12): cada método é lido no arquivo dele.
+    // A voz mora em módulos próprios (S-VOICE-12), e os domínios do servidor também (S-WS-6):
+    // cada método é lido no arquivo dele.
     const webSocketDir = path.join(__dirname, '..', 'src', 'infrastructure', 'websocket');
     const sources = {
       server: fs.readFileSync(path.join(webSocketDir, 'WebSocketServer.ts'), 'utf8'),
@@ -1416,6 +1417,8 @@ async function runTests() {
       sfu: fs.readFileSync(path.join(webSocketDir, 'voice', 'SfuSignalingHandler.ts'), 'utf8'),
       screens: fs.readFileSync(path.join(webSocketDir, 'voice', 'ScreenAccessCoordinator.ts'), 'utf8'),
       rtc: fs.readFileSync(path.join(webSocketDir, 'voice', 'RtcSignalRelay.ts'), 'utf8'),
+      channels: fs.readFileSync(path.join(webSocketDir, 'ChannelHandler.ts'), 'utf8'),
+      roles: fs.readFileSync(path.join(webSocketDir, 'RoleHandler.ts'), 'utf8'),
     };
     const readMethodBody = (file: keyof typeof sources, methodName: string): string => {
       const source = sources[file];
@@ -1452,8 +1455,8 @@ async function runTests() {
       ['voice', 'handleAdminKickVoice', 'this.endVoiceSession('],
       ['voice', 'evictFromVoiceChannel', 'this.endVoiceSession('],
       ['server', 'handleDisconnect', 'this.voiceSessions.endVoiceSession('],
-      ['server', 'handleMemberKick', 'this.voiceSessions.endVoiceSession('],
-      ['server', 'releaseDeletedChannel', 'this.voiceSessions.endVoiceSession('],
+      ['roles', 'kick', 'this.host.voiceSessions.endVoiceSession('],
+      ['channels', 'releaseDeleted', 'this.host.voiceSessions.endVoiceSession('],
       ['server', 'finalizeSessionLeave', 'this.voiceSessions.endVoiceSession('],
     ];
     for (const [file, exitPath, call] of exitPaths) {

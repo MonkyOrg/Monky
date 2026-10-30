@@ -42,7 +42,6 @@ function decodedTextureInfo(event) {
 class NativePresentationBridge {
   constructor(engine, textures, onError, { drainTimeoutMs = 5000, createTextureChannel } = {}) {
     if (typeof engine?.releaseFrame !== 'function' || typeof engine.request !== 'function'
-      || typeof engine.submitFrame !== 'function'
       || typeof textures?.importSharedTexture !== 'function' || typeof textures?.sendSharedTexture !== 'function'
       || typeof onError !== 'function' || !Number.isInteger(drainTimeoutMs)
       || drainTimeoutMs < 1 || drainTimeoutMs > 60000

@@ -280,7 +280,7 @@ export interface CliPromptIO {
 
 ## `downloadManagedToolAsset` {#downloadmanagedtoolasset}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L180)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L167)
 
 ```ts
 export function downloadManagedToolAsset(asset: ManagedToolAsset, destination: string, signal: AbortSignal, callbacks?: ManagedToolDownloadCallbacks): Promise<void>;
@@ -299,7 +299,7 @@ export interface FileUpdateSource {
 
 ## `findManagedNodeAsset` {#findmanagednodeasset}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L161)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L148)
 
 ```ts
 export function findManagedNodeAsset(platform: NodeJS.Platform, arch: string, signal: AbortSignal): Promise<ManagedToolAsset>;
@@ -307,7 +307,7 @@ export function findManagedNodeAsset(platform: NodeJS.Platform, arch: string, si
 
 ## `findManagedToolAsset` {#findmanagedtoolasset}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L118)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L105)
 
 ```ts
 export function findManagedToolAsset(repository: ManagedToolRepository, name: string, signal: AbortSignal): Promise<ManagedToolAsset>;
@@ -362,6 +362,10 @@ export const LIMITS = {
     // three orders of magnitude below MAX_AVATAR_SIZE on purpose: this field is
     // never a place to put bulk data, and the server has no maxPayload of its own.
     MAX_ACTIVITY_ICON_LENGTH: 32 * 1024,
+    // Custom status (custom-status): a short phrase under the name and a tag
+    // small enough to sit beside it, like the BRB tag.
+    MAX_CUSTOM_STATUS_TEXT_LENGTH: 128,
+    MAX_CUSTOM_STATUS_TAG_LENGTH: 12,
     // "Pedir para ver a partida" (#763): how long the player has to answer, and
     // how long the same person waits before asking the same player again.
     GAME_SHARE_REQUEST_TIMEOUT_MS: 30000,
@@ -417,6 +421,12 @@ export const LIMITS = {
      * são 100 MiB, que qualquer cliente não autenticado podia mandar (#372).
      */
     WS_MAX_PAYLOAD_BYTES: 8 * 1024 * 1024,
+    /**
+     * Teto do `requestId` de qualquer mensagem. O servidor copia o id do autor
+     * para eventos que vão a todos, então um id sem limite multiplicava um frame
+     * de 8 MiB pelo número de conectados. Os clientes usam UUIDs (36 a ~80).
+     */
+    MAX_REQUEST_ID_LENGTH: 128,
     DM_RELAY_MAX_ITEMS: 50,
     DM_RELAY_DATA_MAX_LENGTH: 65536,
     DM_RELAY_FILE_DATA_MAX_LENGTH: 196608,
@@ -503,7 +513,7 @@ export const LIMITS = {
 
 ## `MANAGED_NODE_VERSION` {#managed_node_version}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L42)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L45)
 
 ```ts
 export const MANAGED_NODE_VERSION = '24.20.0';
@@ -511,7 +521,7 @@ export const MANAGED_NODE_VERSION = '24.20.0';
 
 ## `MANAGED_TOOL_MAX_DOWNLOAD` {#managed_tool_max_download}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L41)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L44)
 
 ```ts
 export const MANAGED_TOOL_MAX_DOWNLOAD = 350 * 1024 * 1024;
@@ -519,7 +529,7 @@ export const MANAGED_TOOL_MAX_DOWNLOAD = 350 * 1024 * 1024;
 
 ## `managedFfmpegArchiveEntry` {#managedffmpegarchiveentry}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L231)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L218)
 
 ```ts
 export function managedFfmpegArchiveEntry(archiveName: string): string;
@@ -527,7 +537,7 @@ export function managedFfmpegArchiveEntry(archiveName: string): string;
 
 ## `managedNodeArtifact` {#managednodeartifact}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L151)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L138)
 
 ```ts
 export function managedNodeArtifact(platform: NodeJS.Platform, arch: string): {
@@ -538,7 +548,7 @@ export function managedNodeArtifact(platform: NodeJS.Platform, arch: string): {
 
 ## `ManagedToolAsset` {#managedtoolasset}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L6)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L9)
 
 ```ts
 export interface ManagedToolAsset {
@@ -552,7 +562,7 @@ export interface ManagedToolAsset {
 
 ## `ManagedToolDownloadCallbacks` {#managedtooldownloadcallbacks}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L20)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L23)
 
 ```ts
 export interface ManagedToolDownloadCallbacks {
@@ -563,7 +573,7 @@ export interface ManagedToolDownloadCallbacks {
 
 ## `ManagedToolDownloadError` {#managedtooldownloaderror}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L31)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L34)
 
 ```ts
 export class ManagedToolDownloadError extends Error {
@@ -575,7 +585,7 @@ export class ManagedToolDownloadError extends Error {
 
 ## `ManagedToolDownloadFailure` {#managedtooldownloadfailure}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L25)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L28)
 
 ```ts
 export type ManagedToolDownloadFailure = "downloadOrigin" | "downloadRedirects" | "downloadRedirectMissing" | "downloadHttp" | "responseEmpty" | "responseTooLarge" | "releaseInvalid" | "assetInvalid" | "checksumMissing" | "checksumAmbiguous" | "metadataInvalid" | "downloadEmpty" | "downloadTooLarge" | "downloadWriteFailed" | "downloadMismatch" | "archiveUnsupported";
@@ -583,7 +593,7 @@ export type ManagedToolDownloadFailure = "downloadOrigin" | "downloadRedirects" 
 
 ## `ManagedToolDownloadProgress` {#managedtooldownloadprogress}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L14)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L17)
 
 ```ts
 export interface ManagedToolDownloadProgress {
@@ -595,7 +605,7 @@ export interface ManagedToolDownloadProgress {
 
 ## `ManagedToolRepository` {#managedtoolrepository}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L4)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/managedTools.ts#L7)
 
 ```ts
 export type ManagedToolRepository = "yt-dlp/yt-dlp" | "yt-dlp/FFmpeg-Builds" | "eugeneware/ffmpeg-static";
@@ -603,7 +613,7 @@ export type ManagedToolRepository = "yt-dlp/yt-dlp" | "yt-dlp/FFmpeg-Builds" | "
 
 ## `MessageType` {#messagetype}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L75)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L76)
 
 ```ts
 export enum MessageType {
@@ -759,6 +769,10 @@ export enum MessageType {
     USER_UPDATE_VISIBILITY = 'USER_UPDATE_VISIBILITY',
     /** Client -> server: publish (or clear, with null) the game being played (#675). */
     USER_UPDATE_ACTIVITY = 'USER_UPDATE_ACTIVITY',
+    /** Client -> server: turn the "be right back" status on or off (user-brb). */
+    USER_UPDATE_BRB = 'USER_UPDATE_BRB',
+    /** Client -> server: set (or clear, with null) the person's custom status (custom-status). */
+    USER_UPDATE_CUSTOM_STATUS = 'USER_UPDATE_CUSTOM_STATUS',
     /** Client -> server: ask a player in the same voice channel to share their game window (#763). */
     GAME_SHARE_REQUEST = 'GAME_SHARE_REQUEST',
     /** Server -> requester: the ask reached the player; carries the id the answer will refer to (#763). */
@@ -922,12 +936,12 @@ export enum MessageType {
 [Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L1)
 
 ```ts
-export const PROTOCOL_VERSION = 39;
+export const PROTOCOL_VERSION = 40;
 ```
 
 ## `ProtocolErrorCode` {#protocolerrorcode}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L12)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L13)
 
 ```ts
 export enum ProtocolErrorCode {
@@ -996,7 +1010,7 @@ export enum ProtocolErrorCode {
 
 ## `runBotCli` {#runbotcli}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L119)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L121)
 
 ```ts
 export function runBotCli(packageRoot: string, args?: string[]): Promise<void>;
@@ -1004,7 +1018,7 @@ export function runBotCli(packageRoot: string, args?: string[]): Promise<void>;
 
 ## `validateBotName` {#validatebotname}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L102)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L105)
 
 ```ts
 export function validateBotName(value: unknown): string;
@@ -1012,7 +1026,7 @@ export function validateBotName(value: unknown): string;
 
 ## `validateBotPublicHost` {#validatebotpublichost}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L161)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L164)
 
 ```ts
 export function validateBotPublicHost(value: unknown): string;
@@ -1020,7 +1034,7 @@ export function validateBotPublicHost(value: unknown): string;
 
 ## `validateBotServePort` {#validatebotserveport}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L152)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L155)
 
 ```ts
 export function validateBotServePort(value: unknown): number;
@@ -1028,7 +1042,7 @@ export function validateBotServePort(value: unknown): number;
 
 ## `validateBotServerUrl` {#validatebotserverurl}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L133)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L136)
 
 ```ts
 export function validateBotServerUrl(value: unknown): string;
@@ -1036,7 +1050,7 @@ export function validateBotServerUrl(value: unknown): string;
 
 ## `validateBotToken` {#validatebottoken}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L120)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/config.ts#L123)
 
 ```ts
 export function validateBotToken(value: unknown): string;

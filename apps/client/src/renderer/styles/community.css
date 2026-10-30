@@ -44,7 +44,6 @@
 .event-channel-type:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
 .event-step-viewport { position: relative; overflow: clip; }
 .event-step-body { min-width: 0; }
-.event-step-outgoing { position: absolute; inset: 0 0 auto; }
 .event-wizard .community-steps { position: relative; }
 .event-wizard .community-steps::after { content: ''; position: absolute; top: 0; left: 0; width: calc((100% - 16px) / 3); height: 4px; border-radius: 2px; background: var(--accent-primary); transform: translateX(calc(var(--event-step, 0) * (100% + 8px))); transition: transform var(--motion-step-duration) var(--motion-easing); }
 .event-wizard .community-steps span { transition: color var(--motion-step-duration) var(--motion-easing); border-top-color: var(--text-muted); }
@@ -108,7 +107,6 @@
 .event-schedule-options summary { cursor: pointer; }
 .event-wizard-footer { gap: 8px; padding-top: 20px; }
 .event-footer-spacer { flex: 1; }
-.event-wizard-footer [data-action=back] { background: transparent; border-color: transparent; padding-left: 0; }
 .event-review-explanation { text-align: center; padding: 20px 0 12px; }
 .community-event-row { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; margin-bottom: 16px; background: var(--bg-card); }
 .community-event-row[data-event-openable=true] { cursor: pointer; transition: border-color .15s ease, background-color .15s ease; }
@@ -741,27 +739,6 @@
 .community-empty h2 { font-size: 22px; margin-top: 24px; }
 .community-empty p { font-size: 13px; color: var(--text-secondary); }
 .community-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.community-error { color: var(--danger); white-space: pre-wrap; }
-.community-modal > [data-community-error] {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  margin: 0;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--danger) 12%, var(--bg-card));
-  color: var(--danger);
-  font-size: 12px;
-  line-height: 1.45;
-}
-.community-modal > [data-community-error]::before {
-  content: 'error';
-  flex: 0 0 auto;
-  font-family: 'Material Symbols Outlined';
-  font-size: 20px;
-  line-height: 1;
-}
 .community-inline-warning { color: var(--warning, #f0b232); }
 .community-modal { max-width: calc(100vw - 32px); }
 .community-modal .btn:disabled { opacity: .45; cursor: not-allowed; }
@@ -801,7 +778,7 @@
   border: 1px solid var(--border-color);
   border-radius: 12px;
   background: var(--bg-input);
-  transition: border-color var(--motion-duration-control, 140ms) ease;
+  transition: border-color var(--motion-popover-duration) ease;
 }
 .forum-create-shell[hidden] { display: none; }
 .forum-create-shell:focus-within {
@@ -842,11 +819,11 @@
   opacity: 0;
   pointer-events: none;
   transform: translateY(-3px);
-  transition: opacity var(--motion-duration-control, 140ms) ease,
-    transform var(--motion-duration-control, 140ms) ease,
-    max-height var(--motion-duration-control, 140ms) ease,
-    padding var(--motion-duration-control, 140ms) ease,
-    border-width var(--motion-duration-control, 140ms) ease;
+  transition: opacity var(--motion-popover-duration) ease,
+    transform var(--motion-popover-duration) ease,
+    max-height var(--motion-popover-duration) ease,
+    padding var(--motion-popover-duration) ease,
+    border-width var(--motion-popover-duration) ease;
 }
 .forum-create-shell:focus-within .forum-create-shortcut {
   max-height: 31px;

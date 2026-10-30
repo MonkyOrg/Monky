@@ -34,7 +34,6 @@ class ProcessEngine {
     this.onEvent = onEvent;
     this.pending = new Map();
     this.leases = new Map();
-    this.inputFrames = new Map();
     this.nextId = 0;
     this.bytesPending = 0;
     this.retirementPending = 0;
@@ -68,7 +67,7 @@ class ProcessEngine {
             this.surfaces = handles.createReceiver(this.child.pid);
           } else this.handles = handles.openProcess(this.child.pid);
         }
-        this.send({ type: 'initialize', filename, capabilities, handlesFile, parentPid: process.pid, options,
+        this.send({ type: 'initialize', filename, capabilities, handlesFile, options,
           surfaceChannel: this.surfaces?.name });
       } catch (error) { this.fail(error); }
     };
@@ -123,8 +122,6 @@ class ProcessEngine {
       const record = this.pending.get(message.id);
       assert.ok(record, 'Native RTC host replied to an unknown operation.');
       this.retireCall(message.id, record);
-      if (record.inputKey && (!message.error || message.error.nativeOwnershipRetained === false))
-        this.inputFrames.delete(record.inputKey);
       if (message.error) {
         const error = fromError(message.error);
         if (record.retirementOperation && error.code === 'ERR_RTC_CANCELLED') this.fail(error);
@@ -132,9 +129,6 @@ class ProcessEngine {
       }
       else {
         if (record.method === 'close') {
-          // Unlike OS death alone, the native close acknowledgement proves
-          // that imported input readers and their GPU fences have retired.
-          this.inputFrames.clear();
           this.closeAcknowledged = true;
           this.exitTimer = setTimeout(() => this.fail(hostFailure('The closed native RTC host did not exit.')),
             Math.min(this.options.operationTimeoutMs ?? 12000, 8000));
@@ -204,9 +198,7 @@ class ProcessEngine {
       this.retireCall(id, record);
       const identity = record.identity;
       record.reject(Object.assign(new Error(error.message), error, identity ? {
-        ...identity, nativeOwnershipRetained: record.method === 'submitFrame',
-        ...(record.method === 'submitFrame' ? { gpuRetirementConfirmed: false } : { processingPending: false }),
-        hostExited: true,
+        ...identity, nativeOwnershipRetained: false, processingPending: false, hostExited: true,
       } : { hostExited: true }));
     }
     try { this.handles?.close(); this.surfaces?.close(); }
@@ -225,12 +217,6 @@ class ProcessEngine {
     if (this.failure || this.hostExited) return Promise.reject(this.failure ?? hostFailure('Native RTC host is closed.'));
     assert.ok(Number.isSafeInteger(this.nextId + 1), 'Native RTC operation identifiers are exhausted.');
     const bytes = encode({ type: 'call', id: this.nextId + 1, method, args });
-    const inputKey = method === 'submitFrame' ? `${args[0]}:${args[1]?.frameId}` : null;
-    if (inputKey && this.inputFrames.has(inputKey))
-      throw Object.assign(new Error('This input GPU frame already has a retained reader.'), {
-        code: 'ERR_RTC_INPUT_DUPLICATE', status: 8, nativeOwnershipRetained: true,
-        sourceId: args[0], frameId: args[1]?.frameId,
-      });
     const retirement = method === 'releaseFrame' || method === 'close'
       || (method === 'request' && ['resource.close', 'audio.stopOutput'].includes(args[1]));
     // Releasing an existing owner must not compete with the work that filled the queue.
@@ -240,8 +226,7 @@ class ProcessEngine {
         || this.bytesPending - this.retirementBytes + bytes.length > 32 * 1024 * 1024;
     if (full
       || (method === 'submitEncodedFrame' && this.encodedPending >= 16)
-      || (method === 'submitAudioPacket' && this.audioPending >= 8)
-      || (inputKey && this.inputFrames.size >= 16)) throw queueFull();
+      || (method === 'submitAudioPacket' && this.audioPending >= 8)) throw queueFull();
     const id = ++this.nextId, record = { ...Promise.withResolvers(), method, bytes: bytes.length };
     record.retirementOperation = retirement;
     if (retirement) {
@@ -253,11 +238,6 @@ class ProcessEngine {
       record.identity = { sourceId: args[0], epoch: packet.epoch, sequence: packet.sequence,
         frameIndex: packet.frameIndex, frames: packet.frames };
       this.audioPending++;
-    }
-    if (method === 'submitFrame') {
-      record.identity = { sourceId: args[0], frameId: args[1].frameId };
-      record.inputKey = inputKey;
-      this.inputFrames.set(inputKey, record.identity);
     }
     if (method === 'submitEncodedFrame') this.encodedPending++;
     this.bytesPending += bytes.length;
@@ -281,7 +261,6 @@ class ProcessEngine {
       this.fail(error);
     });
   }
-  submitFrame(...args) { return this.call('submitFrame', args); }
   submitEncodedFrame(...args) { return this.call('submitEncodedFrame', args); }
   submitAudioPacket(sourceId, packet) {
     const identity = { sourceId, epoch: packet.epoch, sequence: packet.sequence,
@@ -312,7 +291,6 @@ class ProcessEngine {
       isolated: true, pid: this.pid ?? this.child.pid, exited: this.hostExited === true, cached: true,
       pendingCalls: this.pending.size, pendingBytes: this.bytesPending, externalTextureLeases: this.leases.size,
       retirementCalls: this.retirementPending, retirementBytes: this.retirementBytes,
-      unprovenInputGpuLeases: this.inputFrames.size,
     } };
   }
   async refreshSnapshot() {
@@ -371,10 +349,6 @@ class ProcessEngine {
     }
     await this.exitState.promise;
     while (this.leases.size) await Promise.all([...this.leases.values()].map(lease => lease.released.promise));
-    if (this.inputFrames.size) throw Object.assign(new Error(
-      'The RTC host exited before imported input GPU readers retired; producer ownership remains retained.'), {
-      code: 'ERR_RTC_GPU_INPUT_RETIREMENT', nativeOwnershipRetained: true, hostExited: true,
-    });
     assert.equal(this.leases.size, 0, 'Chromium texture ownership survived native host closure.');
     return this.snapshot();
   }

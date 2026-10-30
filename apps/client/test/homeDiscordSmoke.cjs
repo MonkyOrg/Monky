@@ -271,6 +271,13 @@ async function setupHomeDiscordSmoke() {
   await until(() => !!document.querySelector('#add-server-create-form'), 'create form did not render');
   check(!!document.querySelector('#add-server-open-tutorials'), 'create flow exposes hosting tutorials');
   check(!!document.querySelector('#add-server-name') && !!document.querySelector('#add-server-local-port'), 'create form has server name and port');
+  const voiceModes = document.querySelector('#add-server-voice-mode-cards');
+  const sfuCard = voiceModes.querySelector('[data-mode="sfu"]');
+  sfuCard.click();
+  check(voiceModes.getAttribute('role') === 'group' && voiceModes.classList.contains('input-mode-cards')
+    && sfuCard.getAttribute('aria-pressed') === 'true' && voiceModes.querySelector('[data-mode="p2p"]').getAttribute('aria-pressed') === 'false'
+    && document.querySelector('#add-server-voice-mode').value === 'sfu' && !sfuCard.hasAttribute('style'),
+  'create form picks the voice mode with the shared choice cards, styled by the theme');
   document.querySelector('#add-server-create-back').click();
   await until(() => !!document.querySelector('#add-server-option-join'), 'choice screen did not return');
   document.querySelector('#add-server-option-join').click();
@@ -351,8 +358,10 @@ async function setupHomeDiscordSmoke() {
   document.querySelector('#logout-dialog-export').click();
   await until(() => !!document.querySelector('#identity-export-password'), 'export-first did not open the identity export dialog');
   const exportBackdrop = document.querySelector('#identity-export-password').closest('.modal-backdrop');
-  check(Number(exportBackdrop.style.zIndex) > Number(document.querySelector('.logout-dialog').closest('.modal-backdrop').style.zIndex),
-    'identity export opens above the logout confirmation');
+  const logoutBackdrop = document.querySelector('.logout-dialog').closest('.modal-backdrop');
+  check(!exportBackdrop.style.zIndex && !logoutBackdrop.style.zIndex
+    && !!(logoutBackdrop.compareDocumentPosition(exportBackdrop) & Node.DOCUMENT_POSITION_FOLLOWING) && logoutBackdrop.inert,
+  'identity export opens above the logout confirmation, stacked by order instead of a fixed z-index');
   exportBackdrop.querySelector('[data-action="cancel"]').click();
   await until(() => !document.querySelector('#identity-export-password'), 'identity export dialog did not close');
   document.querySelector('#logout-dialog-cancel').click();
@@ -363,9 +372,12 @@ async function setupHomeDiscordSmoke() {
   logoutButton.click();
   await until(() => !!document.querySelector('.logout-dialog'), 'logout confirmation did not reopen');
   document.querySelector('#logout-dialog-confirm').click();
-  await until(() => document.querySelector('#logout-dialog-error')?.classList.contains('show'), 'logout failure was not shown');
-  check(document.querySelector('#logout-dialog-error').textContent.includes('disk busy')
-    && !document.querySelector('#logout-dialog-confirm').disabled, 'a failed logout shows the error and allows retrying');
+  const logoutToast = () => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
+  await until(() => logoutToast(), 'logout failure was not shown');
+  const logoutFailure = logoutToast();
+  check(logoutFailure.getAttribute('role') === 'alert' && logoutFailure.textContent.includes('disk busy')
+    && !document.querySelector('#logout-dialog-confirm').disabled && !!document.querySelector('.logout-dialog'),
+  'a failed logout explains the error in the alert toast and allows retrying');
   logoutResult = { success: true };
   document.querySelector('#logout-dialog-confirm').click();
   await until(() => logoutCalls.length === 2, 'retrying logout did not call the main process');

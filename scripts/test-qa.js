@@ -116,10 +116,19 @@ test('macOS app retains system HOME for Keychain while all Monky data remains is
   }
 });
 
+test('A run directory keeps the client profile within the native screen capture path budget', () => {
+  const name = shared.developmentQaRunName(randomUUID());
+  assert.match(name, /^[0-9a-f]{8}$/);
+  // Native capture refuses paths over 240 characters and adds up to 126 to the profile, so the profile
+  // may have 114: a checkout path of up to 89 characters, longer than any of the agents' worktrees.
+  const checkout = `C:\\${'x'.repeat(86)}`;
+  assert.ok(path.win32.join(checkout, '.qa', 'runs', name, 'client').length <= 114);
+});
+
 test('Main QA configuration accepts only the supervised, matching isolated development profile', async () => {
   const { loadDevelopmentQa } = loadMain({});
   const config = baseConfig();
-  const root = path.join(repoRoot, '.qa', 'runs', `${config.scenario}-${config.runId}`);
+  const root = path.join(repoRoot, '.qa', 'runs', shared.developmentQaRunName(config.runId));
   const profile = path.join(root, 'client');
   const other = path.join(root, 'other-profile');
   const filename = path.join(root, 'launch.json');

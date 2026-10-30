@@ -6,16 +6,15 @@ import {
 import { t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { openModal, type ModalShell } from '../utils/modalShell';
 import { animateEnter } from '../utils/surfaceMotion';
-import { appEvents } from '../core/EventBus';
 import { RequestTimeoutError } from '../core/NetworkClient';
-import { sessionManager, type ServerSession } from '../core/SessionManager';
-import { currentEventOrigin } from '../core/sessionRouting';
+import type { ServerSession } from '../core/SessionManager';
+import { isVisibleSession, watchVisibleSession } from '../core/visibleSession';
 import {
   ServerAuditError, ServerAuditSource, endsServerAudit, type ServerAuditFailure, type ServerAuditQuery,
 } from '../core/ServerAuditSource';
-import { showErrorToast } from './CopyToast';
+import { reportError } from '../utils/feedback';
 import {
   AUDIT_CATEGORY_ICONS, AUDIT_CATEGORY_LABELS, formatAuditEntry, formatAuditTime, type FormattedAuditChange,
 } from './serverAuditFormat';
@@ -68,6 +67,7 @@ export function auditEntryHtml(entry: ServerAuditEntry): string {
  * "load more" and reorder the list; changing a filter discards stale pages.
  */
 export class ServerAuditModal {
+  private shell: ModalShell | null = null;
   private modalEl: HTMLElement | null = null;
   private source: ServerAuditSource | null = null;
   private entries: ServerAuditEntry[] = [];
@@ -82,15 +82,10 @@ export class ServerAuditModal {
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private cleanup: Array<() => void> = [];
-  private events: AbortController | null = null;
-  private previousFocus: HTMLElement | null = null;
 
   public async open(session: ServerSession): Promise<void> {
     this.close();
-    const source = new ServerAuditSource(
-      session.client, session.serverStore,
-      () => sessionManager.getActive() === session && sessionManager.get(session.key) === session,
-    );
+    const source = new ServerAuditSource(session.client, session.serverStore, () => isVisibleSession(session));
     try {
       source.assertCurrent();
     } catch (error) {
@@ -103,20 +98,16 @@ export class ServerAuditModal {
     this.filter = 'all';
     this.query = '';
     this.hasMore = false;
-    this.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    this.events = new AbortController();
-
-    const modal = document.createElement('div');
-    modal.className = 'modal-backdrop';
-    modal.innerHTML = `
-      <div class="modal-card server-audit-card" role="dialog" aria-modal="true" aria-labelledby="audit-title"
+    const shell = openModal({
+      card: `
+      <div class="modal-card server-audit-card" aria-labelledby="audit-title"
         aria-describedby="audit-subtitle" tabindex="-1">
         <div class="modal-header">
           <div id="audit-title" class="modal-title server-audit-title">
             <span class="material-symbols-outlined" aria-hidden="true">policy</span>
             <span>${escapeHtml(t('serverAudit.title'))}</span>
           </div>
-          <button type="button" id="modal-close" class="modal-close-btn" aria-label="${escapeHtml(t('common.close'))}">&times;</button>
+          <button type="button" id="modal-close" class="modal-close-btn" data-modal-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
         </div>
         <p id="audit-subtitle" class="server-audit-subtitle">${escapeHtml(t('serverAudit.subtitle', {
           server: session.serverStore.serverDetails?.name ?? '', days: SERVER_AUDIT_LIMITS.RETENTION_DAYS,
@@ -140,30 +131,20 @@ export class ServerAuditModal {
           </button>
         </div>
       </div>
-    `;
-    this.modalEl = modal;
-    document.body.appendChild(modal);
-    enterModal(modal);
-    this.attachEvents(modal);
-    modal.querySelector<HTMLButtonElement>('#modal-close')?.focus();
-
-    const revalidate = () => {
-      const origin = currentEventOrigin();
-      if (origin !== null && origin !== session.key) return;
+    `,
+      initialFocus: '#modal-close',
+      onClose: () => { if (this.shell === shell) this.teardown(); },
+    });
+    this.shell = shell;
+    this.modalEl = shell.element;
+    this.attachEvents(shell.element, shell.signal);
+    this.cleanup.push(watchVisibleSession(session, () => {
       try {
         source.assertCurrent();
       } catch (error) {
         this.report(error);
       }
-    };
-    this.cleanup.push(
-      appEvents.on('server.updated', revalidate),
-      appEvents.on('server.roles_updated', revalidate),
-      appEvents.on('network.status', revalidate),
-      appEvents.on('session.changed', () => {
-        if (sessionManager.getActive() !== session || sessionManager.get(session.key) !== session) this.close(true);
-      }),
-    );
+    }, () => this.close(true)));
     await this.reload();
   }
 
@@ -344,32 +325,8 @@ export class ServerAuditModal {
     void this.reload();
   }
 
-  private attachEvents(modal: HTMLElement): void {
-    if (!this.events) return;
-    const options = { signal: this.events.signal };
-    modal.querySelector('#modal-close')?.addEventListener('click', () => this.close(), options);
-    modal.addEventListener('mousedown', (event) => {
-      if (event.target === modal) this.close();
-    }, options);
-    document.addEventListener('keydown', (event) => {
-      if (!handlesModalKey(modal, event)) return;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.close();
-      } else if (event.key === 'Tab') {
-        const focusable = Array.from(modal.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), [tabindex="0"]',
-        )).filter((element) => element.getClientRects().length > 0);
-        const target = event.shiftKey ? focusable.at(-1) : focusable[0];
-        const boundary = event.shiftKey ? focusable[0] : focusable.at(-1);
-        if (document.activeElement === boundary || !modal.contains(document.activeElement)) {
-          event.preventDefault();
-          target?.focus();
-        }
-      }
-    }, { ...options, capture: true });
-
+  private attachEvents(modal: HTMLElement, signal: AbortSignal): void {
+    const options = { signal };
     modal.addEventListener('click', (event) => {
       if (!(event.target instanceof Element)) return;
       const filter = event.target.closest<HTMLElement>('[data-audit-filter]')?.dataset.auditFilter;
@@ -401,7 +358,7 @@ export class ServerAuditModal {
     const message = error instanceof ServerAuditError ? t(FAILURE_KEYS[error.reason])
       : error instanceof RequestTimeoutError ? t('serverAudit.timeout')
       : t('serverAudit.loadFailed', { error: error instanceof Error ? error.message : t('protocolError.internalError') });
-    showErrorToast(message);
+    reportError(message);
     if (endsServerAudit(error)) this.close(true);
   }
 
@@ -412,6 +369,12 @@ export class ServerAuditModal {
 
   /** Revoked content leaves at once; an ordinary close animates out. */
   public close(immediate = false): void {
+    if (this.shell) this.shell.close('api', immediate);
+    else this.teardown();
+  }
+
+  private teardown(): void {
+    this.shell = null;
     this.view++;
     // Reads of the closed view drop their results; a new opening never waits behind them.
     this.queue = Promise.resolve();
@@ -421,16 +384,8 @@ export class ServerAuditModal {
     for (const cleanup of this.cleanup.splice(0)) cleanup();
     this.source?.dispose();
     this.source = null;
-    this.events?.abort();
-    this.events = null;
-    if (this.modalEl) {
-      exitModal(this.modalEl, immediate);
-      this.modalEl = null;
-    }
+    this.modalEl = null;
     this.entries = [];
-    const previousFocus = this.previousFocus;
-    this.previousFocus = null;
-    if (previousFocus?.isConnected) previousFocus.focus();
   }
 }
 

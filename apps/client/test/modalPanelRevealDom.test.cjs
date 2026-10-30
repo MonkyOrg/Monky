@@ -91,6 +91,16 @@ if (!process.versions.electron) {
       await evaluate('window.fixture.pencil().click()');
       await check(await waitFor('window.fixture.editorClosed()'), 'the editor closes again');
 
+      // A panel unfolding through its own CSS transition (the soundboard's) follows the same rule.
+      await evaluate('window.unfoldFixture.park()');
+      const parked = await evaluate('window.unfoldFixture.scrollTop()');
+      await evaluate('window.unfoldFixture.openByCode()');
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await check(await evaluate(`window.unfoldFixture.open() && !window.unfoldFixture.visible()
+        && window.unfoldFixture.scrollTop() === ${parked}`), 'a CSS unfold without user action does not scroll');
+      await evaluate('window.unfoldFixture.close(); window.fixture.scroller().scrollTop = 0');
+      await new Promise(resolve => setTimeout(resolve, 400));
+
       // Opened with a real click: once expanded, the editor is scrolled into view.
       const point = await evaluate(`(() => {
         const box = window.fixture.pencil().getBoundingClientRect();
@@ -102,6 +112,14 @@ if (!process.versions.electron) {
       await check(await waitFor('window.fixture.editorOpen()'), 'a real click opens the editor');
       await check(await waitFor('window.fixture.editorVisible() && window.fixture.scroller().scrollTop > 0', 4000),
         'the opened editor is scrolled fully into view');
+
+      await evaluate('window.unfoldFixture.park()');
+      const unfoldPoint = await evaluate('window.unfoldFixture.point()');
+      browser.webContents.sendInputEvent({ type: 'mouseMove', ...unfoldPoint });
+      browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...unfoldPoint });
+      browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...unfoldPoint });
+      await check(await waitFor('window.unfoldFixture.open() && window.unfoldFixture.visible()', 4000),
+        'a CSS unfold opened by a click ends scrolled into view');
       console.log('Modal reveal DOM passed');
       await finish(0);
     } catch (error) {
@@ -155,6 +173,44 @@ async function setupFixture() {
       const box = host().getBoundingClientRect();
       const viewBox = container.getBoundingClientRect();
       return box.top >= viewBox.top - 1 && box.bottom <= viewBox.top + container.clientHeight + 1;
+    },
+  };
+  const { revealWhenUnfolded } = await import('/utils/surfaceVisibility.ts');
+  const unfold = document.createElement('div');
+  unfold.innerHTML = '<button type="button" data-unfold-trigger>Unfold</button><section class="sb-settings-section"'
+    + ' data-unfold-panel><div class="sb-settings-clip"><div style="height: 260px">Unfolded</div></div></section>';
+  view.append(unfold);
+  const unfoldButton = unfold.querySelector('[data-unfold-trigger]');
+  const unfoldPanel = unfold.querySelector('[data-unfold-panel]');
+  unfoldButton.addEventListener('click', () => {
+    const open = !unfoldPanel.classList.contains('is-expanded');
+    unfoldPanel.classList.toggle('is-expanded', open);
+    if (open) revealWhenUnfolded(unfoldPanel);
+  });
+  const unfoldContainer = () => scroller() ?? view;
+  window.unfoldFixture = {
+    // The trigger sits on screen at the bottom edge, so the panel unfolds below the fold.
+    park: () => {
+      const container = unfoldContainer();
+      const bottom = container.getBoundingClientRect().top + container.clientHeight;
+      container.scrollTop += unfoldButton.getBoundingClientRect().bottom - bottom + 2;
+    },
+    point: () => {
+      const box = unfoldButton.getBoundingClientRect();
+      return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+    },
+    scrollTop: () => unfoldContainer().scrollTop,
+    open: () => unfoldPanel.classList.contains('is-expanded'),
+    openByCode: () => {
+      unfoldPanel.classList.add('is-expanded');
+      revealWhenUnfolded(unfoldPanel);
+    },
+    close: () => unfoldPanel.classList.remove('is-expanded'),
+    visible: () => {
+      const container = unfoldContainer();
+      const box = unfoldPanel.getBoundingClientRect();
+      const viewBox = container.getBoundingClientRect();
+      return box.height > 200 && box.top >= viewBox.top - 1 && box.bottom <= viewBox.top + container.clientHeight + 1;
     },
   };
   window.revealState = () => {

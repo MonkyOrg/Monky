@@ -1,5 +1,5 @@
 import { t } from '../i18n';
-import { enterModal, exitModal, handlesModalKey } from '../utils/modalSurface';
+import { openModal } from '../utils/modalShell';
 import { escapeHtml } from '../utils/html';
 import { withButtonLoading } from '../utils/buttonLoading';
 import { renderLoadingError } from '../utils/loadingSkeleton';
@@ -88,10 +88,11 @@ export function openImageCropperBatch(
     const loading = new AbortController();
     let state = entries[0].state;
 
-    const backdrop = document.createElement('div');
-    backdrop.className = 'modal-backdrop';
-    backdrop.innerHTML = `
-      <div class="modal-card crop-modal-card ${isMedia ? 'crop-banner-card' : ''}" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('crop.title'))}">
+    let result: string[] | null = null;
+    let settled = false;
+    const shell = openModal({
+      card: `
+      <div class="modal-card crop-modal-card ${isMedia ? 'crop-banner-card' : ''}" aria-label="${escapeHtml(t('crop.title'))}">
         <div class="modal-header">
           <div class="modal-title">${t('crop.title')}</div>
           <span class="crop-counter" ${entries.length > 1 ? '' : 'hidden'}></span>
@@ -118,7 +119,18 @@ export function openImageCropperBatch(
           <button type="button" class="btn btn-primary" data-action="confirm" disabled>${t('crop.confirm')}</button>
         </div>
       </div>
-    `;
+    `,
+      initialFocus: '[data-action="cancel"]',
+      onClose: () => {
+        settled = true;
+        loading.abort();
+        image?.removeAttribute('src');
+        imageEl.removeAttribute('src');
+        image = null;
+        resolve(result);
+      },
+    });
+    const backdrop = shell.card;
 
     const imageEl = backdrop.querySelector('.crop-image') as HTMLImageElement;
     const viewport = backdrop.querySelector('.crop-viewport') as HTMLElement;
@@ -160,27 +172,10 @@ export function openImageCropperBatch(
       apply();
     };
 
-    let settled = false;
-    const settle = (result: string[] | null) => {
+    const settle = (value: string[] | null) => {
       if (settled) return;
-      settled = true;
-      loading.abort();
-      image?.removeAttribute('src');
-      imageEl.removeAttribute('src');
-      image = null;
-      document.removeEventListener('keydown', onKeyDown, true);
-      exitModal(backdrop);
-      resolve(result);
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (!handlesModalKey(backdrop, e)) return;
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        // Otherwise the modal that opened the cropper would close as well.
-        e.stopPropagation();
-        settle(null);
-      }
+      result = value;
+      shell.close('button');
     };
 
     const exportCrop = (entryImage: HTMLImageElement, entryState: CropState): string | null => {
@@ -340,13 +335,6 @@ export function openImageCropperBatch(
       }
       void exportAll();
     });
-    backdrop.addEventListener('mousedown', (e) => {
-      if (e.target === backdrop) settle(null);
-    });
-    document.addEventListener('keydown', onKeyDown, true);
-
-    document.body.appendChild(backdrop);
-    enterModal(backdrop);
     const prepare = async (): Promise<void> => {
       const entry = entries[index];
       slider.disabled = confirm.disabled = reset.disabled = rotate.disabled = true;

@@ -4,14 +4,9 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
-const ts = require('typescript');
+const { loadMain } = require('./mainModules.cjs');
 
 const clientRoot = path.resolve(__dirname, '..');
-const filename = path.join(clientRoot, 'src', 'main', 'trayManager.ts');
-const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
-}).outputText;
 const trayDir = path.join(clientRoot, 'build', 'tray');
 // In a call each pose may hold a megaphone instead of the mic (only call and talk), wear 3D glasses
 // and have a REC frame: `{pose}[-mega][-3d][-rec]`.
@@ -40,14 +35,12 @@ function load(platform) {
       createFromPath(file) { loaded.push(file); return { file, isEmpty: () => !fs.existsSync(file) }; },
     },
   };
-  const module = { exports: {} };
-  // The compiled file runs from dist-electron/main (package.json "main"), two levels below the client root.
-  vm.runInThisContext(`(function(require, module, exports, __dirname, process) {\n${compiled}\n})`, { filename })(
-    name => name === 'electron' ? electron : name === './i18n' ? { mt: key => key } : require(name),
-    module, module.exports, path.join(clientRoot, 'dist-electron', 'main'), { ...process, platform },
-  );
-  const window = { isDestroyed: () => false, webContents: { send: channel => sent.push(channel) } };
-  return { ...module.exports, window, loaded, trays, sent };
+  // src/main and dist-electron/main (package.json "main") are both two levels below the client root.
+  const exports = loadMain('trayManager', {
+    packages: { electron }, local: { i18n: { mt: key => key } }, globals: { process: { ...process, platform } },
+  });
+  const window = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: channel => sent.push(channel) } };
+  return { ...exports, window, loaded, trays, sent };
 }
 
 const poseStates = [

@@ -1,6 +1,7 @@
 import { BrowserWindow, Menu, NativeImage, nativeImage, Tray } from 'electron';
 import path from 'path';
 import { mt, type MainTranslationKey } from './i18n';
+import { sendEvent, windowContents } from './ipc/registry';
 
 export interface VoiceStatus {
   inCall: boolean;
@@ -168,9 +169,7 @@ export class TrayManager {
       menuTemplate.push({
         label: isMuted ? mt('tray.unmuteMic') : mt('tray.muteMic'),
         click: () => {
-          if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-            this.mainWindow.webContents.send('tray:toggle-mute');
-          }
+          sendEvent(windowContents(this.mainWindow), 'tray:toggle-mute');
         },
       });
 
@@ -179,9 +178,7 @@ export class TrayManager {
       menuTemplate.push({
         label: isDeafened ? mt('tray.undeafen') : mt('tray.deafen'),
         click: () => {
-          if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-            this.mainWindow.webContents.send('tray:toggle-deafen');
-          }
+          sendEvent(windowContents(this.mainWindow), 'tray:toggle-deafen');
         },
       });
     }
