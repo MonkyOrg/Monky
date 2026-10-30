@@ -1,4 +1,3 @@
-const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -6,6 +5,7 @@ const ts = require('typescript');
 const shared = require('@monky/shared');
 
 const preloadRoot = path.resolve(__dirname, '..', 'src', 'preload');
+const WORKLET = '@monky/screen-share/runtime/nativePcmPlayout.worklet.js?raw';
 
 function transpile(filename) {
   return ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
@@ -47,7 +47,8 @@ function loadPreload() {
       },
       sharedTexture: {},
     }],
-    ['node:fs', { readFileSync: () => 'registerProcessor("fixture", class {});' }],
+    // The bundle embeds the worklet source as a string (scripts/buildPreloads.mjs).
+    [WORKLET, 'registerProcessor("fixture", class {});'],
     ['@monky/shared', shared],
     ['@monky/screen-share/renderer', screenRenderer],
   ]);
@@ -62,10 +63,6 @@ function loadPreload() {
       if (modules.has(request)) return modules.get(request);
       throw new Error(`The preload required an unexpected module: ${request}`);
     }
-    fakeRequire.resolve = request => {
-      assert.equal(request, '@monky/screen-share/runtime/nativePcmPlayout.worklet.js');
-      return path.join('C:\\', 'fixture', 'nativePcmPlayout.worklet.js');
-    };
     vm.runInNewContext(transpile(filename), {
       module, exports: module.exports, require: fakeRequire, console, Blob,
       process: { argv: [], platform: 'win32' },

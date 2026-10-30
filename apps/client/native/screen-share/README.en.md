@@ -394,7 +394,10 @@ Its owner blocks new frames, closes the decoder and drains the writer before
 stopping the track; a timeout retains resources for a subsequent retry.
 
 Preload loads only `@monky/screen-share/renderer` (presentation and audio), and
-only when its window watches the first native screen. Capture, transport and
+only when its window watches the first native screen. Because the window is
+sandboxed, this entry cannot depend on Node modules: it is bundled into the
+preload (`apps/client/scripts/buildPreloads.mjs`) together with the audio
+worklet source. Capture, transport and
 processes stay in Main, behind the main entry; `afterPack` compares both
 entries byte for byte with the packaged copy.
 

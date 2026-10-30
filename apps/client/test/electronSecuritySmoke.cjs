@@ -1,6 +1,6 @@
 'use strict';
 // E-MAIN-1 and E-MAIN-3 in a real Electron: the navigation and window policy every
-// WebContents receives, the overlay's minimal preload and own page (R-MEDIA-3), the
+// WebContents receives, the sandboxed preloads (#826), the overlay's minimal preload and own page (R-MEDIA-3), the
 // main-frame IPC guard, the preload's one-time folder report (D4) and the renderer
 // Content-Security-Policy, both in the built bundle (file://) and through the Vite dev server.
 const assert = require('node:assert/strict');
@@ -38,11 +38,12 @@ async function run() {
   require(built('main/botScreenDocuments.js')).registerBotScreenScheme();
   const { installWebContentsPolicy } = require(built('main/webContentsPolicy.js'));
   let disposePolicy = installWebContentsPolicy(app);
-  const { MEDIA_FOLDERS_IPC, SHORTCUT_IPC } = require('@monky/shared');
+  const { MEDIA_FOLDERS_IPC, SHORTCUT_IPC, DEVELOPMENT_QA_IPC } = require('@monky/shared');
   const { IpcRegistry, windowContents } = require(built('main/ipc/registry.js'));
   // The packaged native helper is not built in DOM lanes; the overlay only needs its window to resize.
   require('@monky/screen-audio').setWindowResizeAspect = () => {};
   const { OverlayManager } = require(built('main/overlayManager.js'));
+  const { isolatedWebPreferences } = require(built('main/windowPreferences.js'));
   await app.whenReady();
   // Miniapp documents answer 404 here; the frame only needs a real handler for its scheme.
   require(built('main/botScreenDocuments.js')).installBotScreenDocuments(require('electron').session.defaultSession);
@@ -122,9 +123,8 @@ async function run() {
     ipcMain.handle(MEDIA_FOLDERS_IPC.adopt, (event, folders) => {
       reports.push({ sender: event.sender.id, top: event.senderFrame === event.sender.mainFrame, folders });
     });
-    const appWindow = track(new BrowserWindow({ show: false, webPreferences: {
-      preload: built('preload/preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: false,
-    } }));
+    const appWindow = track(new BrowserWindow({ show: false, webPreferences: isolatedWebPreferences('preload') }));
+    check(appWindow.webContents.getLastWebPreferences().sandbox === true, 'The main window runs sandboxed (#826).');
     await appWindow.loadURL(`${origin}/settings`);
     await until(() => reports.length === 1, 'first folder report');
     check(reports[0].top && reports[0].sender === appWindow.webContents.id && !reports[0].folders.soundboard
@@ -151,12 +151,27 @@ async function run() {
       && listings.map(entry => entry.channel).join() === [...listingChannels, ...listingChannels].join(),
     `A user action lets Main confirm the folder: ${JSON.stringify(listings)}`);
     for (const channel of listingChannels) ipcMain.removeHandler(channel);
-    const opaque = track(new BrowserWindow({ show: false, webPreferences: {
-      preload: built('preload/preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: false,
-    } }));
+    const opaque = track(new BrowserWindow({ show: false, webPreferences: isolatedWebPreferences('preload') }));
     await opaque.loadURL('data:text/html,<title>opaque</title>');
     check(await opaque.webContents.executeJavaScript('typeof window.api.getAppVersion') === 'function',
       'Documents without storage still get the API.');
+
+    // --- The sandboxed preload has only `electron`: Node globals stay out of the page, the prepared QA
+    // flag still arrives through argv, and native screen audio plays its embedded worklet (#826). ---
+    check(await appWindow.webContents.executeJavaScript('typeof process + typeof require') === 'undefinedundefined',
+      'The page sees neither process nor require.');
+    const qaMarker = { runId: 'sandbox-fixture' };
+    ipcMain.handle(DEVELOPMENT_QA_IPC.config, () => qaMarker);
+    const prepared = track(new BrowserWindow({ show: false,
+      webPreferences: isolatedWebPreferences('preload', { additionalArguments: ['--monky-prepared-qa'] }) }));
+    await prepared.loadURL(`${origin}/plain`);
+    check(JSON.stringify(await prepared.webContents.executeJavaScript('window.api.getDevelopmentQaConfig()')) === JSON.stringify(qaMarker),
+      'The sandboxed preload reads its prepared QA flag from argv.');
+    check(JSON.stringify(await appWindow.webContents.executeJavaScript('window.api.getDevelopmentQaConfig()')) === 'null',
+      'A window without the flag never asks for the QA configuration.');
+    ipcMain.removeHandler(DEVELOPMENT_QA_IPC.config);
+    prepared.destroy();
+    check(await nativeAudioPlays(appWindow), 'The sandboxed preload starts native screen audio from its embedded worklet.');
 
     // --- Built bundle (file://): the real renderer and the browser features it relies on. ---
     const assets = fs.readdirSync(path.join(client, 'dist', 'assets'));
@@ -208,6 +223,7 @@ async function run() {
     manager.open({ mode: 'cameras-only', layout: 'horizontal', position: 'bottom-right', cardOpacity: 0.85,
       focusActiveSpeaker: false, preserveAspectRatio: true });
     overlay = await created;
+    check(overlay.webContents.getLastWebPreferences().sandbox === true, 'The overlay runs sandboxed (#826).');
     const overlayViolations = observe('overlay', overlay.webContents);
     overlay.webContents.on('console-message', event => {
       if (event.level === 'error') overlayErrors.push(event.message);
@@ -264,9 +280,8 @@ async function run() {
     await until(() => hmrConnected, 'Vite HMR connection');
     check(devViolations.length === 0, `The dev server renderer loads without CSP violations: ${devViolations.join('\n')}`);
     // npm run dev opens the overlay from the dev server too: its page must run and reload there.
-    const devOverlay = track(new BrowserWindow({ show: false, width: 400, height: 240, webPreferences: {
-      preload: built('preload/overlayPreload.js'), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false,
-    } }));
+    const devOverlay = track(new BrowserWindow({ show: false, width: 400, height: 240,
+      webPreferences: isolatedWebPreferences('overlayPreload', { backgroundThrottling: false }) }));
     const devOverlayViolations = observe('vite overlay', devOverlay.webContents);
     let overlayHmr = false;
     devOverlay.webContents.on('console-message', event => {
@@ -276,7 +291,7 @@ async function run() {
     await until(() => devOverlay.webContents.executeJavaScript('!!document.querySelector(".overlay-stage-root")'), 'dev overlay UI', 60_000);
     await until(() => overlayHmr, 'Vite HMR connection in the overlay');
     check(devOverlayViolations.length === 0, `The dev server overlay loads without CSP violations: ${devOverlayViolations.join('\n')}`);
-    console.log(`Electron security: ${checks} checks passed (policy, overlay preload, IPC guard, folder report and confirmation, CSP built and dev; ${dropped}).`);
+    console.log(`Electron security: ${checks} checks passed (policy, sandboxed preloads with QA flag and native audio, overlay preload, IPC guard, folder report and confirmation, CSP built and dev; ${dropped}).`);
     await finish(0);
   } catch (error) {
     console.error(error);
@@ -289,6 +304,42 @@ async function run() {
     await vite?.close().catch(() => undefined);
     await new Promise(resolve => server.close(resolve));
     app.exit(code);
+  }
+}
+
+/**
+ * Runs one native screen audio output into the window's real preload, the way
+ * Main does, with the native engine answered in place. Readiness proves the
+ * AudioWorklet embedded in the preload bundle started; credits, that it plays.
+ */
+async function nativeAudioPlays(window) {
+  const { ipcMain, MessageChannelMain } = require('electron');
+  const protocol = require('@monky/shared');
+  const { NativeAudioPortMain } = require(path.join(client, 'native', 'screen-share', 'runtime', 'nativeAudioPortMain.cjs'));
+  const { within } = require(path.join(client, 'native', 'screen-share', 'runtime', 'asyncTools.cjs'));
+  ipcMain.handle(protocol.NATIVE_SCREEN_IPC.invoke, () => null);
+  const credits = Promise.withResolvers();
+  const output = new NativeAudioPortMain({
+    webContents: window.webContents, frame: window.webContents.mainFrame, expectedUrl: window.webContents.getURL(),
+    sessionId: 'sandbox-fixture', protocol, createMessageChannel: () => new MessageChannelMain(),
+    controls: {
+      configureOutput: async value => ({ epoch: value.epoch, sampleRate: 48000, channels: 2 }),
+      probe: value => ({ ...value, rtcBeforeUs: 1000000, rtcAfterUs: 1000001 }),
+      calibrate: value => ({ epoch: value.epoch, calibrationId: value.probeId, offsetUs: 900000, uncertaintyUs: 1 }),
+      grantCredits: value => credits.resolve(value),
+      feedback() {},
+    },
+    onError: error => credits.reject(error),
+  });
+  try {
+    // Watching a native screen is what registers the preload's audio receiver.
+    await window.webContents.executeJavaScript("window.api.nativeScreenCommand({ action: 'watch' })");
+    await within(output.start({ epoch: 1, sinkId: '', sampleRate: 48000, channels: 2 }), 15_000, 'Native audio never became ready.');
+    const granted = await within(credits.promise, 15_000, 'The native audio worklet never asked for PCM.');
+    await within(output.stop(1), 15_000, 'Native audio did not retire.');
+    return granted.epoch === 1 && granted.frames > 0;
+  } finally {
+    ipcMain.removeHandler(protocol.NATIVE_SCREEN_IPC.invoke);
   }
 }
 

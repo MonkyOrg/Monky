@@ -15,6 +15,7 @@ import type {
   OverlaySyncState,
 } from '@monky/shared';
 import { sendEvent, windowContents } from './ipc/registry';
+import { isolatedWebPreferences } from './windowPreferences';
 
 const DEFAULT_OVERLAY_WIDTH = OVERLAY_DEFAULT_WIDTH;
 const DEFAULT_OVERLAY_HEIGHT = OVERLAY_DEFAULT_HEIGHT;
@@ -94,15 +95,8 @@ export class OverlayManager {
       skipTaskbar: true,
       backgroundColor: '#00000000',
       show: false,
-      webPreferences: {
-        // A dedicated preload: the overlay only draws the call (E-MAIN-1).
-        preload: path.join(__dirname, '../preload/overlayPreload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: false,
-        backgroundThrottling: false,
-        webSecurity: true,
-      },
+      // A dedicated preload: the overlay only draws the call (E-MAIN-1).
+      webPreferences: isolatedWebPreferences('overlayPreload', { backgroundThrottling: false }),
     });
 
     const openedWindow = this.overlayWindow;

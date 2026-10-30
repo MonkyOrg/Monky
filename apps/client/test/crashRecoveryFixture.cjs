@@ -51,7 +51,7 @@ function sourceFor(specifier, from) {
 /**
  * Isolated compilation: never overwrites dist or a peer's build artifacts. Starts from the recovery
  * entry points and follows every relative and @monky/shared require of the emitted code, so a new
- * import in any of them is compiled too instead of failing at load.
+ * import in any of them is compiled too instead of failing at load. The preloads are bundled by the smoke.
  */
 function compileRecovery(root) {
   const sharedIndex = path.join(sharedSource, 'index.ts');
@@ -59,8 +59,8 @@ function compileRecovery(root) {
     ? path.join('shared', path.relative(sharedSource, source)) : path.relative(path.join(client, 'src'), source))
     .replace(/\.ts$/u, '.js');
   const pending = [
-    ...['crashRecovery', 'i18n'].map(name => path.join(client, 'src', 'main', `${name}.ts`)),
-    ...['crashRecoveryPreload', 'preload'].map(name => path.join(client, 'src', 'preload', `${name}.ts`)),
+    ...['crashRecovery', 'crashDiagnostics', 'crashRecoveryPage', 'i18n', 'windowPreferences']
+      .map(name => path.join(client, 'src', 'main', `${name}.ts`)),
     sharedIndex,
   ];
   const compiled = new Set();

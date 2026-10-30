@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, sharedTexture } from 'electron';
-import { readFileSync } from 'node:fs';
+import nativePcmPlayoutWorklet from '@monky/screen-share/runtime/nativePcmPlayout.worklet.js?raw';
 import type { NativeScreenPresentationController } from '@monky/screen-share/renderer';
 import * as nativeAudioProtocol from '@monky/shared';
 import {
@@ -59,8 +59,7 @@ let nativeAudio: ReturnType<NativeScreenRenderer['registerNativeAudioPortReceive
 let nativeAudioWorkletUrl: string | null = null;
 function prepareNativeAudio(): void {
   if (nativeAudio) return;
-  const code = readFileSync(require.resolve('@monky/screen-share/runtime/nativePcmPlayout.worklet.js'), 'utf8');
-  const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+  const url = URL.createObjectURL(new Blob([nativePcmPlayoutWorklet], { type: 'application/javascript' }));
   try {
     nativeAudio = screenRenderer().registerNativeAudioPortReceiver(ipcRenderer, nativeAudioProtocol, {
       workletUrl: url, onError: error => console.error('[NativeScreen] Audio output failed:', error),

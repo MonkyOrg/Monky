@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Todas as janelas do Monky, incluindo a principal, o overlay e a tela de recuperação, agora rodam na caixa de areia do sistema. Se algo der errado numa página, ele fica preso lá dentro.",
+  "en": "Every Monky window, including the main one, the overlay and the recovery screen, now runs inside the system sandbox. If something goes wrong in a page, it stays locked in there."
+}

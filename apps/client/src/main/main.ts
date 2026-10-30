@@ -39,6 +39,7 @@ import { installWebContentsPolicy } from './webContentsPolicy';
 import type { ContractIpcMain } from './ipcContract';
 import { webUrl } from './ipc/guards';
 import { IpcRegistry, sendEvent, windowContents } from './ipc/registry';
+import { isolatedWebPreferences } from './windowPreferences';
 
 import fs from 'fs';
 
@@ -392,17 +393,11 @@ function createWindow(deferShow = false): void {
     trafficLightPosition: isMac ? { x: 14, y: 12 } : undefined,
     title: developmentProfile ? 'Monky Dev' : 'Monky',
     icon: iconPath,
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      nodeIntegrationInSubFrames: false,
-      sandbox: false, // The preload requires Node modules: the shared contracts and the native screen renderer.
-      webSecurity: true,
+    webPreferences: isolatedWebPreferences('preload', {
       backgroundThrottling: false, // Keep audio and WebRTC processing smoothly when minimized/hidden
       offscreen: developmentQa?.smoke === true,
       additionalArguments: developmentQa ? ['--monky-prepared-qa'] : [],
-    },
+    }),
   });
   markStartup('window');
 

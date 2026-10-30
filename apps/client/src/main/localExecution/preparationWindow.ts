@@ -7,6 +7,7 @@ import {
   type LocalBotIdentity, type LocalCapabilityId, type LocalConsentDecision, type LocalPreparationDialogState,
 } from '@monky/shared';
 import { mt } from '../i18n';
+import { isolatedWebPreferences } from '../windowPreferences';
 import { LocalExecutionError, localFailure } from './errors';
 import type { LocalTools } from './LocalTools';
 import {
@@ -90,11 +91,7 @@ export class LocalPreparationWindow {
       width: Math.min(720, workArea.width - 40), height: Math.min(preparing ? 820 : 470, workArea.height - 40),
       resizable: false, minimizable: false, maximizable: false, fullscreenable: false,
       backgroundColor: '#161b22', title: this.state().title,
-      webPreferences: {
-        contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false, sandbox: true,
-        webSecurity: true, backgroundThrottling: false,
-        preload: path.join(__dirname, '../../preload/localPreparationDialog.cjs'),
-      },
+      webPreferences: isolatedWebPreferences('localPreparationDialog', { backgroundThrottling: false }),
     });
     this.window = window;
     this.contents = window.webContents;

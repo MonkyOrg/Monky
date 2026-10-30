@@ -211,6 +211,8 @@ test('renderer death replaces the broken window once, with no automatic report o
   assert.equal(window.options.webPreferences.nodeIntegration, false);
   assert.equal(window.options.webPreferences.nodeIntegrationInSubFrames, false);
   assert.equal(window.options.webPreferences.partition, 'monky-crash-recovery');
+  assert.equal(window.options.webPreferences.sandbox, true, 'the recovery page runs sandboxed (#826)');
+  assert.equal(path.basename(window.options.webPreferences.preload), 'crashRecoveryPreload.cjs', 'its preload is the bundle');
   assert.equal(window.options.titleBarStyle, 'hidden');
   if (process.platform === 'darwin') {
     assert.equal(window.options.trafficLightPosition.x, 14);
