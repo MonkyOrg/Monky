@@ -42,6 +42,7 @@ const commands = [
   ['npm', 'run', 'test:community', '--workspace=apps/client'],
   ['npm', 'run', 'test:pip', '--workspace=apps/client'],
   ['npm', 'run', 'test:security', '--workspace=apps/client'],
+  ['node', 'apps/client/test/crashRecoverySmoke.cjs'],
 ];
 
 // Seconds measured in CI (windows-2022, macos-15). They only balance shards; every command still runs

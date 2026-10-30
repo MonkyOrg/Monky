@@ -39,37 +39,26 @@ test runs that case with `UV_THREADPOOL_SIZE=4`.
 
 ## Build and run on Windows x64
 
-Run from the repository root with the existing Visual Studio 2022 Build Tools,
-Node headers/import library in the `node-gyp` cache, and installed client
-`node-addon-api`. No download, SDK rebuild or production-addon write is needed.
-Use a separate checkout when an installed/development build is in use.
+CI runs this suite in the Windows packaging job, and `npm run ci:local` runs it on Windows.
+From the repository root:
 
 ```powershell
-(Get-Process -Id $PID).PriorityClass = 'BelowNormal'
-$out = 'apps\client\native\screen-audio\build\packet-tests'
-New-Item -ItemType Directory -Force "$out\capture_double\obj", "$out\core_controls\obj" | Out-Null
-$env:MONKY_PCM_TEST_NODE = Join-Path $env:LOCALAPPDATA "node-gyp\Cache\$(node -p 'process.versions.node')"
-
-& $env:ComSpec /d /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul && cl /nologo /EHsc /std:c++17 /MD /O1 /DNAPI_DISABLE_CPP_EXCEPTIONS /DNAPI_VERSION=8 /D_HAS_EXCEPTIONS=1 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /DMONKY_PACKET_CAPTURE_TEST /I"%MONKY_PCM_TEST_NODE%\include\node" /I"apps\client\node_modules\node-addon-api" /LD "apps\client\native\screen-audio\test\capture_double.cpp" "apps\client\native\screen-audio\src\packet_capture.cpp" "apps\client\native\screen-audio\src\win\wasapi_format.cpp" /Fo"apps\client\native\screen-audio\build\packet-tests\capture_double\obj\\" /Fe"apps\client\native\screen-audio\build\packet-tests\capture_double\capture_double.node" /link /INCREMENTAL:NO "%MONKY_PCM_TEST_NODE%\x64\node.lib" ksuser.lib'
-if ($LASTEXITCODE -ne 0) { throw 'Packet capture test build failed.' }
-
-& $env:ComSpec /d /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul && cl /nologo /EHsc /std:c++17 /MD /O1 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 "apps\client\native\screen-audio\test\core_controls.cpp" "apps\client\native\screen-audio\src\win\wasapi_format.cpp" /Fo"apps\client\native\screen-audio\build\packet-tests\core_controls\obj\\" /Fe"apps\client\native\screen-audio\build\packet-tests\core_controls\core_controls.exe" /link /INCREMENTAL:NO ksuser.lib'
-if ($LASTEXITCODE -ne 0) { throw 'PCM core test build failed.' }
-
-@{
-  nodeVersion = (node -p 'process.versions.node')
-  hardwareUsed = $false
-  functionalAddonLoaded = $false
-  productionAddonUnchanged = $true
-} | ConvertTo-Json | Set-Content "$out\build-report.json"
-
-node --test --test-concurrency=1 apps\client\native\screen-audio\test\packetCapture.test.cjs
-node --test --test-concurrency=1 apps\client\native\screen-share\test\nativePcmCaptureBridge.test.cjs apps\client\native\screen-share\test\nativePcmCaptureHub.test.cjs
+npm run test:packet-capture --workspace=apps/client
 ```
 
-For a second existing Node runtime, build against its matching headers/library
-into a separate directory, set `MONKY_PACKET_CAPTURE_TEST_DIR` to that absolute
-directory, and run the same suite using that runtime. `core_controls.exe` is
+`buildPacketTests.cjs` compiles the double (production `packet_capture.cpp` and
+`wasapi_format.cpp`, never `wasapi_capture.cpp`) and `core_controls.exe` into
+`apps\client\native\screen-audio\build\packet-tests`, using the MSVC already on `PATH`
+(a Developer prompt or CI) or the Visual Studio Build Tools found by `vswhere`. It builds
+against the headers and import library of the Node that runs it, from the `node-gyp` cache
+(downloaded only when missing; `MONKY_PCM_TEST_NODE` overrides the folder), with the installed
+client `node-addon-api`, and writes `build-report.json`. No SDK rebuild or production-addon
+write is needed. Without that build the suite fails instead of skipping.
+
+For a second existing Node runtime, set `MONKY_PACKET_CAPTURE_TEST_DIR` to a separate
+absolute directory and run both `buildPacketTests.cjs` and the suite with that runtime
+(`<node> apps\client\native\screen-audio\test\buildPacketTests.cjs`, then
+`<node> --test --test-concurrency=1 apps\client\native\screen-audio\test\packetCapture.test.cjs`). `core_controls.exe` is
 independent of Node. Never run the Node-24-only post-finalizer ownership scenario
 on Node 20; the suite selects it only on the verified runtime.
 

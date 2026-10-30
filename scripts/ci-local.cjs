@@ -69,6 +69,9 @@ function plan({ base, head, title = '', packageApp = false, platform = process.p
     ...[`node apps/client/native/screen-share/scripts/verifyOutputs.cjs ${platform === 'darwin' ? 'mac --legal' : 'win'}`,
       ...lines(packaging, 'Exercise native screen contracts and legal metadata')]
       .map(command => shell('native', command, nativeReady ? {} : { skip: noNative })),
+    // Windows-only: the acquisition double needs MSVC, not the prepared screen runtime.
+    ...platform === 'darwin' ? [] : lines(packaging, 'Exercise device-free screen audio capture contracts')
+      .map(command => shell('native-audio', command)),
     ...lines(packaging, 'Exercise prepared application startup and scenarios').map(command => shell('package', command)),
     { stage: 'package', label: 'copiar migrations', fn: copyMigrations },
     shell('package', `npx --no-install electron-builder --${platform === 'darwin' ? 'mac' : 'win'} --dir --publish never`, {

@@ -688,6 +688,11 @@ jobs:
           npm run test:native-screen --workspace=apps/client
           npm run test:legal
 
+      - name: Exercise device-free screen audio capture contracts
+        # Builds the acquisition double with this job's MSVC and Node; a missing double fails the suite.
+        timeout-minutes: 10
+        run: npm run test:packet-capture --workspace=apps/client
+
       - name: Save verified native runtime
         if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
