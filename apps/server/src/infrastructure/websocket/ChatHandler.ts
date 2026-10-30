@@ -1,7 +1,7 @@
 import type { WebSocket } from 'ws';
 import {
-  LIMITS, MessageType, Permission, ProtocolErrorCode, chatHistoryRequestSchema, chatReactionSchema,
-  type BotCommandMessagePayload, type ChatDeletePayload, type ChatEditPayload, type ChatHistoryPayload, type ChatMentionsReadPayload,
+  LIMITS, MessageType, Permission, ProtocolErrorCode, chatHistoryRequestSchema, chatMentionsReadSchema, chatReactionSchema,
+  type BotCommandMessagePayload, type ChatDeletePayload,   type ChatEditPayload, type ChatHistoryPayload,
   type ChatMessage, type ChatReactionPayload, type ChatRequestUploadTokenPayload, type ChatRestorePayload, type ChatSendPayload,
   type ServerMessage,
 } from '@monky/shared';
@@ -75,8 +75,8 @@ export class ChatHandler {
         handle: ({ session, payload, requestId }) => this.restore(session, payload as ChatRestorePayload, requestId),
       }),
       route({
-        types: [MessageType.CHAT_MENTIONS_READ],
-        handle: ({ session, payload }) => this.host.chat.markMentionsRead(session.user.id, (payload as ChatMentionsReadPayload).channelId),
+        types: [MessageType.CHAT_MENTIONS_READ], schema: { type: chatMentionsReadSchema, message: 'Canal inválido.' },
+        handle: ({ session, payload }) => this.host.chat.markMentionsRead(session.user.id, payload.channelId),
       }),
       route({
         types: [MessageType.CHAT_REQUEST_UPLOAD_TOKEN],

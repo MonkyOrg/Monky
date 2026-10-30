@@ -13,7 +13,7 @@ import type { RateLimiter } from '../security/RateLimiter';
 import type { Authorizer } from './access/Authorizer';
 import type { ClientSession, SignedInSession } from './ClientSession';
 import type { Outbox } from './Outbox';
-import { channelIdOf, route, type Route } from './routing/MessageRouter';
+import { channelIdOf, featureUnavailableCode, route, type Route } from './routing/MessageRouter';
 
 export interface SoundboardHost {
   readonly serverRepo: IServerRepository;
@@ -228,7 +228,7 @@ export class SoundboardHandler {
       return undefined;
     }
     if (!this.host.recentSoundCache) {
-      this.host.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR,
+      this.host.sendError(session.ws, featureUnavailableCode(session, ProtocolErrorCode.INTERNAL_ERROR),
         'O cache de áudios não está disponível neste servidor.', requestId);
       return undefined;
     }

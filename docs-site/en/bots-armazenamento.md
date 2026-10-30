@@ -79,6 +79,7 @@ whose `code` is a `ProtocolErrorCode`:
 | `STORAGE_FULL` | The write does not fit the limit or the number of objects |
 | `BOT_PERMISSIONS_REQUIRED` | `server_storage` was not approved on this server |
 | `FEATURE_REQUIRES_UPDATE` | The server does not have bot storage yet |
+| `FEATURE_UNAVAILABLE` | The server was started without bot storage; updating does not help |
 | `RATE_LIMITED` | More than 20 operations per second |
 | `BAD_REQUEST` | Invalid key, data or listing |
 

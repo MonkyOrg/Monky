@@ -1,7 +1,7 @@
 import type http from 'http';
 import type { WebSocket } from 'ws';
 import {
-  LIMITS, MessageType, Permission, ProtocolErrorCode, channelNameSchema, isAfkTimeoutSeconds,
+  LIMITS, MessageType, Permission, ProtocolErrorCode, channelNameSchema, isAfkTimeoutSeconds, serverUpdateSettingsSchema,
   type ServerMessage, type ServerSettingsUpdatedPayload, type ServerUpdateSettingsPayload, type VoiceModeTransition,
 } from '@monky/shared';
 import type { AuthService } from '../../application/services/AuthService';
@@ -24,7 +24,7 @@ import type { AuditRecorder } from './AuditRecorder';
 import type { BotInteractionSession } from './BotInteractionHandler';
 import type { ChannelHandler } from './ChannelHandler';
 import type { ClientSession } from './ClientSession';
-import { route, type Route } from './routing/MessageRouter';
+import { featureUnavailableCode, route, type Route } from './routing/MessageRouter';
 import type { VoiceSessionHandler } from './voice/VoiceSessionHandler';
 
 export interface ServerSettingsHost {
@@ -65,7 +65,8 @@ export class ServerSettingsHandler {
       // MANAGE_SERVER is checked again after the waits of a save (#384, #431).
       route({
         types: [MessageType.SERVER_UPDATE_SETTINGS], permission: Permission.MANAGE_SERVER,
-        handle: ({ session, payload, requestId }) => this.update(session, payload as ServerUpdateSettingsPayload, requestId),
+        schema: { type: serverUpdateSettingsSchema, message: 'Configurações do servidor inválidas.' },
+        handle: ({ session, payload, requestId }) => this.update(session, payload, requestId),
       }),
       route({ types: [MessageType.SERVER_GET_INVITE_INFO], handle: ({ session, requestId }) => this.inviteInfo(session, requestId) }),
     ];
@@ -130,7 +131,7 @@ export class ServerSettingsHandler {
     }
     if ((payload.recentSoundCacheEnabled !== undefined || payload.recentSoundCacheLimit !== undefined)
       && !this.host.recentSoundCache) {
-      this.host.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR,
+      this.host.sendError(session.ws, featureUnavailableCode(session, ProtocolErrorCode.INTERNAL_ERROR),
         'O cache de áudios não está disponível neste servidor.', requestId);
       return;
     }

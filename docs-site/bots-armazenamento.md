@@ -80,6 +80,7 @@ cujo `code` é um `ProtocolErrorCode`:
 | `STORAGE_FULL` | A gravação não cabe no limite ou no número de objetos |
 | `BOT_PERMISSIONS_REQUIRED` | `server_storage` não foi aprovada neste servidor |
 | `FEATURE_REQUIRES_UPDATE` | O servidor ainda não tem armazenamento de bots |
+| `FEATURE_UNAVAILABLE` | O servidor foi iniciado sem armazenamento de bots; atualizar não resolve |
 | `RATE_LIMITED` | Mais de 20 operações por segundo |
 | `BAD_REQUEST` | Chave, dados ou listagem inválidos |
 

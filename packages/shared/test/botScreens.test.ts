@@ -36,9 +36,9 @@ test('authentication shape allows negotiation while the compatibility floor reje
 
 test('DM relay, role models, the channel tree order and poll voters negotiate as human-only features without raising the compatibility floor', () => {
   assert.deepEqual(createProtocolOffer('client'), {
-    minimumVersion: 35, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8',     'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status'],
+    minimumVersion: 35, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8',     'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status', 'feature-unavailable'],
   });
-  assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage'] });
+  assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage', 'feature-unavailable'] });
   assert.deepEqual(negotiateProtocol(40, undefined, 'client'), { version: 40, ...createProtocolOffer('client') });
   for (const version of [35, 36, 37, 38, 39]) {
     assert.deepEqual(negotiateProtocol(version, undefined, 'client'), { version: 40, minimumVersion: 35, features: [] });

@@ -31,7 +31,14 @@ export enum ProtocolErrorCode {
   STORAGE_FULL = 'STORAGE_FULL',
   SERVER_FULL = 'SERVER_FULL',
   PROTOCOL_VERSION_UNSUPPORTED = 'PROTOCOL_VERSION_UNSUPPORTED',
+  /** The app or the server is too old for this feature: updating one of them makes it work. */
   FEATURE_REQUIRES_UPDATE = 'FEATURE_REQUIRES_UPDATE',
+  /**
+   * This server does not offer the feature at all (it was started without the service behind it),
+   * so updating changes nothing. Sent only to peers that announce `feature-unavailable`; older ones
+   * keep the code each route answered before.
+   */
+  FEATURE_UNAVAILABLE = 'FEATURE_UNAVAILABLE',
   INTERNAL_ERROR = 'INTERNAL_ERROR',
   UNAUTHORIZED = 'UNAUTHORIZED',
   PERMISSION_DENIED = 'PERMISSION_DENIED',
