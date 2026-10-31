@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ED25519_SPKI_PUBLIC_KEY_DER_HEX_LENGTH, ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX, LIMITS, PROTOCOL_VERSION } from './constants.js';
 import { CHANNEL_PERMISSIONS, EVERYONE_ROLE_ID, LEGACY_CHANNEL_PERMISSIONS, channelPermissionTargetKey } from './permissions.js';
 import { protocolOfferSchema } from './protocolCompatibility.js';
+import type { ServerUpdateSettingsPayload } from './protocol.js';
 import { screenShareIdSchema, nativeScreenRenditionSchema } from './screenSharing.js';
 export { screenShareIdSchema } from './screenSharing.js';
 
@@ -231,6 +232,7 @@ export const voiceJoinSchema = z.object({
   channelId: messageReferenceSchema,
   isMuted: z.boolean().optional(),
   isDeafened: z.boolean().optional(),
+  moveId: messageReferenceSchema.optional(),
 });
 export const voiceStateUpdateSchema = z.object({
   isMuted: z.boolean().optional(),
@@ -573,6 +575,46 @@ export const roleAssignmentSchema = z.object({
 });
 
 export const voiceModeSchema = z.enum(['p2p', 'sfu']);
+
+/*
+ * Payloads the server used to read without a schema (#839). They are not `.strict()`: an app
+ * that sends an extra field keeps working, the field is just dropped. Contents are still judged
+ * by the services (nickname rules, avatar format, setting ranges): these only make a payload of
+ * the wrong shape a BAD_REQUEST instead of an internal error.
+ */
+export const chatMentionsReadSchema = z.object({ channelId: z.string().min(1) });
+export const channelDeleteSchema = z.object({ channelId: z.string().min(1) });
+export const roleDeleteSchema = z.object({ roleId: z.string().min(1, 'Cargo inválido') });
+export const userChangeNicknameSchema = z.object({ newNickname: z.string() });
+export const userUpdateAvatarSchema = z.object({ avatarBase64: z.string().nullable(), mimeType: z.string().optional() });
+
+export const serverUpdateSettingsSchema = z.object({
+  maxMessageLength: z.number().optional(),
+  name: z.string().optional(),
+  password: z.string().nullable().optional(),
+  allowSoundboard: z.boolean().optional(),
+  recentSoundCacheEnabled: z.boolean().optional(),
+  recentSoundCacheLimit: z.number().optional(),
+  dmRelayEnabled: z.boolean().optional(),
+  allowEveryoneMention: z.boolean().optional(),
+  allowMessageEdit: z.boolean().optional(),
+  messageDeleteUndoSeconds: z.number().optional(),
+  showRoleBadgesToEveryone: z.boolean().optional(),
+  iconBase64: z.string().nullable().optional(),
+  maxAttachmentFileBytes: z.number().optional(),
+  maxAttachmentStorageBytes: z.number().optional(),
+  maxUsers: z.number().optional(),
+  voiceMode: voiceModeSchema.optional(),
+  turnEnabled: z.boolean().optional(),
+  afkChannelEnabled: z.boolean().optional(),
+  afkChannelName: z.string().optional(),
+  afkTimeoutSeconds: z.number().optional(),
+});
+// The schema drops unknown fields, so a setting added to the payload must be added above too.
+const serverSettingsSchemaCoversPayload: Record<
+  Exclude<keyof ServerUpdateSettingsPayload, keyof z.infer<typeof serverUpdateSettingsSchema>>, never
+> = {};
+void serverSettingsSchemaCoversPayload;
 
 export function isValidNickname(nickname: string): boolean {
   return nicknameSchema.safeParse(nickname).success;

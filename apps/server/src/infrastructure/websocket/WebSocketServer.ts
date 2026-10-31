@@ -914,8 +914,8 @@ export class WebSocketServer {
   /**
    * The community features — the server's page, events, live actions and forms,
    * forums and message search — and the audit log and monitor of its
-   * administrators. A server built without one answers that it is unavailable,
-   * each with the code its clients have always received for it.
+   * administrators. A server built without one answers FEATURE_UNAVAILABLE, or to an older app the code
+   * it has always received for it (featureUnavailableCode).
    */
   private featureRoutes(): Route[] {
     return [
@@ -927,27 +927,27 @@ export class WebSocketServer {
           MessageType.LIVE_ACTION_LIST, MessageType.LIVE_ACTION_SUBMIT, MessageType.NATIVE_FORM_CREATE, MessageType.NATIVE_FORM_SUBMIT,
           MessageType.NATIVE_FORM_CLOSE, MessageType.NATIVE_FORM_RESULTS,
         ],
-        unavailable: { when: () => !this.community, message: 'Server community unavailable.' },
+        service: { available: () => !!this.community, message: 'Server community unavailable.' },
         handle: ({ session, type, payload, requestId }) => this.community?.handle(session, type, payload, requestId),
       }),
       route({
         types: [MessageType.FORUM_LIST, MessageType.FORUM_CREATE_POST, MessageType.FORUM_UPDATE_POST, MessageType.FORUM_DELETE_POST],
-        unavailable: { when: () => !this.forum, message: 'Forums unavailable.' },
+        service: { available: () => !!this.forum, message: 'Forums unavailable.' },
         handle: ({ session, type, payload, requestId }) => this.forum?.handle(session, type, payload, requestId),
       }),
       route({
         types: [MessageType.CHAT_SEARCH],
-        unavailable: { when: () => !this.messageSearch, message: 'Message search unavailable.' },
+        service: { available: () => !!this.messageSearch, message: 'Message search unavailable.' },
         handle: ({ session, payload, requestId }) => this.messageSearch?.handle(session, payload, requestId),
       }),
       route({
         types: [MessageType.SERVER_AUDIT_GET],
-        unavailable: { when: () => !this.serverAudit, message: 'The audit log is unavailable.' },
+        service: { available: () => !!this.serverAudit, message: 'The audit log is unavailable.' },
         handle: ({ session, payload, requestId }) => this.serverAudit?.handle(session, payload, requestId),
       }),
       route({
         types: [MessageType.SERVER_MONITOR_GET],
-        unavailable: { when: () => !this.serverMonitor, code: ProtocolErrorCode.INTERNAL_ERROR, message: 'Server monitoring is unavailable.' },
+        service: { available: () => !!this.serverMonitor, legacyCode: ProtocolErrorCode.INTERNAL_ERROR, message: 'Server monitoring is unavailable.' },
         handle: ({ session, payload, requestId }) => this.serverMonitor?.handle(session, payload, requestId),
       }),
     ];
@@ -1038,7 +1038,7 @@ export class WebSocketServer {
           MessageType.BOT_SCREEN_CREATE, MessageType.BOT_SCREEN_UPDATE, MessageType.BOT_SCREEN_CLOSE, MessageType.BOT_SCREEN_END,
           MessageType.BOT_SCREEN_LIST, MessageType.BOT_SCREEN_ACTION,
         ],
-        unavailable: { when: () => !this.botScreens, code: ProtocolErrorCode.BAD_REQUEST, message: 'Programmable screens are unavailable.' },
+        service: { available: () => !!this.botScreens, legacyCode: ProtocolErrorCode.BAD_REQUEST, message: 'Programmable screens are unavailable.' },
         handle: ({ session, type, payload, requestId }) => this.botScreens?.handle(session, type, payload, requestId),
       }),
       route({
@@ -1047,7 +1047,7 @@ export class WebSocketServer {
           MessageType.BOT_STORAGE_USAGE, MessageType.BOT_STORAGE_INFO_GET, MessageType.BOT_STORAGE_LIMIT_UPDATE,
           MessageType.BOT_STORAGE_CLEAR,
         ],
-        unavailable: { when: () => !this.botStorage, message: 'Bot storage is unavailable.' },
+        service: { available: () => !!this.botStorage, message: 'Bot storage is unavailable.' },
         handle: ({ session, type, payload, requestId }) => this.botStorage?.handle(session, type, payload, requestId),
       }),
       route({
@@ -1055,7 +1055,7 @@ export class WebSocketServer {
           MessageType.SELECTOR_CREATE, MessageType.SELECTOR_LIST, MessageType.SELECTOR_UPDATE, MessageType.SELECTOR_CLOSE,
           MessageType.SELECTOR_RESPOND, MessageType.SELECTOR_FINALIZE,
         ],
-        unavailable: { when: () => !this.botSelectors, code: ProtocolErrorCode.BAD_REQUEST, message: 'Selectors are unavailable.' },
+        service: { available: () => !!this.botSelectors, legacyCode: ProtocolErrorCode.BAD_REQUEST, message: 'Selectors are unavailable.' },
         handle: ({ session, type, payload, requestId }) => this.botSelectors?.handle(session, type, payload, requestId),
       }),
     ];

@@ -5,7 +5,7 @@ import {
 import { ProtocolRequestError, type NetworkClient } from './NetworkClient';
 import { BoundRequests, SessionBinding, type SessionBindingFailure } from './sessionBinding';
 
-export type ServerAuditFailure = SessionBindingFailure | 'permissionDenied' | 'updateRequired' | 'invalidResponse';
+export type ServerAuditFailure = SessionBindingFailure | 'permissionDenied' | 'updateRequired' | 'unavailable' | 'invalidResponse';
 
 export class ServerAuditError extends Error {
   constructor(public readonly reason: ServerAuditFailure) {
@@ -80,6 +80,7 @@ export class ServerAuditSource {
             throw new ServerAuditError('permissionDenied');
           }
           if (error.code === ProtocolErrorCode.FEATURE_REQUIRES_UPDATE) throw new ServerAuditError('updateRequired');
+          if (error.code === ProtocolErrorCode.FEATURE_UNAVAILABLE) throw new ServerAuditError('unavailable');
         }
         throw error;
       }

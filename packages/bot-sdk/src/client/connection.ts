@@ -65,6 +65,8 @@ export interface ServerConnection {
   /** Selector, live action, miniapp and storage requests waiting for their acknowledgement. */
   resources: PendingReplies<unknown>;
   invocations: Map<string, Invocation>;
+  /** Command handlers that have not settled, ones the server already finished included. */
+  commandWork: number;
   autocompletes: Map<string, LiveRequest>;
   /** Autocomplete handlers that have not settled, cancelled ones included. */
   autocompleteWork: number;
@@ -89,6 +91,7 @@ export function createServerConnection(serverId: string, serverUrl: string, toke
     reconnectTimer: null,
     profileRequestId: null,
     invocations: new Map(),
+    commandWork: 0,
     autocompletes: new Map(),
     autocompleteWork: 0,
     audioPreviews: new Map(),

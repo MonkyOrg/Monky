@@ -1,6 +1,6 @@
 import type { WebSocket } from 'ws';
 import {
-  MessageType, Permission, ProtocolErrorCode, roleModelFor, rolesForModel,
+  MessageType, Permission, ProtocolErrorCode, roleDeleteSchema, roleModelFor, rolesForModel,
   type MemberKickPayload, type RoleAssignPayload, type RoleCreatePayload, type RoleDeletePayload, type RoleModel,
   type RoleUpdatePayload, type ServerMessage,
 } from '@monky/shared';
@@ -54,7 +54,10 @@ export class RoleHandler {
     return [
       route({ types: [MessageType.ROLE_CREATE], handle: ({ session, payload, requestId }) => this.create(session, payload as RoleCreatePayload, requestId) }),
       route({ types: [MessageType.ROLE_UPDATE], handle: ({ session, payload, requestId }) => this.update(session, payload as RoleUpdatePayload, requestId) }),
-      route({ types: [MessageType.ROLE_DELETE], handle: ({ session, payload, requestId }) => this.delete(session, payload as RoleDeletePayload, requestId) }),
+      route({
+        types: [MessageType.ROLE_DELETE], schema: { type: roleDeleteSchema, message: 'Cargo inválido.' },
+        handle: ({ session, payload, requestId }) => this.delete(session, payload, requestId),
+      }),
       route({
         types: [MessageType.ROLE_ASSIGN, MessageType.ROLE_UNASSIGN],
         handle: ({ session, type, payload, requestId }) =>

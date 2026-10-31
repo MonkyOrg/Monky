@@ -1,6 +1,6 @@
 import type { WebSocket } from 'ws';
 import {
-  MessageType, ProtocolErrorCode, userUpdateActivitySchema, userUpdateBrbSchema, userUpdateCustomStatusSchema,
+  MessageType, ProtocolErrorCode, userChangeNicknameSchema, userUpdateActivitySchema, userUpdateAvatarSchema, userUpdateBrbSchema, userUpdateCustomStatusSchema,
   type CustomStatus, type ServerMessage, type UserChangeNicknamePayload, type UserSummary, type UserUpdateAvatarPayload,
   type UserUpdateVisibilityPayload,
 } from '@monky/shared';
@@ -30,12 +30,12 @@ export class PresenceHandler {
   routes(): Route[] {
     return [
       route({
-        types: [MessageType.USER_CHANGE_NICKNAME],
-        handle: ({ session, payload, requestId }) => this.changeNickname(session, payload as UserChangeNicknamePayload, requestId),
+        types: [MessageType.USER_CHANGE_NICKNAME], schema: { type: userChangeNicknameSchema, message: 'Apelido inválido.' },
+        handle: ({ session, payload, requestId }) => this.changeNickname(session, payload, requestId),
       }),
       route({
-        types: [MessageType.USER_UPDATE_AVATAR],
-        handle: ({ session, payload, requestId }) => this.updateAvatar(session, payload as UserUpdateAvatarPayload, requestId),
+        types: [MessageType.USER_UPDATE_AVATAR], schema: { type: userUpdateAvatarSchema, message: 'Avatar inválido.' },
+        handle: ({ session, payload, requestId }) => this.updateAvatar(session, payload, requestId),
       }),
       route({
         types: [MessageType.USER_UPDATE_VISIBILITY],

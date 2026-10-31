@@ -208,6 +208,8 @@ export interface BotRecord {
   lastProtocolVersion?: number | null;
   /** Manifest URL used to install this bot; null for token links and bots installed before migration 052. */
   manifestUrl?: string | null;
+  /** Proved it holds its private key once (bot-key-proof), so it may never sign in without that proof again. */
+  keyProofRequired?: boolean;
 }
 
 export interface BotSettingsRecord {

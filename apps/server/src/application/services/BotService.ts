@@ -275,23 +275,50 @@ export class BotService {
    * Returns the BotRecord if valid, or null.
    */
   async validateToken(rawToken: string, publicKey: string): Promise<BotRecord | null> {
+    return this.mutate(() => this.bindToken(rawToken, publicKey));
+  }
+
+  /**
+   * A bot signing in: the token check and TOFU binding of validateToken, plus
+   * proof of the private key (bot-key-proof). `proven` means the connection
+   * signed its challenge with `publicKey`. The first proof makes it mandatory
+   * for this bot, so a captured token cannot sign in by not offering it.
+   */
+  async authenticateConnection(rawToken: string, publicKey: string, proven: boolean): Promise<
+    { record: BotRecord } | { failure: 'invalid' | 'proof_required' }
+  > {
     return this.mutate(async () => {
-      const hash = BotService.hashToken(rawToken);
-      const record = await this.botRepo.findByTokenHash(hash);
-      if (!record) return null;
-
-      if (!record.boundPublicKey) {
-        // TOFU: bind the public key on first connection.
-        await this.botRepo.update(record.id, { boundPublicKey: publicKey });
-        record.boundPublicKey = publicKey;
-        Logger.info('BOT', `Bot "${record.name}" TOFU-bound to public key ${publicKey.substring(0, 16)}...`);
-      } else if (record.boundPublicKey !== publicKey) {
-        Logger.security(`Bot "${record.name}" rejected: public key mismatch (TOFU binding violated).`);
-        return null;
+      const record = await this.bindToken(rawToken, publicKey);
+      if (!record) return { failure: 'invalid' };
+      if (!proven && record.keyProofRequired) {
+        Logger.security(`Bot "${record.name}" rejected: it proved its private key before and signed in without proof.`);
+        return { failure: 'proof_required' };
       }
-
-      return record;
+      if (proven && !record.keyProofRequired) {
+        await this.botRepo.update(record.id, { keyProofRequired: true });
+        record.keyProofRequired = true;
+        Logger.info('BOT', `Bot "${record.name}" proved its private key; proof is now required.`);
+      }
+      return { record };
     });
+  }
+
+  private async bindToken(rawToken: string, publicKey: string): Promise<BotRecord | null> {
+    const hash = BotService.hashToken(rawToken);
+    const record = await this.botRepo.findByTokenHash(hash);
+    if (!record) return null;
+
+    if (!record.boundPublicKey) {
+      // TOFU: bind the public key on first connection.
+      await this.botRepo.update(record.id, { boundPublicKey: publicKey });
+      record.boundPublicKey = publicKey;
+      Logger.info('BOT', `Bot "${record.name}" TOFU-bound to public key ${publicKey.substring(0, 16)}...`);
+    } else if (record.boundPublicKey !== publicKey) {
+      Logger.security(`Bot "${record.name}" rejected: public key mismatch (TOFU binding violated).`);
+      return null;
+    }
+
+    return record;
   }
 
   /**

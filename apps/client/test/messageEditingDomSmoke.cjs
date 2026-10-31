@@ -1179,6 +1179,7 @@ async function runEditorContextSmoke(window, locale) {
     check(await value()==='Before Monky after', 'The same link menu also updates an existing message edit');
     await click('#btn-cancel-message-edit');
     await draft('ABCDE',1,4);
+    await evaluate('window.messageEditingFixture.feedAtRest()');
     await evaluate(`void (window.api.editorCommand=()=>new Promise(resolve=>{window.editorMenuTest.resolveCommand=resolve}))`);
     await context();
     await click(item(2));
@@ -1792,6 +1793,15 @@ async function installFixture() {
       appEvents.emit('server.updated', server.serverDetails);
       check(find('#chat-message-input').maxLength === 123, 'A live limit update changes the editor without reconnecting');
       const { OverlayStageView } = await import('/views/OverlayStageView.ts');
+      // The stage is styled by the overlay window's own sheet, not theme.css (#852).
+      const stageSheet = document.createElement('link');
+      stageSheet.rel = 'stylesheet';
+      stageSheet.href = '/styles/overlayStage.css';
+      await new Promise((resolve, reject) => {
+        stageSheet.addEventListener('load', resolve, { once: true });
+        stageSheet.addEventListener('error', reject, { once: true });
+        document.head.append(stageSheet);
+      });
       const overlayRoot = document.createElement('div');
       overlayRoot.style.cssText = 'position:fixed;left:0;top:0;width:600px;height:400px';
       document.body.append(overlayRoot);
@@ -1837,7 +1847,7 @@ async function installFixture() {
         overlay.isHovered = false;
         overlay.applyHoverState();
         check(getComputedStyle(root, '::after').opacity === '0', 'Leaving the overlay hides the frame');
-      } finally { overlay.destroy(); overlayRoot.remove(); document.body.classList.remove('overlay-window-mode'); }
+      } finally { overlay.destroy(); overlayRoot.remove(); stageSheet.remove(); document.body.classList.remove('overlay-window-mode'); }
       return checks;
     },
     async prepare(locale) {
@@ -1994,6 +2004,18 @@ async function installFixture() {
       active.session.chatStore.updateMessage({ ...original, content });
       view.composer.startEditingMessage(original.id);
       await settle();
+      await this.feedAtRest();
+    },
+    // The rows and the composer change size as an edit starts or ends. With the feed kept at
+    // the newest message since the channel opened (#840), it comes to rest before a menu is
+    // opened over it: any scroll closes an open menu.
+    async feedAtRest() {
+      const feed = document.querySelector('.chat-messages-feed');
+      for (let frame = 0, quiet = 0, top = feed?.scrollTop; feed && frame < 120 && quiet < 6; frame++) {
+        await new Promise(requestAnimationFrame);
+        quiet = feed.scrollTop === top ? quiet + 1 : 0;
+        top = feed.scrollTop;
+      }
     },
     async deletedUndo(duration) {
       const now = Date.now();

@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import * as mediasoup from 'mediasoup';
 import type { types as MediasoupTypes } from 'mediasoup';
-import { AuthSuccessPayload, ChannelSummary, DEFAULT_PERMISSIONS, MessageType, Permission, ProtocolErrorCode, ServerDetails, ServerErrorPayload, UserSummary, VoiceConnectionHealth, VoiceUserJoinedPayload, SfuProducersListPayload, hasPermission } from '@monky/shared';
+import { AuthSuccessPayload, ChannelSummary, DEFAULT_PERMISSIONS, MessageType, MIN_CLIENT_PROTOCOL, Permission, PROTOCOL_FEATURES, PROTOCOL_VERSION, ProtocolErrorCode, ServerDetails, ServerErrorPayload, UserSummary, VoiceConnectionHealth, VoiceUserJoinedPayload, SfuProducersListPayload, hasPermission } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { PermissionService } from './application/services/PermissionService';
 import { UserService } from './application/services/UserService';
@@ -1528,6 +1528,53 @@ test('a person moved by the server keeps the call when their client follows by l
       && message.payload.sessionId === guestSessionId && message.payload.channelId === to), false, `${label}: the room never hears it leave`);
     from = to;
   }
+});
+
+test('two moves before the first join arrives, to a visible room and then a hidden one, leave the person in the hidden one (#841)', { timeout: 30_000 }, async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Room manager');
+  const guest = await f.human('Moved twice');
+  const legacy = await f.human('Older client', undefined, undefined, false, PROTOCOL_VERSION, {
+    minimumVersion: MIN_CLIENT_PROTOCOL, features: PROTOCOL_FEATURES.filter((feature) => feature !== 'voice-move-id'),
+  });
+  const lobbyId = text(recordList(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const create = async (name: string, isPrivate: boolean) => text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name, type: 'VOICE', isPrivate, allowedRoleIds: [],
+  })).payload.channel).id);
+  const visibleId = await create('open-room', false);
+  const hiddenId = await create('managers-room', true);
+  const guestSessionId = text(record(guest.auth.payload.currentUser).sessionId);
+  const state = () => f.wsServer['signalingService'].getVoiceState(guestSessionId);
+  await owner.peer.request(MessageType.VOICE_JOIN, { channelId: hiddenId });
+  await guest.peer.request(MessageType.VOICE_JOIN, { channelId: lobbyId });
+
+  const since = guest.peer.messages.length;
+  await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: visibleId });
+  await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: guestSessionId, channelId: hiddenId });
+  const notices = await Promise.all([visibleId, hiddenId].map((channelId) => guest.peer.wait((message) =>
+    message.type === MessageType.ADMIN_MOVE_USER && message.payload.channelId === channelId, since)));
+  const [first, second] = notices.map((notice) => text(notice.payload.moveId));
+  assert.notEqual(first, second, 'each move has its own id');
+  assert.equal(state()?.channelId, hiddenId);
+
+  // The client follows the first notice before reading the second.
+  await guest.peer.error(MessageType.VOICE_JOIN, { channelId: visibleId, moveId: first }, ProtocolErrorCode.VOICE_MOVE_SUPERSEDED);
+  assert.equal(state()?.channelId, hiddenId, 'the overtaken join does not pull it out of the later room');
+  const joined = await guest.peer.request(MessageType.VOICE_JOIN, { channelId: hiddenId, moveId: second });
+  assert.equal(joined.type, MessageType.VOICE_USER_JOINED, JSON.stringify(joined.payload));
+  assert.equal(state()?.channelId, hiddenId, 'it ends up where the last move took it');
+  await guest.peer.error(MessageType.VOICE_JOIN, { channelId: hiddenId, moveId: second }, ProtocolErrorCode.VOICE_MOVE_SUPERSEDED);
+  assert.equal(state()?.channelId, hiddenId, 'a followed move is spent');
+
+  // A client without the feature is sent no id and joins as before.
+  const legacySessionId = text(record(legacy.auth.payload.currentUser).sessionId);
+  await legacy.peer.request(MessageType.VOICE_JOIN, { channelId: lobbyId });
+  const legacySince = legacy.peer.messages.length;
+  await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: legacySessionId, channelId: visibleId });
+  const notice = await legacy.peer.wait((message) => message.type === MessageType.ADMIN_MOVE_USER, legacySince);
+  assert.equal('moveId' in notice.payload, false);
+  assert.equal((await legacy.peer.request(MessageType.VOICE_JOIN, { channelId: visibleId })).type, MessageType.VOICE_USER_JOINED);
 });
 
 test('a hang-up that crossed one move or two, or named a room it never reached, still ends the call where it is (S-VOICE-5)', { timeout: 30_000 }, async (t) => {

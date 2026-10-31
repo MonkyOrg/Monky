@@ -1,7 +1,7 @@
 'use strict';
 
 const { isPresentationId } = require('./presentationRoute.cjs');
-const { registerTextureTransferReceiver } = require('./textureTransfer.cjs');
+const { registerTextureTransferReceiver } = require('./textureTransferReceiver.cjs');
 
 function registerTextureReceiver(sharedTexture, { getSink, onError }, ipcRenderer = require('electron').ipcRenderer) {
   return registerTextureTransferReceiver(sharedTexture, ipcRenderer, async ({ importedSharedTexture }, metadata) => {

@@ -1,6 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
 import type { IpcMainInvokeEvent, RenderProcessGoneDetails } from 'electron';
-import path from 'path';
 import { BUG_REPORT_URL, CRASH_RECOVERY_IPC } from '@monky/shared';
 import type { CrashRecoveryActionResult } from '@monky/shared';
 import type { ClientLogger } from './clientLogger';
@@ -10,6 +9,7 @@ import {
 } from './crashDiagnostics';
 import { buildCrashRecoveryPage, CRASH_RECOVERY_COLORS } from './crashRecoveryPage';
 import { mt } from './i18n';
+import { isolatedWebPreferences } from './windowPreferences';
 
 export const BOOTSTRAP_TIMEOUT_MS = 45000;
 const RECOVERY_TIMEOUT_MS = 10000;
@@ -179,13 +179,7 @@ export class CrashRecovery {
           symbolColor: CRASH_RECOVERY_COLORS.controls,
           height: 32,
         },
-        webPreferences: {
-          preload: path.join(__dirname, '../preload/crashRecoveryPreload.js'),
-          contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false,
-          sandbox: false, // The isolated preload imports only Electron and shared contracts.
-          webSecurity: true,
-          partition: 'monky-crash-recovery',
-        },
+        webPreferences: isolatedWebPreferences('crashRecoveryPreload', { partition: 'monky-crash-recovery' }),
       });
       this.recoveryWindow = window;
       const contents = window.webContents;

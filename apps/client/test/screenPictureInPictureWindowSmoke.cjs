@@ -43,8 +43,8 @@ if (!process.versions.electron) {
   app.whenReady().then(async () => {
     deadline = setTimeout(() => { console.error('Monky PiP window smoke timeout'); finish(1); }, 40000);
     mainWindow = new BrowserWindow({ title: 'Monky QA - PiP', show: false, width: 480, height: 320,
-      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false,
-        preload: path.join(root, 'dist-electron', 'preload', 'preload.js') } });
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false,
+        preload: path.join(root, 'dist-electron', 'preload', 'preload.cjs') } });
     const contents = mainWindow.webContents;
     contents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     // Same order as main.ts: the PiP popup first, everything else denied.

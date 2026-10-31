@@ -794,9 +794,18 @@ async function* regression(locale, inviteModule) {
           : payload.sort === 'newest'
             ? right.createdAt - left.createdAt
             : right.updatedAt - left.updatedAt));
-        const offset = payload.offset ?? 0;
+        // With a cursor, the page starts right after that place in the order, as the server does.
+        const key = payload.sort === 'latest' ? 'updatedAt' : 'createdAt';
+        const later = (entry, after) => entry.pinned !== after.pinned ? entry.pinned < after.pinned
+          : entry[key] !== after.at ? (payload.sort === 'oldest' ? entry[key] > after.at : entry[key] < after.at)
+            : entry.channelId > after.channelId;
+        const start = payload.after ? posts.findIndex(entry => later(entry, payload.after)) : payload.offset ?? 0;
+        const offset = start < 0 ? posts.length : start;
         const page = posts.slice(offset, offset + 25);
-        return { channelId: 'forum', posts: page, hasMore: offset + page.length < posts.length, nextOffset: offset + page.length };
+        const hasMore = offset + page.length < posts.length;
+        const last = page.at(-1);
+        return { channelId: 'forum', posts: page, hasMore, nextOffset: offset + page.length,
+          ...(hasMore ? { nextCursor: { pinned: last.pinned, at: last[key], channelId: last.channelId } } : {}) };
       }
       if (type === 'FORUM_CREATE_POST') return { post: { ...post, channelId: payload.id, title: payload.title } };
       if (type === 'CHAT_REQUEST_UPLOAD_TOKEN') return { token: 'forum-token' };
@@ -1273,6 +1282,29 @@ async function* regression(locale, inviteModule) {
     && !livePollModal.querySelector('.native-poll-option-check, .native-poll-option .material-symbols-outlined')
     && livePollModal.querySelector('.native-poll-view-votes')?.textContent.includes(t('poll.viewVotes')),
   'Like WhatsApp, each answer shows its voters\' avatars beside the vote count on the right, with no check or percentage');
+  // #842: someone else's vote reaches the open live action without a new community snapshot.
+  const snapshotsBeforeVote = calls.filter(call => call.type === 'COMMUNITY_GET').length;
+  const otherVote = structuredClone(poll);
+  otherVote.revision = 1;
+  otherVote.myVoteOptionIds = null;
+  otherVote.totalVotes = 3;
+  otherVote.options[1] = { ...otherVote.options[1], votes: 1, voters: [{ userId: 'guest', userNickname: 'Guest', userAvatarUrl: null }] };
+  emit('message.POLL_UPDATED', otherVote);
+  await flush();
+  check(livePollModal.querySelector('[data-native-poll-option=no]').nextElementSibling
+    ?.querySelector('[data-native-poll-count]')?.textContent === '1'
+    && livePollModal.querySelector('[data-native-poll-option=yes]').getAttribute('aria-pressed') === 'true'
+    && feed.snapshot.polls[0].myVoteOptionIds?.join(',') === 'yes'
+    && calls.filter(call => call.type === 'COMMUNITY_GET').length === snapshotsBeforeVote,
+  'A vote broadcast updates the live-action poll in place, keeps this member\'s own vote and asks for no snapshot');
+  emit('message.POLL_UPDATED', { ...structuredClone(poll), revision: 0, totalVotes: 9 });
+  await flush();
+  check(feed.snapshot.polls[0].totalVotes === 3, 'An older poll revision never replaces a newer one');
+  // Back to the fixture's tally, at the revision the feed now holds.
+  poll.revision = 1;
+  pollRevision = 1;
+  emit('message.POLL_UPDATED', structuredClone(poll));
+  await flush();
   const voteCallsBefore = calls.filter(call => call.type === 'POLL_VOTE').length;
   let releaseVote;
   pollVoteGate = new Promise(resolve => { releaseVote = resolve; });
@@ -1398,7 +1430,7 @@ async function* regression(locale, inviteModule) {
   document.querySelector('[data-action=confirm]').click();
   await flush();
   const refreshedLoss = t('poll.editLossChanged', { option: 'Yes', count: 3 });
-  check(calls.filter(call => call.type === 'POLL_EDIT').at(-1)?.payload.expectedRevision === 0
+  check(calls.filter(call => call.type === 'POLL_EDIT').at(-1)?.payload.expectedRevision === poll.revision
     && document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('poll.editChanged'))
     && editWizard.querySelector('.native-poll-edit-summary--loss')?.textContent.includes(refreshedLoss)
     && editWizard.querySelector('[data-poll-option]') === null,
@@ -3002,6 +3034,21 @@ async function* regression(locale, inviteModule) {
   check(root.querySelector('.forum-post-stats').textContent.includes(t('forum.locked'))
     && root.querySelector('.forum-post-stats').textContent.includes(t('forum.closed')),
   'Thread cards distinguish administrative locks from author closures');
+  // #828: a post whose time a Date cannot hold is left out; the others still show.
+  forumPosts = [
+    { ...post, channelId: 'bad-text', updatedAt: 'yesterday' },
+    { ...post, channelId: 'bad-nan', updatedAt: Number.NaN },
+    { ...post, channelId: 'bad-range', updatedAt: 1e20 },
+    { ...post, channelId: 'valid-time', title: 'Valid time' },
+  ];
+  await forum.load();
+  const validTime = () => root.querySelector('[data-forum-id="valid-time"] time');
+  check([...root.querySelectorAll('[data-forum-id]')].map(row => row.dataset.forumId).join() === 'valid-time'
+    && validTime()?.dateTime === new Date(now).toISOString(),
+  'Posts with an invalid time are left out of the forum list instead of breaking it');
+  emit('message.FORUM_POST_SAVED', { post: { ...forumPosts[3], title: 'Out of range', updatedAt: -1e20 } });
+  check(root.querySelector('[data-forum-id="valid-time"] h3')?.textContent === 'Valid time' && validTime(),
+    'A saved post with a time out of range leaves its card as it was');
   forumPosts = Array.from({ length: 60 }, (_, index) => ({
     ...post,
     channelId: `lazy-post-${index}`,
@@ -3297,6 +3344,26 @@ async function* regression(locale, inviteModule) {
     forumSort.value = 'oldest';
     forumSort.dispatchEvent(new Event('change', { bubbles: true }));
     toastWatch.disconnect();
+  }
+  // #847: with forum-cursor, the next page starts right after the last thread read, so threads
+  // read that left the list before their events arrived take none of the following ones with them.
+  if (locale === 'pt-BR') {
+    const features = server.serverDetails.protocol.features;
+    features.push('forum-cursor');
+    forumPosts = Array.from({ length: 60 }, (_, index) => ({ ...post, channelId: `c${String(index).padStart(2, '0')}`,
+      title: `Cursor ${index}`, createdAt: now + index, updatedAt: now + index }));
+    forumScroller.scrollTop = 0;
+    await forum.load();
+    await flush();
+    forumPosts = forumPosts.filter(entry => entry.channelId !== 'c03' && entry.channelId !== 'c07');
+    const beforeCursor = forumRequests().length;
+    forumScroller.scrollTop = forumScroller.scrollHeight;
+    await until(() => rowCount() === 50);
+    const cursorPage = forumRequests()[beforeCursor].payload;
+    const expected = Array.from({ length: 50 }, (_, index) => `c${String(index).padStart(2, '0')}`).join();
+    check(cursorPage.after?.channelId === 'c24' && !('offset' in cursorPage) && threadIds() === expected,
+      `The next page is asked for after the last thread read and skips none: ${JSON.stringify(cursorPage)} ${threadIds()}`);
+    features.splice(features.indexOf('forum-cursor'), 1);
   }
   forumPosts = [];
   await forum.load();
@@ -4104,11 +4171,11 @@ async function* regression(locale, inviteModule) {
   keptPending[0](snapshot);
   await keptLoad; await flush();
   const shownSnapshot = kept.snapshot;
-  for (const listener of keptListeners) listener('message.ROLES_LIST', {});
-  check(shownSnapshot && kept.snapshot === shownSnapshot && keptPending.length === 2,
-    'Another member\'s role change keeps the banner and toolbar up while the community refreshes');
-  keptPending[1](snapshot);
-  await flush();
+  for (const type of ['ROLES_LIST', 'CATEGORIES_UPDATED', 'CHANNEL_UPDATED']) {
+    for (const listener of keptListeners) listener(`message.${type}`, {});
+  }
+  check(shownSnapshot && kept.snapshot === shownSnapshot && keptPending.length === 1,
+    'Role, category and channel changes that keep this member\'s access ask for no new community snapshot (#842)');
   allowed = !allowed;
   for (const listener of keptListeners) listener('message.ROLES_LIST', {});
   check(kept.snapshot === null, 'Losing access still clears the community snapshot at once');

@@ -363,8 +363,8 @@ and between native/Chromium over P2P and SFU. It includes three participants,
 voice policies, room switching, reconnects, kicks, topology changes, invalid
 signaling, and pending/denied microphone permission. It also includes two
 crossed moves, into rooms Light sees and rooms it cannot see (and from a seen
-room into a hidden one, where the move is lost without leaving a membership on
-the server), a kick that crosses the join behind a move, leaving and rejoining
+room into a hidden one, where the server refuses the join the second move
+overtook), a kick that crosses the join behind a move, leaving and rejoining
 the same room inside one round trip, a server with a forum and an idle AFK call,
 a channel without Speak, SFU consume and produce failures, transport drops in a
 row, a core that falls behind, events nobody reads and, on Windows, a closed

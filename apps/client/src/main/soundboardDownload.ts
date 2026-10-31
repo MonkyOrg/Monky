@@ -10,6 +10,7 @@ import {
 } from '@monky/shared';
 import { isSoundFileName } from './soundAudioValidation';
 import { fetchSoundAudio, nativeSoundTransport, SoundDownloadError, soundDownloadUrl, type SoundDownloadTransport } from './audioFetch';
+import { canonicalPath, type Realpath } from './canonicalDirectory';
 import { isRecord } from './ipc/guards';
 export { nativeSoundTransport, SoundDownloadError, soundDownloadUrl, type SoundDownloadTransport } from './audioFetch';
 
@@ -48,7 +49,17 @@ export class SoundboardDownloads {
   private targets = new Set<string>();
   private ownerGeneration = new Map<number, number>();
 
-  constructor(private configFile: string, private transport: SoundDownloadTransport = nativeSoundTransport) {}
+  /** `nativeRealpath` is only replaced by tests, to reproduce virtual volumes where it fails. */
+  constructor(
+    private configFile: string,
+    private transport: SoundDownloadTransport = nativeSoundTransport,
+    private readonly nativeRealpath: Realpath = fs.realpath,
+  ) {}
+
+  /** Canonical path, also on virtual volumes where the native realpath fails (see `canonicalPath`). */
+  public canonical(target: string): Promise<string> {
+    return canonicalPath(target, this.nativeRealpath);
+  }
 
   private load(): Promise<void> {
     return this.loaded ??= (async () => {
@@ -66,7 +77,7 @@ export class SoundboardDownloads {
   public async confirmFolder(folder: string): Promise<string | null> {
     const selection = ++this.folderSelection;
     await this.load();
-    const canonical = await fs.realpath(folder);
+    const canonical = await this.canonical(folder);
     return this.persistConfirmedFolder(canonical, selection);
   }
 
@@ -83,11 +94,11 @@ export class SoundboardDownloads {
     if (this.confirmedFolder) return this.confirmedFolder;
     // A native folder selection, including one still being saved, takes precedence.
     if (selection !== 0 || selection !== this.folderSelection) return null;
-    const profile = await fs.realpath(path.dirname(this.configFile));
+    const profile = await this.canonical(path.dirname(this.configFile));
     const folder = path.join(profile, 'soundboard');
     await fs.mkdir(folder, { recursive: true });
     if (selection !== this.folderSelection) return null;
-    if ((await fs.lstat(folder)).isSymbolicLink() || !samePath(await fs.realpath(folder), folder)) {
+    if ((await fs.lstat(folder)).isSymbolicLink() || !samePath(await this.canonical(folder), folder)) {
       throw new SoundDownloadError('write_failed');
     }
     return this.persistConfirmedFolder(folder, selection);
@@ -105,13 +116,13 @@ export class SoundboardDownloads {
       const availability = await this.availability(configuredFolder);
       if (selection !== this.folderSelection) return false;
       if (availability === 'ready') return true;
-      const canonical = await fs.realpath(configuredFolder);
+      const canonical = await this.canonical(configuredFolder);
       if (!(await fs.lstat(canonical)).isDirectory()) throw new SoundDownloadError('no_folder');
       await fs.access(canonical, constants.W_OK);
       if (selection !== this.folderSelection) return false;
       // A legacy renderer preference is not write permission: Main must obtain native consent.
       if (!await approve(canonical)) return false;
-      const current = await fs.realpath(configuredFolder);
+      const current = await this.canonical(configuredFolder);
       if (selection !== this.folderSelection || !samePath(current, canonical)) return false;
       return (await this.persistConfirmedFolder(canonical, ++this.folderSelection)) !== null;
     } finally {
@@ -159,8 +170,8 @@ export class SoundboardDownloads {
     const generation = this.folderGeneration;
     if (!folder) return { availability: 'confirmation_required' };
     try {
-      if (!samePath(await fs.realpath(configuredFolder), folder)) return { availability: 'confirmation_required' };
-      if (!samePath(await fs.realpath(folder), folder) || !(await fs.lstat(folder)).isDirectory()) return { availability: 'no_folder' };
+      if (!samePath(await this.canonical(configuredFolder), folder)) return { availability: 'confirmation_required' };
+      if (!samePath(await this.canonical(folder), folder) || !(await fs.lstat(folder)).isDirectory()) return { availability: 'no_folder' };
       await fs.access(folder, constants.W_OK);
       return generation === this.folderGeneration
         ? { availability: 'ready', folder, generation } : { availability: 'confirmation_required' };
@@ -247,7 +258,7 @@ export class SoundboardDownloads {
     try {
       if (!isSoundFileName(input.fileName)) throw new SoundDownloadError('invalid_file_name');
       soundDownloadUrl(input.url);
-      if (!samePath(await fs.realpath(grant.folder), grant.folder) || !(await fs.lstat(grant.folder)).isDirectory()) {
+      if (!samePath(await this.canonical(grant.folder), grant.folder) || !(await fs.lstat(grant.folder)).isDirectory()) {
         throw new SoundDownloadError('no_folder');
       }
       signal.throwIfAborted();
@@ -265,7 +276,7 @@ export class SoundboardDownloads {
         (receivedBytes, totalBytes) => progress({ ...key, receivedBytes, totalBytes })
       );
       signal.throwIfAborted();
-      if (!samePath(await fs.realpath(grant.folder), grant.folder)) throw new SoundDownloadError('no_folder');
+      if (!samePath(await this.canonical(grant.folder), grant.folder)) throw new SoundDownloadError('no_folder');
       const candidate = path.join(grant.folder, `.monky-sound-${randomUUID()}.part`);
       const handle = await fs.open(candidate, 'wx');
       staging = candidate;

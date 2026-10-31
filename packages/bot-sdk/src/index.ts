@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID, type KeyObject } from 'crypto';
 import { EventEmitter } from 'events';
 import http from 'http';
 import WebSocket from 'ws';
@@ -32,11 +32,15 @@ export type { BotDeviceStorageStatus, BotScreenStorage, BotScreenStorageEntry, B
 export * from './managedTools';
 export * from './localExecution/contracts';
 export { handleReachabilityProbe } from './reachability';
+import {
+  createReachabilityIdentity, runtimeBotIdentity, signBotAuthChallenge, type BotReachabilityIdentity,
+} from './reachability';
 import { createMarketplaceServer, marketplaceBaseUrl } from './marketplace';
 import {
   LIMITS,
   MessageType,
   PROTOCOL_VERSION,
+  botAuthNonceSchema,
   createProtocolOffer,
   legacyProtocolFallback,
   protocolOfferSchema,
@@ -123,6 +127,8 @@ export class BotClient extends EventEmitter {
   private voiceCleanup = new Set<Promise<void>>();
   private localExecutionClients = new Map<string, BotLocalExecutionClient>();
   private options: BotOptions;
+  /** From BotOptions.privateKey, checked against publicKey once; the runtime identity is the fallback. */
+  private readonly identity: BotReachabilityIdentity | undefined;
   private profile: BotProfileUpdatePayload = {};
   private commands = new Map<string, CommandDefinition>();
   private connections = new Map<string, ServerConnection>();
@@ -324,6 +330,7 @@ export class BotClient extends EventEmitter {
   constructor(options: BotOptions) {
     super();
     this.options = { autoReconnect: true, ...options, requestedCapabilities: botCapabilitiesSchema.parse(options.requestedCapabilities) };
+    this.identity = options.privateKey === undefined ? undefined : createReachabilityIdentity(options.publicKey, options.privateKey);
     this.registrationStore = new RegistrationStore(options.registrationFile, options.publicKey);
     if (options.name !== undefined || options.avatarBase64 !== undefined) {
       this.profile = botProfileUpdateSchema.parse({
@@ -702,6 +709,9 @@ export class BotClient extends EventEmitter {
     if (this.settingsSync.handle(conn, msg) || this.liveRequests.handle(conn, msg) ||
         this.commandRuntime.handle(conn, msg)) return;
     switch (msg.type) {
+      case MessageType.AUTH_CHALLENGE:
+        this.proveKey(conn, msg.payload);
+        return;
       case MessageType.AUTH_SUCCESS:
         this.authenticated(conn, msg.payload);
         return;
@@ -869,16 +879,39 @@ export class BotClient extends EventEmitter {
 
   /** The first attempt and the legacy protocol retry present the same identity and token. */
   private sendAuthConnect(conn: ServerConnection, protocolVersion: number): void {
+    const offer = createProtocolOffer('bot');
     this.sendToConn(conn, {
       type: MessageType.AUTH_CONNECT,
       payload: {
         protocolVersion,
-        protocolOffer: createProtocolOffer('bot'),
+        // Without its private key the bot could not answer the challenge, so it does not ask for one.
+        protocolOffer: this.signingKey() ? offer : { ...offer, features: offer.features.filter((f) => f !== 'bot-key-proof') },
         publicKey: this.options.publicKey,
         nickname: this.profile.name ?? 'bot',
         password: '',
         botToken: conn.token,
       },
+    });
+  }
+
+  /** The key that proves this bot's identity, when the bot has it (bot-key-proof). */
+  private signingKey(): KeyObject | undefined {
+    if (this.identity) return this.identity.privateKey;
+    const runtime = runtimeBotIdentity();
+    return runtime?.publicKeyHex === this.options.publicKey.toLowerCase() ? runtime.privateKey : undefined;
+  }
+
+  /** AUTH_CHALLENGE: sign it for the token this connection presented. */
+  private proveKey(conn: ServerConnection, payload: unknown): void {
+    const nonce = botAuthNonceSchema.safeParse(isRecord(payload) ? payload.nonce : undefined);
+    const key = this.signingKey();
+    if (conn.connected || !nonce.success || !key) {
+      this.failAuthentication(conn, { message: 'The server sent an unexpected authentication challenge.' });
+      return;
+    }
+    this.sendToConn(conn, {
+      type: MessageType.AUTH_CHALLENGE_RESPONSE,
+      payload: { signature: signBotAuthChallenge(nonce.data, conn.token, key) },
     });
   }
 

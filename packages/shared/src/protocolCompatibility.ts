@@ -37,16 +37,23 @@ import { PROTOCOL_VERSION } from './constants.js';
 // user-brb: USER_UPDATE_BRB and UserSummary.brb, the "Volto já" status. Older servers drop the auth flag and are never
 // sent the update, and peers without it never receive the field, so they keep seeing the person as online.
 // custom-status: USER_UPDATE_CUSTOM_STATUS and UserSummary.customStatus, the person's own status, negotiated the same way.
+// bot-key-proof: a bot that offers it explicitly is sent AUTH_CHALLENGE and signs botAuthChallenge() with its private
+// key. After one valid proof the server refuses that bot without one; bots that never offered it sign in as before.
+// voice-move-id: ADMIN_MOVE_USER carries a moveId the moved client repeats in the VOICE_JOIN following it, so the server
+// refuses (VOICE_MOVE_SUPERSEDED) a join that a second move overtook, instead of undoing that move (#841). Clients
+// without it are sent no id and join as before.
+// forum-cursor: FORUM_LIST accepts `after` and FORUM_LIST_RESULT carries `nextCursor`, so a page starts after the last post
+// read instead of at an offset that posts moving meanwhile shift. Older servers reject `after`, so clients keep `offset`.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status', 'bot-key-proof', 'voice-move-id', 'forum-cursor', 'feature-unavailable'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 /**
  * What a bot is offered, listed rather than subtracted: a new feature is only
  * for people until someone decides a bot needs it too.
  */
 export const BOT_PROTOCOL_FEATURES = [
-  'message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage',
+  'message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage', 'bot-key-proof', 'feature-unavailable',
 ] as const satisfies readonly ProtocolFeature[];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),

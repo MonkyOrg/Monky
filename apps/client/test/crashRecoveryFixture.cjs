@@ -41,21 +41,46 @@ function sourceLoader(overrides = new Map(), globals = {}) {
   };
 }
 
-/** Isolated compilation: never overwrites dist or a peer's build artifacts. */
+function sourceFor(specifier, from) {
+  const base = path.resolve(path.dirname(from), specifier.replace(/\.js$/u, ''));
+  const found = [`${base}.ts`, path.join(base, 'index.ts')].find(candidate => fs.existsSync(candidate));
+  if (!found) throw new Error(`Cannot resolve ${specifier} from ${from}`);
+  return found;
+}
+
+/**
+ * Isolated compilation: never overwrites dist or a peer's build artifacts. Starts from the recovery
+ * entry points and follows every relative and @monky/shared require of the emitted code, so a new
+ * import in any of them is compiled too instead of failing at load. The preloads are bundled by the smoke.
+ */
 function compileRecovery(root) {
-  const files = [
-    ...['crashRecovery', 'crashDiagnostics', 'crashRecoveryPage', 'i18n'].map(name =>
-      [path.join(client, 'src', 'main', `${name}.ts`), path.join('main', `${name}.js`)]),
-    ...['crashRecoveryPreload', 'preload', 'ipc'].map(name =>
-      [path.join(client, 'src', 'preload', `${name}.ts`), path.join('preload', `${name}.js`)]),
-    ...['ipc', 'bugReport'].map(name => [path.join(sharedSource, `${name}.ts`), path.join('shared', `${name}.js`)]),
+  const sharedIndex = path.join(sharedSource, 'index.ts');
+  const targetFor = source => path.join(root, source.startsWith(sharedSource)
+    ? path.join('shared', path.relative(sharedSource, source)) : path.relative(path.join(client, 'src'), source))
+    .replace(/\.ts$/u, '.js');
+  const pending = [
+    ...['crashRecovery', 'crashDiagnostics', 'crashRecoveryPage', 'i18n', 'windowPreferences']
+      .map(name => path.join(client, 'src', 'main', `${name}.ts`)),
+    sharedIndex,
   ];
-  for (const [source, relative] of files) {
-    const target = path.join(root, relative);
+  const compiled = new Set();
+  while (pending.length) {
+    const source = pending.pop();
+    if (compiled.has(source)) continue;
+    compiled.add(source);
+    const target = targetFor(source);
+    const output = transpile(source).replace(/require\("([^"]+)"\)/gu, (call, specifier) => {
+      if (specifier === '@monky/shared') {
+        pending.push(sharedIndex);
+        const relative = path.relative(path.dirname(target), targetFor(sharedIndex)).replaceAll('\\', '/');
+        return `require(${JSON.stringify(relative.startsWith('.') ? relative : `./${relative}`)})`;
+      }
+      if (specifier.startsWith('.')) pending.push(sourceFor(specifier, source));
+      return call;
+    });
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, transpile(source).replaceAll('require("@monky/shared")', 'require("../shared")'));
+    fs.writeFileSync(target, output);
   }
-  fs.writeFileSync(path.join(root, 'shared', 'index.js'), "Object.assign(exports, require('./ipc'), require('./bugReport'));\n");
   return transpile(path.join(client, 'src', 'renderer', 'utils', 'fatalBootstrap.ts'));
 }
 

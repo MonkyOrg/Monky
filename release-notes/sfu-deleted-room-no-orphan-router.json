@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No modo SFU, apagar uma sala de voz no instante em que alguém entra nela não deixa mais recursos de mídia presos no servidor.",
+  "en": "In SFU mode, deleting a voice room just as someone enters it no longer leaves media resources stuck on the server."
+}

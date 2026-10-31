@@ -1,4 +1,5 @@
-import { LIMITS, MessageType, Permission, ProtocolErrorCode, type AttachmentMeta, type ForumListResult, type ForumPost, type ForumPostSaved } from '@monky/shared';
+import { LIMITS, MessageType, Permission, ProtocolErrorCode, forumCursorSchema, type AttachmentMeta, type ForumCursor, type ForumListResult,
+  type ForumPost, type ForumPostSaved } from '@monky/shared';
 import { ProtocolRequestError, type NetworkClient } from '../core/NetworkClient';
 import { accessSignature, type ServerStore } from '../stores/serverStore';
 import { t, getLanguage } from '../i18n';
@@ -14,6 +15,7 @@ import { imageCarouselNavigationButton, moveImageCarousel } from './ImageCarouse
 import { showErrorToast } from './CopyToast';
 import { useAppValidation } from '../utils/feedback';
 import { openFileInputPicker } from '../utils/buttonLoading';
+import { isServerTime, serverTimeHtml } from '../utils/serverTime';
 
 interface ForumAttachmentSelection {
   id: string;
@@ -35,8 +37,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isForumPost(value: unknown): value is ForumPost {
   return isRecord(value) && typeof value.channelId === 'string' && typeof value.forumId === 'string'
     && typeof value.title === 'string' && typeof value.authorId === 'string' && typeof value.preview === 'string'
-    && Number.isFinite(value.createdAt) && Number.isFinite(value.updatedAt)
+    && isServerTime(value.createdAt) && isServerTime(value.updatedAt)
     && typeof value.pinned === 'boolean' && typeof value.locked === 'boolean' && typeof value.closed === 'boolean';
+}
+
+/**
+ * A page as the server sent it, or null when it is not one. A post the list could not show is
+ * left out instead of taking the others down with it.
+ */
+function forumListResult(value: unknown): ForumListResult | null {
+  if (!isRecord(value) || !Array.isArray(value.posts) || typeof value.hasMore !== 'boolean'
+    || typeof value.channelId !== 'string' || typeof value.nextOffset !== 'number' || !Number.isSafeInteger(value.nextOffset)) return null;
+  const cursor = forumCursorSchema.safeParse(value.nextCursor);
+  return { channelId: value.channelId, posts: value.posts.filter(isForumPost), hasMore: value.hasMore,
+    nextOffset: Math.max(0, value.nextOffset), ...(cursor.success ? { nextCursor: cursor.data } : {}) };
 }
 
 /** Events where the forum may read something else; the server sends the role list whenever anyone logs in. */
@@ -77,6 +91,8 @@ export class ForumView {
   private sort: 'latest' | 'newest' | 'oldest' = 'latest';
   private generation = 0;
   private next = 0;
+  /** Where the next page starts, when the server pages by cursor; posts moving meanwhile then never shift it. */
+  private cursor: ForumCursor | undefined;
   /** Pages of posts on screen, and how many posts the server puts in a full one. */
   private pages = 0;
   private pageSize = 0;
@@ -187,6 +203,7 @@ export class ForumView {
           this.loaded = false;
           this.loading = null;
           this.next = 0;
+          this.cursor = undefined;
           this.pages = 0;
           this.refreshDeferred = false;
           this.more = false;
@@ -350,6 +367,10 @@ export class ForumView {
     try {
       const posts = append ? [...this.posts] : [];
       let offset = append ? this.next : 0;
+      // Servers without `forum-cursor` reject `after`: they page by offset, which the shifts below correct.
+      const cursors = this.server.serverDetails?.protocol?.features.includes('forum-cursor') === true;
+      let after = append && cursors ? this.cursor : undefined;
+      const usedCursor = after !== undefined;
       let fetched = 0;
       let response: ForumListResult;
       do {
@@ -357,20 +378,25 @@ export class ForumView {
           this.lastRefreshAt = performance.now();
           this.lastRefreshCost = fetched + 1;
         }
-        response = await this.client.sendRequest<ForumListResult>(MessageType.FORUM_LIST, {
-          channelId: this.channelId, query, sort, offset,
+        const sent = await this.client.sendRequest<unknown>(MessageType.FORUM_LIST, {
+          channelId: this.channelId, query, sort, ...(after ? { after } : { offset }),
         });
         if (this.disposed || generation !== this.generation) return;
+        const page = forumListResult(sent);
+        if (!page) throw new Error(t('community.actionFailed'));
+        response = page;
         if (response.hasMore) this.pageSize = response.posts.length;
         posts.push(...response.posts);
         offset = response.nextOffset;
+        after = cursors ? response.nextCursor : undefined;
         fetched++;
       } while (response.hasMore && fetched < pagesToLoad);
       // The reader scrolled past the pages kept while they loaded.
       if (sameList && fetched < this.pages && this.deferRefresh()) return;
       // A post above this page moved down or out while it was read, so the page may start a
       // post late: it is asked for again where the following posts are now.
-      if (append && shifts !== this.shifts) return;
+      // A cursor page starts after the last post read wherever the others went.
+      if (append && !usedCursor && shifts !== this.shifts) return;
       this.posts = [...new Map(posts.map(post => [post.channelId, post])).values()];
       // A read that began after a post lost its newest message shows its time again; an
       // append, only for the posts on its page.
@@ -379,6 +405,7 @@ export class ForumView {
       // These pages may have been read before posts moved down or out: the next page then
       // starts that many places earlier.
       this.next = Math.max(0, response.nextOffset - (this.shifts - shifts));
+      this.cursor = cursors ? response.nextCursor : undefined;
       this.more = response.hasMore;
       this.pages = append ? this.pages + 1 : fetched;
       this.appendFailures = 0;
@@ -474,7 +501,7 @@ export class ForumView {
           <p>${post.preview}</p><small class="forum-post-stats">
             <span title="${t('forum.replies', { count: replies })}"><span class="material-symbols-outlined md-16">chat_bubble</span>${replies}</span>
             <span title="${t('forum.reactions', { count: reactions })}"><span class="material-symbols-outlined md-16">add_reaction</span>${reactions}</span>
-            <time datetime="${new Date(post.updatedAt).toISOString()}">${new Date(post.updatedAt).toLocaleString(getLanguage())}</time>
+            ${serverTimeHtml(post.updatedAt, date => date.toLocaleString(getLanguage()))}
             ${post.locked ? html`<span class="forum-post-state"><span class="material-symbols-outlined md-14">lock</span>${t('forum.locked')}</span>` : ''}
             ${post.closed ? html`<span class="forum-post-state"><span class="material-symbols-outlined md-14">check_circle</span>${t('forum.closed')}</span>` : ''}</small></span>
           ${thumbnail ? html`<img class="forum-post-thumbnail" src="${thumbnail}" alt="">` : ''}

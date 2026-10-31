@@ -4,6 +4,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { pathToFileURL } = require('node:url');
 const { compileRecovery, client } = require('./crashRecoveryFixture.cjs');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -96,8 +97,8 @@ if (process.versions.electron) {
       const main = new BrowserWindow({
         show: false,
         webPreferences: {
-          preload: path.join(root, 'compiled', 'preload', 'preload.js'),
-          contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false,
+          preload: path.join(root, 'compiled', 'preload', 'preload.cjs'),
+          contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false,
         },
       });
       recovery.watch(main);
@@ -117,6 +118,7 @@ if (process.versions.electron) {
         return window.webContents.executeJavaScript('!!document.getElementById("recovery-report")');
       }, 'recovery page DOM');
       await until(() => window.isVisible(), 'recovery preload readiness');
+      assert.equal(window.webContents.getLastWebPreferences().sandbox, true, 'The recovery page runs sandboxed (#826).');
       const state = await window.webContents.executeJavaScript(`({
         language: document.documentElement.lang,
         title: document.getElementById('recovery-title').textContent,
@@ -295,6 +297,8 @@ if (process.versions.electron) {
   }, async (t) => {
     const root = path.join(client, `.crash-recovery-smoke-${randomUUID()}`);
     fs.mkdirSync(root, { recursive: true });
+    const { buildPreloads } = await import(pathToFileURL(path.join(client, 'scripts', 'buildPreloads.mjs')).href);
+    await buildPreloads({ outDir: path.join(root, 'compiled', 'preload'), names: ['preload', 'crashRecoveryPreload'] });
     const env = { ...process.env, MONKY_CRASH_SMOKE_ROOT: root, MONKY_HOME: path.join(root, 'profile', 'cli') };
     delete env.ELECTRON_RUN_AS_NODE;
     const child = spawn(require('electron'), [__filename, `--user-data-dir=${path.join(root, 'profile')}`], {

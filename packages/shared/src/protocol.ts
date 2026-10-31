@@ -31,7 +31,14 @@ export enum ProtocolErrorCode {
   STORAGE_FULL = 'STORAGE_FULL',
   SERVER_FULL = 'SERVER_FULL',
   PROTOCOL_VERSION_UNSUPPORTED = 'PROTOCOL_VERSION_UNSUPPORTED',
+  /** The app or the server is too old for this feature: updating one of them makes it work. */
   FEATURE_REQUIRES_UPDATE = 'FEATURE_REQUIRES_UPDATE',
+  /**
+   * This server does not offer the feature at all (it was started without the service behind it),
+   * so updating changes nothing. Sent only to peers that announce `feature-unavailable`; older ones
+   * keep the code each route answered before.
+   */
+  FEATURE_UNAVAILABLE = 'FEATURE_UNAVAILABLE',
   INTERNAL_ERROR = 'INTERNAL_ERROR',
   UNAUTHORIZED = 'UNAUTHORIZED',
   PERMISSION_DENIED = 'PERMISSION_DENIED',
@@ -71,6 +78,8 @@ export enum ProtocolErrorCode {
    */
   SFU_UNAVAILABLE = 'SFU_UNAVAILABLE',
   VOICE_RECONNECT_EXPIRED = 'VOICE_RECONNECT_EXPIRED',
+  /** A join following a move that a later move replaced: the connection stays where the later one put it. */
+  VOICE_MOVE_SUPERSEDED = 'VOICE_MOVE_SUPERSEDED',
 }
 
 export enum MessageType {
@@ -718,6 +727,12 @@ export interface VoiceJoinPayload {
   invocationId?: string;
   /** Bot-only opt-in, requiring the separate receive_voice capability. */
   receiveAudio?: boolean;
+  /**
+   * `voice-move-id`: the ADMIN_MOVE_USER this join follows. The server answers
+   * VOICE_MOVE_SUPERSEDED, leaving the connection where it is, when a later
+   * move replaced it.
+   */
+  moveId?: string;
 }
 
 export interface VoiceModeTransition {
@@ -778,6 +793,8 @@ export interface AdminKickVoicePayload {
 export interface AdminMoveUserPayload {
   targetSessionId: string;
   channelId: string;
+  /** Server -> moved client, `voice-move-id`: repeated in the VOICE_JOIN that follows this move. */
+  moveId?: string;
 }
 
 export interface MemberKickPayload {

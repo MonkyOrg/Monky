@@ -9,7 +9,8 @@ const {
   NATIVE_SCREEN_TEXTURE_IPC, nativeScreenTexturePortInfoSchema, nativeScreenTextureChannelInfoSchema,
   nativeScreenTextureMessageSchema, nativeScreenTextureReceiptSchema,
 } = require('@monky/shared');
-const { TextureTransferSender, sendTexture, registerTextureTransferReceiver } = require('../runtime/textureTransfer.cjs');
+const { TextureTransferSender, sendTexture } = require('../runtime/textureTransfer.cjs');
+const { registerTextureTransferReceiver } = require('../runtime/textureTransferReceiver.cjs');
 const { NativePresentationBridge } = require('../runtime/nativePresentationBridge.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 

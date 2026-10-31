@@ -229,7 +229,11 @@ test('AFK channel: set up in server settings, entered only when idle, muted by t
   from = bob.peer.mark();
   alice.peer.send(MessageType.VOICE_AFK, { channelId: lobbyId });
   const move = await alice.peer.next(message => message.type === MessageType.ADMIN_MOVE_USER, 'AFK move');
-  assert.deepEqual(move.payload, { targetSessionId: alice.sessionId, channelId: afkId });
+  const payload = move.payload;
+  assert.ok(typeof payload === 'object' && payload !== null && 'moveId' in payload && typeof payload.moveId === 'string',
+    'the AFK move is followed like any other (voice-move-id)');
+  const { moveId: _followed, ...notice } = payload;
+  assert.deepEqual(notice, { targetSessionId: alice.sessionId, channelId: afkId });
   const seen = await bob.peer.next(arrival(alice.sessionId, afkId), 'AFK arrival', from);
   assert.equal(voiceState(seen).permissionMuted, true, 'the server mutes whoever is in the AFK room');
   const followed = await join(alice, afkId);

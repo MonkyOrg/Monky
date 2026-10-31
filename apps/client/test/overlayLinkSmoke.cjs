@@ -177,6 +177,51 @@ async function runOverlayLinkSmoke() {
     await until(() => first.videoSenders.slice(0, 2).every(cappedAt(scaled)), 'the cap follows the overlay pixel ratio');
     check(true, 'The cap follows the pixel ratio the overlay reports, not the main window\'s');
 
+    // "Focus on the active speaker" shows one card: only its camera is encoded, and the next
+    // speaker's camera takes over the same slot without a lingering black card (#849).
+    const encodedPerSlot = async bridge => Promise.all(bridge.videoSenders.map(async sender => {
+      let frames = 0;
+      (await sender.getStats()).forEach(entry => { if (entry.type === 'outbound-rtp') frames += entry.framesEncoded ?? 0; });
+      return frames;
+    }));
+    const sendingSlots = async bridge => {
+      const before = await encodedPerSlot(bridge);
+      await delay(700);
+      const after = await encodedPerSlot(bridge);
+      return after.map((frames, index) => frames - before[index]).filter(frames => frames > 3).length;
+    };
+    const probe = document.createElement('canvas');
+    probe.width = probe.height = 4;
+    const probeContext = probe.getContext('2d', { willReadFrequently: true });
+    const shownCamera = () => {
+      const [video] = videos();
+      if (!video || video.videoWidth === 0) return null;
+      probeContext.drawImage(video, 0, 0, 4, 4);
+      const [red, , blue] = probeContext.getImageData(0, 0, 1, 1).data;
+      return blue > red ? 'cam-b' : 'cam-a';
+    };
+    const speak = (sessionId, isSpeaking) => session.participants.setSpeaking(sessionId, isSpeaking);
+    const allCameras = settingsStore.getOverlayConfig();
+    settingsStore.setOverlayConfig({ ...allCameras, focusActiveSpeaker: true });
+    first.syncState();
+    await until(() => videos().length === 1 && shownCamera() === 'cam-a', 'the overlay shows only the first camera');
+    await until(async () => (await sendingSlots(first)) === 1, 'one slot encodes in focus mode');
+    check(true, 'With several cameras on, focus mode encodes only the camera on screen');
+    speak('cam-b', true);
+    const switchedAt = performance.now();
+    first.syncState();
+    await until(() => videos().length === 1 && shownCamera() === 'cam-b', 'the card follows the new speaker', 3000);
+    const switchMs = performance.now() - switchedAt;
+    check(switchMs < 2000, `The card shows the new speaker's camera in ${Math.round(switchMs)} ms`);
+    check(first.videoSenders[0].track === session.participants.get('cam-b').remoteStream.getVideoTracks()[0]
+      && (await sendingSlots(first)) === 1, 'The new speaker\'s camera replaces the old one in the single slot');
+    speak('cam-b', false);
+    settingsStore.setOverlayConfig(allCameras);
+    first.syncState();
+    await until(() => playingFrom(view.localPeerConnection) === 2, 'both cameras play again outside focus mode');
+    await until(async () => (await sendingSlots(first)) === 2, 'every camera encodes outside focus mode');
+    check(true, 'Outside focus mode every camera goes to the overlay');
+
     // The main window reloads with the overlay open: its new connection must pair again,
     // and an answer that belongs to the old connection must not be taken for the new one.
     const firstAnswer = answers.at(-1);

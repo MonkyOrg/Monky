@@ -525,6 +525,23 @@ void adversarialLifecycleEdges() {
   idle.receive(message::ADMIN_MOVE_USER, {{"targetSessionId", "self:device"}, {"channelId", "other"}});
   check(idle.sent.size() == idleSent && !idle.session.desiredChannel(), "Administrative move started a call");
 
+  // Moved twice before the first join is answered (#841): each join names the
+  // move it follows, so the server can refuse the one the second overtook.
+  Fixture twice;
+  twice.auth();
+  twice.join();
+  twice.receive(message::ADMIN_MOVE_USER,
+      {{"targetSessionId", "self:device"}, {"channelId", "other"}, {"moveId", "move-1"}});
+  check(twice.sent.back()["payload"]["channelId"] == "other" && twice.sent.back()["payload"]["moveId"] == "move-1",
+        "A join following a move did not name it");
+  twice.receive(message::ADMIN_MOVE_USER,
+      {{"targetSessionId", "self:device"}, {"channelId", "room"}, {"moveId", "move-2"}});
+  check(twice.sent.back()["payload"]["channelId"] == "room" && twice.sent.back()["payload"]["moveId"] == "move-2" &&
+        twice.sentCount(message::VOICE_LEAVE) == 0, "The later join did not name the later move, or left a room");
+  twice.session.join("other", twice.now);
+  check(twice.sent.back()["type"] == std::string(message::VOICE_JOIN) && !twice.sent.back()["payload"].contains("moveId"),
+        "A join of the user's own named a spent move");
+
   Fixture peer;
   peer.auth();
   peer.join(false);

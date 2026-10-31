@@ -3,6 +3,7 @@ import { CHANNEL_PERMISSIONS, channelOverwrites, channelPrivacy, withChannelPriv
 import { SqliteCategoryRepository } from './SqliteCategoryRepository';
 import { SqliteChannelPermissions } from './SqliteChannelPermissions';
 import { partialUpdate } from './partialUpdate';
+import { indexMessageMentions } from './messageSearchMentions';
 import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema, botMessageLocalizationsSchema } from '@monky/shared';
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NewServerRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
 import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
@@ -108,6 +109,7 @@ const BOT_COLUMNS: { readonly [K in keyof BotRecord]?: string } = {
   boundPublicKey: 'bound_public_key',
   lastProtocolVersion: 'last_protocol_version',
   manifestUrl: 'manifest_url',
+  keyProofRequired: 'key_proof_required',
 };
 
 export class SqliteServerRepository implements IServerRepository {
@@ -565,7 +567,10 @@ export class SqliteMessageRepository implements IMessageRepository {
   }
 
   async create(message: MessageRecord): Promise<void> {
-    this.insertMessage(message);
+    this.db.transaction(() => {
+      this.insertMessage(message);
+      indexMessageMentions(this.db, message.id);
+    })();
   }
 
   async createChatMessage(message: MessageRecord, attachmentIds: string[], mentions: MentionRecord[]): Promise<{
@@ -584,6 +589,7 @@ export class SqliteMessageRepository implements IMessageRepository {
         this.db.prepare('UPDATE message_attachments SET message_id = ? WHERE id = ?').run(message.id, id);
       }
       for (const mention of mentions) this.insertMention(mention);
+      indexMessageMentions(this.db, message.id);
       return { message, created: true };
     })();
   }
@@ -597,6 +603,7 @@ export class SqliteMessageRepository implements IMessageRepository {
       const stored = this.db.prepare('SELECT id FROM messages WHERE id = ?').get(message.id);
       this.insertMessage(message, true);
       if (!stored) for (const mention of mentions) this.insertMention(mention);
+      if (!stored) indexMessageMentions(this.db, message.id);
       const row = this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`).get(message.id) as SqliteMessageRow | undefined;
       if (!row) throw new Error('Bot message was not persisted.');
       return toMessageRecord(row);
@@ -644,8 +651,11 @@ export class SqliteMessageRepository implements IMessageRepository {
   }
 
   async updateContent(messageId: string, content: string, editedAt: number, blocks?: MessageBlock[]): Promise<void> {
-    this.db.prepare('UPDATE messages SET content = ?, blocks_json = ?, bot_localizations_json = NULL, edited_at = ?, revision = revision + 1 WHERE id = ? AND deleted_at IS NULL')
-      .run(content, blocks ? JSON.stringify(blocks) : null, editedAt, messageId);
+    this.db.transaction(() => {
+      this.db.prepare('UPDATE messages SET content = ?, blocks_json = ?, bot_localizations_json = NULL, edited_at = ?, revision = revision + 1 WHERE id = ? AND deleted_at IS NULL')
+        .run(content, blocks ? JSON.stringify(blocks) : null, editedAt, messageId);
+      indexMessageMentions(this.db, messageId);
+    })();
   }
 
   async markDeleted(messageId: string, deletedAt: number, actorId?: string, undoUntil?: number): Promise<void> {
@@ -674,6 +684,7 @@ export class SqliteMessageRepository implements IMessageRepository {
         deleted_at = NULL, deleted_by_user_id = NULL, delete_undo_until = NULL, revision = revision + 1 WHERE id = ?`)
         .run(backup.content, backup.blocks_json, backup.bot_localizations_json, messageId);
       this.db.prepare('DELETE FROM message_deletion_backups WHERE message_id = ?').run(messageId);
+      indexMessageMentions(this.db, messageId);
       return true;
     })();
   }
@@ -969,7 +980,7 @@ export class SqliteRoleRepository implements IRoleRepository {
   }
 }
 
-type BotRow = Omit<BotRecord, 'profilePending'> & { profilePending: number };
+type BotRow = Omit<BotRecord, 'profilePending' | 'keyProofRequired'> & { profilePending: number; keyProofRequired: number };
 
 export class SqliteBotRepository implements IBotRepository {
   constructor(private db: IDatabaseDriver) {}
@@ -987,7 +998,7 @@ export class SqliteBotRepository implements IBotRepository {
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
               created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion,
-              manifest_url as manifestUrl
+              manifest_url as manifestUrl, key_proof_required as keyProofRequired
        FROM bots WHERE id = ?`
     ).get(id) as BotRow | undefined;
     return row ? this.mapRow(row) : null;
@@ -998,7 +1009,7 @@ export class SqliteBotRepository implements IBotRepository {
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
               created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion,
-              manifest_url as manifestUrl
+              manifest_url as manifestUrl, key_proof_required as keyProofRequired
        FROM bots WHERE token_hash = ?`
     ).get(tokenHash) as BotRow | undefined;
     return row ? this.mapRow(row) : null;
@@ -1009,7 +1020,7 @@ export class SqliteBotRepository implements IBotRepository {
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
               created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion,
-              manifest_url as manifestUrl
+              manifest_url as manifestUrl, key_proof_required as keyProofRequired
        FROM bots ORDER BY created_at ASC`
     ).all() as BotRow[];
     return rows.map((r) => this.mapRow(r));
@@ -1042,6 +1053,7 @@ export class SqliteBotRepository implements IBotRepository {
       createdAt: row.createdAt,
       lastProtocolVersion: row.lastProtocolVersion ?? null,
       manifestUrl: row.manifestUrl ?? null,
+      keyProofRequired: row.keyProofRequired === 1,
     };
   }
 }

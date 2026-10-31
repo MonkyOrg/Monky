@@ -90,6 +90,15 @@ test('reads are bound to the server, validated and always retired', async () => 
   }
 });
 
+test('a server started without the audit log says so, instead of asking for an update that would not help (#839)', async () => {
+  const f = fixture();
+  const source = f.source();
+  const unavailable = source.read();
+  f.requests[0].result.reject(new ProtocolRequestError('none', ProtocolErrorCode.FEATURE_UNAVAILABLE));
+  await assert.rejects(unavailable, (error: unknown) => error instanceof ServerAuditError && error.reason === 'unavailable');
+  assert.equal(endsServerAudit(new ServerAuditError('unavailable')), true);
+});
+
 test('losing access ends the view, before or after the server answers', async () => {
   const f = fixture();
   const source = f.source();

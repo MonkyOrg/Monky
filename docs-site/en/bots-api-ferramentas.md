@@ -328,7 +328,7 @@ export interface GitHubReleaseSource {
 
 ## `handleReachabilityProbe` {#handlereachabilityprobe}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/reachability.ts#L95)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/reachability.ts#L102)
 
 ```ts
 export function handleReachabilityProbe(request: http.IncomingMessage, response: http.ServerResponse, publicKeyHex?: string): boolean;
@@ -613,7 +613,7 @@ export type ManagedToolRepository = "yt-dlp/yt-dlp" | "yt-dlp/FFmpeg-Builds" | "
 
 ## `MessageType` {#messagetype}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L76)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L85)
 
 ```ts
 export enum MessageType {
@@ -965,7 +965,14 @@ export enum ProtocolErrorCode {
     STORAGE_FULL = 'STORAGE_FULL',
     SERVER_FULL = 'SERVER_FULL',
     PROTOCOL_VERSION_UNSUPPORTED = 'PROTOCOL_VERSION_UNSUPPORTED',
+    /** The app or the server is too old for this feature: updating one of them makes it work. */
     FEATURE_REQUIRES_UPDATE = 'FEATURE_REQUIRES_UPDATE',
+    /**
+     * This server does not offer the feature at all (it was started without the service behind it),
+     * so updating changes nothing. Sent only to peers that announce `feature-unavailable`; older ones
+     * keep the code each route answered before.
+     */
+    FEATURE_UNAVAILABLE = 'FEATURE_UNAVAILABLE',
     INTERNAL_ERROR = 'INTERNAL_ERROR',
     UNAUTHORIZED = 'UNAUTHORIZED',
     PERMISSION_DENIED = 'PERMISSION_DENIED',
@@ -1004,7 +1011,9 @@ export enum ProtocolErrorCode {
      * degrading to P2P (#515).
      */
     SFU_UNAVAILABLE = 'SFU_UNAVAILABLE',
-    VOICE_RECONNECT_EXPIRED = 'VOICE_RECONNECT_EXPIRED'
+    VOICE_RECONNECT_EXPIRED = 'VOICE_RECONNECT_EXPIRED',
+    /** A join following a move that a later move replaced: the connection stays where the later one put it. */
+    VOICE_MOVE_SUPERSEDED = 'VOICE_MOVE_SUPERSEDED'
 }
 ```
 

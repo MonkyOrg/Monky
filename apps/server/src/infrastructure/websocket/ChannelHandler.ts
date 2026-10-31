@@ -1,6 +1,6 @@
 import type { WebSocket } from 'ws';
 import {
-  MessageType, Permission, ProtocolErrorCode, canAccessChannel,
+  MessageType, Permission, ProtocolErrorCode, canAccessChannel, channelDeleteSchema,
   type CategoryCreatePayload, type CategoryDeletePayload, type CategoryReorderPayload, type CategoryUpdatePayload,
   type ChannelCreatePayload, type ChannelDeletePayload, type ChannelReorderPayload, type ChannelSummary, type ChannelUpdatePayload,
   type ServerMessage,
@@ -69,8 +69,8 @@ export class ChannelHandler {
         handle: ({ session, payload, requestId }) => this.update(session, payload as ChannelUpdatePayload, requestId),
       }),
       route({
-        types: [MessageType.CHANNEL_DELETE], permission: manage,
-        handle: ({ session, payload, requestId }) => this.delete(session, payload as ChannelDeletePayload, requestId),
+        types: [MessageType.CHANNEL_DELETE], permission: manage, schema: { type: channelDeleteSchema, message: 'Canal inválido.' },
+        handle: ({ session, payload, requestId }) => this.delete(session, payload, requestId),
       }),
       route({
         types: [MessageType.CHANNEL_REORDER], permission: manage,

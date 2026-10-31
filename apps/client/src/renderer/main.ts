@@ -447,7 +447,7 @@ class App {
     bindVoiceEvents({
       reconnect: this.voiceModeReconnect,
       render: () => this.mainView.render(),
-      rejoinOnScreen: channelId => { void this.mainView.rejoinVoiceChannel(channelId); },
+      rejoinOnScreen: (channelId, moveId) => { void this.mainView.rejoinVoiceChannel(channelId, moveId); },
     });
 
     // ── Bot infrastructure (#569) ────────────────────────────────────────

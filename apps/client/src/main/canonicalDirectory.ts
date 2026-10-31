@@ -1,5 +1,28 @@
+import { realpath as pathWalkingRealpath } from 'node:fs';
 import { mkdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
+
+export type Realpath = (target: string) => Promise<string>;
+
+const walkLinks: Realpath = promisify(pathWalkingRealpath);
+
+/**
+ * Canonical path of what exists at `target`; rejects like `realpath` when nothing does.
+ *
+ * The native realpath asks Windows for the final path of an open handle, which some virtual
+ * volumes cannot answer (ImDisk RAM disks, WinFsp or Dokan mounts fail with EISDIR) even though
+ * listing and reading them work. Node's path-walking realpath, which resolves each link with
+ * readlink, gives the same answer there, so links are still followed and compared by callers.
+ * `nativeRealpath` is only replaced by tests, to reproduce those volumes.
+ */
+export async function canonicalPath(target: string, nativeRealpath: Realpath = realpath): Promise<string> {
+  try {
+    return await nativeRealpath(target);
+  } catch {
+    return walkLinks(target);
+  }
+}
 
 /** Whether two absolute paths name the same entry; Windows compares them case-insensitively. */
 export function samePath(first: string, second: string): boolean {

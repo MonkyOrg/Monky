@@ -7,7 +7,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { Worker } = require('node:worker_threads');
 const { once } = require('node:events');
-const { createPacketCaptureFactory } = require('..\\packet_capture');
+const { createPacketCaptureFactory } = require(path.join(__dirname, '..', 'packet_capture'));
 const output = process.env.MONKY_PACKET_CAPTURE_TEST_DIR
   || path.resolve(__dirname, '..', 'build', 'packet-tests');
 const buildReport = JSON.parse(fs.readFileSync(path.join(output, 'build-report.json'), 'utf8'));

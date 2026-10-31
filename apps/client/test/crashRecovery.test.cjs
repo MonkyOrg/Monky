@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const test = require('node:test');
-const { sourceLoader, client } = require('./crashRecoveryFixture.cjs');
+const { sourceLoader, compileRecovery, client } = require('./crashRecoveryFixture.cjs');
 
 function fixture() {
   const windows = [];
@@ -211,6 +211,8 @@ test('renderer death replaces the broken window once, with no automatic report o
   assert.equal(window.options.webPreferences.nodeIntegration, false);
   assert.equal(window.options.webPreferences.nodeIntegrationInSubFrames, false);
   assert.equal(window.options.webPreferences.partition, 'monky-crash-recovery');
+  assert.equal(window.options.webPreferences.sandbox, true, 'the recovery page runs sandboxed (#826)');
+  assert.equal(path.basename(window.options.webPreferences.preload), 'crashRecoveryPreload.cjs', 'its preload is the bundle');
   assert.equal(window.options.titleBarStyle, 'hidden');
   if (process.platform === 'darwin') {
     assert.equal(window.options.trafficLightPosition.x, 14);
@@ -435,4 +437,33 @@ test('missing font assets do not prevent an offline recovery page or its vector 
   assert.doesNotMatch(page, /data:font\/woff2/);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0][0], /using system fonts/);
+});
+
+test('the Electron smoke compiles every module its recovery entry points require', () => {
+  // A fixed file list broke the smoke when ipc.ts started importing ./botStorage.js (#832).
+  const root = path.join(client, `.crash-recovery-compile-${randomUUID()}`);
+  try {
+    compileRecovery(root);
+    const files = [];
+    const walk = (folder) => {
+      for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+        const full = path.join(folder, entry.name);
+        if (entry.isDirectory()) walk(full); else files.push(full);
+      }
+    };
+    walk(root);
+    for (const file of files) {
+      for (const [, specifier] of fs.readFileSync(file, 'utf8').matchAll(/require\("([^"]+)"\)/gu)) {
+        assert.notEqual(specifier, '@monky/shared', `${file} must use the compiled shared copy`);
+        if (!specifier.startsWith('.')) continue;
+        const target = path.resolve(path.dirname(file), specifier.replace(/\.js$/u, ''));
+        assert.ok(fs.existsSync(`${target}.js`) || fs.existsSync(path.join(target, 'index.js')), `${file} -> ${specifier}`);
+      }
+    }
+    const shared = require(path.join(root, 'shared'));
+    assert.equal(typeof shared.BUG_REPORT_URL, 'string');
+    assert.equal(typeof shared.botDeviceStorageGrantSchema?.parse, 'function');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

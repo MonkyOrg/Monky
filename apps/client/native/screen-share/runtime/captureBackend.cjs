@@ -4,11 +4,8 @@ const assert = require('node:assert/strict');
 const windows = require('./captureBridge.cjs');
 const protocol = require('./captureProtocol.cjs');
 const apple = require('./mac/captureBridge.cjs');
-const { validateMacTarget } = require('./mac/target.cjs');
+const { validateCaptureTarget } = require('./captureTarget.cjs');
 
-function validateCaptureTarget(target) {
-  return target?.platform === 'darwin' ? validateMacTarget(target) : protocol.validateSource(target);
-}
 function cloneCaptureTarget(target) {
   validateCaptureTarget(target);
   const value = structuredClone(target);

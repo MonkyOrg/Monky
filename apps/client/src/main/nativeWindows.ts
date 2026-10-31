@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { NativeMonitorInfo, NativeWindowInfo, NativeWindowState } from '@monky/screen-audio';
-import { validateCaptureTarget, type NativeScreenCaptureTarget } from '@monky/screen-share';
+import type { NativeScreenCaptureTarget } from '@monky/screen-share';
+import { validateCaptureTarget } from '@monky/screen-share/target';
 import type { DesktopSource, NativeScreenCaptureKind } from '@monky/shared';
 
 export function nativeWindowIdFromSourceId(sourceId: string): number | null {

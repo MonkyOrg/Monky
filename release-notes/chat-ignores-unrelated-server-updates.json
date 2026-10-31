@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Com um canal de texto aberto, mudanças em outros canais, nas categorias ou nos cargos de outras pessoas não redesenham mais a caixa de mensagem, os cartões de bot e as escolhas públicas do canal, o que deixa o chat mais leve em servidores movimentados.",
+  "en": "With a text channel open, changes to other channels, categories or other people's roles no longer redraw the message box, the bot cards and the channel's public choices, which makes the chat lighter on busy servers."
+}

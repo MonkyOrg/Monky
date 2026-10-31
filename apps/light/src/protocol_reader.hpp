@@ -40,6 +40,8 @@ std::string text(const Json& object, const char* key);
 bool boolean(const Json& object, const char* key);
 // Absent is nullopt; present, it has to be a boolean.
 std::optional<bool> optionalBoolean(const Json& object, const char* key);
+// Absent is nullopt; present, it has to be a nonempty string.
+std::optional<std::string> optionalText(const Json& object, const char* key);
 void number(const Json& object, const char* key);
 void objectField(const Json& object, const char* key);
 void arrayField(const Json& object, const char* key);

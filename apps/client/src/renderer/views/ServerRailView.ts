@@ -28,7 +28,6 @@ import { t } from '../i18n';
 import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { appEvents } from '../core/EventBus';
 import { addServerModal } from './addServer/AddServerModal';
-import { serverMonitorModal } from './ServerMonitorModal';
 import { folderSettingsModal } from './FolderSettingsModal';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter } from '../utils/surfaceMotion';
@@ -770,7 +769,7 @@ export class ServerRailView {
           label: t('serverMonitor.title'),
           icon: 'monitoring',
           disabled: !running,
-          onClick: () => { void serverMonitorModal.openLocal(owned.port); },
+          onClick: () => { void import('./ServerMonitorModal').then(({ serverMonitorModal }) => serverMonitorModal.openLocal(owned.port)); },
         },
         {
           label: t('connection.deleteSavedServer'),

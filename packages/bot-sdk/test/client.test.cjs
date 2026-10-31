@@ -1630,7 +1630,56 @@ test('new SDK reconnects using the known legacy bot contract without an update w
   assert.equal(offered[0].protocolOffer.features.includes('message-forward'), false);
   assert.equal(offered[0].protocolOffer.features.includes('user-brb'), false);
   assert.equal(offered[0].protocolOffer.features.includes('custom-status'), false);
+  assert.equal(offered[0].protocolOffer.features.includes('bot-key-proof'), false, 'Without its private key the bot cannot answer a challenge');
   assert.equal(errors.length, 0);
+});
+
+// The token alone must not be enough to impersonate a bot (#822).
+test('a bot holding its private key offers bot-key-proof and signs the challenge for the token it presents', async (t) => {
+  const { generateKeyPairSync, verify, createPublicKey } = require('node:crypto');
+  const { setRuntimeBotIdentity, createReachabilityIdentity } = require('../dist/reachability.js');
+  const { botAuthChallenge } = require('@monky/shared');
+  const pair = () => {
+    const keys = generateKeyPairSync('ed25519');
+    return { privateKey: keys.privateKey, publicKey: keys.publicKey.export({ format: 'der', type: 'spki' }).toString('hex') };
+  };
+  const keys = pair();
+  assert.throws(() => new BotClient({ requestedCapabilities: ['commands'], publicKey: keys.publicKey, privateKey: pair().privateKey }),
+    /does not match/);
+  const proveWith = async (options) => {
+    const server = await makeServer(t, { authenticate: (ws, message) => {
+      assert.ok(message.payload.protocolOffer.features.includes('bot-key-proof'));
+      ws.send(JSON.stringify({ type: MessageType.AUTH_CHALLENGE, payload: { nonce: 'ab'.repeat(32) } }));
+    } });
+    const { bot, errors } = makeBot(t, server, { publicKey: keys.publicKey, ...options });
+    bot.command({ name: 'ping', description: 'Ping', handler() {} });
+    bot.connect();
+    const answer = await server.next(MessageType.AUTH_CHALLENGE_RESPONSE);
+    const signed = Buffer.from(botAuthChallenge('ab'.repeat(32), 'test-token'), 'utf8');
+    assert.equal(verify(null, signed, createPublicKey(`-----BEGIN PUBLIC KEY-----\n${Buffer.from(keys.publicKey, 'hex').toString('base64')}\n-----END PUBLIC KEY-----`),
+      Buffer.from(answer.payload.signature, 'hex')), true);
+    assert.equal(verify(null, Buffer.from(botAuthChallenge('ab'.repeat(32), 'other-token'), 'utf8'),
+      createPublicKey(keys.privateKey), Buffer.from(answer.payload.signature, 'hex')), false, 'Bound to this token only');
+    server.send(MessageType.AUTH_SUCCESS, {});
+    await server.next(MessageType.COMMAND_REGISTER);
+    assert.deepEqual(errors, []);
+  };
+  await proveWith({ privateKey: keys.privateKey.export({ format: 'pem', type: 'pkcs8' }) });
+  await proveWith({ privateKey: keys.privateKey });
+  setRuntimeBotIdentity(createReachabilityIdentity(keys.publicKey, keys.privateKey));
+  t.after(() => setRuntimeBotIdentity(undefined));
+  await proveWith({});
+
+  setRuntimeBotIdentity(undefined);
+  const server = await makeServer(t, { authenticate: (ws) => ws.send(JSON.stringify({
+    type: MessageType.AUTH_CHALLENGE, payload: { nonce: 'cd'.repeat(32) },
+  })) });
+  const { bot, errors } = makeBot(t, server, { publicKey: keys.publicKey });
+  const failed = once(bot, 'auth_failed');
+  bot.connect();
+  await failed;
+  assert.equal(server.frames.some((frame) => frame.type === MessageType.AUTH_CHALLENGE_RESPONSE), false);
+  assert.match(errors[0].message, /unexpected authentication challenge/);
 });
 const soundDownloadRequest = { url: 'https://example.com/sound.mp3', fileName: 'sound.mp3', title: 'Sound' };
 
@@ -2097,6 +2146,42 @@ test('autocomplete concurrency stays bounded even when handlers ignore cancellat
   assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT), false,
     'Cancelled searches never answer');
   assert.deepEqual(errors, []);
+});
+
+// COMMAND_FINISHED aborts the signal at once, but a handler that ignores it keeps running:
+// it must keep its slot, or cancelling and repeating would pile up unbounded handlers.
+test('command concurrency stays bounded even when handlers ignore the server finishing them', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const work = [];
+  let immediate = false;
+  bot.command({
+    name: 'hold', description: 'Hold',
+    handler: (ctx) => immediate ? undefined : new Promise((resolve) => { work.push({ ctx, resolve }); }),
+  });
+  t.after(() => { for (const pending of work) pending.resolve(); });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  for (let index = 0; index < LIMITS.MAX_BOT_INVOCATIONS; index++) server.invoke(`work-${index}`, 'hold');
+  await sdkBarrier(server);
+  assert.equal(work.length, LIMITS.MAX_BOT_INVOCATIONS);
+  for (let index = 0; index < work.length; index++) {
+    server.send(MessageType.COMMAND_FINISHED, { invocationId: `work-${index}`, channelId: 'channel-one', reason: 'cancelled' });
+  }
+  await sdkBarrier(server);
+  assert.ok(work.every((pending) => pending.ctx.signal.aborted));
+  immediate = true;
+  server.invoke('full', 'hold');
+  assert.deepEqual((await server.next(MessageType.COMMAND_FINISH)).payload, { invocationId: 'full', failed: true });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /Too many active bot commands/);
+  for (const pending of work) pending.resolve();
+  await sdkBarrier(server);
+  server.invoke('released', 'hold');
+  assert.deepEqual((await server.next(MessageType.COMMAND_FINISH)).payload, { invocationId: 'released', failed: false });
+  assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_FINISH), false,
+    'Commands the server finished never report back');
+  assert.equal(errors.length, 1);
 });
 
 test('sound downloads await structured outcomes, remain private and consume one request per invocation', async (t) => {

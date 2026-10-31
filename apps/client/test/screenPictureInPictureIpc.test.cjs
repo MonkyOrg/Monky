@@ -207,7 +207,9 @@ test('the PiP popup is single-use, sandboxed, floating, never steals focus and r
     const child = {
       calls, css,
       emit: name => (events.get(name) ?? []).forEach(callback => callback()),
-      moveTo: next => { bounds = next; child.emit('moved'); },
+      // Electron reports programmatic and user moves alike with 'move'. A popup its sandboxed
+      // opener closes is destroyed without 'close' (#826), so nothing is left to read then.
+      moveTo: next => { bounds = next; child.emit('move'); },
       isDestroyed: () => destroyed, isMinimized: () => false, isVisible: () => true, getBounds: () => bounds,
       removeMenu: () => calls.push('removeMenu'),
       setAspectRatio: ratio => { calls.push(`aspect:${ratio}`); bounds = { ...bounds, width: bounds.width - 2 }; },

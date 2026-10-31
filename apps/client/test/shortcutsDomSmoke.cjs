@@ -57,9 +57,9 @@ if (!process.versions.electron) {
     const address = vite.httpServer.address();
     assert.ok(address && typeof address !== 'string');
     window = new BrowserWindow({ show: false, webPreferences: {
-      contextIsolation: true, nodeIntegration: false, sandbox: false,
+      contextIsolation: true, nodeIntegration: false, sandbox: true,
       backgroundThrottling: false, offscreen: true,
-      preload: path.join(output, 'src/preload/preload.js'),
+      preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.cjs'),
     } });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     // Inject native events and their layout: hosted desktops need not have an input locale.

@@ -509,14 +509,15 @@ export class SfuManager {
     if (router && !router.closed) return Promise.resolve(router);
     const pending = this.routerCreations.get(channelId);
     if (pending) return pending;
-    const creation = this.createRouter(channelId);
+    // closeChannel drops the entry: a creation no longer registered is abandoned.
+    const creation = this.createRouter(channelId, () => this.routerCreations.get(channelId) === creation);
     this.routerCreations.set(channelId, creation);
     const settled = () => { if (this.routerCreations.get(channelId) === creation) this.routerCreations.delete(channelId); };
     void creation.then(settled, settled);
     return creation;
   }
 
-  private async createRouter(channelId: string): Promise<mediasoup.types.Router> {
+  private async createRouter(channelId: string, isCurrent: () => boolean): Promise<mediasoup.types.Router> {
     if (!this.isReady()) await this.init();
     const worker = this.worker;
     if (!worker || worker.died) {
@@ -528,6 +529,10 @@ export class SfuManager {
     if (generation !== this.generation) {
       router.close();
       throw new Error('The SFU worker changed while the router was being created');
+    }
+    if (!isCurrent()) {
+      router.close();
+      throw new Error('The channel was closed while its router was being created');
     }
     this.routers.set(channelId, router);
     return router;
@@ -1239,6 +1244,7 @@ export class SfuManager {
   /** Closes everything of a removed channel, its router included, reporting the producers that went with it. */
   public closeChannel(channelId: string): { closedProducerIds: string[] } {
     this.cancelPendingTransports(pending => pending.channelId === channelId);
+    this.routerCreations.delete(channelId);
     const closedProducerIds: string[] = [];
     for (const [id, record] of Array.from(this.producers.entries())) {
       if (record.channelId === channelId) {

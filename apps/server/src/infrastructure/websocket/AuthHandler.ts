@@ -1,7 +1,8 @@
+import { createPublicKey, randomBytes, verify } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import {
-  DEFAULT_PERMISSIONS, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, authConnectSchema, botIdentitySchema,
-  canAccessChannel, localBotIdentitySchema, negotiateProtocol, roleModelFor, rolesForModel,
+  DEFAULT_PERMISSIONS, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, authConnectSchema, botAuthChallenge,
+  botAuthSignatureSchema, botIdentitySchema, canAccessChannel, localBotIdentitySchema, negotiateProtocol, roleModelFor, rolesForModel,
   type AuthChallengePayload, type AuthConnectPayload, type AuthFailedPayload, type AuthSuccessPayload, type RolesListPayload,
   type ServerMessage, type UserConnectionStatePayload, type UserJoinedPayload, type UserSummary,
 } from '@monky/shared';
@@ -15,6 +16,7 @@ import type { RoleService } from '../../application/services/RoleService';
 import { auditRef } from '../../application/services/ServerAuditService';
 import type { SignalingService } from '../../application/services/SignalingService';
 import type { IServerRepository } from '../../domain/repositories';
+import type { BotRecord } from '../../domain/entities';
 import { Logger } from '../logger/Logger';
 import type { RateLimiter } from '../security/RateLimiter';
 import { CoturnManager } from '../turn/CoturnManager';
@@ -22,7 +24,7 @@ import type { ChannelVisibility } from './access/ChannelVisibility';
 import type { AuditRecorder } from './AuditRecorder';
 import type { BotInteractionSession } from './BotInteractionHandler';
 import type { BotManagementHandler } from './BotManagementHandler';
-import type { ClientSession } from './ClientSession';
+import type { BotSignIn, ClientSession } from './ClientSession';
 import type { PresenceHandler } from './PresenceHandler';
 import type { RoleHandler } from './RoleHandler';
 import { route, type Route } from './routing/MessageRouter';
@@ -32,6 +34,17 @@ import { voiceRosterUser } from './voice/VoiceSessionHandler';
 /** How long a stale login waits for an access change in progress to end before catching up anyway (see resyncLoginAccess). */
 const LOGIN_RESYNC_WAIT_MS = 1_000;
 const LOGIN_RESYNC_POLL_MS = 20;
+
+/** Whether `signature` is the bot's Ed25519 signature of this challenge for the token it presented (bot-key-proof). */
+function verifyBotKeyProof(nonce: string, signIn: BotSignIn, signature: string): boolean {
+  try {
+    const key = createPublicKey({ key: Buffer.from(signIn.publicKey, 'hex'), format: 'der', type: 'spki' });
+    return key.asymmetricKeyType === 'ed25519' && verify(null,
+      Buffer.from(botAuthChallenge(nonce, signIn.botToken), 'utf8'), key, Buffer.from(signature, 'hex'));
+  } catch {
+    return false;
+  }
+}
 
 export interface AuthHost {
   readonly auth: AuthService;
@@ -133,7 +146,8 @@ export class AuthHandler {
       return;
     }
     session.protocol = negotiateProtocol(payload.protocolVersion, payload.protocolOffer, payload.botToken ? 'bot' : 'client') ?? undefined;
-    // Bot token auth: skip challenge-response, authenticate directly (#569).
+    session.botKeyChallenge = undefined;
+    // Bot token auth: a challenge only for bots that offered bot-key-proof (#569, #822).
     if (payload.botToken && this.host.botService) {
       await this.authenticateBot(session, payload, requestId);
       return;
@@ -169,6 +183,10 @@ export class AuthHandler {
 
   /** A person who signed the challenge joins: AUTH_SUCCESS with what they may see, then everyone else is told. */
   private async answerChallenge(session: ClientSession, payload: unknown, requestId?: string): Promise<void> {
+    if (session.botKeyChallenge) {
+      await this.answerBotChallenge(session, payload, requestId);
+      return;
+    }
     // A malformed answer is the client's mistake, not a server failure to log with a stack.
     const signature = payload !== null && typeof payload === 'object' && 'signature' in payload ? payload.signature : undefined;
     if (typeof signature !== 'string') {
@@ -413,11 +431,15 @@ export class AuthHandler {
     }
   }
 
-  /** A bot signs in with its token and the key it was bound to (TOFU), without a challenge (#569). */
+  /**
+   * A bot signs in with its token and the key it was bound to (TOFU) (#569).
+   * One that offered bot-key-proof must first sign a challenge with that key (#822).
+   */
   private async authenticateBot(session: ClientSession, payload: AuthConnectPayload, requestId?: string): Promise<void> {
+    const botToken = payload?.botToken;
     if (
-      !this.host.botService || !payload?.botToken ||
-      !authConnectSchema.shape.botToken.safeParse(payload.botToken).success ||
+      !this.host.botService || !botToken ||
+      !authConnectSchema.shape.botToken.safeParse(botToken).success ||
       !authConnectSchema.shape.publicKey.safeParse(payload.publicKey).success
     ) {
       this.host.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de autenticação de bot inválidos.', requestId);
@@ -427,7 +449,7 @@ export class AuthHandler {
     // Incompatible peers must never perform TOFU binding. An already-bound bot
     // can still identify its obsolete protocol for the owner's persistent warning.
     if (!session.protocol) {
-      await this.host.botService.recordRejectedProtocol(payload.botToken, payload.publicKey, payload.protocolVersion);
+      await this.host.botService.recordRejectedProtocol(botToken, payload.publicKey, payload.protocolVersion);
       if (!this.host.isLive(session)) return;
       this.host.sendError(
         session.ws,
@@ -446,29 +468,74 @@ export class AuthHandler {
       return;
     }
 
+    const signIn: BotSignIn = {
+      botToken, publicKey: payload.publicKey, nickname: nickname.data, protocolVersion: payload.protocolVersion,
+    };
+    // Only an explicit offer counts: a bot that sends none at the current
+    // version is implicitly granted every feature, but cannot answer a challenge.
+    if (session.protocol.features.includes('bot-key-proof') && payload.protocolOffer?.features.includes('bot-key-proof')) {
+      const nonce = randomBytes(32).toString('hex');
+      session.botKeyChallenge = { nonce, signIn };
+      this.host.send(session.ws, {
+        type: MessageType.AUTH_CHALLENGE,
+        requestId,
+        payload: { nonce } satisfies AuthChallengePayload,
+      });
+      return;
+    }
+    await this.admitBot(session, signIn, false, requestId);
+  }
+
+  /** The signed bot-key-proof challenge: the token is only checked once the key is proven. */
+  private async answerBotChallenge(session: ClientSession, payload: unknown, requestId?: string): Promise<void> {
+    const pending = session.botKeyChallenge;
+    session.botKeyChallenge = undefined;
+    if (!pending) return;
+    const signature = botAuthSignatureSchema.safeParse(
+      payload !== null && typeof payload === 'object' && 'signature' in payload ? payload.signature : undefined);
+    if (!signature.success || !verifyBotKeyProof(pending.nonce, pending.signIn, signature.data)) {
+      Logger.security(`Bot key proof failed from ${session.ip}`);
+      this.refuseBot(session, 'Falha ao validar a assinatura do bot.', requestId);
+      return;
+    }
+    await this.admitBot(session, pending.signIn, true, requestId);
+  }
+
+  /** A failed bot sign-in spends the address's attempts, as a wrong password does (#372). */
+  private refuseBot(session: ClientSession, message: string, requestId?: string,
+    code = ProtocolErrorCode.UNAUTHORIZED): void {
+    this.host.rateLimiter.checkLimit(`auth:${session.ip}`, LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS, LIMITS.RATE_LIMIT_AUTH_WINDOW_MS);
+    this.host.send(session.ws, {
+      type: MessageType.AUTH_FAILED,
+      requestId,
+      payload: { code, message } satisfies AuthFailedPayload,
+    });
+  }
+
+  private async admitBot(session: ClientSession, signIn: BotSignIn, proven: boolean, requestId?: string): Promise<void> {
+    if (!this.host.botService) return;
     // Probed before the bot is validated and anything is read for it, as for a
     // person: what changes while it runs, a revocation included, is then seen by
     // this login instead of reaching it ahead of AUTH_SUCCESS or being missed.
     const turnAvailability = await CoturnManager.availability();
     if (!this.host.isLive(session)) return;
 
-    const publicKey = payload.publicKey;
-    let botRecord = await this.host.botService.validateToken(payload.botToken, publicKey);
+    const authenticated = await this.host.botService.authenticateConnection(signIn.botToken, signIn.publicKey, proven);
     if (!this.host.isLive(session)) return;
-    if (!botRecord) {
-      this.host.send(session.ws, {
-        type: MessageType.AUTH_FAILED,
-        requestId,
-        payload: {
-          code: ProtocolErrorCode.UNAUTHORIZED,
-          message: 'Token de bot inválido ou chave pública não corresponde ao vínculo TOFU.',
-        } satisfies AuthFailedPayload,
-      });
+    if ('failure' in authenticated) {
+      if (authenticated.failure === 'proof_required') {
+        // Not UNAUTHORIZED: the token is right, so the bot keeps its saved link and only needs its key back.
+        this.refuseBot(session, 'Este bot já provou ter a chave privada e precisa prová-la em toda conexão. ' +
+          'Atualize o SDK do bot ou informe a chave privada dele.', requestId, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+      } else {
+        this.refuseBot(session, 'Token de bot inválido ou chave pública não corresponde ao vínculo TOFU.', requestId);
+      }
       return;
     }
+    let botRecord: BotRecord | null = authenticated.record;
 
     if (botRecord.profilePending) {
-      const result = await this.host.botService.updateProfile(botRecord.id, { name: nickname.data });
+      const result = await this.host.botService.updateProfile(botRecord.id, { name: signIn.nickname });
       if (!result.success) {
         this.host.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
         return;
@@ -481,7 +548,7 @@ export class AuthHandler {
       if (!this.host.isLive(session)) return;
     }
 
-    if (!await this.host.botService.recordCompatibleConnection(botRecord.id, payload.protocolVersion)) {
+    if (!await this.host.botService.recordCompatibleConnection(botRecord.id, signIn.protocolVersion)) {
       this.host.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'O vínculo do bot foi revogado.', requestId);
       return;
     }

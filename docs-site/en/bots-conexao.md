@@ -215,18 +215,38 @@ connects as the bot on that server. Treat it like a password. Keep the
 event does not include it) and, in marketplace mode, use HTTPS through
 `publicUrl`. To reach the server, prefer `wss://`.
 
-The **Ed25519 public key** only identifies the bot. On the first connection, the
+The **Ed25519 public key** identifies the bot. On the first connection, the
 server binds the presented key to the bot (TOFU, *Trust On First Use*) and from
-then on rejects connections with a different key. This binding prevents an
-accidental identity swap, but it does **not** protect a leaked token: the key is
-public (it travels in the manifest and in commands), and the server does not ask
-for proof of possession of the private key. In marketplace mode, the binding
-happens during installation.
+then on rejects connections with a different key. In marketplace mode, the
+binding happens during installation.
+
+The public key is no secret (it travels in the manifest and in commands), so
+what protects a leaked token is **proof of possession of the private key**. When
+the bot holds its private key, the SDK offers the `bot-key-proof` feature: the
+server sends a challenge and the bot signs it with the private key, bound to the
+token of that connection. After the first valid proof, the server requires it
+from that bot on every connection. From then on, whoever holds only the token and
+the public key is refused (`FEATURE_REQUIRES_UPDATE`) without disconnecting the
+real bot. Running through the bot CLI, this is already on; in code, pass the key
+in `privateKey`:
+
+```ts
+const bot = new BotClient({
+  requestedCapabilities: [],
+  publicKey: 'YOUR_ED25519_PUBLIC_KEY_HEX',
+  privateKey: readFileSync('.keys/private.pem', 'utf8'), // PEM or KeyObject
+});
+```
+
+Older bots and servers, without the feature, keep connecting with the token
+alone. A bot that never proved its key is therefore still protected only by its
+token. Every refused attempt (invalid token, wrong signature or missing proof)
+spends the address's connection attempt quota, like a wrong password.
 
 If a token leaks, revoke the bot on the server and add it again. The new
 registration gets another token, and the bot keeps the same identity.
 
-> 💡 The [Monky Bot](https://github.com/MonkyOrg/MonkyBot) automatically generates and reuses its Ed25519 key pair. When building your own bot with the SDK, generate and persist your key using Node.js cryptography APIs and pass the public key in `publicKey`; do not generate a new identity on every restart.
+> 💡 The [Monky Bot](https://github.com/MonkyOrg/MonkyBot) automatically generates and reuses its Ed25519 key pair. When building your own bot with the SDK, generate and persist your key using Node.js cryptography APIs and pass the public key in `publicKey` and the private key in `privateKey`; do not generate a new identity on every restart.
 
 ## Bot photos
 

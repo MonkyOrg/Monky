@@ -367,7 +367,7 @@ nativos e entre nativo/Chromium em P2P e SFU. Inclui três participantes, polít
 de voz, troca de sala, reconexão, expulsão, mudança de topologia, sinalização
 inválida e permissão de microfone pendente/negada. Inclui também dois moves
 cruzados, em salas que o Light vê e em salas que não vê (e de uma vista para uma
-oculta, em que o move se perde sem deixar presença no servidor), um kick que
+oculta, em que o servidor recusa a entrada que o segundo move ultrapassou), um kick que
 cruza a entrada de um move, sair e voltar à mesma sala dentro de um RTT,
 servidor com fórum e chamada ociosa no AFK, canal sem permissão de falar, falhas
 de consumo e de produção no SFU, quedas seguidas de transporte, núcleo atrasado,

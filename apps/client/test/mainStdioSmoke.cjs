@@ -24,8 +24,8 @@ async function child() {
   const placement = require('./fixtures/testDisplay.cjs').installTestDisplay({ app, BrowserWindow, screen });
   await app.whenReady();
   const options = { show: false, width: 320, height: 240, webPreferences: {
-    preload: path.join(client, 'dist-electron', 'preload', 'preload.js'),
-    nodeIntegration: false, contextIsolation: true, sandbox: false, offscreen: true,
+    preload: path.join(client, 'dist-electron', 'preload', 'preload.cjs'),
+    nodeIntegration: false, contextIsolation: true, sandbox: true, offscreen: true,
   } };
   const window = placement ? placement.createWindow(options) : new BrowserWindow(options);
   ipcMain.handle('overlay:layout-cards', () => { throw new Error('Owned rejected IPC fixture'); });

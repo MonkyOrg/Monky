@@ -368,9 +368,8 @@ test('a native call follows a move into a room it cannot see, but a client that 
 });
 
 // Two moves inside one round trip, into rooms the client sees or not. Its
-// answers are held until both moves are done, so they cross them. A room it
-// sees then admits the first join, which pulls the membership out of the last
-// room and tells the client so, before its second join lands.
+// answers are held until both moves are done, so they cross them. The first
+// join names the move the second overtook, and the server refuses it (#841).
 async function crossTwoMoves(t, visible) {
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');
@@ -426,22 +425,26 @@ for (const visible of [false, true]) {
   });
 }
 
-test('two moves inside one round trip, into a room it sees and then one it cannot, leave neither side in a call', { timeout: 45_000 }, async t => {
-  // The replaced join takes the membership out of the hidden room, which then
-  // refuses the second join and leaves the client's list. The move is lost
-  // (only the protocol can tell a replaced join apart), but the server must not
-  // keep the client in the room it saw while the client thinks it hung up.
-  const { light, room } = await crossTwoMoves(t, [true, false]);
-  await until(() => room() === undefined, 'The server kept a member in the room the replaced join named', 5000);
+test('two moves inside one round trip, into a room it sees and then one it cannot, leave the native call in the last room (#841)', { timeout: 45_000 }, async t => {
+  // Each join names the move it follows: the server refuses the one the second
+  // move overtook instead of admitting it into the room it sees, which would
+  // pull the membership out of the hidden room the second join then needs.
+  const { light, rooms, sent, since, room } = await crossTwoMoves(t, [true, false]);
+  await light.wait(event => event.event === 'voice-admitted' && event.channelId === rooms[1], since);
+  assert.equal(sent.includes(MessageType.VOICE_LEAVE), false, 'Following a move named the room it left');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(room(), rooms[1], 'The overtaken join took the client out of the last room');
   const state = await light.state();
-  assert.equal(state.phase, 'ready');
-  assert.equal(state.mediaActive, false);
+  assert.equal(state.phase, 'admitted');
+  assert.equal(state.channelId, rooms[1]);
+  assert.equal(light.events.slice(since).some(event => event.event === 'session-error'), false,
+    'The refusal of the overtaken join reached the interface');
   await light.close();
 });
 
 test('a kick that crosses the join behind a move leaves no membership on the server', { timeout: 45_000 }, async t => {
-  // The server admits that join without looking for the kick it crossed, into
-  // a room the client sees, although the client gave the join up on the kick.
+  // The kick ends the move the join follows, so the server refuses that join
+  // as overtaken (#841) instead of admitting a client that gave it up.
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');
   const light = new NativeClient(fixture, { nickname: 'Kicked while moved' });
@@ -456,12 +459,18 @@ test('a kick that crosses the join behind a move leaves no membership on the ser
   const voice = wsServer.voiceSessions;
   const handle = voice.handle;
   const sent = [];
+  const handled = [];
   let release;
   const kicked = new Promise(resolve => { release = resolve; });
   voice.handle = async function (session, type, payload, requestId) {
     if (session.sessionId === auth.sessionId) {
       sent.push(type);
       await kicked;
+      try {
+        return await handle.call(this, session, type, payload, requestId);
+      } finally {
+        handled.push(type);
+      }
     }
     return handle.call(this, session, type, payload, requestId);
   };
@@ -477,9 +486,10 @@ test('a kick that crosses the join behind a move leaves no membership on the ser
     [MessageType.ADMIN_KICK_VOICE]);
   await light.wait('kicked', since);
   release();
-  await until(() => sent.includes(MessageType.VOICE_LEAVE),
-    'The client never left the membership its crossed join was given', 5000);
-  await until(() => room() === undefined, 'The server kept the kicked client in the room its join named', 5000);
+  await until(() => handled.includes(MessageType.VOICE_JOIN), 'The server never answered the crossed join', 5000);
+  assert.equal(room(), undefined, 'The server admitted the join a kick had overtaken');
+  assert.equal(light.events.slice(since).some(event => event.event === 'session-error'), false,
+    'The refusal of the overtaken join reached the interface');
   const state = await light.state();
   assert.equal(state.phase, 'ready');
   assert.equal(state.mediaActive, false);

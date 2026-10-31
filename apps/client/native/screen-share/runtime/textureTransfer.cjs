@@ -3,12 +3,11 @@
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const { within } = require('./asyncTools.cjs');
+const { MAX_TEXTURE_TRANSFERS: MAX_TRANSFERS } = require('./textureTransferReceiver.cjs');
 const {
   NATIVE_SCREEN_TEXTURE_IPC, nativeScreenTexturePortInfoSchema, nativeScreenTextureChannelInfoSchema,
   nativeScreenTextureMessageSchema, nativeScreenTextureReceiptSchema,
 } = require('@monky/shared');
-
-const MAX_TRANSFERS = 16;
 
 class TextureChannel {
   constructor(destination, onError, { timeoutMs, createChannel }) {
@@ -170,95 +169,4 @@ async function sendTexture(imported, destination, metadata, onError, { onAcquire
   await sender.close();
 }
 
-function registerTextureTransferReceiver(textures, ipcRenderer, receive, onError) {
-  assert.equal(typeof textures?.subtle?.finishTransferSharedTexture, 'function');
-  const channels = new Map();
-  const listener = (event, value) => {
-    let port;
-    try {
-      assert.equal(event.ports.length, 1, 'Native texture transfer requires exactly one private port.');
-      const { channelId } = nativeScreenTextureChannelInfoSchema.parse(value);
-      assert.ok(!channels.has(channelId), 'Duplicate native texture channel.');
-      port = event.ports[0];
-      const active = new Map();
-      let lastSequence = 0, closing = false, draining = false, finished = false, complete;
-      const closed = new Promise(resolve => { complete = resolve; });
-      const finish = () => {
-        if (!closing || active.size || finished) return;
-        finished = true;
-        try { port.postMessage({ kind: 'closed' }); }
-        catch (error) { onError(error); }
-        finally {
-          port.removeEventListener('message', message);
-          port.close();
-          channels.delete(channelId);
-          complete();
-        }
-      };
-      const close = () => { closing = true; finish(); return closed; };
-      const drain = () => {
-        if (!draining && !finished) {
-          draining = true;
-          try { port.postMessage({ kind: 'drain' }); }
-          catch (error) { onError(error); }
-        }
-        return closed;
-      };
-      const message = event => {
-        let native, sequence, released = false;
-        const release = () => {
-          if (released || !native) return;
-          released = true;
-          native.release(() => {
-            try { port.postMessage({ kind: 'retired', sequence }); }
-            catch (error) { onError(error); }
-            finally { active.delete(sequence); finish(); }
-          });
-        };
-        try {
-          const packet = nativeScreenTextureMessageSchema.parse(event.data);
-          if (packet.kind === 'close') { close(); return; }
-          assert.equal(closing, false, 'Native texture receiver is closing.');
-          assert.equal(packet.sequence, lastSequence + 1, 'Native texture sequence is not consecutive.');
-          assert.ok(active.size < MAX_TRANSFERS, 'Native texture receiver credit exhausted.');
-          sequence = packet.sequence;
-          lastSequence = sequence;
-          active.set(sequence, true);
-          native = textures.subtle.finishTransferSharedTexture(packet.info.transfer);
-          const token = native.getFrameCreationSyncToken();
-          const receipt = nativeScreenTextureReceiptSchema.parse({ kind: 'imported', sequence, syncToken: token.syncToken });
-          port.postMessage(receipt);
-          const importedSharedTexture = { getVideoFrame: () => native.getVideoFrame(), release };
-          void Promise.resolve().then(() => receive({ importedSharedTexture }, packet.info.metadata))
-            .catch(onError).finally(release).catch(onError);
-        } catch (error) {
-          onError(error);
-          if (sequence !== undefined) {
-            try { port.postMessage({ kind: 'error', sequence, message: String(error.message ?? error).slice(0, 512) }); }
-            catch (failure) { onError(failure); }
-          }
-          if (native) release();
-          else {
-            // A throwing import cannot prove GPU retirement to Main.
-            active.delete(sequence);
-            close();
-          }
-        }
-      };
-      channels.set(channelId, { drain, closed });
-      port.addEventListener('message', message);
-      port.start();
-    } catch (error) {
-      onError(error);
-      for (const unused of event.ports ?? []) unused.close();
-    }
-  };
-  ipcRenderer.on(NATIVE_SCREEN_TEXTURE_IPC.port, listener);
-  return async () => {
-    ipcRenderer.removeListener(NATIVE_SCREEN_TEXTURE_IPC.port, listener);
-    await within(Promise.all([...channels.values()].map(channel => channel.drain())),
-      12000, 'Native renderer texture retirement timed out; GPU receipts remain pending.');
-  };
-}
-
-module.exports = { TextureTransferSender, sendTexture, registerTextureTransferReceiver };
+module.exports = { TextureTransferSender, sendTexture };

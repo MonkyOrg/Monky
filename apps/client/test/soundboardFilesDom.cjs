@@ -74,8 +74,8 @@ if (!process.versions.electron) {
     browser = new BrowserWindow({
       show: false, width: 1000, height: 850, useContentSize: true,
       webPreferences: {
-        contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false, offscreen: true,
-        preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.js'),
+        contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false, offscreen: true,
+        preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.cjs'),
       },
     });
     const errors = [];

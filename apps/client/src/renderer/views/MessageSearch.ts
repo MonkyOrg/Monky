@@ -11,6 +11,7 @@ import { cancelSurfaceMotion, hideWithMotion, showWithMotion } from '../utils/su
 import { getAvatarUrl } from '../utils/avatar';
 import { dateFieldValue, formatCalendarValue, setDateFieldValue, todayCalendarValue } from '../utils/calendarDate';
 import { renderMarkdown } from '../utils/markdown';
+import { serverDate } from '../utils/serverTime';
 import { fileIconName, formatBytes, getAttachmentUrl } from '../utils/attachment';
 import { downloadLightboxFile, lightboxModal, type LightboxMedia } from './LightboxModal';
 import { bindMessageLinks } from './ServerInviteCard';
@@ -1436,8 +1437,11 @@ export class MessageSearch {
     const author = document.createElement('strong');
     author.textContent = `${message.userNickname} · #${this.options.channels().find(channel => channel.id === message.channelId)?.name ?? ''}`;
     const time = document.createElement('time');
-    time.dateTime = new Date(message.createdAt).toISOString();
-    time.textContent = new Date(message.createdAt).toLocaleString(getLanguage());
+    const sentAt = serverDate(message.createdAt);
+    if (sentAt) {
+      time.dateTime = sentAt.toISOString();
+      time.textContent = sentAt.toLocaleString(getLanguage());
+    }
     const content = document.createElement('div');
     content.className = 'chat-message-text message-search-result-content';
     content.innerHTML = renderMarkdown(getMessageText(message, getLanguage()).slice(0, 1200), { interactive: true, mentions });

@@ -7,7 +7,6 @@
     "rootDir": "."
   },
   "include": [
-    "src/preload/preload.ts",
     "src/main/updateVersions.ts",
     "src/main/serverDataDir.ts",
     "src/main/net/addressPolicy.ts",

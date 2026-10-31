@@ -10,11 +10,11 @@ import {
   type VoiceUserLeftPayload,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
-import { audioProcessor } from './AudioProcessor';
 import { callClient, eventOwnsCall } from './callScope';
 import { clientLog } from './ClientLogService';
 import { networkClient, type ConnectionStatus } from './NetworkClient';
 import { participantManager } from './ParticipantManager';
+import { applyLocalAudioState } from './localAudioState';
 import { leaveCurrentCall, rejoinCallOnSession, suspendCallForNetworkLoss } from './serverConnection';
 import { stopLocalScreenShares } from './screenShareControls';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './sessionRouting';
@@ -35,14 +35,12 @@ export interface VoiceEventsHost {
   /** Redraws the server on screen, whose call just ended. */
   render(): void;
   /** Follows a move of the call on screen, showing the destination's stage. */
-  rejoinOnScreen(channelId: string): void;
+  rejoinOnScreen(channelId: string, moveId?: string): void;
 }
 
 /** Brings the microphone, the output and the published tracks in line with the call's moderation. */
 function syncLocalVoiceMedia(): void {
-  audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-  audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-  webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
+  applyLocalAudioState();
   void webRtcManager.syncMicrophonePublication().catch((error: unknown) => {
     clientLog.warn('AUDIO', 'Could not publish the microphone after Speak was allowed', { error: String(error) });
   });
@@ -253,10 +251,10 @@ export function bindVoiceEvents(host: VoiceEventsHost): () => void {
       // The server muted the microphone in there; say why before the call follows.
       if (payload.channelId === afkChannelIdOf(serverStore.serverDetails)) showInfoToast(t('afk.movedToast'), 8000);
       if (isForegroundEvent()) {
-        host.rejoinOnScreen(payload.channelId);
+        host.rejoinOnScreen(payload.channelId, payload.moveId);
       } else {
         const origin = currentEventOrigin();
-        if (origin) void rejoinCallOnSession(origin, payload.channelId);
+        if (origin) void rejoinCallOnSession(origin, payload.channelId, undefined, payload.moveId);
       }
     }),
 
