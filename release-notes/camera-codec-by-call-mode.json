@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Nas chamadas diretas (P2P), a câmera agora prefere H.264, que a placa de vídeo codifica, em vez de AV1, que pesa no processador a cada pessoa a mais na chamada. Nas chamadas pelo servidor (SFU), a câmera continua em AV1.",
+  "en": "In direct (P2P) calls, the camera now prefers H.264, which the graphics card encodes, instead of AV1, which loads the processor more with each extra person in the call. In server (SFU) calls, the camera stays on AV1."
+}

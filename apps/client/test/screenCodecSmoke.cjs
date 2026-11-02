@@ -196,7 +196,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
   const probeTransceiver = preferenceProbe.addTransceiver('video', { direction: 'sendonly' });
   for (const [name, caps] of [['send', capabilities], ['receive', RTCRtpReceiver.getCapabilities('video').codecs]]) {
     try {
-      probeTransceiver.setCodecPreferences(codecs.sortVideoCodecs(caps, true));
+      probeTransceiver.setCodecPreferences(codecs.sortVideoCodecs(caps, 'p2p'));
       console.log(`CODEC TEST unfiltered ${name} preference accepted`);
     } catch (error) {
       console.log(`CODEC TEST unfiltered ${name} preference rejected: ${error.message}`);
@@ -207,12 +207,17 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
   const required = `video/${selected}`;
   settings.save = () => {};
   settings.qualityPreset = 'NORMAL';
-  // The camera has no codec choice since #717: a 60+ FPS preset is what puts H.264 first.
-  const preferHardwareCodec = async run => {
-    const preset = settings.qualityPreset;
-    settings.qualityPreset = 'GAMING';
-    try { return await run(); } finally { settings.qualityPreset = preset; }
-  };
+  // #835: P2P camera puts H.264 first on any preset, with the profile the
+  // Windows hardware encoder accepts ahead of the other H.264 entries.
+  if (selected === 'h264') {
+    const [first] = codecs.getPrioritizedVideoCodecs();
+    const baseline = capabilities.some(codec => codec.mimeType.toLowerCase() === 'video/h264'
+      && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(codec.sdpFmtpLine ?? '') && profileOf(codec.sdpFmtpLine) === '42001f');
+    check(first?.mimeType.toLowerCase() === 'video/h264'
+      && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(first.sdpFmtpLine ?? '')
+      && (!baseline || profileOf(first.sdpFmtpLine) === '42001f'),
+    `The P2P camera offers H.264 first, Baseline 42001f when the runtime has it: ${first?.mimeType} ${first?.sdpFmtpLine}`);
+  }
   voice.setChannel('room');
   const sources = [];
   function source(width = 160, height = 90) {
@@ -374,7 +379,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
       await testVoiceKick();
       return { checks, outputs };
     }
-    if (selected === 'h264') await preferHardwareCodec(testH264Profiles);
+    if (selected === 'h264') await testH264Profiles();
     if (profilesOnly) {
       check(selected === 'h264', 'H.264 must be available for the profile scenarios');
       return { checks, outputs };
@@ -416,8 +421,8 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     check(await sfu.join('vp8-room'), 'An SFU router without H.264 still connects');
     const fallbackCamera = source();
     try {
-      const camera = await preferHardwareCodec(() => sfu.produceCamera(fallbackCamera.stream.getVideoTracks()[0]));
-      check(!!camera, 'The SFU publishes a camera the router cannot receive in H.264');
+      const camera = await sfu.produceCamera(fallbackCamera.stream.getVideoTracks()[0]);
+      check(!!camera, 'The SFU publishes a camera with the only codec the router receives');
       await actualCodec(camera.rtpSender, 'SFU camera fallback', 'video/vp8');
     } finally {
       sfu.leave();
@@ -694,7 +699,15 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
       check(await viewer.join('room'), 'A separate receiving client joins the real SFU fixture');
       check(JSON.stringify(viewer.device.rtpCapabilities) === JSON.stringify(legacyDevice.rtpCapabilities),
         'Legacy and updated clients negotiate the same receiving capabilities');
+      // #835: one encoder in an SFU call, so the camera keeps AV1 first there.
+      const sendsAv1 = sfu.device.sendRtpCapabilities.codecs.some(codec => codec.mimeType.toLowerCase() === 'video/av1');
       let producer = await sfu.produceCamera(shared.stream.getVideoTracks()[0]);
+      await actualCodec(producer.rtpSender, 'SFU camera default', sendsAv1 ? 'video/av1' : null);
+      sfu.closeProducer('camera');
+      // The profile scenarios model a send set where H.264 is what is left.
+      sfu.device.sendRtpCapabilities.codecs = sfu.device.sendRtpCapabilities.codecs
+        .filter(codec => codec.kind !== 'video' || /^video\/(h264|rtx)$/i.test(codec.mimeType));
+      producer = await sfu.produceCamera(shared.stream.getVideoTracks()[0]);
       await actualCodec(producer.rtpSender, 'SFU native H264 profile', 'video/h264', expectedProfile);
       await viewer.consumeRemoteProducer({
         channelId: 'room', producerId: producer.id, producerSessionId: 'self', kind: 'video',

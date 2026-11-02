@@ -1,17 +1,24 @@
-import { isMotionQualityPreset } from '@monky/shared';
-import { settingsStore } from '../../stores/settingsStore';
-
 /**
  * Camera codec order for WebRTC peer connections and SFU producers. Only the
  * order of the offered codecs changes, so a call can still negotiate a
- * fallback: AV1 -> VP9 -> VP8 -> H.264, or H.264 first on 60+ FPS presets.
+ * fallback.
+ *
+ * The order depends on how many encoders the camera runs, not on the quality
+ * preset (#835). In P2P every peer has its own encoder, and AV1 is encoded on
+ * the CPU: four peers at 720p measured 2.3 cores in AV1 against 0.9 in H.264,
+ * which the GPU encodes. An SFU call runs a single encoder, cheap even in AV1,
+ * so it keeps the codec with the best quality per kbps.
  *
  * There is no user choice here: the camera codec selector left with #717, and
  * a choice saved before then must not keep deciding the codec unseen.
  */
 
-const COMPRESSION_FIRST = ['video/av1', 'video/vp9', 'video/vp8', 'video/h264'] as const;
-const HARDWARE_FIRST = ['video/h264', 'video/av1', 'video/vp9', 'video/vp8'] as const;
+export type CameraTransport = 'p2p' | 'sfu';
+
+const CAMERA_CODEC_ORDER: Record<CameraTransport, readonly string[]> = {
+  p2p: ['video/h264', 'video/av1', 'video/vp9', 'video/vp8'],
+  sfu: ['video/av1', 'video/vp9', 'video/vp8', 'video/h264'],
+};
 
 export interface CodecCapabilityLike {
   mimeType: string;
@@ -37,44 +44,44 @@ function compatibleSendingVideoCodecs(): RTCRtpCodec[] {
 }
 
 /**
- * Whether the camera should favour a codec the GPU can encode instead of the
- * one with the best compression.
- *
- * AV1 and VP9 have no hardware encoder on most desktops, so WebRTC encodes them
- * on the CPU — at 1080p60 that is enough work to steal frames from the game
- * being shared (#526). H.264 is the only codec with near-universal NVENC /
- * QuickSync / AMF support, which is also what Discord and OBS lean on. Every
- * named preset from 60 FPS up (1080p60 to 4K120) is at least that demanding.
+ * Among H.264 entries, Baseline 42001f with packetization-mode=1 goes first:
+ * it is the profile the Windows hardware encoder (Media Foundation) accepts,
+ * while Constrained Baseline 42e01f falls back to OpenH264 on the CPU (#835).
+ * Entries without an fmtp line (mediasoup capabilities) keep their order.
  */
-export function shouldPreferHardwareEncoding(): boolean {
-  const preset = settingsStore?.qualityPreset;
-  return preset !== undefined && isMotionQualityPreset(preset);
+function h264ProfileRank(codec: CodecCapabilityLike): number {
+  const fmtp = codec.sdpFmtpLine;
+  if (fmtp === undefined || codec.mimeType.toLowerCase() !== 'video/h264') return 0;
+  const singleNal = !/(?:^|;)\s*packetization-mode=1(?:;|$)/.test(fmtp);
+  if (singleNal) return 2;
+  return /(?:^|;)\s*profile-level-id=42001f(?:;|$)/i.test(fmtp) ? 0 : 1;
 }
 
 /**
- * Sorts video codec capabilities by the camera order. Codecs outside it (e.g.
- * rtx, red, ulpfec) keep their relative position after the primary codecs.
+ * Sorts video codec capabilities by the camera order of a transport. Codecs
+ * outside it (e.g. rtx, red, ulpfec) keep their relative position after the
+ * primary codecs.
  */
-export function sortVideoCodecs<T extends CodecCapabilityLike>(codecs: T[], preferHardwareEncoding = false): T[] {
-  const priorityList: readonly string[] = preferHardwareEncoding ? HARDWARE_FIRST : COMPRESSION_FIRST;
-  const getPriority = (mimeType: string): number => {
-    const index = priorityList.indexOf(mimeType.toLowerCase());
+export function sortVideoCodecs<T extends CodecCapabilityLike>(codecs: T[], transport: CameraTransport): T[] {
+  const priorityList = CAMERA_CODEC_ORDER[transport];
+  const getPriority = (codec: T): number => {
+    const index = priorityList.indexOf(codec.mimeType.toLowerCase());
     return index !== -1 ? index : 999;
   };
-  return [...codecs].sort((a, b) => getPriority(a.mimeType) - getPriority(b.mimeType));
+  return [...codecs].sort((a, b) => getPriority(a) - getPriority(b) || h264ProfileRank(a) - h264ProfileRank(b));
 }
 
-/** The video codecs this runtime can send, in the camera order. */
+/** The video codecs this runtime can send, in the P2P camera order. */
 export function getPrioritizedVideoCodecs(): RTCRtpCodec[] {
   if (typeof RTCRtpSender === 'undefined' || typeof RTCRtpSender.getCapabilities !== 'function') {
     return [];
   }
-  return sortVideoCodecs(compatibleSendingVideoCodecs(), shouldPreferHardwareEncoding());
+  return sortVideoCodecs(compatibleSendingVideoCodecs(), 'p2p');
 }
 
 /**
- * Orders the codecs of local video senders. Remote-only transceivers keep the
- * remote sender's choices.
+ * Orders the codecs of local video senders of a P2P link. Remote-only
+ * transceivers keep the remote sender's choices.
  */
 export function applyVideoCodecPreferences(pc: RTCPeerConnection): void {
   for (const transceiver of pc.getTransceivers()) {

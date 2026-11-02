@@ -27,7 +27,7 @@ import { NetworkClient, ProtocolRequestError } from '../NetworkClient';
 import { clientLog } from '../ClientLogService';
 import { appEvents } from '../EventBus';
 import { currentEventOrigin } from '../sessionRouting';
-import { shouldPreferHardwareEncoding, sortVideoCodecs } from './codecPreferences';
+import { sortVideoCodecs } from './codecPreferences';
 import { applyMediaEncodingPolicy, getMediaEncodingPolicy, type OutboundMediaKind } from './mediaEncodingPolicy';
 import { updateRtpSenderParameters } from './rtpSenderParameters';
 import { candidateRoute } from './rtcStats';
@@ -381,9 +381,8 @@ export class SfuClientEngine {
 
   /**
    * Picks which codec to encode the camera with instead of letting mediasoup
-   * take the first one the router offers (#526): the router advertises AV1
-   * first, and AV1 has no hardware encoder on most desktops. This follows the
-   * same automatic order as P2P calls.
+   * take the first one the router offers. An SFU call runs a single camera
+   * encoder, so it follows the SFU order (AV1 first), not the P2P one (#835).
    */
   private pickVideoCodec(): mediasoupTypes.RtpCodecCapability | undefined {
     // Receive capabilities are not evidence that this device can encode the
@@ -393,7 +392,7 @@ export class SfuClientEngine {
     const videoCodecs = codecs.filter(
       (codec) => codec.kind === 'video' && !/\/(rtx|red|ulpfec|flexfec)/i.test(codec.mimeType)
     );
-    const [best] = sortVideoCodecs(videoCodecs, shouldPreferHardwareEncoding());
+    const [best] = sortVideoCodecs(videoCodecs, 'sfu');
     return best;
   }
 
