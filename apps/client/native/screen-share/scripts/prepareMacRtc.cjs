@@ -3,7 +3,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { root, execute, write, withNetworkRetries, withBuildLock } = require('./buildTools.cjs');
+const { root, execute, write, withBuildLock } = require('./buildTools.cjs');
+const pinnedGit = require('./pinnedGit.cjs');
 const { pipInstallArguments } = require('./native-rtc/gclientRuntime.cjs');
 const pins = require('./native-rtc/pins.json');
 
@@ -14,20 +15,6 @@ function checkSpace(directory = workspace) {
   const space = fs.statfsSync(directory);
   assert.ok(space.bavail * space.bsize >= reserveBytes,
     'Native macOS preparation stopped: preserve at least 4 GiB of free disk space.');
-}
-
-function checkout(name, directory, env) {
-  const pin = pins.repositories[name];
-  if (!fs.existsSync(directory)) {
-    fs.mkdirSync(directory, { recursive: true });
-    execute('git', ['init', '--quiet', directory], { env });
-    execute('git', ['-C', directory, 'remote', 'add', 'origin', pin.url], { env });
-  }
-  assert.equal(execute('git', ['-C', directory, 'remote', 'get-url', 'origin'], { env, capture: true }), pin.url);
-  const head = execute('git', ['-C', directory, 'rev-parse', '--verify', '--quiet', '--end-of-options',
-    `${pin.commit}^{commit}`], { env, capture: true });
-  assert.equal(head, pin.commit);
-  execute('git', ['-C', directory, 'checkout', '--quiet', '--detach', pin.commit], { env });
 }
 
 function prepare({ python = 'python3.11' } = {}) {
@@ -45,31 +32,23 @@ function prepare({ python = 'python3.11' } = {}) {
   checkSpace();
   return withBuildLock(path.join(workspace, 'prepare.lock'), () => {
     const depot = path.join(workspace, 'depot_tools');
-    const env = { ...process.env, DEPOT_TOOLS_UPDATE: '0', DEPOT_TOOLS_WIN_TOOLCHAIN: '0',
-      GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: '/dev/null', PYTHONDONTWRITEBYTECODE: '1',
-      CIPD_CACHE_DIR: path.join(workspace, 'cipd-cache'),
-      PATH: `${path.join(workspace, 'python-3.11', 'bin')}:${depot}:${process.env.PATH}` };
     const venv = path.join(workspace, 'python-3.11');
+    // The same isolation as the Windows bootstrap: Git, gclient, CIPD and pip see neither the user's
+    // configuration nor their home, and keep caches and temporary files inside this workspace.
+    const isolation = pinnedGit.workspaceIsolation(workspace);
+    for (const directory of isolation.directories) fs.mkdirSync(directory, { recursive: true });
+    pinnedGit.prepareIsolation(isolation);
+    const env = pinnedGit.toolEnvironment(process.env, workspace, { paths: [path.join(venv, 'bin'), depot] });
     if (!fs.existsSync(venv)) execute(python, ['-m', 'venv', venv], { env });
     const interpreter = path.join(venv, 'bin', 'python3');
     execute(interpreter, pipInstallArguments(), { env });
-    for (const [name, directory] of [
-      ['depot_tools', depot], ['webrtc', path.join(workspace, 'webrtc', 'src')],
+    const git = pinnedGit.gitCommand(isolation, { env });
+    for (const [name, directory, gclientRoot] of [
+      ['depot_tools', depot, false], ['webrtc', path.join(workspace, 'webrtc', 'src'), true],
     ]) {
       checkSpace();
-      if (!fs.existsSync(directory)) {
-        fs.mkdirSync(directory, { recursive: true });
-        execute('git', ['init', '--quiet', directory], { env });
-        execute('git', ['-C', directory, 'remote', 'add', 'origin', pins.repositories[name].url], { env });
-      }
-      assert.equal(execute('git', ['-C', directory, 'remote', 'get-url', 'origin'], { env, capture: true }),
-        pins.repositories[name].url);
-      assert.equal(execute('git', ['-C', directory, 'status', '--porcelain', '--untracked-files=no'],
-        { env, capture: true }), '', `Native SDK source has local modifications: ${name}`);
-      withNetworkRetries(() => execute('git', ['-C', directory, 'fetch', '--quiet', '--depth=1', 'origin',
-        pins.repositories[name].commit], { env, capture: true }), { label: `Source fetch ${name}` });
-      checkout(name, directory, env);
+      const { url, commit } = pins.repositories[name];
+      pinnedGit.acquireSync({ directory, url, commit, isolation, git, gclientRoot });
     }
     const solution = path.join(workspace, 'webrtc');
     write(path.join(solution, '.gclient'), `solutions = [{

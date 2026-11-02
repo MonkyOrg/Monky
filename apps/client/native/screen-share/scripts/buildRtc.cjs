@@ -3,23 +3,13 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { root, execute, write, digest, regularFiles, withBuildLock } = require('./buildTools.cjs');
+const { root, execute, write, digest, withBuildLock } = require('./buildTools.cjs');
 const windowsToolchain = require('./windowsToolchain.cjs');
-
-const source = path.join(root, 'src', 'rtc');
-const revision = '36ea4535a500ac137dbf1f577ce40dc1aaa774ef';
+const rtc = require('./rtcBuildCommon.cjs');
 
 function ownedDirectory(directory) {
-  const marker = path.join(directory, '.monky-screen-build.json');
-  const expected = { root, directory: path.resolve(directory), revision };
-  if (fs.existsSync(directory)) {
-    assert.ok(!fs.lstatSync(directory).isSymbolicLink(), 'Build directories cannot be aliases.');
-    assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), expected, 'Build directory belongs to another checkout.');
-  } else {
-    fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(marker, JSON.stringify(expected) + '\n', { flag: 'wx' });
-  }
-  return directory;
+  return rtc.ownedDirectory(directory, '.monky-screen-build.json',
+    { root, directory: path.resolve(directory), revision: rtc.revision });
 }
 
 function options(argv) {
@@ -49,62 +39,26 @@ function build(config) {
   const env = windowsToolchain.msvcEnvironment(toolchain);
   console.log(JSON.stringify({ windowsToolchain: windowsToolchain.summary(toolchain) }));
   const sdk = fs.realpathSync(config.webrtcRoot);
-  assert.equal(execute('git', ['--no-pager', '-C', sdk, 'rev-parse', 'HEAD'], { env, capture: true }), revision,
-    'WebRTC revision differs from the pinned native media toolchain.');
-  const level6 = JSON.parse(fs.readFileSync(path.join(source, 'level6-upstream.json'), 'utf8'));
-  assert.equal(level6.revision, revision);
-  for (const file of level6.files) {
-    assert.equal(digest(fs.readFileSync(path.join(sdk, ...file.path.split('/')))), file.sha256,
-      `The maintained Level6 overlay requires its exact upstream source: ${file.path}`);
-  }
+  const clang = path.join(sdk, 'third_party', 'llvm-build', 'Release+Asserts', 'bin', 'clang-cl.exe');
+  rtc.checkSdk({ sdk, compiler: clang, env });
 
   const key = digest(fs.realpathSync(root).toLowerCase()).slice(0, 6);
   const inputs = ownedDirectory(path.join(sdk, 'out', `ms${key}i`));
   const output = ownedDirectory(path.join(sdk, 'out', `ms${key}`));
   const localBuild = ownedDirectory(path.join(root, 'build', 'rtc-production'));
   return withBuildLock(path.join(localBuild, 'rtc.lock'), () => {
-    const sourceFiles = regularFiles(source).map(relative => {
-      const bytes = fs.readFileSync(path.join(source, relative));
-      write(path.join(inputs, relative), bytes);
-      return { path: relative, sha256: digest(bytes) };
-    });
+    const { source, sourceFiles, rootTarget, ccWrapper } = rtc.stageInputs({ sdk, inputs,
+      source: path.join(root, 'src', 'rtc'), directories: ['.'], base: '', caseSensitive: false });
+    // Windows pins the build timestamp to the WebRTC commit, so rebuilds of the same inputs match.
     write(path.join(inputs, 'pinned_timestamp.py'), fs.readFileSync(path.join(__dirname, 'pinned_timestamp.py')));
-    const epoch = execute('git', ['--no-pager', '-C', sdk, 'show', '--no-patch', '--format=%ct', revision], { env, capture: true });
+    const epoch = execute('git', ['--no-pager', '-C', sdk, 'show', '--no-patch', '--format=%ct', rtc.revision], { env, capture: true });
     assert.match(epoch, /^\d{1,10}$/u);
     write(path.join(inputs, 'pinned_epoch.txt'), `${epoch}\n`);
-
-    const overlayFiles = sourceFiles.filter(file => file.path.startsWith(path.join('inputs', 'sdk') + path.sep));
-    const vfs = {
-      version: 0, 'case-sensitive': false, 'use-external-names': false,
-      roots: overlayFiles.map(file => ({
-        type: 'file', name: path.join(sdk, path.relative(path.join('inputs', 'sdk'), file.path)),
-        'external-contents': path.join(inputs, file.path),
-      })),
-    };
-    const vfsPath = path.join(inputs, 'sdk-vfs.json');
-    write(vfsPath, JSON.stringify(vfs, null, 2) + '\n');
-    const wrapper = path.join(inputs, 'inputs', 'build', 'rtc_overlay_compiler.py');
-    const overlayHash = digest(JSON.stringify(overlayFiles) + digest(fs.readFileSync(wrapper)));
-    const rootTarget = `//out/${path.basename(inputs)}`;
-    const gnValues = {
-      target_os: 'win', target_cpu: 'x64', is_debug: false, is_component_build: false, is_official_build: false,
-      is_clang: true, use_lld: true, use_custom_libcxx: true, use_custom_libcxx_for_host: true,
-      use_rtti: true, use_thin_lto: false, symbol_level: 0, treat_warnings_as_errors: false,
-      use_siso: false, use_remoteexec: false, clang_use_chrome_plugins: false,
-      rtc_include_tests: false, rtc_build_examples: false, rtc_build_tools: false,
-      rtc_enable_protobuf: false, rtc_use_h264: false, rtc_use_h265: false,
-      enable_libaom: true, enable_rust: false, enable_rust_cxx: false, enable_chromium_prelude: false,
-      compute_build_timestamp: `${rootTarget}/pinned_timestamp.py`,
-      cc_wrapper: `"${python}" -I -S -B "${wrapper}" "${vfsPath}" ${overlayHash} --`,
-    };
-    write(path.join(output, 'args.gn'), Object.entries(gnValues)
-      .map(([name, value]) => `${name}=${JSON.stringify(value)}`).join('\n') + '\n');
+    rtc.writeGnArgs(output, { targetOs: 'win', targetCpu: 'x64', ccWrapper: ccWrapper(python),
+      platformArgs: { use_lld: true, compute_build_timestamp: `${rootTarget}/pinned_timestamp.py` } });
     const gn = path.join(sdk, 'buildtools', 'win', 'gn.exe');
     const ninja = path.join(sdk, 'third_party', 'ninja', 'ninja.exe');
-    const clang = path.join(sdk, 'third_party', 'llvm-build', 'Release+Asserts', 'bin', 'clang-cl.exe');
-    assert.match(execute(clang, ['--version'], { env, capture: true }), /21\.0\.0git[\s\S]*bd809ffb/u);
-    const graphArgs = [`--root=${sdk}`, `--root-target=${rootTarget}`, `--script-executable=${python}`, '--threads=1'];
-    execute(gn, ['gen', output, '--fail-on-unused-args', ...graphArgs], { cwd: sdk, env });
+    const graphArgs = rtc.generate({ gn, sdk, output, rootTarget, python, env, extraArgs: ['--threads=1'] });
     const graph = JSON.parse(execute(gn, ['desc', output, `${rootTarget}:*`, '--format=json', ...graphArgs],
       { cwd: sdk, env, capture: true }));
     for (const target of ['monky_screen_rtc', 'monky_rtc_engine_core', 'monky_mf_rtc_adapters']) {
@@ -114,10 +68,10 @@ function build(config) {
         description.cflags_cc.some(flag => flag.includes('libc++')),
       `Native DLL compiler/CRT configuration drift: ${target}`);
     }
-    execute(ninja, ['-C', output, `-j${config.jobs}`, 'monky_screen_rtc', 'monky_av1', 'monky_rtc_engine_contract_probe', 'monky_msvc_job'],
-      { cwd: sdk, env });
-    const contracts = JSON.parse(execute(path.join(output, 'monky_rtc_engine_contract_probe.exe'), [], { env, capture: true }));
-    assert.ok(contracts.checks > 85000 && contracts.devicesOpened === false, 'Native device-free contract checks did not complete.');
+    rtc.compile({ ninja, sdk, output, jobs: config.jobs, env,
+      targets: ['monky_screen_rtc', 'monky_av1', 'monky_rtc_engine_contract_probe', 'monky_msvc_job'] });
+    const contracts = rtc.checkContracts(JSON.parse(execute(path.join(output, 'monky_rtc_engine_contract_probe.exe'), [],
+      { env, capture: true })), { minimum: 85000 });
     execute(python, ['-I', path.join(__dirname, 'native-rtc', 'licenses.py'),
       `--sdk=${sdk}`, `--output=${output}`, `--root-target=${rootTarget}`,
       `--licenses=${path.join(root, 'licenses', 'webrtc')}`], { cwd: sdk, env });
@@ -161,19 +115,12 @@ function build(config) {
     const capabilities = JSON.parse(execute(process.execPath, ['-e',
       'console.log(JSON.stringify(require(process.argv[1]).capabilities()))', addon], { env, capture: true }));
     require(path.join(root, 'runtime', 'nativeRtc', 'engine', 'node', 'encoded.cjs')).validateCapabilities(capabilities);
-    for (const file of sourceFiles)
-      assert.equal(digest(fs.readFileSync(path.join(source, file.path))), file.sha256, `Source changed during compilation: ${file.path}`);
+    rtc.assertUnchanged(source, sourceFiles);
 
     const bin = path.join(root, 'bin', 'win32-x64');
-    fs.mkdirSync(bin, { recursive: true });
-    const binaries = [dll, addon, path.join(output, 'monky_av1.dll'),
-      path.join(addonBuild, 'build', 'Release', 'monky_native_handles.node')].map(filename => {
-      const bytes = fs.readFileSync(filename);
-      write(path.join(bin, path.basename(filename)), bytes);
-      return { name: path.basename(filename), bytes: bytes.length, sha256: digest(bytes) };
-    });
-    const report = { schemaVersion: 1, webrtcRevision: revision, sourceFiles, binaries, capabilities, contracts };
-    write(path.join(bin, 'rtc-build.json'), JSON.stringify(report, null, 2) + '\n');
+    const binaries = rtc.installBinaries([dll, addon, path.join(output, 'monky_av1.dll'),
+      path.join(addonBuild, 'build', 'Release', 'monky_native_handles.node')], bin);
+    const report = rtc.writeManifest(bin, { sourceFiles, binaries, capabilities, contracts });
     require(path.resolve(root, '..', '..', '..', '..', 'scripts', 'legal.cjs')).copyMonkyLicenses(root);
     write(path.join(root, 'build', 'tools', 'monky_msvc_job.exe'), fs.readFileSync(path.join(output, 'monky_msvc_job.exe')));
     console.log(JSON.stringify({ nativeRtcBuilt: true, contractChecks: contracts.checks, binaries }));
