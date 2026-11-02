@@ -108,7 +108,7 @@ jobs:
         run: python scripts/macos-test-keychain.py setup
       - name: Exercise native components without media devices
         # Keep the realtime audio clock check isolated from the other native processes.
-        run: node --test --test-concurrency=1 scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
+        run: node --test --test-concurrency=1 scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/server_invite_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
       # mediasoup has no prebuilt worker for every host (darwin-x64 compiles it for ~8 min). The
       # key pins the exact locked package, host image and compiler; a restored worker passes the
       # same checks as a fresh one and is saved only after the real interoperability tests.
@@ -180,7 +180,7 @@ jobs:
           npm run build --workspace=apps/server
           npm run test:bots --workspace=apps/server
           npm run test:community --workspace=apps/server
-          node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js apps/server/dist/test-voice-afk.js apps/server/dist/test-voice-mode.js apps/server/dist/test-screen-subscriptions.js apps/server/dist/test-server-settings.js apps/server/dist/test-startup-lifecycle.js apps/server/dist/test-game-activity.js apps/server/dist/test-game-share-request.js apps/server/dist/test-ws-hardening.js apps/server/dist/test-cli-identity.js apps/server/test/cliWriteGuard.test.cjs apps/server/test/cliUpdateRecovery.test.cjs apps/server/test/cliPrompts.test.cjs apps/server/test/cliPm2Reads.test.cjs apps/server/dist/test-logger.js apps/server/dist/test-message-composition.js apps/server/test/cliProcess.test.cjs apps/server/test/cliServerRules.test.cjs apps/server/dist/test-image-uploads.js apps/server/dist/test-message-router.js apps/server/dist/test-message-routes.js
+          node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js apps/server/dist/test-voice-afk.js apps/server/dist/test-voice-mode.js apps/server/dist/test-screen-subscriptions.js apps/server/dist/test-server-settings.js apps/server/dist/test-startup-lifecycle.js apps/server/dist/test-game-activity.js apps/server/dist/test-game-share-request.js apps/server/dist/test-ws-hardening.js apps/server/dist/test-server-key-auth.js apps/server/dist/test-cli-identity.js apps/server/test/cliWriteGuard.test.cjs apps/server/test/cliUpdateRecovery.test.cjs apps/server/test/cliPrompts.test.cjs apps/server/test/cliPm2Reads.test.cjs apps/server/dist/test-logger.js apps/server/dist/test-message-composition.js apps/server/test/cliProcess.test.cjs apps/server/test/cliServerRules.test.cjs apps/server/dist/test-image-uploads.js apps/server/dist/test-message-router.js apps/server/dist/test-message-routes.js
           # libuiohook initializes X11 even when the tests inject a passive mock.
           xvfb-run -a npm run test --workspace=apps/client
           npm exec -- tsc -p apps/client/tsconfig.electron.json

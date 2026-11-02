@@ -26,9 +26,17 @@ function stringConstants(values, name) {
   });
 }
 
-export function nativeProtocolHeader({ version, messageTypes, errorCodes, limits, reconnectDelays }) {
+export function nativeProtocolHeader({ version, minimumVersion, features, messageTypes, errorCodes, limits, reconnectDelays }) {
   if (!Number.isSafeInteger(version) || version <= 0) {
     throw new TypeError('Protocol version must be a positive safe integer.');
+  }
+  if (!Number.isSafeInteger(minimumVersion) || minimumVersion <= 0 || minimumVersion > version) {
+    throw new TypeError('Minimum protocol version must be a positive safe integer up to the version.');
+  }
+  // The explicit offer the native client sends: every feature of the build it was generated for, as the desktop app.
+  if (!Array.isArray(features) || features.length === 0
+    || features.some((feature) => typeof feature !== 'string' || !/^[a-z0-9-]+$/.test(feature))) {
+    throw new TypeError('Protocol features must be a nonempty array of lowercase feature names.');
   }
   if (!Array.isArray(reconnectDelays) || reconnectDelays.length === 0 ||
       reconnectDelays.some((value) => !Number.isSafeInteger(value) || value < 0)) {
@@ -56,6 +64,8 @@ export function nativeProtocolHeader({ version, messageTypes, errorCodes, limits
     '',
     'namespace monky::protocol {',
     `inline constexpr std::int64_t VERSION = ${version}LL;`,
+    `inline constexpr std::int64_t MIN_CLIENT_VERSION = ${minimumVersion}LL;`,
+    `inline constexpr std::array<std::string_view, ${features.length}> CLIENT_FEATURES = {${features.map((feature) => JSON.stringify(feature)).join(', ')}};`,
     `inline constexpr std::array<std::int64_t, ${reconnectDelays.length}> RECONNECT_DELAYS_MS = {${reconnectDelays.map((value) => `${value}LL`).join(', ')}};`,
     '',
     'namespace message {',
@@ -77,12 +87,17 @@ export function nativeProtocolHeader({ version, messageTypes, errorCodes, limits
 export async function writeNativeProtocol(output) {
   const constantsUrl = pathToFileURL(path.join(ROOT, 'packages', 'shared', 'dist', 'constants.js'));
   const protocolUrl = pathToFileURL(path.join(ROOT, 'packages', 'shared', 'dist', 'protocol.js'));
-  const [{ PROTOCOL_VERSION, LIMITS, RECONNECT_DELAYS_MS }, { MessageType, ProtocolErrorCode }] = await Promise.all([
+  const compatibilityUrl = pathToFileURL(path.join(ROOT, 'packages', 'shared', 'dist', 'protocolCompatibility.js'));
+  const [{ PROTOCOL_VERSION, LIMITS, RECONNECT_DELAYS_MS }, { MessageType, ProtocolErrorCode }, { createProtocolOffer }] = await Promise.all([
     import(constantsUrl.href),
     import(protocolUrl.href),
+    import(compatibilityUrl.href),
   ]);
+  const offer = createProtocolOffer('client');
   const header = nativeProtocolHeader({
     version: PROTOCOL_VERSION,
+    minimumVersion: offer.minimumVersion,
+    features: offer.features,
     messageTypes: MessageType,
     errorCodes: ProtocolErrorCode,
     limits: LIMITS,

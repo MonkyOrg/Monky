@@ -442,6 +442,9 @@ export interface AuthConnectPayload {
 
 export interface AuthChallengePayload {
   nonce: string;
+  /** server-key-auth: the server's identity and its signature of serverAuthChallenge(), always together. */
+  serverKey?: string;
+  serverSignature?: string;
 }
 
 export interface AuthChallengeResponsePayload {

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O login agora vale para um servidor só: um servidor em que você entrou não consegue mais repassar o seu login para entrar em outro como você. O app lembra a chave de cada servidor salvo e avisa, sem entrar, se ela mudar. Uma chave nova só vale por um convite novo.",
+  "en": "Signing in is now valid for one server only: a server you joined can no longer relay your sign-in to join another one as you. The app remembers each saved server's key and warns, without joining, if it changes. A new key is only accepted through a new invitation."
+}

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { deflateSync, Inflate } from 'fflate';
+import { ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX } from './constants.js';
+import { serverPublicKeySchema } from './serverAuth.js';
 
 // A dedicated page, not the docs home: link previews (WhatsApp, Discord…) never
 // receive the fragment, so the page itself must carry the invitation card.
@@ -15,6 +17,10 @@ export const MAX_SERVER_INVITE_LENGTH = 16384;
 const MAX_INVITE_BYTES = 4800;
 // This is part of the invitation format, not a configurable server default.
 const INVITE_DEFAULT_PORT = 3000;
+const SERVER_KEY_BYTES = 32;
+// Closes an invitation carrying a server key: the 32 raw key bytes, then "MK" and the suffix version.
+const SERVER_KEY_MARKER = [0x4d, 0x4b, 1] as const;
+const SERVER_KEY_SUFFIX = SERVER_KEY_BYTES + SERVER_KEY_MARKER.length;
 const encoder = new TextEncoder();
 // A leading U+FEFF belongs to the field, including when that field is a password.
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -50,6 +56,8 @@ export const serverInviteSchema = z.object({
   name: z.string().min(1).max(100).refine(validUnicode).optional(),
   password: z.string().min(1).max(1024).refine(validUnicode).refine(value => !/[\x00-\x1f\x7f]/.test(value)).optional(),
   eventId: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/).optional(),
+  /** The server's identity (server-key-auth, #821): the only way the app accepts a key other than the one it pinned. */
+  serverKey: serverPublicKeySchema.optional(),
 }).strict();
 
 export type ServerInvite = z.infer<typeof serverInviteSchema>;
@@ -78,6 +86,10 @@ function hostType(host: string): number {
   if (host === '[::1]') return 5;
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return 1;
   return host.startsWith('[') ? 2 : 0;
+}
+
+function hexBytes(value: string): number[] {
+  return Array.from({ length: value.length / 2 }, (_, index) => parseInt(value.slice(index * 2, index * 2 + 2), 16));
 }
 
 function ipv6Bytes(host: string): number[] {
@@ -118,6 +130,12 @@ function inviteToken(value: ServerInvite): string {
     }
     const raw = Uint8Array.from(body);
     const compressed = deflateSync(raw, { level: 9 });
+    // The server key (#821) follows the end of the deflate stream, where parsers that
+    // predate it stop reading: older apps open the invitation and only skip the key.
+    if (invite.serverKey !== undefined) {
+      return Uint8Array.from([header | 128, ...compressed,
+        ...hexBytes(invite.serverKey.slice(ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX.length)), ...SERVER_KEY_MARKER]);
+    }
     return compressed.length < raw.length
       ? Uint8Array.from([header | 128, ...compressed]) : Uint8Array.from([header, ...raw]);
   };
@@ -221,6 +239,22 @@ function readInvite(header: number, body: Uint8Array): ServerInvite {
   });
 }
 
+/** The invitation with the server key that follows its deflate stream, or null when it carries none. */
+function readKeyedInvite(bytes: Uint8Array): ServerInvite | null {
+  if (!(bytes[0] & 128) || bytes.length <= 1 + SERVER_KEY_SUFFIX
+    || SERVER_KEY_MARKER.some((value, index) => bytes[bytes.length - SERVER_KEY_MARKER.length + index] !== value)) return null;
+  const key = bytes.subarray(bytes.length - SERVER_KEY_SUFFIX, bytes.length - SERVER_KEY_MARKER.length);
+  try {
+    const invite = readInvite(bytes[0], inflateBody(bytes.subarray(1, bytes.length - SERVER_KEY_SUFFIX)));
+    return serverInviteSchema.parse({
+      ...invite, serverKey: ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX + [...key].map(byte => byte.toString(16).padStart(2, '0')).join(''),
+    });
+  } catch {
+    // A plain invitation whose compressed bytes happen to end like the marker.
+    return null;
+  }
+}
+
 export function decodeServerInviteToken(token: unknown): ServerInviteResult {
   if (typeof token !== 'string' || !token.startsWith(SERVER_INVITE_FRAGMENT_PREFIX)) return { ok: false, reason: 'invalid' };
   if (token.length > MAX_SERVER_INVITE_LENGTH) return { ok: false, reason: 'too_long' };
@@ -233,8 +267,8 @@ export function decodeServerInviteToken(token: unknown): ServerInviteResult {
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
     if (bytes.length > MAX_INVITE_BYTES) return { ok: false, reason: 'too_long' };
     if (base64Url(bytes) !== encoded) return { ok: false, reason: 'invalid' };
-    const body = bytes[0] & 128 ? inflateBody(bytes.subarray(1)) : bytes.subarray(1);
-    const invite = readInvite(bytes[0], body);
+    const invite = readKeyedInvite(bytes)
+      ?? readInvite(bytes[0], bytes[0] & 128 ? inflateBody(bytes.subarray(1)) : bytes.subarray(1));
     return { ok: true, invite: serverInviteSchema.parse({ ...invite, ...(eventId !== undefined ? { eventId } : {}) }) };
   } catch (error: unknown) {
     return { ok: false, reason: error instanceof InviteSizeError ? 'too_long' : 'invalid' };

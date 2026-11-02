@@ -4,8 +4,8 @@ sequenceDiagram
 
     C->>S: AUTH_CONNECT<br/>(chave pública, nickname, versão do protocolo, senha do servidor?)
     Note over S: valida a versão do protocolo,<br/>a senha do servidor e o nickname
-    S->>C: AUTH_CHALLENGE (nonce aleatório)
-    Note over C: assina o nonce com<br/>a chave privada
+    S->>C: AUTH_CHALLENGE (nonce aleatório,<br/>chave do servidor, assinatura do servidor)
+    Note over C: confere a chave fixada para este servidor<br/>e a assinatura dele, e assina<br/>"monky-auth:v2:chave do servidor:nonce"<br/>com a chave privada
     C->>S: AUTH_CHALLENGE_RESPONSE (assinatura)
-    Note over S: confere a assinatura<br/>contra a chave pública
+    Note over S: confere a assinatura vinculada<br/>à própria chave contra a chave pública
     S->>C: estado do servidor: canais, membros, cargos, histórico

@@ -64,6 +64,12 @@ keep stdin and stdout available. The bundle declares its microphone usage purpos
 password, supply `MONKY_LIGHT_PASSWORD` in the process environment, not on the
 command line. It is not saved in the profile.
 
+`--server` also accepts a Monky invitation link (`https://monkyorg.github.io/Monky/convite/#~…`
+or `monky://#~…`), read as the desktop app reads it: Light joins the invitation's
+address, uses the invitation's password when `MONKY_LIGHT_PASSWORD` is not set
+and, if the invitation carries the server's identity key, expects that key.
+That is how Light joins again a server whose key changed (see below).
+
 Output consists of JSON events, including `authenticated` with the server name
 and the channel list, and `channels-changed` whenever that list changes.
 Enter one JSON object per line in the terminal, using the received channel ID:
@@ -224,6 +230,22 @@ devices) and never participates in identity validation. It is replaced
 atomically under the profile lock. Invalid or unreadable settings emit a
 `warning`, fall back to defaults, and are replaced by the next save; an
 interrupted settings write does not require recovery.
+
+`monky-light-servers.json` stores each server's identity key (by `--server`
+address), pinned on the first protected sign-in. The sign-in signature is bound
+to that key, and Light refuses to join, without retrying, a server that presents
+another key, no key after having presented one, or the key pinned for another
+address of the profile (see
+[the signature is valid for one server only](https://monkyorg.github.io/Monky/en/arquitetura.html#the-signature-is-valid-for-one-server-only)).
+An unreadable key file is never recreated: it requires explicit recovery, so
+first-contact trust is never silently reopened.
+
+As in the desktop app, only an invitation replaces a pinned key: passing in
+`--server` a new invitation carrying the new key makes Light accept it and pin
+it in place of the old one. An invitation carrying the key pinned for **another**
+address of the profile is refused, as on the desktop, because a server may be
+relaying that one's sign-in. Light has no "Add address": the same server reached
+at two addresses needs one profile for each.
 
 `IdentityStore` requires an existing absolute profile directory. It holds an
 exclusive lock for its lifetime and stores a 32-byte Ed25519 seed with

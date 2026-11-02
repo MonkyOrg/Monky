@@ -72,6 +72,7 @@ export * from './botStorage.js';
 export * from './protocolCompatibility.js';
 export * from './botDiagnostics.js';
 export * from './botAuth.js';
+export * from './serverAuth.js';
 export * from './messageBlocks.js';
 export * from './nativePolls.js';
 export * from './nativeLiveForms.js';
