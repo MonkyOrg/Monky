@@ -8,6 +8,7 @@ import { LIMITS, SCREEN_SHARE_LIMITS, aggregateTransportHealth, VoiceConnectionH
 import { getPublicIp } from '../discovery/ServerIpScanner';
 import { describeFailure } from '../lifecycle/ServerResourceScope';
 import { Logger } from '../logger/Logger';
+import { expectedSfuMediaPort, readSfuMediaPort, writeSfuMediaPort } from './sfuPortRecord';
 
 const MEDIA_CODECS: RouterRtpCodecCapability[] = [
   {
@@ -76,6 +77,8 @@ export interface SfuManagerOptions {
   rtcMaxPort?: number;
   announcedIp?: string | null;
   listenIp?: string;
+  /** Server data directory, where the media port in use is remembered between restarts. */
+  dataDir?: string;
 }
 
 export interface SfuProducerRecord {
@@ -113,14 +116,14 @@ type PendingSfuTransport = Pick<SfuTransportRecord, 'sessionId' | 'channelId' | 
 };
 
 /**
- * Why the configured UDP range cannot carry media.
+ * Why the configured range cannot carry media.
  *
  * Structured instead of a message so the CLI and the desktop app can translate
  * it, the same way {@link checkSfuPreflight} reports a missing worker.
  */
 export type SfuPortProblem =
-  | { code: 'bind-failed'; port: number; protocol: 'udp' | 'tcp' }
-  | { code: 'turn-overlap'; port: number; turnMinPort: number; turnMaxPort: number };
+  | { code: 'range-busy'; minPort: number; maxPort: number }
+  | { code: 'turn-overlap'; minPort: number; maxPort: number; turnMinPort: number; turnMaxPort: number };
 
 /** How a client reached the server, which decides the addresses its ICE candidates offer. */
 export interface SfuClientAddress {
@@ -144,14 +147,13 @@ export interface SfuClientAddress {
 export function describeSfuPortProblem(problem: SfuPortProblem): string {
   if (problem.code === 'turn-overlap') {
     return (
-      `A porta de mídia do SFU (${problem.port}) fica dentro do range de relay do ` +
-      `coturn (${problem.turnMinPort}-${problem.turnMaxPort}). Os dois disputariam a mesma porta.`
+      `A faixa de mídia do SFU (${problem.minPort}-${problem.maxPort}) invade a faixa de relay do ` +
+      `coturn (${problem.turnMinPort}-${problem.turnMaxPort}). Os dois disputariam as mesmas portas.`
     );
   }
   return (
-    `A porta ${problem.port}/${problem.protocol.toUpperCase()} do SFU não pôde ser reservada. ` +
-    'Confira se nenhum outro processo a ocupa e se ela está liberada (UDP e TCP) no firewall. ' +
-    'Sem essa porta o SFU não consegue transmitir mídia.'
+    `Nenhuma porta da faixa ${problem.minPort}-${problem.maxPort} está livre em UDP e TCP ao mesmo tempo. ` +
+    'Feche o que ocupa essas portas. Sem uma delas o SFU não consegue transmitir mídia.'
   );
 }
 
@@ -280,6 +282,10 @@ export class SfuManager {
   private readonly rtcMinPort: number;
   private readonly rtcMaxPort: number;
   private readonly listenIp: string;
+  /** Where the port in use is remembered between restarts; none in tests. */
+  private readonly dataDir?: string;
+  /** The port the current worker's sockets are bound to. */
+  private mediaPort: number | null = null;
   private announcedIp: string | null = null;
   private detectedPublicIp: string | null = null;
 
@@ -289,6 +295,7 @@ export class SfuManager {
     this.rtcMaxPort = options.rtcMaxPort ?? LIMITS.SFU_DEFAULT_MAX_PORT;
     this.listenIp = options.listenIp || '0.0.0.0';
     this.announcedIp = options.announcedIp || null;
+    this.dataDir = options.dataDir;
   }
 
   public setAnnouncedIp(ip: string | null): void {
@@ -304,54 +311,86 @@ export class SfuManager {
   }
 
   /**
-   * The one port, UDP and TCP, every transport shares: the first of the
-   * range, so an operator who opened the whole range needs to change nothing.
+   * The one port, UDP and TCP, every transport shares while the worker runs;
+   * null while it does not. This is the port to open in the firewall.
    */
-  public getMediaPort(): number {
-    return this.rtcMinPort;
+  public getMediaPort(): number | null {
+    return this.isReady() ? this.mediaPort : null;
+  }
+
+  /** The port to open in the firewall: the one in use, else the one the next start tries first. */
+  public getFirewallPort(): number {
+    return this.getMediaPort() ?? expectedSfuMediaPort(this.dataDir, this.rtcMinPort, this.rtcMaxPort);
   }
 
   /**
-   * Checks that the media port can actually be used, mirroring what
-   * `CoturnManager.checkPortReachability` does for the relay (#515).
-   *
-   * Without this the worker would fail to start only when the first call
-   * asks for it, and the admin would never know why.
-   *
-   * Only a local bind is attempted: there is no external service to probe
-   * from, so a firewall that drops inbound traffic cannot be detected from
-   * here. The bind still catches the common cases — a conflicting process or
-   * a port the OS refuses.
+   * Ports to try, best first: the one used last, so the firewall rule keeps
+   * working across restarts, then the range in order, so whoever opened the
+   * whole range needs to change nothing.
    */
-  public async checkPortAvailability(): Promise<SfuPortProblem | null> {
-    const overlap = this.findTurnOverlap();
-    if (overlap) return overlap;
-    // Our own worker holds the port: binding it again would report the
-    // running SFU as the conflict.
-    if (this.isReady()) return null;
+  private *portCandidates(): Generator<number> {
+    if (this.rtcMinPort === 0) {
+      yield 0;
+      return;
+    }
+    const first = expectedSfuMediaPort(this.dataDir, this.rtcMinPort, this.rtcMaxPort);
+    yield first;
+    for (let port = this.rtcMinPort; port <= this.rtcMaxPort; port++) if (port !== first) yield port;
+  }
 
-    const port = this.getMediaPort();
-    if (!await SfuManager.probeUdpBind(port, 2000)) return { code: 'bind-failed', port, protocol: 'udp' };
-    if (!await SfuManager.probeTcpBind(port, 2000)) return { code: 'bind-failed', port, protocol: 'tcp' };
+  /** The first candidate free in both UDP and TCP, or null when the whole range is taken. */
+  private async findFreePort(after?: number): Promise<number | null> {
+    let skipping = after !== undefined;
+    for (const port of this.portCandidates()) {
+      if (skipping) {
+        if (port === after) skipping = false;
+        continue;
+      }
+      if (port === 0) return 0;
+      if (await SfuManager.probeUdpBind(port, this.listenIp, 2000) && await SfuManager.probeTcpBind(port, this.listenIp, 2000)) {
+        return port;
+      }
+    }
     return null;
   }
 
   /**
-   * coturn allocates relay ports anywhere in its own range, so a media port
-   * inside it makes the two servers race for it once both are enabled.
+   * Which port the SFU would use, mirroring what
+   * `CoturnManager.checkPortReachability` does for the relay (#515): a
+   * problem when no port of the range can carry media, else the port.
+   *
+   * Only a local bind is attempted: there is no external service to probe
+   * from, so a firewall that drops inbound traffic cannot be detected from
+   * here — which is why the port found is shown, for the operator to open.
+   */
+  public async checkPortAvailability(): Promise<{ port: number } | { problem: SfuPortProblem }> {
+    const overlap = this.findTurnOverlap();
+    if (overlap) return { problem: overlap };
+    // Our own worker holds its port: binding it again would report the
+    // running SFU as the conflict.
+    const running = this.getMediaPort();
+    if (running !== null) return { port: running };
+    const port = await this.findFreePort();
+    return port === null
+      ? { problem: { code: 'range-busy', minPort: this.rtcMinPort, maxPort: this.rtcMaxPort } }
+      : { port };
+  }
+
+  /**
+   * coturn allocates relay ports anywhere in its own range, so an overlap makes
+   * the two servers race for the same port once both are enabled.
    */
   private findTurnOverlap(): SfuPortProblem | null {
     const turnMinPort = LIMITS.TURN_RELAY_MIN_PORT;
     const turnMaxPort = LIMITS.TURN_RELAY_MAX_PORT;
-    const port = this.getMediaPort();
-    if (port < turnMinPort || port > turnMaxPort) return null;
-    return { code: 'turn-overlap', port, turnMinPort, turnMaxPort };
+    if (this.rtcMinPort === 0 || this.rtcMinPort > turnMaxPort || this.rtcMaxPort < turnMinPort) return null;
+    return { code: 'turn-overlap', minPort: this.rtcMinPort, maxPort: this.rtcMaxPort, turnMinPort, turnMaxPort };
   }
 
   /** Binds a UDP socket briefly to prove the port is free. */
-  private static probeUdpBind(port: number, timeoutMs: number): Promise<boolean> {
+  private static probeUdpBind(port: number, host: string, timeoutMs: number): Promise<boolean> {
     return new Promise((resolve) => {
-      const socket = dgram.createSocket('udp4');
+      const socket = dgram.createSocket(net.isIPv6(host) ? 'udp6' : 'udp4');
       const timer = setTimeout(() => {
         try { socket.close(); } catch { /* already closed */ }
         resolve(false);
@@ -363,7 +402,7 @@ export class SfuManager {
         resolve(false);
       });
 
-      socket.bind(port, '0.0.0.0', () => {
+      socket.bind(port, host, () => {
         clearTimeout(timer);
         try { socket.close(); } catch { /* already closed */ }
         resolve(true);
@@ -372,7 +411,7 @@ export class SfuManager {
   }
 
   /** Listens on a TCP port briefly to prove it is free. */
-  private static probeTcpBind(port: number, timeoutMs: number): Promise<boolean> {
+  private static probeTcpBind(port: number, host: string, timeoutMs: number): Promise<boolean> {
     return new Promise((resolve) => {
       const server = net.createServer();
       let settled = false;
@@ -385,7 +424,7 @@ export class SfuManager {
       };
       const timer = setTimeout(() => finish(false), timeoutMs);
       server.once('error', () => finish(false));
-      server.listen({ port, host: '0.0.0.0', exclusive: true }, () => finish(true));
+      server.listen({ port, host, exclusive: true }, () => finish(true));
     });
   }
 
@@ -436,12 +475,10 @@ export class SfuManager {
       }
       // Every transport shares these two sockets, told apart by ICE ufrag:
       // the ports in use no longer grow with participants or screen renditions.
-      let webRtcServer: mediasoup.types.WebRtcServer;
-      try {
-        webRtcServer = await created.createWebRtcServer({ listenInfos: this.getListenInfos() });
-      } catch (error) {
+      const bound = await this.bindWebRtcServer(created);
+      if (!bound) {
         created.close();
-        throw new Error(`Could not bind the SFU media port ${this.getMediaPort()} (UDP/TCP): ${describeFailure(error)}`);
+        throw new Error(`No port of the SFU media range ${this.rtcMinPort}-${this.rtcMaxPort} is free in both UDP and TCP`);
       }
       if (generation !== this.generation) {
         this.retiringWorkers.add(created);
@@ -450,14 +487,15 @@ export class SfuManager {
         return false;
       }
       this.worker = created;
-      this.webRtcServer = webRtcServer;
+      this.webRtcServer = bound.server;
+      this.mediaPort = bound.port;
       this.workerStartedAt = performance.now();
       created.on('died', (error) => this.workerDied(created, error));
 
       if (this.initializationError !== null) Logger.info('SFU', 'The mediasoup worker is running again.');
       this.initializationError = null;
       this.retryAt = 0;
-      console.log(`[SFU] mediasoup Worker initialized; media on port ${this.getMediaPort()} (UDP and TCP)`);
+      this.rememberMediaPort(bound.port);
       return true;
     } catch (error) {
       if (worker && generation !== this.generation) throw error;
@@ -484,6 +522,7 @@ export class SfuManager {
     this.generation++;
     this.worker = null;
     this.webRtcServer = null;
+    this.mediaPort = null;
     this.forgetMedia();
     Logger.error('SFU', 'The mediasoup worker died; SFU calls reconnect once a new one starts.', error);
     this.workerLostListener?.();
@@ -573,12 +612,51 @@ export class SfuManager {
   }
 
   /** The shared sockets of the worker's WebRtcServer: one per protocol, on the media port. */
-  private getListenInfos(): TransportListenInfo[] {
-    const port = this.getMediaPort();
+  private getListenInfos(port: number): TransportListenInfo[] {
     return [
       { protocol: 'udp', ip: this.listenIp, port },
       { protocol: 'tcp', ip: this.listenIp, port },
     ];
+  }
+
+  /**
+   * Binds the worker's shared sockets to the first free candidate port. A port
+   * that looked free can be taken before mediasoup binds it, so a failure
+   * moves on to the next candidate instead of giving up.
+   */
+  private async bindWebRtcServer(
+    worker: mediasoup.types.Worker
+  ): Promise<{ server: mediasoup.types.WebRtcServer; port: number } | null> {
+    let after: number | undefined;
+    for (;;) {
+      const port = await this.findFreePort(after);
+      if (port === null) return null;
+      try {
+        const server = await worker.createWebRtcServer({ listenInfos: this.getListenInfos(port) });
+        if (port !== 0) return { server, port };
+        // An OS-chosen port: UDP and TCP may differ, the UDP one is the one reported.
+        const { udpSockets } = await server.dump();
+        return { server, port: udpSockets[0]?.port ?? 0 };
+      } catch (error) {
+        Logger.warn('SFU', `Could not bind the SFU media port ${port} (UDP/TCP): ${describeFailure(error)}`);
+        if (port === 0) return null;
+        after = port;
+      }
+    }
+  }
+
+  /** Remembers the port for the next start and tells the operator which one to open. */
+  private rememberMediaPort(port: number): void {
+    Logger.info('SFU', `SFU media on port ${port} (UDP and TCP): open it in the firewall.`);
+    if (port !== this.rtcMinPort && this.rtcMinPort !== 0) {
+      Logger.warn('SFU', `Port ${this.rtcMinPort} was taken, so the SFU uses ${port} (UDP and TCP). Open port ${port} in the firewall.`);
+    }
+    if (!this.dataDir || readSfuMediaPort(this.dataDir) === port) return;
+    try {
+      writeSfuMediaPort(this.dataDir, port);
+    } catch (error) {
+      Logger.warn('SFU', `Could not remember the SFU media port: ${describeFailure(error)}`);
+    }
   }
 
   /**
@@ -1308,6 +1386,7 @@ export class SfuManager {
     // A worker whose close failed stays retiring, for the next close to retry.
     this.worker = null;
     this.webRtcServer = null;
+    this.mediaPort = null;
     for (const worker of this.retiringWorkers) {
       try {
         if (!worker.died) worker.close();

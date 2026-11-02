@@ -115,20 +115,22 @@ const BOT_COLUMNS: { readonly [K in keyof BotRecord]?: string } = {
 export class SqliteServerRepository implements IServerRepository {
   constructor(private db: IDatabaseDriver) {}
 
-  async getLifecycleSettings(): Promise<Pick<ServerRecord, 'name' | 'turnEnabled'> | null> {
+  async getLifecycleSettings(): Promise<Pick<ServerRecord, 'name' | 'turnEnabled' | 'voiceMode'> | null> {
     const columns: unknown[] = this.db.prepare('PRAGMA table_info(server_meta)').all();
     if (columns.length === 0) return null;
-    const hasTurn = columns.some((column) =>
-      column !== null && typeof column === 'object' && 'name' in column && column.name === 'turn_enabled');
+    const has = (name: string) => columns.some((column) =>
+      column !== null && typeof column === 'object' && 'name' in column && column.name === name);
     // Lifecycle reads must also work before the running server applies newer migrations.
     const row: unknown = this.db.prepare(
-      `SELECT name, ${hasTurn ? 'turn_enabled' : '0'} AS turnEnabled FROM server_meta LIMIT 1`
+      `SELECT name, ${has('turn_enabled') ? 'turn_enabled' : '0'} AS turnEnabled, ` +
+      `${has('voice_mode') ? 'voice_mode' : "'p2p'"} AS voiceMode FROM server_meta LIMIT 1`
     ).get();
     if (row === undefined) return null;
-    if (!row || typeof row !== 'object' || !('name' in row) || typeof row.name !== 'string' || !('turnEnabled' in row)) {
+    if (!row || typeof row !== 'object' || !('name' in row) || typeof row.name !== 'string' || !('turnEnabled' in row)
+      || !('voiceMode' in row)) {
       throw new Error('Invalid stored server lifecycle settings.');
     }
-    return { name: row.name, turnEnabled: Boolean(row.turnEnabled) };
+    return { name: row.name, turnEnabled: Boolean(row.turnEnabled), voiceMode: row.voiceMode === 'sfu' ? 'sfu' : 'p2p' };
   }
 
   async getServer(): Promise<ServerRecord | null> {

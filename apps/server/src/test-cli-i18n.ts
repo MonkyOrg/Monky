@@ -532,8 +532,8 @@ test('comparison tables, status, health and availability diagnostics use the act
     assert.equal(describeTurnUnavailability({ supported: false, reason: 'unsupported-platform' }), t('config.turnLinuxOnly'));
     assert.equal(describeTurnUnavailability({ supported: false, reason: 'not-installed', autoInstallable: true }), t('config.coturnMissing'));
     assert.equal(describeTurnUnavailability({ supported: true }), null);
-    assert.equal(describeSfuPortProblem({ code: 'bind-failed', port: 10000, protocol: 'tcp' }),
-      t('sfu.portBindFailed', { port: 10000, protocol: 'TCP' }));
+    assert.equal(describeSfuPortProblem({ code: 'range-busy', minPort: 10000, maxPort: 11000 }),
+      t('sfu.portRangeBusy', { minPort: 10000, maxPort: 11000 }));
     const summary = sfuPreflightSummary({ ok: false, issues: [{ code: 'mediasoup-unresolved', message: 'fixture diagnostic' }] });
     assert.equal(summary, t('sfu.preflightMediasoupUnresolved'));
     assert.deepEqual(health.evaluateServerHealth({

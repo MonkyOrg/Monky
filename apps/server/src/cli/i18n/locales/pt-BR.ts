@@ -100,9 +100,11 @@ export const ptBR = {
   'sfu.preflightHintReinstall': 'Reinstale o Monky CLI.',
   'sfu.preflightConsequence': 'O servidor sobe mesmo assim, mas as chamadas caem para P2P.',
   'sfu.portOverlap':
-    'A porta de mídia do SFU ({port}) fica dentro do range de relay do coturn ({turnMinPort}-{turnMaxPort}). Os dois disputariam a mesma porta.',
-  'sfu.portBindFailed':
-    'A porta {port}/{protocol} do SFU não pôde ser reservada. Confira se nenhum outro processo a ocupa e libere a porta {port} (UDP e TCP) no firewall.',
+    'A faixa de mídia do SFU ({minPort}-{maxPort}) invade a faixa de relay do coturn ({turnMinPort}-{turnMaxPort}). Os dois disputariam as mesmas portas.',
+  'sfu.portRangeBusy':
+    'Nenhuma porta da faixa {minPort}-{maxPort} está livre em UDP e TCP ao mesmo tempo. Feche o que ocupa essas portas; sem uma delas o SFU não transmite mídia.',
+  'sfu.portMoved': 'A porta {first} está ocupada nesta máquina, então o SFU usa a {port}. Libere a porta {port} (UDP e TCP) no firewall.',
+  'sfu.mediaPort': '{port} (UDP e TCP)',
   'turn.portNotListening': 'A porta {port} não está escutando localmente. Verifique se nenhum outro processo está usando essa porta.',
   'turn.portExternalUnreachable': 'A porta {port} (UDP/TCP) não está acessível externamente no IP {publicIp}. Abra a porta {port} (UDP e TCP) e o range {minPort}-{maxPort} (UDP) no firewall da VPS para que o relay TURN funcione.',
   'turn.relayPortBindFailed': 'O range de portas UDP {minPort}-{maxPort} não está acessível (falha ao testar porta {port}/UDP). Abra o range {minPort}-{maxPort} (UDP) no firewall da VPS. Sem essas portas, o relay TURN não consegue transmitir mídia.',
@@ -146,7 +148,7 @@ export const ptBR = {
   'config.turnPortOk': '✔ Porta TURN (3478) acessível. Certifique-se de que o range 49152-65535/UDP também está aberto no firewall.',
   'config.turnUnavailable': 'indisponível: {reason}',
   'config.sfuUnavailable': 'inativo: {reason}',
-  'config.sfuPortOk': '✔ A porta de mídia do SFU ({port}, UDP e TCP) está livre nesta máquina. Confirme que ela também está liberada no firewall da VPS.',
+  'config.sfuPortOk': '✔ O SFU vai usar a porta {port} (UDP e TCP). Libere essa porta no firewall da VPS.',
   'config.turnDisabledBySfu': 'TURN desligado automaticamente: no modo SFU o próprio servidor já faz o relay.',
   'config.turnBlockedBySfu':
     'O TURN não pode ser ativado no modo SFU — o próprio SFU já é o relay. Volte para o modo p2p antes de ligar o TURN.',
@@ -400,6 +402,7 @@ export const ptBR = {
   'label.showRoleBadgesToEveryone': 'Exibir emblemas dos cargos para todos',
   'label.voiceMode': 'Modo de voz/vídeo',
   'label.turn': 'Relay de mídia (TURN)',
+  'label.sfuMediaPort': 'Porta de mídia do SFU (liberar no firewall)',
   'label.icon': 'Ícone do servidor',
   'label.iconPath': 'Caminho do ícone',
   'label.maxAttachmentFileBytes': 'Tamanho máximo por anexo (bytes)',

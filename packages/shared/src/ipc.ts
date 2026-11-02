@@ -583,6 +583,12 @@ export interface ServerStats {
   members: number;
   channels: number;
   messages: number;
+  /**
+   * In SFU mode, the one port (UDP and TCP) to open in the firewall for media:
+   * the one in use, else the one the next start tries first. Null otherwise.
+   * Local only: the remote monitor does not carry it.
+   */
+  sfuMediaPort?: number | null;
 }
 
 export interface AppIdentityResult {

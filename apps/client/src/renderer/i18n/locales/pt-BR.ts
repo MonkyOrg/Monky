@@ -388,6 +388,8 @@ export const ptBR = {
   'serverMonitor.channels': 'Canais',
   'serverMonitor.messages': 'Mensagens',
   'serverMonitor.port': 'Porta',
+  'serverMonitor.sfuPort': 'Mídia SFU (liberar no firewall)',
+  'serverMonitor.sfuPortValue': '{port} UDP e TCP',
   'serverMonitor.levelAll': 'Todos',
   'serverMonitor.searchPlaceholder': 'Filtrar logs...',
   'serverMonitor.autoScroll': 'Rolagem automática',

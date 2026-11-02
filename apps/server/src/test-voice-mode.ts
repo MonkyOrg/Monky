@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { once } from 'node:events';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import dgram from 'node:dgram';
+import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
+import path from 'node:path';
 import { crc32 } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { MessageType, Permission, ProtocolErrorCode, type ProtocolMessage, type ServerSettingsUpdatedPayload, type VoiceUserJoinedPayload, type VoiceUserLeftPayload } from '@monky/shared';
@@ -14,6 +17,7 @@ import { AuthService, serverSettingsPayload } from './application/services/AuthS
 import { BotLocalExecutionService } from './application/services/BotLocalExecutionService';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import { Logger } from './infrastructure/logger/Logger';
+import { readSfuMediaPort } from './infrastructure/sfu/sfuPortRecord';
 import type { ChannelRecord, ServerRecord, VoiceRestrictions } from './domain/entities';
 import { SERVER_SETTING_DEFAULTS } from './domain/serverSettings';
 
@@ -131,32 +135,67 @@ test('every SFU transport shares one UDP and one TCP port, told apart by ICE ufr
   assert.equal(sfu['transports'].get(transports[5].id)?.transport.iceState, 'new', 'a check reaches only its own transport');
 });
 
-test('a media port another process holds is reported, and our own running worker is not (#824)', async (t) => {
-  // Below coturn's relay range, which would be reported first.
-  let port = 20000 + Math.floor(Math.random() * 20000);
-  let holder: dgram.Socket;
-  for (;; port++) {
-    const socket = dgram.createSocket('udp4');
-    const bound = await new Promise<boolean>((resolve) => {
-      socket.once('error', () => resolve(false));
-      socket.bind(port, '0.0.0.0', () => resolve(true));
-    });
-    if (bound) { holder = socket; break; }
-    socket.close();
-  }
-  t.after(() => holder.close());
-  assert.deepEqual(await new SfuManager({ rtcMinPort: port }).checkPortAvailability(),
-    { code: 'bind-failed', port, protocol: 'udp' });
-  const blocked = new SfuManager({ announcedIp: '127.0.0.1', rtcMinPort: port });
-  t.mock.method(Logger, 'warn', () => {});
-  assert.equal(await blocked.init(), false);
-  assert.match(blocked.getLastError() ?? '', new RegExp(`media port ${port}`));
-  blocked.close();
+/** Holds a loopback UDP port, as another program would. */
+async function holdUdpPort(t: TestContext, port: number): Promise<boolean> {
+  const socket = dgram.createSocket('udp4');
+  const bound = await new Promise<boolean>((resolve) => {
+    socket.once('error', () => resolve(false));
+    socket.bind(port, '127.0.0.1', () => resolve(true));
+  });
+  if (bound) t.after(() => socket.close());
+  else socket.close();
+  return bound;
+}
 
-  const running = new SfuManager({ listenIp: '127.0.0.1', announcedIp: '127.0.0.1', rtcMinPort: 0 });
-  t.after(() => running.close());
-  assert.equal(await running.init(), true);
-  assert.equal(await running.checkPortAvailability(), null);
+/** Three consecutive loopback ports free in UDP and TCP, below coturn's relay range. */
+async function freeRange(): Promise<number> {
+  const free = async (port: number) => await SfuManager['probeUdpBind'](port, '127.0.0.1', 2000)
+    && await SfuManager['probeTcpBind'](port, '127.0.0.1', 2000);
+  for (let base = 20000 + Math.floor(Math.random() * 20000); ; base += 3) {
+    if (await free(base) && await free(base + 1) && await free(base + 2)) return base;
+  }
+}
+
+test('the SFU moves to the next free port of the range, and keeps it across restarts (#824)', async (t) => {
+  t.mock.method(Logger, 'warn', () => {});
+  t.mock.method(Logger, 'info', () => {});
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-sfu-port-'));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const base = await freeRange();
+  const manager = () => new SfuManager({ listenIp: '127.0.0.1', announcedIp: '127.0.0.1', rtcMinPort: base, rtcMaxPort: base + 2, dataDir });
+
+  // Another program holds only the TCP side of the first port: UDP and TCP must share one number.
+  const outsider = new AbortController();
+  const holder = net.createServer();
+  await new Promise<void>((resolve) => holder.listen({ port: base, host: '127.0.0.1', exclusive: true, signal: outsider.signal }, resolve));
+  const first = manager();
+  assert.deepEqual(await first.checkPortAvailability(), { port: base + 1 });
+  assert.equal(first.getFirewallPort(), base, 'before any start, the first port of the range is the one expected');
+  assert.equal(await first.init(), true);
+  assert.equal(first.getMediaPort(), base + 1);
+  assert.deepEqual(await first.checkPortAvailability(), { port: base + 1 }, 'our own worker is not a conflict');
+  const candidates = await first.createWebRtcTransport('alice', 'room', 'send', { loopback: true });
+  assert.deepEqual([...new Set(candidates.iceCandidates.map(c => c.port))], [base + 1]);
+  first.close();
+  assert.equal(readSfuMediaPort(dataDir), base + 1);
+  outsider.abort();
+  await new Promise<void>((resolve) => holder.close(() => resolve()));
+
+  // The first port is free again, but the firewall was opened for the one used last.
+  const restarted = manager();
+  t.after(() => restarted.close());
+  assert.equal(restarted.getFirewallPort(), base + 1);
+  assert.equal(await restarted.init(), true);
+  assert.equal(restarted.getMediaPort(), base + 1);
+  restarted.close();
+
+  for (let port = base; port <= base + 2; port++) assert.ok(await holdUdpPort(t, port));
+  const blocked = manager();
+  assert.deepEqual(await blocked.checkPortAvailability(),
+    { problem: { code: 'range-busy', minPort: base, maxPort: base + 2 } });
+  assert.equal(await blocked.init(), false);
+  assert.match(blocked.getLastError() ?? '', new RegExp(`range ${base}-${base + 2}`));
+  blocked.close();
 });
 
 function fixture(restricted = true) {
@@ -211,7 +250,7 @@ function fixture(restricted = true) {
   const sfu = new SfuManager();
   sfu.close = () => { closes++; };
   sfu.init = async () => true;
-  sfu.checkPortAvailability = async () => null;
+  sfu.checkPortAvailability = async () => ({ port: 40000 });
   server['sfuManager'] = sfu;
   server['serverSettings']['applyTurnState'] = async () => {};
   // What each connection was told is fixed here: the rooms listed for it do not follow its presence.

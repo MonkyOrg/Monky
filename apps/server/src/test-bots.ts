@@ -4732,7 +4732,7 @@ test('local execution real voice mode change and bot removal cancel private task
   await f.join(invocation.id);
   const context: LocalRequestContext = { kind: 'source', sourceContextId: source.sourceContextId };
   const stream = await f.task(context, { operation: 'youtube.stream', url: LOCAL_TEST_URL });
-  t.mock.method(f.wsServer['sfuManager'], 'checkPortAvailability', async () => null);
+  t.mock.method(f.wsServer['sfuManager'], 'checkPortAvailability', async () => ({ port: 40000 }));
   t.mock.method(f.wsServer['sfuManager'], 'init', async () => true);
   assert.equal((await f.owner.peer.request(MessageType.SERVER_UPDATE_SETTINGS, { voiceMode: 'sfu' })).type,
     MessageType.SERVER_SETTINGS_UPDATED);

@@ -252,12 +252,12 @@ export class ServerSettingsHandler {
     // worker holds the port, which would otherwise read as a conflict.
     if (payload.voiceMode === 'sfu') {
       if (previousVoiceMode !== 'sfu') {
-        const portProblem = await this.host.sfu.checkPortAvailability();
-        if (portProblem) {
+        const availability = await this.host.sfu.checkPortAvailability();
+        if ('problem' in availability) {
           this.host.sendError(
             session.ws,
             ProtocolErrorCode.SFU_UNAVAILABLE,
-            describeSfuPortProblem(portProblem),
+            describeSfuPortProblem(availability.problem),
             requestId
           );
           return;

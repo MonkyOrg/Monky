@@ -69,6 +69,13 @@ connections apart by their ICE identifier, so the number of ports does not grow
 with the number of people. If you had already opened the whole range, nothing
 needs to change.
 
+If `40000` is already taken on this machine (by another Monky server, for
+example), the SFU uses the next free port of the range, always the same number
+over UDP and TCP, and keeps using it across restarts while it stays free.
+`monky status`, `monky config` and the server monitor in the app show which
+port to open. If no port of the range is free, SFU mode warns and does not
+turn on.
+
 Because it is UDP traffic arriving without anyone having asked for it first,
 the `RELATED,ESTABLISHED` rule most distributions ship **does not cover it** —
 the port has to be opened explicitly, and the same goes for TCP, which is the

@@ -70,6 +70,13 @@ tela usa essa mesma porta, em UDP e em TCP; o servidor separa cada conexão
 pelo identificador ICE, então o número de portas não cresce com o número de
 pessoas. Quem já tinha liberado a faixa inteira não precisa mudar nada.
 
+Se a `40000` já estiver ocupada nesta máquina (por outro servidor Monky, por
+exemplo), o SFU usa a próxima porta livre da faixa, sempre com o mesmo número
+em UDP e TCP, e volta a usar essa porta nos próximos reinícios enquanto ela
+estiver livre. `monky status`, `monky config` e o monitor do servidor no app
+mostram qual porta liberar. Se nenhuma porta da faixa estiver livre, o modo SFU
+avisa e não liga.
+
 Como é tráfego UDP que chega sem ninguém ter pedido antes, a regra de
 `RELATED,ESTABLISHED` que a maioria das distribuições traz **não cobre** — a
 porta precisa ser aberta explicitamente, e o mesmo vale para TCP, que é o

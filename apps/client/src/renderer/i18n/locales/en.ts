@@ -426,6 +426,8 @@ export const en: TranslationMap = {
   'serverMonitor.channels': 'Channels',
   'serverMonitor.messages': 'Messages',
   'serverMonitor.port': 'Port',
+  'serverMonitor.sfuPort': 'SFU media (open in firewall)',
+  'serverMonitor.sfuPortValue': '{port} UDP and TCP',
   'serverMonitor.levelAll': 'All',
   'serverMonitor.searchPlaceholder': 'Filter logs...',
   'serverMonitor.autoScroll': 'Auto-scroll',

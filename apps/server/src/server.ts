@@ -434,7 +434,7 @@ export class MonkyServer {
 
     const coturnManager = new CoturnManager(config.dataDir);
     resources.defer('TURN relay', () => coturnManager.stop());
-    const sfuManager = new SfuManager();
+    const sfuManager = new SfuManager({ dataDir: config.dataDir });
     resources.defer('SFU runtime', () => sfuManager.close());
     const lanBroadcaster = new LanBroadcaster({
       serverName: config.serverName || 'Monky Server',
@@ -669,6 +669,7 @@ export class MonkyServer {
       members: members.length,
       channels: channels.length,
       messages,
+      sfuMediaPort: serverRecord?.voiceMode === 'sfu' ? this.sfuManager.getFirewallPort() : null,
     };
   }
 }
