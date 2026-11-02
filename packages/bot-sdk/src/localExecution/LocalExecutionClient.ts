@@ -103,6 +103,7 @@ interface PendingTask {
   timer: ReturnType<typeof setTimeout>;
   expiryTimer?: ReturnType<typeof setTimeout>;
   completionTimer?: ReturnType<typeof setTimeout>;
+  mediaFailureTimer?: ReturnType<typeof setTimeout>;
   unsubscribe(): void;
   offer?: LocalTaskOffer;
   accepted?: Extract<LocalTaskEvent, { state: 'accepted' }>;
@@ -121,6 +122,11 @@ interface PendingTask {
 const RPC_TIMEOUT_MS = 8_000;
 const CONTROL_TIMEOUT_MS = 8_000;
 const COMPLETION_TIMEOUT_MS = 8_000;
+/**
+ * The private channel and the server's verdict travel on different paths: a requester leaving voice closes the
+ * channel while the server's 'cancelled' is still on its way. A lost channel waits this long for that verdict.
+ */
+const MEDIA_FAILURE_GRACE_MS = 1_500;
 const MAX_SOURCE_REQUESTS = 100;
 const LOCAL_MESSAGES = new Set<string>([
   MessageType.BOT_LOCAL_SOURCE_RESULT, MessageType.BOT_LOCAL_TASK_OFFER,
@@ -788,9 +794,16 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
   }
 
   private mediaFailed(task: PendingTask, error: Error): void {
-    if (task.terminal) return;
+    if (task.terminal || task.mediaFailureTimer) return;
     if (!this.transport.isCurrent(task.connection)) { this.disconnectTask(task); return; }
     if (!task.offer) { this.failTask(task, error); return; }
+    task.mediaFailureTimer = setTimeout(() => this.reportMediaFailure(task), MEDIA_FAILURE_GRACE_MS);
+  }
+
+  private reportMediaFailure(task: PendingTask): void {
+    task.mediaFailureTimer = undefined;
+    if (task.terminal || !task.offer) return;
+    if (!this.transport.isCurrent(task.connection)) { this.disconnectTask(task); return; }
     const failure = new LocalExecutionError({ state: 'failed', taskId: task.offer.taskId, reason: 'transport_failed' });
     this.terminate(task, failure, false);
     if (this.transport.isCurrent(task.connection)) {
@@ -806,6 +819,7 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
     clearTimeout(task.timer);
     if (task.expiryTimer) clearTimeout(task.expiryTimer);
     if (task.completionTimer) clearTimeout(task.completionTimer);
+    if (task.mediaFailureTimer) clearTimeout(task.mediaFailureTimer);
     task.unsubscribe();
     this.rejectControl(task, new Error('Local execution completed before the control acknowledgement.'));
   }

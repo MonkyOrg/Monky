@@ -759,7 +759,9 @@ test('a microphone the native SFU call cannot receive, or that the server refuse
   await charlie.close();
 });
 
-test('a native SFU call recovers from transport drops in a row, each recovery starting over', { timeout: 60_000 }, async t => {
+// The SFU shares one media port (#824): closing a transport no longer closes a socket, so the client
+// learns of it from unanswered ICE checks rather than at once; slow runners take close to 30 s.
+test('a native SFU call recovers from transport drops in a row, each recovery starting over', { timeout: 180_000 }, async t => {
   const fixture = await createServerFixture(t, { voiceMode: 'sfu' });
   const alice = new NativeClient(fixture, { nickname: 'Light Alice' });
   const bob = new NativeClient(fixture, { nickname: 'Light Bob' });
@@ -773,10 +775,10 @@ test('a native SFU call recovers from transport drops in a row, each recovery st
     const since = alice.events.length;
     // The server loses the call's receiving transport, as on a network change.
     fixture.server.sfuManager.closeTransportsFor(auth.sessionId, channelId, 'recv');
-    const retry = await alice.wait(event => event.event === 'media-reconnecting', since, 30_000);
+    const retry = await alice.wait(event => event.event === 'media-reconnecting', since, 60_000);
     // Each drop after a recovery is a first attempt again, not the next step down.
     assert.equal(retry.detail, 'Retrying SFU transport in 1 seconds', `Drop ${drop} continued an earlier recovery`);
-    await alice.wait(event => event.event === 'media-connected', since, 30_000);
+    await alice.wait(event => event.event === 'media-connected', since, 60_000);
     await alice.decodedFrom(bobAuth.sessionId);
   }
   assert.equal((await alice.state()).phase, 'admitted');
