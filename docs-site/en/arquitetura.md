@@ -318,7 +318,7 @@ These stores have different purposes and guarantees.
 |---|---|
 | `monky_settings` | Preferences: quality, devices, volumes, shortcuts, soundboard |
 | `monky_nickname` / `monky_avatar` | Your visual identity |
-| `monky_saved_servers` | Servers you saved to reconnect to |
+| `monky_saved_servers` | Servers you saved to reconnect to, with the identity key pinned for each |
 | `monky_created_servers` | Servers you created on this machine |
 | `monky_favorites` | Local sound favorites by full path and server favorites by address/port |
 | `monky_device_id` | Identifies **this device** (lets the same person use two machines) |
@@ -482,6 +482,58 @@ The server password, when present, protects *entry* and is checked by the
 server before the challenge. It differs from your local identity-backup
 password. The private key and that backup password are not sent during login.
 
+#### The signature is valid for one server only {#the-signature-is-valid-for-one-server-only}
+
+If the signature covered only the nonce, a server M you joined could open a
+connection to another server A with your public key, relay A's challenge to
+you and hand your answer to A, signing in there as you. That is why each server
+has its own **Ed25519 identity key** and the signature names that key
+(negotiated feature `server-key-auth`):
+
+1. In `AUTH_CHALLENGE`, the server sends the nonce, its public key and a
+   signature of `monky-server-auth:v1:<server key>:<nonce>`, proving it holds
+   the key it presents.
+2. The app checks that proof and signs `monky-auth:v2:<server key>:<nonce>`,
+   never the bare nonce. An answer obtained by M is bound to M's key and is
+   worthless at A.
+3. On the first protected sign-in, the app **pins** the key for that saved
+   address (TOFU) and keeps it in the saved server itself, which travels with
+   the servers backup. An invitation may also carry the key.
+
+The app decides (`decideServerKey`, in `@monky/shared`) before signing
+anything:
+
+| Situation at the address | What the app does |
+|---|---|
+| Never presented a key | Signs the nonce, as before (older servers keep working) |
+| First key, not pinned by any other saved server | Signs bound to it and pins it on joining |
+| The same pinned key | Signs bound to it |
+| Another key | Refuses (`Key changed`). Only a **new invitation** carrying the new key replaces it |
+| No key, after presenting one | Refuses: there is no downgrade to the old format |
+| The key of **another** saved server | Refuses, even from an invitation. A second address of the same server is added from the saved server's menu, under **Add address**, which copies the pinned key |
+
+The server does not accept a downgrade either: after a member's first bound
+sign-in, it refuses that identity's bare-nonce signatures
+(`FEATURE_REQUIRES_UPDATE`), since a relaying server could still obtain them
+from an app that never saw it with a key. Bots do not use this challenge
+(see `bot-key-proof`).
+
+The server's private key lives in `server.db` (table `server_identity`),
+created on the first start that does not find one and written to disk before
+the server accepts connections. It therefore follows the database copy made
+before each update, the data folder moved to another machine and every restart.
+Changing the key (deleting the table, or starting a new database at the same
+address) makes apps refuse the server until they receive a new invitation.
+
+Monky Light follows the same rule and keeps the pinned keys in its profile, in
+`monky-light-servers.json`, by server address.
+
+**Residual risk.** The protection holds from the first protected sign-in to A.
+If you never joined A with an app that has the feature, a server M visited for
+the first time can present A's key and relay its challenge; the app cannot tell
+that apart from a legitimate new server. Once you join A, its key is pinned and
+any other address presenting it is refused.
+
 ### Sessions: the same person on several devices
 
 A session is identified by `userId:deviceId`, not just by the user. That is what
@@ -507,6 +559,7 @@ table — the server only runs what it has not run yet.
 | Table | Holds |
 |---|---|
 | `server_meta` | Server configuration: name, password, owner, limits, icon |
+| `server_identity` | The server's Ed25519 identity key ([signature binding](#the-signature-is-valid-for-one-server-only)) |
 | `users` | Members, each with their public key |
 | `channels` | Voice and text channels |
 | `messages` | Chat history |
@@ -865,6 +918,10 @@ Things that follow directly from the architecture, and are not bugs:
   they update, and a new feature only appears when both sides have it.
 - **Screen audio only on Windows and macOS**, because it depends on each system's
   native API.
+- **First contact trusts the server.** A server's key is pinned on the first
+  protected sign-in. Before that, an unknown server can present the key of
+  another one you have not yet visited with the current app (see
+  [residual risk](#the-signature-is-valid-for-one-server-only)).
 - **Qualification depends on hardware.** The macOS path was exercised on M1
   with P2P/SFU audio/video and approximately 57 FPS at 4K60. The probe accepts
   Main 6.0/4K120, but that does not qualify sustained 120 FPS or Intel GPUs.

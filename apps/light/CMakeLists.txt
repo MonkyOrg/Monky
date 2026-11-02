@@ -33,7 +33,7 @@ endif()
 get_filename_component(MONKY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 find_program(MONKY_NODE_EXECUTABLE NAMES node REQUIRED)
 set(MONKY_SHARED_DIST "${MONKY_ROOT}/packages/shared/dist")
-foreach(contract_source constants.js protocol.js)
+foreach(contract_source constants.js protocol.js protocolCompatibility.js)
   if(NOT EXISTS "${MONKY_SHARED_DIST}/${contract_source}")
     message(FATAL_ERROR "Build @monky/shared first, or use npm run build:light from the repository root.")
   endif()
@@ -49,6 +49,7 @@ add_custom_command(
     "${MONKY_ROOT}/scripts/generate-light-contracts.js"
     "${MONKY_SHARED_DIST}/constants.js"
     "${MONKY_SHARED_DIST}/protocol.js"
+    "${MONKY_SHARED_DIST}/protocolCompatibility.js"
   VERBATIM
 )
 add_custom_target(monky_light_generate_contracts ALL DEPENDS "${MONKY_PROTOCOL_HEADER}")

@@ -225,6 +225,15 @@ substituído de forma atômica sob o lock do perfil. Configurações inválidas 
 ilegíveis geram `warning`, usam os padrões e são substituídas no próximo
 salvamento; uma gravação interrompida das configurações não exige recuperação.
 
+`monky-light-servers.json` guarda a chave de identidade de cada servidor (por
+endereço `--server`), fixada no primeiro login protegido. A assinatura do login
+fica vinculada a essa chave, e o Light se recusa a entrar, sem tentar de novo,
+num servidor que apresente outra chave, nenhuma chave depois de já ter
+apresentado uma, ou a chave fixada para outro endereço do perfil (veja
+[a assinatura vale para um servidor só](https://monkyorg.github.io/Monky/arquitetura.html#a-assinatura-vale-para-um-servidor-so)).
+Um arquivo de chaves ilegível nunca é recriado: ele exige recuperação explícita,
+para não reabrir a confiança do primeiro contato em silêncio.
+
 `IdentityStore` requer um diretório de perfil absoluto e já existente. Mantém um
 lock exclusivo durante sua vida e armazena uma seed Ed25519 de 32 bytes com
 DPAPI por usuário no Windows ou Keychain no macOS. Os métodos devem ser chamados

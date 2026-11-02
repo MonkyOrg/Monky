@@ -148,6 +148,7 @@ class DisposableProfile final {
     for (const auto* name : {".identity.lock", "identity.dpapi", "identity.dpapi.pending",
                              "monky-light.json", "monky-light.json.pending",
                              "monky-light-settings.json", "monky-light-settings.json.pending",
+                             "monky-light-servers.json", "monky-light-servers.json.pending",
                              "unrelated.txt", "unrelated-directory"}) {
       removeOwned(path / name);
     }
@@ -437,6 +438,37 @@ void settingsBesideIdentity(const fs::path& root) {
   require(saved.find("monky-light-settings") != std::string::npos, "Settings were written without their format");
 }
 
+// server-key-auth (#821): keys pinned per server survive restarts, and a damaged pin file is never reset.
+void serverKeysBesideIdentity(const fs::path& root) {
+  DisposableProfile profile(root);
+  const auto pinsPath = profile.path / "monky-light-servers.json";
+  const auto first = "302a300506032b6570032100" + std::string(64, 'a');
+  const auto second = "302a300506032b6570032100" + std::string(64, 'b');
+  {
+    ProfileIdentity identity(profile.path);
+    require(!identity.serverKey("wss://one.example") && identity.serverKeysExcept("wss://one.example").empty(),
+            "A fresh profile already had pins");
+    identity.pinServerKey("wss://one.example", first);
+    identity.pinServerKey("ws://two.example:3000", second);
+    require(!fs::exists(profile.path / "monky-light-servers.json.pending"), "Pin write left its marker");
+    requireFailure([&] { identity.pinServerKey("wss://one.example", "not-a-key"); }, "A malformed key was pinned");
+    requireFailure([&] { identity.pinServerKey("", first); }, "A pin without a server was saved");
+  }
+  {
+    ProfileIdentity identity(profile.path);
+    require(identity.serverKey("wss://one.example") == std::optional<std::string>(first), "A pin did not survive");
+    const auto others = identity.serverKeysExcept("wss://one.example");
+    require(others.size() == 1 && others.front() == second, "Other servers' pins were not listed");
+  }
+  for (const auto* invalid : {"{", "{\"format\":\"monky-light-servers\",\"version\":1,\"servers\":{\"x\":\"bad\"}}"}) {
+    writeFile(pinsPath, invalid);
+    ProfileIdentity identity(profile.path);
+    requireFailure([&] { static_cast<void>(identity.serverKey("wss://one.example")); },
+                   "A damaged pin file was read as no pins");
+    requireFailure([&] { identity.pinServerKey("wss://one.example", first); }, "A damaged pin file was replaced");
+  }
+}
+
 void nonOrdinaryAndUnreadable(const fs::path& root) {
   DisposableProfile profile(root);
   {
@@ -519,6 +551,7 @@ int main(int argc, char** argv) {
     pendingMarkers(root);
     unrelatedAndInvalidPaths(root);
     settingsBesideIdentity(root);
+    serverKeysBesideIdentity(root);
     nonOrdinaryAndUnreadable(root);
 #ifdef __APPLE__
     movedMacosProfile(root);

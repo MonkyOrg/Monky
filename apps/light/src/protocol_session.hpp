@@ -57,6 +57,8 @@ struct Authenticated {
   Json server;
   // Absence stays absent: the media owner must explicitly select its ICE policy.
   std::optional<Json> iceServers;
+  // The server key this sign-in was bound to (server-key-auth, #821), to pin for this server.
+  std::optional<std::string> serverKey;
 };
 
 enum class SessionEventKind {
@@ -97,10 +99,21 @@ public:
     std::string deviceId;
     std::string nickname;
     std::optional<std::string> password;
+    // server-key-auth (#821): the key pinned for this server, and those pinned for the profile's other
+    // servers. A server pinned once must present that key; a new one may not present another's.
+    std::optional<std::string> serverKey;
+    std::vector<std::string> keysPinnedElsewhere;
+  };
+  // The key a server presents in AUTH_CHALLENGE and its signature proving it holds it.
+  struct ServerProof {
+    std::string key;
+    std::string signature;
   };
   struct Callbacks {
     std::function<void(const std::string&)> outbound;
-    std::function<std::string(const Nonce&)> signNonce;
+    // Signs the challenge, bound to the proof's key when there is one. Returns nullopt
+    // when the server's signature does not verify; nothing may be signed then.
+    std::function<std::optional<std::string>(const Nonce&, const std::optional<ServerProof>&)> signNonce;
     std::function<std::string()> requestId;
     std::function<void(const SessionEvent&)> event;
   };
@@ -211,6 +224,8 @@ private:
   std::string authId_;
   bool challengeAnswered_ = false;
   bool signatureSent_ = false;
+  // The server key the pending sign-in signature is bound to.
+  std::optional<std::string> boundKey_;
   std::string joinId_;
   std::string joinReply_;
   std::string controlId_;

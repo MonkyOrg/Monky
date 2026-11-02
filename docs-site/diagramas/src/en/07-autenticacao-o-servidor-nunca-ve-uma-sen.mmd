@@ -4,8 +4,8 @@ sequenceDiagram
 
     C->>S: AUTH_CONNECT<br/>(public key, nickname, protocol version, server password?)
     Note over S: validates the protocol version,<br/>the server password and the nickname
-    S->>C: AUTH_CHALLENGE (random nonce)
-    Note over C: signs the nonce with<br/>the private key
+    S->>C: AUTH_CHALLENGE (random nonce,<br/>server key, server signature)
+    Note over C: checks the key pinned for this server<br/>and its signature, then signs<br/>"monky-auth:v2:server key:nonce"<br/>with the private key
     C->>S: AUTH_CHALLENGE_RESPONSE (signature)
-    Note over S: checks the signature<br/>against the public key
+    Note over S: checks the signature, bound<br/>to its own key, against the public key
     S->>C: server state: channels, members, roles, history

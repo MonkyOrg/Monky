@@ -128,12 +128,19 @@ class Application final {
  public:
   Application(Options options, HeadlessConfiguration audio)
       : options_(std::move(options)), audio_(std::move(audio)), identity_(options_.profile),
-        session_({identity_.publicKeyHex(), identity_.deviceId(), options_.nickname, passwordFromEnvironment()},
+        session_({identity_.publicKeyHex(), identity_.deviceId(), options_.nickname, passwordFromEnvironment(),
+                  identity_.serverKey(options_.server), identity_.serverKeysExcept(options_.server)},
                  {[this](const std::string& frame) {
                     const auto attempt = attempt_;
                     loop_.post([this, attempt, frame] { send(attempt, frame); }, frame.size());
                   },
-                  [this](const ProtocolSession::Nonce& nonce) { return identity_.signChallenge(nonce); },
+                  [this](const ProtocolSession::Nonce& nonce, const std::optional<ProtocolSession::ServerProof>& proof)
+                      -> std::optional<std::string> {
+                    if (!proof) return identity_.signChallenge(nonce);
+                    // Nothing is signed for a server that does not prove the key it presents (#821).
+                    if (!verifyServerChallenge(nonce, proof->key, proof->signature)) return std::nullopt;
+                    return identity_.signServerChallenge(nonce, proof->key);
+                  },
                   [] { return randomUuid(); },
                   [this](const SessionEvent& event) {
                     const auto attempt = attempt_;
@@ -508,12 +515,22 @@ class Application final {
     operationDeadline_ = Clock::now() + 10ms;
   }
 
+  // The first protected sign-in pins this server's key in the profile; later runs require it (#821).
+  void pinServerKey(const std::string& key) {
+    try {
+      identity_.pinServerKey(options_.server, key);
+    } catch (const std::exception& error) {
+      output({{"event", "warning"}, {"detail", std::string("Could not remember the server key: ") + error.what()}});
+    }
+  }
+
   void onSession(std::uint64_t attempt, const SessionEvent& event) {
     if (event.connection != session_.connection()) return;
     switch (event.kind) {
       case SessionEventKind::authenticated:
         if (!closing_ && session_.authentication()) {
           const auto& auth = *session_.authentication();
+          if (auth.serverKey) pinServerKey(*auth.serverKey);
           output({{"event", "authenticated"}, {"userId", auth.userId}, {"sessionId", auth.sessionId},
                   {"voiceMode", session_.voiceMode() == VoiceMode::sfu ? "sfu" : "p2p"},
                   {"serverName", auth.server.at("name")},

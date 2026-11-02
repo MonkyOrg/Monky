@@ -4,7 +4,7 @@ const path = require('node:path');
 const childProcess = require('node:child_process');
 const { createHash, generateKeyPairSync, randomUUID, sign } = require('node:crypto');
 const { app, BrowserWindow, ipcMain, session: electronSession } = require('electron');
-const { AUDIO_PREVIEW_IPC, LOCAL_EXECUTION_IPC, SHORTCUT_IPC } = require('@monky/shared');
+const { AUDIO_PREVIEW_IPC, LOCAL_EXECUTION_IPC, SHORTCUT_IPC, memberAuthChallenge } = require('@monky/shared');
 const clientRoot = path.resolve(__dirname, '..', '..');
 const mainRoot = path.join(clientRoot, 'dist-electron', 'main', 'localExecution');
 const { LocalTools } = require(path.join(mainRoot, 'LocalTools.js'));
@@ -145,9 +145,10 @@ const ready = app.whenReady().then(async () => {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   register(legacy.identity, () => identity);
   register(legacy.clientId, () => identity.clientId);
-  register(legacy.sign, nonce => {
+  register(legacy.sign, (nonce, binding) => {
     assert.match(nonce, /^[0-9a-f]{64}$/i);
-    return sign(null, Buffer.from(nonce, 'hex'), keys.privateKey).toString('hex');
+    const signed = binding ? Buffer.from(memberAuthChallenge(nonce, binding.serverKey), 'utf8') : Buffer.from(nonce, 'hex');
+    return { signature: sign(null, signed, keys.privateKey).toString('hex') };
   });
   register(legacy.language, () => undefined);
   register(legacy.inServer, () => undefined);

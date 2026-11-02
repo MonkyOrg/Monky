@@ -16,6 +16,7 @@ import { SqliteChannelRepository, SqliteRoleRepository, SqliteServerRepository }
 import { ServerResourceScope } from './infrastructure/lifecycle/ServerResourceScope';
 import { closeHttpServer, listenHttpServer } from './infrastructure/lifecycle/httpLifecycle';
 import { Logger } from './infrastructure/logger/Logger';
+import { ServerIdentity } from './infrastructure/security/ServerIdentity';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { ClientSession } from './infrastructure/websocket/ClientSession';
 import { ChatHandler } from './infrastructure/websocket/ChatHandler';
@@ -602,6 +603,22 @@ test('a late setup commit failure waits for SFU warmup cleanup and releases ever
   assert.ok(closedWorkers >= 1);
 });
 
+test('the server identity is on disk as soon as the server exists, before any member can pin it (#821)', async (t) => {
+  const f = await fixture(t);
+  const presented = f.server['wsServer']['authService']['serverIdentity'].publicKey;
+  // Read from the file alone, as a restart after a crash right now would.
+  const snapshot = await DatabaseConnection.create(f.filename, { readOnly: true });
+  try {
+    const stored = await ServerIdentity.load({
+      getIdentityKey: () => new SqliteServerRepository(snapshot.getDb()).getIdentityKey(),
+      createIdentityKey: async () => { throw new Error('The identity was not persisted'); },
+    });
+    assert.equal(stored.publicKey, presented);
+  } finally {
+    snapshot.close();
+  }
+});
+
 test('failed shutdown persistence keeps its database available for explicit retry instead of claiming closure', async (t) => {
   const f = await fixture(t);
   const failure = new Error('Synthetic final persistence failure');
@@ -610,6 +627,8 @@ test('failed shutdown persistence keeps its database available for explicit retr
   t.mock.method(console, 'error', () => {});
   const driver = f.server['dbConn'].getDb();
   assert.ok(driver instanceof SqlJsDriver);
+  // Setup is persisted before the server serves (#821); a later change still waits for the debounce.
+  await f.server['serverRepo'].updateServer({ name: 'Unsaved before shutdown' });
   try {
     await assert.rejects(f.server.stop(), /Synthetic final persistence failure/);
     assert.equal(driver['isClosed'], false);

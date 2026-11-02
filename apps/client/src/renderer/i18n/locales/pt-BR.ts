@@ -1216,6 +1216,9 @@ export const ptBR = {
   'connection.use': 'Usar',
   'connection.removeFromSaved': 'Remover dos salvos',
   'connection.editSavedServer': 'Editar conexão',
+  'connection.addServerAddress': 'Adicionar endereço',
+  'connection.addServerAddressMessage': 'Outro endereço do mesmo servidor "{name}", como o IP da rede local ou o IP público. Ele entra salvo como mais um servidor, que só aceita a chave de identidade deste. Adicione apenas endereços que você sabe que levam a este servidor.',
+  'connection.addServerAddressExists': 'Este endereço já está salvo.',
   'connection.serverOnline': 'Servidor online',
   'connection.serverOffline': 'Servidor offline',
   'connection.unknownUser': 'Usuário',
@@ -1995,6 +1998,10 @@ export const ptBR = {
 
   // ── Rede e conexão (NetworkClient.ts) ────────────────────────────────────
   'network.genericConnectError': 'Não foi possível conectar. O servidor pode estar offline ou fechado, ou o IP/porta podem estar incorretos.',
+  'network.serverKeyChanged': 'A chave de identidade deste servidor mudou desde a última vez que você entrou. O Monky não entrou para não entregar o seu login a outro servidor. Se o dono trocou a chave de propósito, peça a ele um convite novo e entre por ele.',
+  'network.serverKeyMissing': 'Este servidor já apresentou uma chave de identidade e agora não apresentou nenhuma. O Monky não entrou para não entregar o seu login a outro servidor. Se o servidor voltou para uma versão antiga, peça ao dono para atualizá-lo.',
+  'network.serverKeyOfOtherServer': 'Este endereço apresentou a chave de identidade de outro servidor que você salvou. O Monky não entrou, porque um servidor pode estar repassando o login daquele. Se for o mesmo servidor em outro endereço, adicione este endereço pelo menu do servidor salvo, em "Adicionar endereço".',
+  'network.serverKeyInvalid': 'O servidor não provou ter a chave de identidade que apresentou. O Monky não entrou.',
   'network.notMonkyServer': 'O endereço {host}:{port} respondeu, mas não é um servidor Monky válido. Verifique a porta.',
   'network.portClosed': 'O computador {host} está online, mas nenhum servidor Monky está ativo na porta {port}. Verifique se o servidor foi iniciado.',
   'network.hostUnreachable': 'Não foi possível encontrar o servidor em {host}:{port}. O computador parece estar offline. Verifique o IP e sua conexão.',

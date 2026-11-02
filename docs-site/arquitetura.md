@@ -321,7 +321,7 @@ São dados com finalidades e garantias diferentes.
 |---|---|
 | `monky_settings` | Preferências: qualidade, dispositivos, volumes, atalhos, soundboard |
 | `monky_nickname` / `monky_avatar` | Sua identidade visual |
-| `monky_saved_servers` | Servidores que você salvou para reconectar |
+| `monky_saved_servers` | Servidores que você salvou para reconectar, com a chave de identidade fixada de cada um |
 | `monky_created_servers` | Servidores que você criou nesta máquina |
 | `monky_favorites` | Favoritos locais de sons por caminho completo e de servidores por endereço/porta |
 | `monky_device_id` | Identifica **este dispositivo** (permite a mesma pessoa em dois aparelhos) |
@@ -487,6 +487,59 @@ A senha do servidor, quando existe, protege a *entrada* e é conferida pelo
 servidor antes do desafio. Ela é diferente da senha local do backup da sua
 identidade. A chave privada e a senha desse backup não são enviadas no login.
 
+#### A assinatura vale para um servidor só {#a-assinatura-vale-para-um-servidor-so}
+
+Se a assinatura cobrisse só o nonce, um servidor M em que você entrou poderia
+abrir uma conexão com outro servidor A usando a sua chave pública, repassar a
+você o desafio de A e entregar a sua resposta a A, entrando lá como você. Por
+isso cada servidor tem uma **chave de identidade Ed25519** própria e a
+assinatura passa a nomear essa chave (recurso negociado `server-key-auth`):
+
+1. No `AUTH_CHALLENGE`, o servidor manda o nonce, a sua chave pública e uma
+   assinatura de `monky-server-auth:v1:<chave do servidor>:<nonce>`, que prova
+   que ele tem a chave que apresenta.
+2. O app confere essa prova e assina `monky-auth:v2:<chave do servidor>:<nonce>`,
+   nunca o nonce cru. Uma resposta obtida por M fica vinculada à chave de M e
+   não vale em A.
+3. No primeiro login protegido, o app **fixa** a chave para aquele endereço
+   salvo (TOFU) e a guarda no próprio servidor salvo, que vai junto no backup
+   de servidores. Um convite também pode trazer a chave.
+
+O app decide (`decideServerKey`, em `@monky/shared`) antes de assinar
+qualquer coisa:
+
+| Situação no endereço | O que o app faz |
+|---|---|
+| Nunca apresentou chave | Assina o nonce, como antes (servidores antigos continuam funcionando) |
+| Primeira chave, de nenhum outro servidor salvo | Assina vinculado a ela e a fixa ao entrar |
+| A mesma chave fixada | Assina vinculado a ela |
+| Outra chave | Recusa (`Chave mudou`). Só um **convite novo** que traga a chave nova a substitui |
+| Nenhuma chave, depois de já ter apresentado uma | Recusa: não há rebaixamento para o formato antigo |
+| A chave de **outro** servidor salvo | Recusa, mesmo vindo de convite. Um segundo endereço do mesmo servidor entra pelo menu do servidor salvo, em **Adicionar endereço**, que copia a chave fixada |
+
+O servidor também não aceita rebaixamento: depois do primeiro login vinculado
+de um membro, ele recusa as assinaturas do nonce cru daquela identidade
+(`FEATURE_REQUIRES_UPDATE`), porque um servidor intermediário poderia ainda
+obtê-las de um app que nunca o viu com chave. Bots não usam esse desafio
+(veja `bot-key-proof`).
+
+A chave privada do servidor mora no `server.db` (tabela `server_identity`),
+criada na primeira subida que não a encontra e gravada em disco antes de o
+servidor aceitar conexões. Por isso ela acompanha a cópia do banco feita antes
+de cada atualização, a pasta de dados levada para outra máquina e qualquer
+reinício. Trocar a chave (apagar a tabela, ou começar com um banco novo no
+mesmo endereço) faz os apps recusarem o servidor até receberem um convite novo.
+
+O Monky Light segue a mesma regra e guarda as chaves fixadas no perfil, em
+`monky-light-servers.json`, por endereço de servidor.
+
+**Risco residual.** A proteção vale a partir do primeiro login protegido em A.
+Se você nunca entrou em A com um app que tenha o recurso, um servidor M visitado
+pela primeira vez pode apresentar a chave de A e repassar o desafio dele; o app
+não tem como distinguir isso de um servidor novo legítimo. Depois de você entrar
+em A uma vez, a chave de A fica fixada e qualquer outro endereço que a apresente
+é recusado.
+
 ### Sessões: a mesma pessoa em vários aparelhos
 
 Uma sessão é identificada por `userId:deviceId`, não só pelo usuário. É isso que
@@ -512,6 +565,7 @@ tabela `schema_migrations` — o servidor só roda o que ainda não rodou.
 | Tabela | Guarda |
 |---|---|
 | `server_meta` | Configuração do servidor: nome, senha, dono, limites, ícone |
+| `server_identity` | A chave de identidade Ed25519 do servidor ([vínculo da assinatura](#a-assinatura-vale-para-um-servidor-so)) |
 | `users` | Membros, com a chave pública de cada um |
 | `channels` | Canais de voz e de texto |
 | `messages` | Histórico do chat |
@@ -874,6 +928,10 @@ Coisas que são consequência direta da arquitetura, não bugs:
   atualizar, e um recurso novo só aparece quando os dois lados o têm.
 - **Áudio de tela só em Windows e macOS**, por depender de API nativa de cada
   sistema.
+- **O primeiro contato confia no servidor.** A chave de um servidor é fixada no
+  primeiro login protegido. Antes disso, um servidor desconhecido pode apresentar
+  a chave de outro que você ainda não visitou com o app atual (veja
+  [risco residual](#a-assinatura-vale-para-um-servidor-so)).
 - **Homologação depende do hardware.** O caminho macOS foi exercitado em M1 com
   áudio/vídeo P2P/SFU e cerca de 57 FPS em 4K60. O probe aceita Main 6.0/4K120,
   mas isso não homologa 120 FPS sustentados nem GPU Intel. Loopback e compilação

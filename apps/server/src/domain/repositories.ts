@@ -61,6 +61,13 @@ export interface IServerRepository {
   updateServer(server: Partial<ServerRecord>): Promise<void>;
 }
 
+export interface IServerIdentityRepository {
+  /** The server's Ed25519 identity as PKCS#8 DER hex, stored by `createIdentityKey` once (#821). */
+  getIdentityKey(): Promise<string | null>;
+  /** Stores the identity unless one exists already, and returns the one kept. */
+  createIdentityKey(privateKeyHex: string, createdAt: number): Promise<string>;
+}
+
 export interface ServerAuditQuery {
   before?: number;
   after?: number;
@@ -96,6 +103,9 @@ export interface IUserRepository {
   listAll(): Promise<UserRecord[]>;
   /** Registered members, which is what the membership cap counts (#403). */
   count(): Promise<number>;
+  /** Whether the member signed in bound to this server's key once, and must from now on (#821). */
+  requiresServerKey(id: string): Promise<boolean>;
+  requireServerKey(id: string): Promise<void>;
 }
 
 export interface IVoiceRestrictionRepository {

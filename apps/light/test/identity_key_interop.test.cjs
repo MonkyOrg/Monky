@@ -1,8 +1,9 @@
 const assert = require('node:assert/strict');
-const { createPublicKey, randomBytes, verify } = require('node:crypto');
+const { createPublicKey, generateKeyPairSync, randomBytes, sign, verify } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const { createInterface } = require('node:readline');
 const { test } = require('node:test');
+const { memberAuthChallenge, serverAuthChallenge } = require('@monky/shared');
 const { nativeExecutable } = require('./native_test_paths.cjs');
 
 const executable = process.env.MONKY_LIGHT_IDENTITY_TEST_BIN || nativeExecutable('monky-light-identity-test');
@@ -60,6 +61,21 @@ test('native nonce signatures verify with the server crypto implementation', { t
 
   child.stdin.write(`${nonce.toString('hex').toUpperCase()}\n`);
   assert.equal(await line(), signatureHex);
+
+  // server-key-auth (#821): the bytes the native client signs are the ones the server verifies.
+  const server = generateKeyPairSync('ed25519');
+  const serverKey = server.publicKey.export({ format: 'der', type: 'spki' }).toString('hex');
+  const nonceHex = nonce.toString('hex');
+  child.stdin.write(`${nonceHex} ${serverKey}\n`);
+  const bound = Buffer.from(await line(), 'hex');
+  assert.equal(verify(null, Buffer.from(memberAuthChallenge(nonceHex, serverKey), 'utf8'), publicKey, bound), true);
+  assert.equal(verify(null, nonce, publicKey, bound), false, 'A bound signature must not answer a bare-nonce challenge');
+  const proof = sign(null, Buffer.from(serverAuthChallenge(nonceHex, serverKey), 'utf8'), server.privateKey).toString('hex');
+  child.stdin.write(`verify ${nonceHex} ${serverKey} ${proof}\n`);
+  assert.equal(await line(), '1', 'A server proof made by the server implementation must verify natively');
+  const otherNonce = randomBytes(32).toString('hex');
+  child.stdin.write(`verify ${otherNonce} ${serverKey} ${proof}\n`);
+  assert.equal(await line(), '0', 'A proof for another challenge must not verify');
   child.stdin.end();
   const result = await closed;
   assert.ifError(inputError);

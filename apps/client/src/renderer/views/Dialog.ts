@@ -337,10 +337,10 @@ export function showConfirmWithText(
 }
 
 export function showTextForm(options: {
-  title: string; fields: DialogTextInput[]; focusInput?: number; signal?: AbortSignal;
+  title: string; fields: DialogTextInput[]; focusInput?: number; signal?: AbortSignal; message?: string;
 }): Promise<string[] | null> {
   return new Promise(resolve => buildDialog({
-    title: options.title, message: '', variant: 'info', showCancel: true,
+    title: options.title, message: options.message ?? '', variant: 'info', showCancel: true,
     confirmLabel: t('common.confirm'), cancelLabel: t('common.cancel'), confirmClass: 'btn-primary',
     textInputs: options.fields, focusInput: options.focusInput, signal: options.signal,
     onResolve: (confirmed, _checked, _value, values) => resolve(confirmed ? values : null),

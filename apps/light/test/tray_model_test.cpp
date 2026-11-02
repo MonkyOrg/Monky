@@ -219,6 +219,20 @@ void failuresAndPermissionsReachTheInterface() {
   const auto failure = model.takeAlert();
   require(failure && *failure == "Channel is full", "A failure must carry its detail");
 
+  // A sign-in refused over the server's identity key is explained in the interface language (#821).
+  TrayModel portuguese(Language::portuguese);
+  require(portuguese.apply({{"event", "session-error"}, {"code", "SERVER_KEY_CHANGED"}, {"detail", "key changed"}}),
+          "A refused server key must reach the interface");
+  const auto changed = portuguese.takeAlert();
+  require(changed && changed->rfind("A chave de identidade deste servidor mudou", 0) == 0,
+          "A changed server key must be explained, not shown as the core's English detail");
+  for (const auto* code : {"SERVER_KEY_MISSING", "SERVER_KEY_OF_OTHER_SERVER", "SERVER_KEY_INVALID"}) {
+    model.apply({{"event", "session-error"}, {"code", code}, {"detail", "core detail"}});
+    const auto alert = model.takeAlert();
+    require(alert && *alert != "core detail" && alert->find("Monky Light did not join") != std::string::npos,
+            "Every server key refusal must be explained");
+  }
+
   require(model.apply({{"event", "microphone-permission"}, {"state", "requesting"}}),
           "A pending permission must redraw");
   model.apply({{"event", "voice-admitted"}, {"channelId", "first"}});

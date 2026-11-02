@@ -6,6 +6,6 @@ module.exports = { identitySignChannel };
 if (process.type === 'renderer') {
   const { contextBridge, ipcRenderer } = require('electron');
   contextBridge.exposeInMainWorld('voiceActivityIdentity', {
-    signChallenge: nonce => ipcRenderer.invoke(identitySignChannel, nonce),
+    signChallenge: (nonce, binding) => ipcRenderer.invoke(identitySignChannel, nonce, binding),
   });
 }

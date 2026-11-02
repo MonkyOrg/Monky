@@ -10,6 +10,7 @@ import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadRes
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 import type { ServerInviteResult } from './serverInvites.js';
+import type { ServerChallengeBinding, SignChallengeResult } from './serverAuth.js';
 import type { EventCalendarExport, EventCalendarSaveResult } from './serverEventCalendar.js';
 import type { HostingSkillId, HostingSkillSaveResult } from './hostingSkills.js';
 import type { FileBatchDownloadRequest, FileBatchDownloadResult } from './fileDownloads.js';
@@ -998,7 +999,7 @@ export interface IpcInvokeChannels extends DmInvokeChannels {
   'identity:create': { args: []; returnType: AppIdentityResult };
   'identity:get': { args: []; returnType: AppIdentityResult };
   'identity:get-client-id': { args: []; returnType: string };
-  'identity:sign-challenge': { args: [nonceHex: string]; returnType: string };
+  'identity:sign-challenge': { args: [nonceHex: string, binding?: ServerChallengeBinding]; returnType: SignChallengeResult };
   'identity:export': { args: [password: string, extras?: string, dmMode?: DmExportMode]; returnType: string };
   'identity:import': {
     args: [exportedIdentity: string, password: string, replace?: string];

@@ -4,6 +4,7 @@ import {
 } from '@monky/shared';
 import type { CommunityFeed } from '../../core/CommunityFeed';
 import { ProtocolRequestError } from '../../core/NetworkClient';
+import { connectionStore } from '../../stores/connectionStore';
 import { getLanguage, t } from '../../i18n';
 import { copyText, reportError } from '../../utils/feedback';
 import { html } from '../../utils/html';
@@ -60,9 +61,12 @@ async function confirmEvent(ctx: CommunityContext, id: string, signal: AbortSign
 
 function eventLink(feed: CommunityFeed, event: ServerEventPublic): string {
   const address = new URL(feed.client.getHttpBaseUrl());
+  const host = address.hostname;
+  const port = Number(address.port || (address.protocol === 'https:' ? 443 : 80));
+  // The key this app pinned for the server, so whoever follows the link signs in bound to it (#821).
+  const serverKey = connectionStore.serverKeyExpectation({ host, port }).pinned;
   return createServerInviteLink({
-    v: 1, host: address.hostname, port: Number(address.port || (address.protocol === 'https:' ? 443 : 80)),
-    name: feed.server.serverDetails?.name, eventId: event.id,
+    v: 1, host, port, name: feed.server.serverDetails?.name, eventId: event.id, ...(serverKey ? { serverKey } : {}),
   }, getLanguage());
 }
 

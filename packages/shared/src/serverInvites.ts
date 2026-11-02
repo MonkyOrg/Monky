@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { deflateSync, Inflate } from 'fflate';
+import { ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX } from './constants.js';
+import { serverPublicKeySchema } from './serverAuth.js';
 
 // A dedicated page, not the docs home: link previews (WhatsApp, Discord…) never
 // receive the fragment, so the page itself must carry the invitation card.
@@ -15,6 +17,7 @@ export const MAX_SERVER_INVITE_LENGTH = 16384;
 const MAX_INVITE_BYTES = 4800;
 // This is part of the invitation format, not a configurable server default.
 const INVITE_DEFAULT_PORT = 3000;
+const SERVER_KEY_BYTES = 32;
 const encoder = new TextEncoder();
 // A leading U+FEFF belongs to the field, including when that field is a password.
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -50,6 +53,8 @@ export const serverInviteSchema = z.object({
   name: z.string().min(1).max(100).refine(validUnicode).optional(),
   password: z.string().min(1).max(1024).refine(validUnicode).refine(value => !/[\x00-\x1f\x7f]/.test(value)).optional(),
   eventId: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/).optional(),
+  /** The server's identity (server-key-auth, #821): the only way the app accepts a key other than the one it pinned. */
+  serverKey: serverPublicKeySchema.optional(),
 }).strict();
 
 export type ServerInvite = z.infer<typeof serverInviteSchema>;
@@ -78,6 +83,10 @@ function hostType(host: string): number {
   if (host === '[::1]') return 5;
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return 1;
   return host.startsWith('[') ? 2 : 0;
+}
+
+function hexBytes(value: string): number[] {
+  return Array.from({ length: value.length / 2 }, (_, index) => parseInt(value.slice(index * 2, index * 2 + 2), 16));
 }
 
 function ipv6Bytes(host: string): number[] {
@@ -115,6 +124,10 @@ function inviteToken(value: ServerInvite): string {
           body.push(parseInt(password.slice(index, index + 2).padEnd(2, '0'), 16));
         }
       }
+    }
+    // The raw Ed25519 key closes the body; its SPKI prefix is the same for every server.
+    if (invite.serverKey !== undefined) {
+      body.push(...hexBytes(invite.serverKey.slice(ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX.length)));
     }
     const raw = Uint8Array.from(body);
     const compressed = deflateSync(raw, { level: 9 });
@@ -213,11 +226,15 @@ function readInvite(header: number, body: Uint8Array): ServerInvite {
     password = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('').slice(0, digits);
     if (passwordMode === 3) password = password.toUpperCase();
   }
+  const serverKey = body.length - offset === SERVER_KEY_BYTES
+    ? ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX + [...take(SERVER_KEY_BYTES)].map(byte => byte.toString(16).padStart(2, '0')).join('')
+    : undefined;
   if (offset !== body.length) throw new Error('Unexpected invitation data');
   return serverInviteSchema.parse({
     v: 1, host, port,
     ...(name !== undefined ? { name } : {}),
     ...(password !== undefined ? { password } : {}),
+    ...(serverKey !== undefined ? { serverKey } : {}),
   });
 }
 

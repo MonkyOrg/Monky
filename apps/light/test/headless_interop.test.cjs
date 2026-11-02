@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { once } = require('node:events');
+const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 const { MessageType, Permission, ProtocolErrorCode, rtcSignalSchema } = require('@monky/shared');
@@ -52,6 +53,10 @@ test('native app supports Unicode password/profile, idle heartbeat and stable id
   await first.close();
   await admin.peer.wait(message => message.type === MessageType.USER_LEFT && message.payload.userId === auth.userId,
     0, 1000);
+  // The first protected sign-in pinned the server's key in the profile; the next one is bound to it (#821).
+  const pins = JSON.parse(fs.readFileSync(path.join(options.profile, 'monky-light-servers.json'), 'utf8'));
+  assert.equal(pins.format, 'monky-light-servers');
+  assert.match(pins.servers[fixture.url] ?? '', /^302a300506032b6570032100[0-9a-f]{64}$/);
   const second = new NativeClient(fixture, options);
   const again = await second.wait('authenticated');
   assert.equal(again.userId, auth.userId);

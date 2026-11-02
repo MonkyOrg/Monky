@@ -46,7 +46,7 @@ if (!process.versions.electron) {
 async function runElectron() {
   const { app, BrowserWindow, ipcMain } = require('electron');
   const { generateKeyPairSync, sign } = require('node:crypto');
-  const { MessageType } = require('@monky/shared');
+  const { MessageType, memberAuthChallenge } = require('@monky/shared');
   const { identitySignChannel } = require('./voiceActivityPreload.cjs');
   const config = JSON.parse(process.env.MONKY_ACTIVITY_FIXTURE);
   app.setPath('userData', config.profile);
@@ -59,12 +59,13 @@ async function runElectron() {
   await app.whenReady();
   const windows = [];
   const identities = new Map();
-  ipcMain.handle(identitySignChannel, (event, nonce) => {
+  ipcMain.handle(identitySignChannel, (event, nonce, binding) => {
     const identity = identities.get(event.sender.id);
     assert.ok(identity, 'Only owned fixture windows may sign');
     assert.equal(typeof nonce, 'string');
     assert.match(nonce, /^[a-f0-9]{64}$/i);
-    return sign(null, Buffer.from(nonce, 'hex'), identity.privateKey).toString('hex');
+    const signed = binding ? Buffer.from(memberAuthChallenge(nonce, binding.serverKey), 'utf8') : Buffer.from(nonce, 'hex');
+    return { signature: sign(null, signed, identity.privateKey).toString('hex') };
   });
   const errors = [];
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -269,7 +270,7 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
     setPttConfig: async () => true, fitHomeWindowToContent: async () => {},
     hostServerStatus: async () => ({ servers: [] }),
     onHostServerStatusChanged: () => () => {}, writeClientLog: async () => {},
-    signChallenge: nonce => window.voiceActivityIdentity.signChallenge(nonce),
+    signChallenge: (nonce, binding) => window.voiceActivityIdentity.signChallenge(nonce, binding),
   };
   const [
     { ActivityTestApp }, { audioProcessor }, { webRtcManager: rtc }, { voiceStore: voice },

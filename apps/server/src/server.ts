@@ -55,6 +55,7 @@ import { AttachmentStorageService } from './infrastructure/security/AttachmentSt
 import { AvatarStorageService } from './infrastructure/security/AvatarStorageService';
 import { PasswordService } from './infrastructure/security/PasswordService';
 import { RateLimiter } from './infrastructure/security/RateLimiter';
+import { ServerIdentity } from './infrastructure/security/ServerIdentity';
 import { CoturnManager } from './infrastructure/turn/CoturnManager';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
@@ -262,6 +263,9 @@ export class MonkyServer {
         const dbConn = await DatabaseConnection.create(path.join(config.dataDir, 'server.db'));
         database = dbConn;
         const server = await dbConn.getDb().transactionAsync(() => MonkyServer.createResources(config, dbConn, resources, logScope));
+        // What setup wrote, the server identity included, reaches the file before
+        // any member can pin that key; a crash right after must not lose it (#821).
+        dbConn.getDb().flush();
         setupComplete = true;
         return server;
       } catch (error) {
@@ -324,6 +328,8 @@ export class MonkyServer {
 
     let getOnlineUsers: () => Map<string, { user: UserSummary }> = () => new Map();
 
+    // Before any connection: created here on the first start, and on disk before the server listens.
+    const serverIdentity = await ServerIdentity.load(serverRepo);
     const authService = new AuthService(
       serverRepo,
       userRepo,
@@ -334,6 +340,7 @@ export class MonkyServer {
       attachmentService,
       permissionService,
       roleService,
+      serverIdentity,
       channelRepo.categories
     );
 

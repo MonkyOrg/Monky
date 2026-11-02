@@ -4,6 +4,8 @@ import { nativeProtocolHeader } from './generate-light-contracts.js';
 
 const contract = {
   version: 7,
+  minimumVersion: 5,
+  features: ['chat-blocks', 'server-key-auth'],
   messageTypes: { VOICE_JOIN: 'voice.join', AUTH_CONNECT: 'auth.connect' },
   errorCodes: { UNAUTHORIZED: 'UNAUTHORIZED', BAD_REQUEST: 'BAD_REQUEST' },
   limits: { MAX_MEMBERS: 20, NO_LIMIT: 0 },
@@ -23,6 +25,8 @@ test('native contracts preserve the source version, message values and limits', 
 test('native contract generation is independent of source property order', () => {
   assert.equal(nativeProtocolHeader(contract), nativeProtocolHeader({
     version: contract.version,
+    minimumVersion: contract.minimumVersion,
+    features: contract.features,
     messageTypes: { AUTH_CONNECT: 'auth.connect', VOICE_JOIN: 'voice.join' },
     errorCodes: { BAD_REQUEST: 'BAD_REQUEST', UNAUTHORIZED: 'UNAUTHORIZED' },
     limits: { NO_LIMIT: 0, MAX_MEMBERS: 20 },
@@ -65,14 +69,22 @@ test('fractional limits remain floating point rather than being truncated', () =
 test('every current shared message and limit is represented in the native contract', async () => {
   const { PROTOCOL_VERSION, LIMITS, RECONNECT_DELAYS_MS } = await import('../packages/shared/dist/constants.js');
   const { MessageType, ProtocolErrorCode } = await import('../packages/shared/dist/protocol.js');
+  const { createProtocolOffer } = await import('../packages/shared/dist/protocolCompatibility.js');
+  const offer = createProtocolOffer('client');
   const header = nativeProtocolHeader({
     version: PROTOCOL_VERSION,
+    minimumVersion: offer.minimumVersion,
+    features: offer.features,
     messageTypes: MessageType,
     errorCodes: ProtocolErrorCode,
     limits: LIMITS,
     reconnectDelays: RECONNECT_DELAYS_MS,
   });
   assert.ok(header.includes(`VERSION = ${PROTOCOL_VERSION}LL;`));
+  assert.ok(header.includes(`MIN_CLIENT_VERSION = ${offer.minimumVersion}LL;`));
+  assert.ok(header.includes(`CLIENT_FEATURES = {${offer.features.map((feature) => JSON.stringify(feature)).join(', ')}};`),
+    'Light offers what the desktop app offers, so the server only binds sign-ins it asked for (#821)');
+  assert.ok(offer.features.includes('server-key-auth'));
   for (const [key, value] of Object.entries(MessageType)) {
     assert.ok(header.includes(`${key} = ${JSON.stringify(value)};`), key);
   }
@@ -100,5 +112,11 @@ test('invalid versions, identifiers and unsupported values fail explicitly', () 
   }
   for (const errorCodes of [null, {}, { INVALID: 3 }]) {
     assert.throws(() => nativeProtocolHeader({ ...contract, errorCodes }), TypeError);
+  }
+  for (const minimumVersion of [0, 8, 1.5, undefined]) {
+    assert.throws(() => nativeProtocolHeader({ ...contract, minimumVersion }), /Minimum protocol version/);
+  }
+  for (const features of [undefined, [], ['Bad Name'], [5]]) {
+    assert.throws(() => nativeProtocolHeader({ ...contract, features }), /Protocol features/);
   }
 });
