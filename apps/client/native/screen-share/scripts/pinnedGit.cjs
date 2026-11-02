@@ -61,14 +61,14 @@ function gitEnvironment(env, isolation) {
  * inherited, and home, temporary files and caches stay inside the workspace. `paths` precede the
  * inherited PATH. Creating the environment never creates its directories.
  */
-function toolEnvironment(env, workspace, { paths = [], platform = process.platform } = {}) {
+function toolEnvironment(env, workspace, { paths = [], platform = process.platform, delimiter = platform === 'win32' ? ';' : ':' } = {}) {
   const isolation = workspaceIsolation(workspace);
   const inheritedPath = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1];
   const result = Object.fromEntries(Object.entries(env)
     .filter(([key]) => !FOREIGN_TOOL_VARIABLE.test(key) && !INHERITED_LOCATION.test(key)));
   const home = isolation.home;
   Object.assign(result, {
-    PATH: [...paths, inheritedPath].filter(Boolean).join(platform === 'win32' ? ';' : ':'),
+    PATH: [...paths, inheritedPath].filter(Boolean).join(delimiter),
     HOME: home, TEMP: isolation.temporary, TMP: isolation.temporary, TMPDIR: isolation.temporary,
     CIPD_CACHE_DIR: path.join(isolation.cache, 'cipd'),
     VPYTHON_VIRTUALENV_ROOT: path.join(isolation.cache, 'vpython'),

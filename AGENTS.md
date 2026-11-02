@@ -142,6 +142,21 @@ npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\p
 
 ---
 
+## ⚡ Checagem rápida antes de cada push
+
+Antes de todo push, rode as duas checagens abaixo (cerca de 1 minuto e meio). Elas pegam erros bobos que derrubariam o CI longo; a validação completa continua sendo o CI do GitHub.
+
+```powershell
+npm run build
+npm run ci:local -- --only "^docs "
+```
+
+- `npm run build` pega erro de tipo e de compilação em todos os pacotes.
+- `--only "^docs "` confere a nota de release, o bump do protocolo, os pares PT/EN e se sobrou arquivo fora do commit.
+
+Se alguma falhar, corrija antes do push.
+
+---
 ## 🚢 Publicação de Releases: Somente por Merge de PR
 
 - **Inclua o changelog do aplicativo no mesmo PR.** Mudanças de aplicação/dependências exigem um arquivo novo `release-notes/*.json` com `group`, `pt-BR` e `en`, conforme o `CONTRIBUTING.md`. O changelog técnico dos commits não substitui essas notas. Rode `node scripts/test-changelog.js` e, após os commits, `node scripts/check-client-release-notes.js --base origin/main --head HEAD --merge-base`; CI e release bloqueiam a ausência de notas.

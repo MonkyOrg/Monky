@@ -181,7 +181,7 @@ function childEnvironment(context) {
     path.join(context.paths.workspace, 'depot_tools'),
   ].filter(Boolean);
   const result = pinnedGit.toolEnvironment(windowsToolchain.cleanWindowsEnvironment(context.env),
-    context.paths.workspace, { paths: pathParts, platform: 'win32' });
+    context.paths.workspace, { paths: pathParts, platform: 'win32', delimiter: path.delimiter });
   if (context.tools.windowsToolchain) {
     const selected = windowsToolchain.buildEnvironment(context.tools.windowsToolchain,
       context.tools.gclientPython || context.tools.python, result);

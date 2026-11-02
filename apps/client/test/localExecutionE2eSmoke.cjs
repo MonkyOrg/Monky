@@ -401,14 +401,18 @@ async function runMediaSmoke(t, mode) {
   const lookup = dns.lookup;
   const promiseLookup = dns.promises.lookup;
   const localDnsNames = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+  // The refused name and its caller make a failure on another host diagnosable.
+  const refusedDns = hostname => Object.assign(new Error(`External DNS disabled by isolated E2E: ${hostname}\n`
+    + new Error().stack.split('\n').slice(3, 10).join('\n')), { code: 'ENOTFOUND' });
   dns.lookup = (hostname, options, callback) => {
     if (localDnsNames.has(hostname)) return lookup(hostname, options, callback);
     const done = typeof options === 'function' ? options : callback;
-    queueMicrotask(() => done(Object.assign(new Error('External DNS disabled by isolated E2E.'), { code: 'ENOTFOUND' })));
+    const error = refusedDns(hostname);
+    queueMicrotask(() => done(error));
   };
   dns.promises.lookup = async (hostname, ...options) => {
     if (localDnsNames.has(hostname)) return promiseLookup(hostname, ...options);
-    throw Object.assign(new Error('External DNS disabled by isolated E2E.'), { code: 'ENOTFOUND' });
+    throw refusedDns(hostname);
   };
   t.after(async () => {
     if (!successful) t.diagnostic(JSON.stringify({

@@ -771,9 +771,8 @@ async function runCameraEffectsSmoke(phase) {
           sampleVideo.pause();
         }
         await service.setCameraEffects({ mode, backgroundSource: 'color', blurRadius: 24 });
-        // Producer readiness and native video presentation are different clocks.
-        // Hold only the fixture preview past the former 180 ms sleep.
-        const resumed = delayPreview ? tick(600).then(() => sampleVideo.play()) : Promise.resolve();
+        // Producer readiness and native video presentation are different clocks: the fixture
+        // preview stays paused until both checks below ran, however long sampling takes.
         try {
           if (delayPreview) {
             await sampleProcessed(0.07, 0.2);
@@ -791,6 +790,7 @@ async function runCameraEffectsSmoke(phase) {
             check(detail.status === 'ready' && detail.preview.paused
               && Array.isArray(detail.preview.presented) && Array.isArray(detail.processor.processed),
             'A presentation timeout exposes both preview and processed pixels with live state');
+            await sampleVideo.play();
           }
           await watch(stream);
           check(service.getCameraStream() === stream && track.readyState === 'live' && requests.length === 1,
@@ -803,7 +803,7 @@ async function runCameraEffectsSmoke(phase) {
               `Actual ${mode} pixels remain correct after changing neutral physical keys`);
           }
         } finally {
-          await resumed;
+          if (delayPreview && sampleVideo.paused) await sampleVideo.play();
         }
       }
       check(failures.length === 0, 'Valid RGB choices and real model transitions produce no camera shutdown/error');
