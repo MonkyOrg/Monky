@@ -26,13 +26,6 @@ export function sidOf(p: ParticipantViewModel): string {
 }
 
 /**
- * Share id used for peers that only announce the legacy `isScreenSharing`
- * boolean (clients older than #253). They can only ever have one share, so a
- * fixed key is enough to give their tile a stable identity.
- */
-export const LEGACY_SHARE_ID = 'legacy';
-
-/**
  * Share ids come from other clients and are interpolated into DOM ids and data
  * attributes, so only MediaStream-shaped ids are accepted. Anything else is
  * treated as a hostile payload and ignored.
@@ -59,9 +52,9 @@ export const stageTileKey = {
 
 /**
  * Screen shares to render for a participant (#253): this client's own shares as
- * the call knows them, otherwise what the peer announced. Falls back to a single
- * synthetic share when the peer only reports the legacy `isScreenSharing`
- * boolean, so older clients still show up as one tile.
+ * the call knows them, otherwise what the peer announced. Every screen is a
+ * native source announced in `screenShareIds` (#830), so a bare
+ * `isScreenSharing` without ids yields no tile.
  *
  * Share ids arrive from other clients and end up in DOM ids and attributes,
  * so anything that isn't a plain MediaStream-style id is dropped here — this
@@ -69,13 +62,9 @@ export const stageTileKey = {
  */
 export function screenShareIds(p: ParticipantViewModel, ownShareIds?: readonly string[]): string[] {
   if (ownShareIds) return [...ownShareIds];
-  const announced = p.voiceState?.screenShareIds;
-  if (announced && announced.length > 0) {
-    // A repeated id would give two tiles one key, and the stage keeps one card per key.
-    const safe = [...new Set(announced.filter(isSafeShareId))];
-    if (safe.length > 0) return safe.slice(0, SCREEN_SHARE_LIMITS.maximum);
-  }
-  return p.voiceState?.isScreenSharing ? [LEGACY_SHARE_ID] : [];
+  // A repeated id would give two tiles one key, and the stage keeps one card per key.
+  const safe = [...new Set((p.voiceState?.screenShareIds ?? []).filter(isSafeShareId))];
+  return safe.slice(0, SCREEN_SHARE_LIMITS.maximum);
 }
 
 /** This client's own media in the call, which the roster may not reflect yet. */
@@ -122,16 +111,9 @@ export function measuredTiles(
     || (tile.kind === 'screen' && (tile.local || isWatching(sidOf(tile.p), tile.shareId!))));
 }
 
-/**
- * Resolves the remote stream backing a screen tile. Pre-#253 peers announce
- * their real MediaStream id over `screen-video-meta` but never publish a
- * `screenShareIds` list, so their tile is keyed by LEGACY_SHARE_ID and has to
- * fall back to whichever single screen stream arrived for that user.
- */
+/** Resolves the remote stream backing a screen tile. */
 export function remoteScreenStream(tile: ParticipantStageTile): MediaStream | undefined {
-  const streams = tile.p.remoteScreenStreams;
-  if (tile.shareId === LEGACY_SHARE_ID) return streams.values().next().value;
-  return streams.get(tile.shareId!);
+  return tile.p.remoteScreenStreams.get(tile.shareId!);
 }
 
 /** Stable, unique DOM id fragment for a tile — screens differ by share (#253). */

@@ -93,11 +93,12 @@ test('real sockets hide private screens from administrators, auth snapshots, lat
   await owner.peer.error(MessageType.NATIVE_SCREEN_SIGNAL, watch, ProtocolErrorCode.PERMISSION_DENIED);
   await outsider.peer.error(MessageType.NATIVE_SCREEN_SIGNAL, watch, ProtocolErrorCode.PERMISSION_DENIED);
   assert.equal((await device.peer.request(MessageType.NATIVE_SCREEN_SIGNAL, watch)).type, MessageType.NATIVE_SCREEN_SIGNAL_ACK);
+  // The retired Chromium Watch is malformed for every viewer, authorized or not (#830).
   await viewer.peer.error(MessageType.RTC_SIGNAL, {
     fromSessionId: 'forged', targetSessionId: publisherSessionId, signalType: 'screen-watch',
     streamId: source.shareId, subscriptionId: 'old-publisher', watcherSubscriptionId: 'old-viewer',
     subscriptionRevision: 1, watching: true,
-  }, ProtocolErrorCode.PERMISSION_DENIED);
+  }, ProtocolErrorCode.BAD_REQUEST);
 
   const created = await owner.peer.request(MessageType.BOT_CREATE, {});
   const bot = await f.bot(text(created.payload.token));

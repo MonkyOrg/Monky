@@ -58,7 +58,7 @@ export const botVoiceJoinedSchema = z.object({
 export const botVoiceLeftSchema = z.object({ channelId: id, sessionId: id });
 export const botVoiceSignalSchema = z.object({
   fromSessionId: id, targetSessionId: id,
-  signalType: z.enum(['offer', 'answer', 'candidate', 'user-left', 'screen-audio-meta', 'screen-video-meta']),
+  signalType: z.enum(['offer', 'answer', 'candidate', 'user-left']),
   sdp: z.object({ type: z.enum(['offer', 'answer']), sdp: z.string().min(1).max(128 * 1024) }).optional(),
   candidate: z.object({
     candidate: z.string().max(4096),

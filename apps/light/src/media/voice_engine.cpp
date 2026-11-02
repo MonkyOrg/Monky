@@ -280,7 +280,6 @@ private:
 struct SdpSection {
   std::string kind;
   std::string mid;
-  std::string stream;
   std::string ufrag;
 };
 
@@ -299,7 +298,7 @@ std::vector<SdpSection> Sections(const std::string &sdp) {
       if (result.size() >= 64)
         throw std::runtime_error("Too many SDP sections");
       result.push_back(
-          {line.substr(2, line.find(' ') - 2), {}, {}, session_ufrag});
+          {line.substr(2, line.find(' ') - 2), {}, session_ufrag});
     } else if (line.starts_with("a=ice-ufrag:")) {
       if (result.empty())
         session_ufrag = line.substr(12);
@@ -307,9 +306,6 @@ std::vector<SdpSection> Sections(const std::string &sdp) {
         result.back().ufrag = line.substr(12);
     } else if (!result.empty() && line.starts_with("a=mid:")) {
       result.back().mid = line.substr(6);
-    } else if (!result.empty() && line.starts_with("a=msid:")) {
-      auto value = line.substr(7);
-      result.back().stream = value.substr(0, value.find(' '));
     }
   }
   return result;
@@ -556,7 +552,6 @@ struct VoiceEngine::Impl::Peer : webrtc::PeerConnectionObserver,
   webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> mic_transceiver;
   std::vector<SdpSection> remote_sections;
   std::string mic_mid;
-  std::set<std::string> screen_streams;
   struct PendingCandidate {
     Json value;
     Clock::time_point arrived;
@@ -1253,24 +1248,18 @@ void VoiceEngine::Impl::ConfigureTracks(Peer &peer) {
   if (peer.mic_mid.empty()) {
     const auto found =
         std::find_if(peer.remote_sections.begin(), peer.remote_sections.end(),
-                     [&](const SdpSection &section) {
-                       return section.kind == "audio" &&
-                              !peer.screen_streams.contains(section.stream);
+                     [](const SdpSection &section) {
+                       return section.kind == "audio";
                      });
     if (found != peer.remote_sections.end())
       peer.mic_mid = found->mid;
   }
   for (auto &transceiver : peer.pc->GetTransceivers()) {
     const auto mid = transceiver->mid();
-    bool mic =
+    const bool mic =
         transceiver->media_type() == webrtc::MediaType::AUDIO &&
         (mid && !peer.mic_mid.empty() ? *mid == peer.mic_mid
                                       : transceiver == peer.mic_transceiver);
-    if (mic && mid) {
-      for (const auto &section : peer.remote_sections)
-        if (section.mid == *mid && peer.screen_streams.contains(section.stream))
-          mic = false;
-    }
     const bool listen = mic &&
                         peer.participant.user_id != config.self_user_id &&
                         !peer.participant.suppressed &&
@@ -1313,13 +1302,6 @@ void VoiceEngine::Impl::Signal(const Json &payload) {
     return; // Membership, never signaling, creates a peer.
   auto peer = found->second;
   const auto type = Text(payload, "signalType");
-  if (type == "screen-audio-meta") {
-    if (peer->screen_streams.size() >= 64)
-      throw std::runtime_error("Too many screen stream identifiers");
-    peer->screen_streams.insert(Text(payload, "streamId"));
-    ConfigureTracks(*peer);
-    return;
-  }
   if (type == "candidate") {
     const auto &candidate = payload.at("candidate");
     if (candidate.is_null())

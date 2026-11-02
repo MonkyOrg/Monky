@@ -349,8 +349,8 @@ SFU vale o mesmo para um microfone que não pode ser recebido: o consumer criado
 no servidor é encerrado e a chamada continua. Se o servidor recusar o microfone,
 a chamada segue só recebendo até a próxima mudança de política. A recuperação dos
 transportes SFU volta ao início sempre que a chamada se restabelece.
-O áudio de tela não é confundido com microfone, e áudio de outra sessão do mesmo
-usuário não é reproduzido.
+Telas e o áudio delas nunca passam pela conexão da chamada, e áudio de outra
+sessão do mesmo usuário não é reproduzido.
 
 Ofertas do cliente completo podem conter vídeo mesmo quando o Light só quer voz.
 O SDK fixado exige capacidades de vídeo não vazias durante essa negociação:

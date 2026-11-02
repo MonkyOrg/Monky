@@ -396,8 +396,15 @@ test('SFU receiving bots may consume only same-room human microphones on their o
   await f.caller.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
   const humanTransport = await f.caller.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'send' });
   const humanTransportId = text(record(humanTransport.payload.transportOptions).id);
+  // A screen is always a native rendition on its own transport (#830).
+  const video = { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 };
+  const nativeScreen = { sourceInstanceId: '4d3c2b1a-0f9e-4d8c-b7a6-958473625140', pipelineId: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d', video };
+  await f.caller.peer.request(MessageType.VOICE_STATE_UPDATE, {
+    screenShareIds: ['owned-screen'],
+    nativeScreenShares: [{ shareId: 'owned-screen', instanceId: nativeScreen.sourceInstanceId, audio: true, video }],
+  });
   const screenTransport = await f.caller.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, {
-    channelId: f.voiceId, direction: 'send', purpose: 'screen',
+    channelId: f.voiceId, direction: 'send', purpose: 'screen', screenSessionId: nativeScreen.pipelineId,
   });
   const screenTransportId = text(record(screenTransport.payload.transportOptions).id);
   const sent = await bot.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'send' });
@@ -412,7 +419,7 @@ test('SFU receiving bots may consume only same-room human microphones on their o
     const message = await f.caller.peer.request(MessageType.SFU_PRODUCE, {
       channelId: f.voiceId, transportId: mediaType === 'mic' ? humanTransportId : screenTransportId,
       kind: 'audio', rtpParameters: rtpParameters(ssrc),
-      appData: mediaType === 'mic' ? { mediaType } : { mediaType, shareId: 'owned-screen' },
+      appData: mediaType === 'mic' ? { mediaType } : { mediaType, shareId: 'owned-screen', nativeScreen },
     });
     assert.equal(message.type, MessageType.SFU_PRODUCED, JSON.stringify(message.payload));
     return text(message.payload.id);

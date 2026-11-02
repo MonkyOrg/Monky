@@ -624,19 +624,26 @@ test('permission-muted SFU participants can publish video but not microphone or 
     ({ id: `${appData?.mediaType ?? 'unknown'}-producer` });
   sfu.setMicrophonesMuted = async () => {};
   await service.joinVoiceChannel('self', 'self', 'room', false, false, true);
-  service.updateVoiceState('self', { screenShareIds: ['share'] });
+  const video = { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 };
+  const sourceInstanceId = '0d6f3c1e-2b4a-4c8d-9e7f-1a2b3c4d5e6f';
+  service.updateVoiceState('self', {
+    screenShareIds: ['share'], nativeScreenShares: [{ shareId: 'share', instanceId: sourceInstanceId, audio: true, video }],
+  });
+  const nativeScreen = { sourceInstanceId, pipelineId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', video };
 
   await server['sfuSignaling']['handleSfuProduce'](session, {
     channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'mic' },
   }, 'mic');
   await server['sfuSignaling']['handleSfuProduce'](session, {
-    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'screen_audio', shareId: 'share' },
+    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] },
+    appData: { mediaType: 'screen_audio', shareId: 'share', nativeScreen },
   }, 'screen-audio');
   await server['sfuSignaling']['handleSfuProduce'](session, {
     channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] }, appData: { mediaType: 'camera' },
   }, 'camera');
   await server['sfuSignaling']['handleSfuProduce'](session, {
-    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] }, appData: { mediaType: 'screen_video', shareId: 'share' },
+    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] },
+    appData: { mediaType: 'screen_video', shareId: 'share', nativeScreen },
   }, 'screen-video');
 
   assert.equal(messages.find(message => message.requestId === 'mic')?.type, MessageType.SERVER_ERROR);
@@ -645,6 +652,41 @@ test('permission-muted SFU participants can publish video but not microphone or 
   assert.equal((messages.find(message => message.requestId === 'screen-audio')?.payload as ServerErrorPayload).code, ProtocolErrorCode.PERMISSION_DENIED);
   assert.equal(messages.find(message => message.requestId === 'camera')?.type, MessageType.SFU_PRODUCED);
   assert.equal(messages.find(message => message.requestId === 'screen-video')?.type, MessageType.SFU_PRODUCED);
+  sfu.close();
+});
+
+test('SFU refuses a screen producer without its native rendition (#830)', async () => {
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  const sfu = new SfuManager();
+  const service = signaling();
+  server['sfuManager'] = sfu;
+  server['signalingService'] = service;
+  server['closing'] = false;
+  const ws = Object.create(WebSocket.prototype) as WebSocket;
+  Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+  const session: Parameters<WebSocketServer['handleMessage']>[0] = {
+    ws, sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
+  };
+  server['sessions'] = new Map([[ws, session]]);
+  server['sessionSockets'] = new Map([['self', ws]]);
+  server['isCurrentSession'] = () => true;
+  const messages: Parameters<WebSocketServer['send']>[1][] = [];
+  server['send'] = (_ws, message) => { messages.push(message); };
+  let produced = 0;
+  sfu.produce = async () => ({ id: `producer-${++produced}` });
+  await service.joinVoiceChannel('self', 'self', 'room');
+  service.updateVoiceState('self', { screenShareIds: ['share'] });
+
+  for (const [kind, mediaType] of [['video', 'screen_video'], ['audio', 'screen_audio']] as const) {
+    await server['sfuSignaling']['handleSfuProduce'](session, {
+      channelId: 'room', transportId: 'send', kind, rtpParameters: { codecs: [] }, appData: { mediaType, shareId: 'share' },
+    }, mediaType);
+    const reply = messages.find(message => message.requestId === mediaType);
+    assert.equal(reply?.type, MessageType.SERVER_ERROR);
+    assert.equal((reply?.payload as ServerErrorPayload).code, ProtocolErrorCode.BAD_REQUEST);
+  }
+  assert.equal(produced, 0, 'refused before the worker');
   sfu.close();
 });
 
@@ -662,7 +704,7 @@ test('producer disappearance during worker consume is obsolete work, but transpo
     sfu['producers'].set('producer', {
       producer: { id: 'producer', closed: false, close() {} } as MediasoupTypes.Producer,
       transportId: 'send-peer',
-      sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'screen_video', shareId: 'share' },
+      sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'camera' },
     });
 
     const router: Partial<MediasoupTypes.Router> = { canConsume: () => true };
