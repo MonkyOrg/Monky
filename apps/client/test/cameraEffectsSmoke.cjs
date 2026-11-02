@@ -135,8 +135,9 @@ if (!process.versions.electron) {
       if (!local) externalRequests.push(details.url);
       callback({ cancel: !local });
     });
+    // The stall and transition phases (#848) made the packaged run longer than 5 minutes on CI runners.
     timeout = setTimeout(() => { console.error('Camera effects smoke timed out'); void finish(1); },
-      process.env.CI === 'true' ? 300000 : 150000);
+      process.env.CI === 'true' ? 480000 : 240000);
     if (packaged) await window.loadFile(fixture);
     else await window.loadURL(fixture);
     await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {

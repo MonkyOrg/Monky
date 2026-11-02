@@ -4,6 +4,7 @@ const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
 const dns = require('node:dns');
+const net = require('node:net');
 const { createHash, generateKeyPairSync } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
@@ -401,17 +402,19 @@ async function runMediaSmoke(t, mode) {
   const lookup = dns.lookup;
   const promiseLookup = dns.promises.lookup;
   const localDnsNames = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+  // An IP literal resolves without any query (WebRTC candidates on the runner's own interfaces).
+  const offline = hostname => localDnsNames.has(hostname) || net.isIP(hostname) !== 0;
   // The refused name and its caller make a failure on another host diagnosable.
   const refusedDns = hostname => Object.assign(new Error(`External DNS disabled by isolated E2E: ${hostname}\n`
     + new Error().stack.split('\n').slice(3, 10).join('\n')), { code: 'ENOTFOUND' });
   dns.lookup = (hostname, options, callback) => {
-    if (localDnsNames.has(hostname)) return lookup(hostname, options, callback);
+    if (offline(hostname)) return lookup(hostname, options, callback);
     const done = typeof options === 'function' ? options : callback;
     const error = refusedDns(hostname);
     queueMicrotask(() => done(error));
   };
   dns.promises.lookup = async (hostname, ...options) => {
-    if (localDnsNames.has(hostname)) return promiseLookup(hostname, ...options);
+    if (offline(hostname)) return promiseLookup(hostname, ...options);
     throw refusedDns(hostname);
   };
   t.after(async () => {
