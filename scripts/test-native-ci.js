@@ -903,6 +903,7 @@ test('the extracted DOM lane preserves every existing test command and its order
     'node apps/client/test/cameraEffectsSmoke.cjs',
     'node apps/client/test/cameraEffectsSmoke.cjs --packaged',
     'node apps/client/test/cameraEffectsSmoke.cjs --packaged --cpu-compositor --chroma-only --transitions-only',
+    'node apps/client/test/cameraEffectsSmoke.cjs --without-track-generator --fps-only --transitions-only',
     'node apps/client/test/cameraPublicationSmoke.cjs',
     'node apps/client/test/footerControlsSmoke.cjs',
     'npm run test:transport --workspace=apps/client',
