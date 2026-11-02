@@ -3483,11 +3483,16 @@ async function* regression(locale, inviteModule) {
   composerTitle.value = '';
   root.querySelector('.forum-composer form').requestSubmit();
   await flush();
+  // Slow runners mount the shared toast after the first flush; the checks below still decide.
+  await until(() => document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')).catch(() => {});
   const missingPostTitle = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
   check(root.querySelector('.forum-composer form').noValidate
     && missingPostTitle?.textContent.includes(t('validation.required', { field: t('forum.postTitle') }))
     && composerTitle.getAttribute('aria-invalid') === 'true' && calls.length === composerCalls,
-  'A new topic without a title is explained in the alert toast, in the app language, and is not published');
+  `A new topic without a title is explained in the alert toast, in the app language, and is not published ${JSON.stringify({
+    noValidate: root.querySelector('.forum-composer form').noValidate, toast: missingPostTitle?.textContent ?? null,
+    invalid: composerTitle.getAttribute('aria-invalid'), calls: calls.slice(composerCalls).map(call => call.type),
+  })}`);
   missingPostTitle.querySelector('.chat-copy-toast-close').click();
   composerTitle.value = 'New topic';
   yield 'forum-composer';
