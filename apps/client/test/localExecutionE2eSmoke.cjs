@@ -366,15 +366,21 @@ async function assertTaskTrace(rows, taskId, frames, startIndex) {
   assert.ok(taskRows.some(row => row.role === 'executor' && row.event === 'ipc.played.end' &&
     row.playedFrames === frames && row.at >= nativeClosed.at && row.status !== 'failed'),
   'The real Main EOF lease must accept the final PLAYED after native/cache closure.');
-  const prepared = rows.findLast(row => row.role === 'executor' && row.event === 'ipc.prepare.end' &&
-    row.status === 'prepared' && row.at <= created.at);
+  const prepared = rows.slice(0, rows.indexOf(created)).findLast(row => row.role === 'executor' &&
+    row.event === 'ipc.prepare.end' && row.status === 'prepared');
   const opened = taskRows.find(row => row.role === 'executor' && row.event === 'private.open');
   const started = taskRows.find(row => row.role === 'executor' && row.event === 'native.start' &&
     row.operation === 'youtube.stream');
+  // Each Chromium process has its own clock source, so timestamps from Main and the renderer are not comparable
+  // to the millisecond; arrival order here follows causality. The actor's createRuntime itself refuses a native
+  // start before the private channel is open, so that order is enforced where it happens.
+  const position = row => rows.indexOf(row);
+  const order = { prepared: position(prepared), created: position(created), opened: position(opened), started: position(started) };
   assert.ok(prepared && created && opened && started &&
-    prepared.at <= created.at && created.at <= opened.at && opened.at <= started.at);
+    order.prepared < order.created && order.created < order.opened,
+  `Preparation, private connection and native startup must all happen, in order: ${JSON.stringify(order)}`);
   const firstRead = taskRows.find(row => row.role === 'executor' && row.event === 'ipc.read.begin');
-  assert.ok(firstRead && wire[ready].at <= firstRead.at, 'Native reads must wait for authoritative ready.');
+  assert.ok(firstRead && rows.indexOf(wire[ready]) < rows.indexOf(firstRead), 'Native reads must wait for authoritative ready.');
 }
 
 for (const mode of ['p2p', 'sfu']) {
