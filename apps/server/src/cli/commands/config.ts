@@ -17,7 +17,8 @@ import {
 } from '../constants';
 import { CliContext, GlobalArgs, readLocalConfig, withWritableContext, writeLocalConfig } from '../context';
 import { estimateHostCapacity, printCapacityEstimate } from '../capacity';
-import { configKeyLabel, describeSfuPortProblem, describeTurnPortProblem, describeTurnUnavailability, formatBool, formatDate, parseBoolean, parseMemberLimit, parsePort, parsePositiveInt, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
+import { configKeyLabel, describeSfuPortProblem, describeTurnPortProblem, describeTurnUnavailability, formatBool, formatDate, formatSfuMediaPort, parseBoolean, parseMemberLimit, parsePort, parsePositiveInt, parseVoiceMode, printSfuPortToOpen, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
+import { expectedSfuMediaPort } from '../../infrastructure/sfu/sfuPortRecord';
 import { t } from '../i18n/index';
 import { RegisteredServer, registerServer } from '../registry';
 import { ask, askChoice, confirm, promptPassword } from '../prompts';
@@ -107,6 +108,7 @@ export async function showConfig(ctx: CliContext): Promise<void> {
   console.log(`${configKeyLabel('allowEveryoneMention')}: ${formatBool(server.allowEveryoneMention)}`);
   console.log(`${configKeyLabel('showRoleBadgesToEveryone')}: ${formatBool(server.showRoleBadgesToEveryone)}`);
   console.log(`${configKeyLabel('voiceMode')}: ${server.voiceMode}${voiceModeStatusSuffix(server.voiceMode)}`);
+  if (server.voiceMode === 'sfu') console.log(`${t('label.sfuMediaPort')}: ${formatSfuMediaPort(expectedSfuMediaPort(ctx.dataDir))}`);
   console.log(`${configKeyLabel('turn')}: ${formatBool(server.turnEnabled)}${turnStatusSuffix()}`);
   console.log(`${t('label.iconPath')}: ${server.iconPath ?? '-'}`);
   console.log(`${configKeyLabel('maxAttachmentFileBytes')}: ${server.maxAttachmentFileBytes ?? '-'}`);
@@ -340,14 +342,18 @@ export async function setConfig(
 
       if (mode === 'sfu' && !options.skipSfuDiagnostics) {
         // Refuse before persisting: the desktop path already blocks the switch
-        // when the range is unusable, and the CLI accepting it would be the
-        // only way left to end up with a mode the host cannot serve (#515).
+        // when no port is usable, and the CLI accepting it would be the only
+        // way left to end up with a mode the host cannot serve (#515).
+        // Already in SFU mode, a running server holds its port itself.
         const { SfuManager } = await import('../../infrastructure/sfu/SfuManager');
-        const portProblem = await new SfuManager().checkPortAvailability();
-        if (portProblem) {
-          throw new Error(describeSfuPortProblem(portProblem));
+        const sfu = new SfuManager({ dataDir: ctx.dataDir });
+        const availability = server.voiceMode === 'sfu'
+          ? { port: sfu.getFirewallPort() }
+          : await sfu.checkPortAvailability();
+        if ('problem' in availability) {
+          throw new Error(describeSfuPortProblem(availability.problem));
         }
-        console.log(color(t('config.sfuPortOk'), ANSI.green));
+        printSfuPortToOpen(availability.port);
       }
 
       // The SFU is the relay in this mode, so coturn is turned off rather than

@@ -42,7 +42,7 @@ Follow "Hosting from the Monky app" above. Check `http://127.0.0.1:3000/health` 
   New-NetFirewallRule -DisplayName "Monky server (Hamachi)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3000 -RemoteAddress 25.0.0.0/8
   ```
 
-  In SFU mode add a second rule with `-Protocol UDP -LocalPort 40000-49151`. Undo with `Remove-NetFirewallRule -DisplayName "Monky server (Hamachi)"`.
+  In SFU mode add a second rule with `-Protocol UDP -LocalPort 40000` and a third with `-Protocol TCP -LocalPort 40000` (for networks that block UDP). Undo with `Remove-NetFirewallRule -DisplayName "Monky server (Hamachi)"`.
 - **macOS**: allow Monky to accept incoming connections (System Settings → Network → Firewall).
 
 ### 7. Test from a friend's computer

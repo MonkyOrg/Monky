@@ -8,6 +8,7 @@ import { LIMITS, SCREEN_SHARE_LIMITS, aggregateTransportHealth, VoiceConnectionH
 import { getPublicIp } from '../discovery/ServerIpScanner';
 import { describeFailure } from '../lifecycle/ServerResourceScope';
 import { Logger } from '../logger/Logger';
+import { expectedSfuMediaPort, readSfuMediaPort, writeSfuMediaPort } from './sfuPortRecord';
 
 const MEDIA_CODECS: RouterRtpCodecCapability[] = [
   {
@@ -76,6 +77,8 @@ export interface SfuManagerOptions {
   rtcMaxPort?: number;
   announcedIp?: string | null;
   listenIp?: string;
+  /** Server data directory, where the media port in use is remembered between restarts. */
+  dataDir?: string;
 }
 
 export interface SfuProducerRecord {
@@ -113,20 +116,22 @@ type PendingSfuTransport = Pick<SfuTransportRecord, 'sessionId' | 'channelId' | 
 };
 
 /**
- * Why the configured UDP range cannot carry media.
+ * Why the configured range cannot carry media.
  *
  * Structured instead of a message so the CLI and the desktop app can translate
  * it, the same way {@link checkSfuPreflight} reports a missing worker.
  */
 export type SfuPortProblem =
-  | { code: 'bind-failed'; port: number; minPort: number; maxPort: number }
-  | {
-      code: 'turn-overlap';
-      minPort: number;
-      maxPort: number;
-      turnMinPort: number;
-      turnMaxPort: number;
-    };
+  | { code: 'range-busy'; minPort: number; maxPort: number }
+  | { code: 'turn-overlap'; minPort: number; maxPort: number; turnMinPort: number; turnMaxPort: number };
+
+/** How a client reached the server, which decides the addresses its ICE candidates offer. */
+export interface SfuClientAddress {
+  /** `Host` of the upgrade request: a name or address that brought this client here. */
+  host?: string;
+  /** Whether the connection came from this machine without a proxy in between. */
+  loopback?: boolean;
+}
 
 /**
  * Renders a port problem as the human-readable text carried in the error
@@ -142,15 +147,13 @@ export type SfuPortProblem =
 export function describeSfuPortProblem(problem: SfuPortProblem): string {
   if (problem.code === 'turn-overlap') {
     return (
-      `O range UDP do SFU (${problem.minPort}-${problem.maxPort}) invade o range de relay do ` +
-      `coturn (${problem.turnMinPort}-${problem.turnMaxPort}). Os dois disputariam as mesmas portas. ` +
-      'Ajuste o range do SFU para terminar antes de ' + problem.turnMinPort + '.'
+      `A faixa de mídia do SFU (${problem.minPort}-${problem.maxPort}) invade a faixa de relay do ` +
+      `coturn (${problem.turnMinPort}-${problem.turnMaxPort}). Os dois disputariam as mesmas portas.`
     );
   }
   return (
-    `A porta ${problem.port}/UDP não pôde ser reservada, então o range ${problem.minPort}-${problem.maxPort} ` +
-    'não está utilizável. Libere esse range (UDP) no firewall da VPS e confira se nenhum outro processo o ocupa. ' +
-    'Sem essas portas o SFU não consegue transmitir mídia.'
+    `Nenhuma porta da faixa ${problem.minPort}-${problem.maxPort} está livre em UDP e TCP ao mesmo tempo. ` +
+    'Feche o que ocupa essas portas. Sem uma delas o SFU não consegue transmitir mídia.'
   );
 }
 
@@ -254,6 +257,8 @@ export class SfuManager {
   }
 
   private worker: mediasoup.types.Worker | null = null;
+  /** The worker's shared media sockets; lives and dies with {@link worker}. */
+  private webRtcServer: mediasoup.types.WebRtcServer | null = null;
   /** Monotonic time the current worker came up: tells a crash loop from a one-off death. */
   private workerStartedAt = 0;
   private routers: Map<string, mediasoup.types.Router> = new Map(); // key = channelId
@@ -277,14 +282,20 @@ export class SfuManager {
   private readonly rtcMinPort: number;
   private readonly rtcMaxPort: number;
   private readonly listenIp: string;
+  /** Where the port in use is remembered between restarts; none in tests. */
+  private readonly dataDir?: string;
+  /** The port the current worker's sockets are bound to. */
+  private mediaPort: number | null = null;
   private announcedIp: string | null = null;
   private detectedPublicIp: string | null = null;
 
   constructor(options: SfuManagerOptions = {}) {
-    this.rtcMinPort = options.rtcMinPort || LIMITS.SFU_DEFAULT_MIN_PORT;
-    this.rtcMaxPort = options.rtcMaxPort || LIMITS.SFU_DEFAULT_MAX_PORT;
+    // 0 lets the OS pick a free port: tests running side by side use it.
+    this.rtcMinPort = options.rtcMinPort ?? LIMITS.SFU_DEFAULT_MIN_PORT;
+    this.rtcMaxPort = options.rtcMaxPort ?? LIMITS.SFU_DEFAULT_MAX_PORT;
     this.listenIp = options.listenIp || '0.0.0.0';
     this.announcedIp = options.announcedIp || null;
+    this.dataDir = options.dataDir;
   }
 
   public setAnnouncedIp(ip: string | null): void {
@@ -300,45 +311,69 @@ export class SfuManager {
   }
 
   /**
-   * Checks that the media range can actually be used, mirroring what
-   * `CoturnManager.checkPortReachability` does for the relay (#515).
-   *
-   * Without this the worker starts, reports success and only fails later when a
-   * transport tries to allocate a blocked port — by then the call is already
-   * degraded and nobody knows why.
-   *
-   * Only a local bind is attempted: unlike the TURN check there is no fixed
-   * port an external service could probe, so a firewall that drops inbound
-   * traffic cannot be detected from here. The bind still catches the common
-   * cases — a conflicting process or a range the OS refuses.
+   * The one port, UDP and TCP, every transport shares while the worker runs;
+   * null while it does not. This is the port to open in the firewall.
    */
-  public async checkPortAvailability(): Promise<SfuPortProblem | null> {
-    const overlap = this.findTurnOverlap();
-    if (overlap) return overlap;
+  public getMediaPort(): number | null {
+    return this.isReady() ? this.mediaPort : null;
+  }
 
-    // Sampling: binding ten thousand sockets to prove a range is free would
-    // cost more than it tells us. The edges plus the middle catch a range that
-    // is entirely unusable, which is what actually happens in practice.
-    const span = this.rtcMaxPort - this.rtcMinPort;
-    const samplePorts = [
-      this.rtcMinPort,
-      this.rtcMinPort + Math.floor(span / 2),
-      this.rtcMaxPort,
-    ];
+  /** The port to open in the firewall: the one in use, else the one the next start tries first. */
+  public getFirewallPort(): number {
+    return this.getMediaPort() ?? expectedSfuMediaPort(this.dataDir, this.rtcMinPort, this.rtcMaxPort);
+  }
 
-    for (const port of samplePorts) {
-      const bindOk = await SfuManager.probeUdpBind(port, 2000);
-      if (!bindOk) {
-        return {
-          code: 'bind-failed',
-          port,
-          minPort: this.rtcMinPort,
-          maxPort: this.rtcMaxPort,
-        };
+  /**
+   * Ports to try, best first: the one used last, so the firewall rule keeps
+   * working across restarts, then the range in order, so whoever opened the
+   * whole range needs to change nothing.
+   */
+  private *portCandidates(): Generator<number> {
+    if (this.rtcMinPort === 0) {
+      yield 0;
+      return;
+    }
+    const first = expectedSfuMediaPort(this.dataDir, this.rtcMinPort, this.rtcMaxPort);
+    yield first;
+    for (let port = this.rtcMinPort; port <= this.rtcMaxPort; port++) if (port !== first) yield port;
+  }
+
+  /** The first candidate free in both UDP and TCP, or null when the whole range is taken. */
+  private async findFreePort(after?: number): Promise<number | null> {
+    let skipping = after !== undefined;
+    for (const port of this.portCandidates()) {
+      if (skipping) {
+        if (port === after) skipping = false;
+        continue;
+      }
+      if (port === 0) return 0;
+      if (await SfuManager.probeUdpBind(port, this.listenIp, 2000) && await SfuManager.probeTcpBind(port, this.listenIp, 2000)) {
+        return port;
       }
     }
-
     return null;
+  }
+
+  /**
+   * Which port the SFU would use, mirroring what
+   * `CoturnManager.checkPortReachability` does for the relay (#515): a
+   * problem when no port of the range can carry media, else the port.
+   *
+   * Only a local bind is attempted: there is no external service to probe
+   * from, so a firewall that drops inbound traffic cannot be detected from
+   * here — which is why the port found is shown, for the operator to open.
+   */
+  public async checkPortAvailability(): Promise<{ port: number } | { problem: SfuPortProblem }> {
+    const overlap = this.findTurnOverlap();
+    if (overlap) return { problem: overlap };
+    // Our own worker holds its port: binding it again would report the
+    // running SFU as the conflict.
+    const running = this.getMediaPort();
+    if (running !== null) return { port: running };
+    const port = await this.findFreePort();
+    return port === null
+      ? { problem: { code: 'range-busy', minPort: this.rtcMinPort, maxPort: this.rtcMaxPort } }
+      : { port };
   }
 
   /**
@@ -348,22 +383,14 @@ export class SfuManager {
   private findTurnOverlap(): SfuPortProblem | null {
     const turnMinPort = LIMITS.TURN_RELAY_MIN_PORT;
     const turnMaxPort = LIMITS.TURN_RELAY_MAX_PORT;
-    if (this.rtcMinPort > turnMaxPort || this.rtcMaxPort < turnMinPort) {
-      return null;
-    }
-    return {
-      code: 'turn-overlap',
-      minPort: this.rtcMinPort,
-      maxPort: this.rtcMaxPort,
-      turnMinPort,
-      turnMaxPort,
-    };
+    if (this.rtcMinPort === 0 || this.rtcMinPort > turnMaxPort || this.rtcMaxPort < turnMinPort) return null;
+    return { code: 'turn-overlap', minPort: this.rtcMinPort, maxPort: this.rtcMaxPort, turnMinPort, turnMaxPort };
   }
 
   /** Binds a UDP socket briefly to prove the port is free. */
-  private static probeUdpBind(port: number, timeoutMs: number): Promise<boolean> {
+  private static probeUdpBind(port: number, host: string, timeoutMs: number): Promise<boolean> {
     return new Promise((resolve) => {
-      const socket = dgram.createSocket('udp4');
+      const socket = dgram.createSocket(net.isIPv6(host) ? 'udp6' : 'udp4');
       const timer = setTimeout(() => {
         try { socket.close(); } catch { /* already closed */ }
         resolve(false);
@@ -375,11 +402,29 @@ export class SfuManager {
         resolve(false);
       });
 
-      socket.bind(port, '0.0.0.0', () => {
+      socket.bind(port, host, () => {
         clearTimeout(timer);
         try { socket.close(); } catch { /* already closed */ }
         resolve(true);
       });
+    });
+  }
+
+  /** Listens on a TCP port briefly to prove it is free. */
+  private static probeTcpBind(port: number, host: string, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const server = net.createServer();
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (server.listening) server.close(() => resolve(ok));
+        else resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      server.once('error', () => finish(false));
+      server.listen({ port, host, exclusive: true }, () => finish(true));
     });
   }
 
@@ -419,11 +464,7 @@ export class SfuManager {
         }).catch(() => {});
       }
 
-      const created = await mediasoup.createWorker({
-        rtcMinPort: this.rtcMinPort,
-        rtcMaxPort: this.rtcMaxPort,
-        logLevel: 'warn',
-      });
+      const created = await mediasoup.createWorker({ logLevel: 'warn' });
       worker = created;
 
       if (generation !== this.generation) {
@@ -432,14 +473,29 @@ export class SfuManager {
         this.retiringWorkers.delete(created);
         return false;
       }
+      // Every transport shares these two sockets, told apart by ICE ufrag:
+      // the ports in use no longer grow with participants or screen renditions.
+      const bound = await this.bindWebRtcServer(created);
+      if (!bound) {
+        created.close();
+        throw new Error(`No port of the SFU media range ${this.rtcMinPort}-${this.rtcMaxPort} is free in both UDP and TCP`);
+      }
+      if (generation !== this.generation) {
+        this.retiringWorkers.add(created);
+        created.close();
+        this.retiringWorkers.delete(created);
+        return false;
+      }
       this.worker = created;
+      this.webRtcServer = bound.server;
+      this.mediaPort = bound.port;
       this.workerStartedAt = performance.now();
       created.on('died', (error) => this.workerDied(created, error));
 
       if (this.initializationError !== null) Logger.info('SFU', 'The mediasoup worker is running again.');
       this.initializationError = null;
       this.retryAt = 0;
-      console.log(`[SFU] mediasoup Worker initialized on UDP ports ${this.rtcMinPort}-${this.rtcMaxPort}`);
+      this.rememberMediaPort(bound.port);
       return true;
     } catch (error) {
       if (worker && generation !== this.generation) throw error;
@@ -465,6 +521,8 @@ export class SfuManager {
     this.noteWorkerFailure(describeFailure(error) || 'Worker died unexpectedly');
     this.generation++;
     this.worker = null;
+    this.webRtcServer = null;
+    this.mediaPort = null;
     this.forgetMedia();
     Logger.error('SFU', 'The mediasoup worker died; SFU calls reconnect once a new one starts.', error);
     this.workerLostListener?.();
@@ -541,8 +599,9 @@ export class SfuManager {
   /**
    * The address a client used to reach the server, as an ICE candidate: the
    * `Host` of its upgrade request without the brackets an IPv6 literal keeps
-   * for URLs, which no ICE agent can parse. Loopback is announced anyway, and
-   * an IPv6 address cannot reach sockets bound to IPv4, so neither comes from here.
+   * for URLs, which no ICE agent can parse. Loopback is announced only to
+   * loopback clients, and an IPv6 address cannot reach sockets bound to IPv4,
+   * so neither comes from here.
    */
   private static announceableClientHost(host: string | undefined, listenIp: string): string | undefined {
     if (!host) return undefined;
@@ -552,82 +611,109 @@ export class SfuManager {
     return address;
   }
 
-  private getListenInfos(preferredAnnouncedIp?: string): TransportListenInfo[] {
-    const portRange = { min: this.rtcMinPort, max: this.rtcMaxPort };
-    const infos: TransportListenInfo[] = [];
-    const addedAddresses = new Set<string>();
+  /** The shared sockets of the worker's WebRtcServer: one per protocol, on the media port. */
+  private getListenInfos(port: number): TransportListenInfo[] {
+    return [
+      { protocol: 'udp', ip: this.listenIp, port },
+      { protocol: 'tcp', ip: this.listenIp, port },
+    ];
+  }
 
-    const addAnnouncedAddress = (addr: string | null | undefined) => {
-      if (!addr) return;
-      const trimmed = addr.trim();
-      if (!trimmed || addedAddresses.has(trimmed)) return;
-      infos.push({
-        protocol: 'udp',
-        ip: this.listenIp,
-        announcedAddress: trimmed,
-        portRange,
-      });
-      infos.push({
-        protocol: 'tcp',
-        ip: this.listenIp,
-        announcedAddress: trimmed,
-        portRange,
-      });
-      addedAddresses.add(trimmed);
+  /**
+   * Binds the worker's shared sockets to the first free candidate port. A port
+   * that looked free can be taken before mediasoup binds it, so a failure
+   * moves on to the next candidate instead of giving up.
+   */
+  private async bindWebRtcServer(
+    worker: mediasoup.types.Worker
+  ): Promise<{ server: mediasoup.types.WebRtcServer; port: number } | null> {
+    let after: number | undefined;
+    for (;;) {
+      const port = await this.findFreePort(after);
+      if (port === null) return null;
+      try {
+        const server = await worker.createWebRtcServer({ listenInfos: this.getListenInfos(port) });
+        if (port !== 0) return { server, port };
+        // An OS-chosen port: UDP and TCP may differ, the UDP one is the one reported.
+        const { udpSockets } = await server.dump();
+        return { server, port: udpSockets[0]?.port ?? 0 };
+      } catch (error) {
+        Logger.warn('SFU', `Could not bind the SFU media port ${port} (UDP/TCP): ${describeFailure(error)}`);
+        if (port === 0) return null;
+        after = port;
+      }
+    }
+  }
+
+  /** Remembers the port for the next start and tells the operator which one to open. */
+  private rememberMediaPort(port: number): void {
+    Logger.info('SFU', `SFU media on port ${port} (UDP and TCP): open it in the firewall.`);
+    if (port !== this.rtcMinPort && this.rtcMinPort !== 0) {
+      Logger.warn('SFU', `Port ${this.rtcMinPort} was taken, so the SFU uses ${port} (UDP and TCP). Open port ${port} in the firewall.`);
+    }
+    if (!this.dataDir || readSfuMediaPort(this.dataDir) === port) return;
+    try {
+      writeSfuMediaPort(this.dataDir, port);
+    } catch (error) {
+      Logger.warn('SFU', `Could not remember the SFU media port: ${describeFailure(error)}`);
+    }
+  }
+
+  /**
+   * Every address under which this client may find the media port, best first.
+   *
+   * The sockets listen on `listenIp` (every interface by default), so one port
+   * answers under all of these names: each becomes a candidate pair pointing
+   * at the same port instead of a socket pair of its own.
+   */
+  private announcedAddresses(client: SfuClientAddress = {}): string[] {
+    const addresses = new Set<string>();
+    const add = (address: string | null | undefined) => {
+      const trimmed = address?.trim();
+      if (trimmed) addresses.add(trimmed);
     };
 
     // 1. Explicit announced IP configured by admin
-    if (this.announcedIp) {
-      addAnnouncedAddress(this.announcedIp);
-    }
-
-    // 2. Client connection host / IP (if client reached server via a public IP or domain)
-    const clientHost = SfuManager.announceableClientHost(preferredAnnouncedIp, this.listenIp);
-    if (clientHost) {
-      addAnnouncedAddress(clientHost);
-    }
-
-    // 3. Auto-detected server public IP (for cloud VPS behind 1:1 NAT like AWS, Oracle Cloud, GCP, etc.)
-    if (this.detectedPublicIp) {
-      addAnnouncedAddress(this.detectedPublicIp);
-    }
-
-    // 4. Always include 127.0.0.1 for local/loopback clients
-    addAnnouncedAddress('127.0.0.1');
-
-    // 5. Detect all available local network interfaces (Radmin VPN 26.x, LAN 192.168.x, 10.x, etc.)
+    add(this.announcedIp);
+    // 2. The name or address that brought this client here
+    add(SfuManager.announceableClientHost(client.host, this.listenIp));
+    // 3. Auto-detected public IP (cloud VPS behind 1:1 NAT like AWS, Oracle Cloud, GCP, etc.)
+    add(this.detectedPublicIp);
+    // 4. Loopback, only for a client on this machine: nobody else can dial it
+    if (client.loopback) add('127.0.0.1');
+    // 5. Local network interfaces (Radmin VPN 26.x, LAN 192.168.x, 10.x, etc.)
     try {
-      const interfaces = os.networkInterfaces();
-      for (const [_, ifaceList] of Object.entries(interfaces)) {
-        if (!ifaceList) continue;
-        for (const iface of ifaceList) {
+      for (const ifaceList of Object.values(os.networkInterfaces())) {
+        for (const iface of ifaceList ?? []) {
           const family = String(iface.family);
-          if ((family === 'IPv4' || family === '4') && iface.address) {
-            addAnnouncedAddress(iface.address);
-          }
+          if ((family === 'IPv4' || family === '4') && iface.address && !iface.internal) add(iface.address);
         }
       }
     } catch {
       // Ignore network interface detection failure
     }
-
-    // Fallback if no valid address was found
-    if (infos.length === 0) {
-      infos.push({
-        protocol: 'udp',
-        ip: this.listenIp,
-        portRange,
-      });
-      infos.push({
-        protocol: 'tcp',
-        ip: this.listenIp,
-        portRange,
-      });
-    }
-
-    return infos;
+    return [...addresses];
   }
 
+  /**
+   * The server's candidates repeated under each announced address. mediasoup
+   * gives one candidate per socket, but the worker's ICE-lite agent accepts a
+   * check on any of its sockets by ufrag, whatever address the packet was sent
+   * to; priorities keep the order of {@link announcedAddresses}.
+   */
+  private announceCandidates(
+    candidates: mediasoup.types.IceCandidate[], client?: SfuClientAddress
+  ): mediasoup.types.IceCandidate[] {
+    const addresses = this.announcedAddresses(client);
+    if (addresses.length === 0) return candidates;
+    return addresses.flatMap((address, index) => candidates.map((candidate) => ({
+      ...candidate,
+      foundation: `${candidate.foundation}${index}`,
+      priority: candidate.priority - index,
+      ip: address,
+      address,
+    })));
+  }
   public async getRouterRtpCapabilities(channelId: string): Promise<mediasoup.types.RtpCapabilities> {
     const router = await this.getOrCreateRouter(channelId);
     return router.rtpCapabilities;
@@ -637,7 +723,7 @@ export class SfuManager {
     sessionId: string,
     channelId: string,
     direction: 'send' | 'recv',
-    clientHost?: string,
+    clientAddress?: SfuClientAddress,
     purpose: RtcTransportPurpose = 'call',
     screenSessionId?: string
   ): Promise<{
@@ -661,10 +747,13 @@ export class SfuManager {
     try {
       const router = await this.getOrCreateRouter(channelId);
       if (pending.cancelled) throw new Error('Transport creation was cancelled before setup');
-      const listenInfos = this.getListenInfos(clientHost);
+      const webRtcServer = this.webRtcServer;
+      if (!webRtcServer || webRtcServer.closed) {
+        throw new Error(`SFU worker is not available: ${this.initializationError || 'worker offline'}`);
+      }
 
       const transport = await router.createWebRtcTransport({
-        listenInfos,
+        webRtcServer,
         enableUdp: true,
         enableTcp: true,
         preferUdp: true,
@@ -675,8 +764,9 @@ export class SfuManager {
         throw new Error('Transport creation was cancelled or closed during setup');
       }
 
+      const iceCandidates = this.announceCandidates(transport.iceCandidates, clientAddress);
       console.log(`[SFU Server] Created ${purpose}/${direction} transport ${transport.id} for session ${sessionId} in channel ${channelId}`);
-      console.log(`[SFU Server] Transport ${transport.id} ICE candidates (${transport.iceCandidates.length}):`, transport.iceCandidates.map((c) => `${c.protocol?.toUpperCase()} ${c.ip || ('address' in c ? c.address : '')}:${c.port}`));
+      console.log(`[SFU Server] Transport ${transport.id} ICE candidates (${iceCandidates.length}):`, iceCandidates.map((c) => `${c.protocol?.toUpperCase()} ${c.address}:${c.port}`));
 
       transport.on('icestatechange', (iceState) => {
         console.log(`[SFU Server] Transport ${transport.id} (${direction}, session ${sessionId}) ICE state changed: ${iceState}`);
@@ -709,7 +799,7 @@ export class SfuManager {
       return {
         id: transport.id,
         iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
+        iceCandidates,
         dtlsParameters: transport.dtlsParameters,
         sctpParameters: transport.sctpParameters,
       };
@@ -1295,6 +1385,8 @@ export class SfuManager {
     if (this.worker) this.retiringWorkers.add(this.worker);
     // A worker whose close failed stays retiring, for the next close to retry.
     this.worker = null;
+    this.webRtcServer = null;
+    this.mediaPort = null;
     for (const worker of this.retiringWorkers) {
       try {
         if (!worker.died) worker.close();

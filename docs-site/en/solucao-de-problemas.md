@@ -20,7 +20,7 @@ are passing; TURN does not fix the login address.
 | Nothing under Servers on the Network | Discovery only works on the same LAN; click Scan again and check UDP `41234` in the firewall |
 | One participant is silent only for me | Right-click them and set individual volume back to 100% |
 | I can only fail to talk to **one** specific person (everyone else works) | A red `link_off` icon shows next to them. You are both likely behind CGNAT with no direct route. The host can enable the [TURN relay](/en/turn); otherwise both of you need a VPN. This only happens in P2P Mesh mode |
-| In **SFU mode**, nobody hears anybody and the call never connects | The `40000-49151` range must be open in **both UDP and TCP** on the firewall and the router. Signalling uses a different port, so the server looks fine while no media gets through. See [Opening the SFU mode ports](/en/hospedar-em-vps#opening-the-sfu-mode-ports) |
+| In **SFU mode**, nobody hears anybody and the call never connects | Port `40000` must be open in **both UDP and TCP** on the firewall and the router. Signalling uses a different port, so the server looks fine while no media gets through. See [Opening the SFU mode ports](/en/hospedar-em-vps#opening-the-sfu-mode-ports) |
 | In **SFU mode**, the call drops and the app keeps saying it is reconnecting | Either the process or the media path may have failed. Creating transports and producers through signaling does not prove ICE/DTLS connectivity. Check the advertised addresses and ports in the logs, the VM firewall and the provider's rules; successfully binding a local port does not prove external reachability |
 | Avast (or another antivirus) flags the installer/updater | Check the detection, source and integrity; do not assume a false positive. See [Antivirus: Avast and similar](#antivirus-avast-and-similar) |
 | The **TURN relay** switch is greyed out and will not budge | Read the displayed reason: unsupported platform, SFU mode, an old version or missing privileges to install coturn. For the last case, follow [manual installation](/en/turn#manual-coturn-installation) without disrupting other services on the host |
@@ -141,7 +141,7 @@ WireGuard). The VPN creates a virtual network that bypasses CGNAT.
 In [SFU mode](/en/criar-seu-servidor#voice-media-modes-p2p-mesh-vs-sfu) nobody
 connects directly to the other participants: each person talks to the server.
 This removes dependence on that direct peer-to-peer path, but still requires
-a reachable host, correct announced IP and open `40000-49151` ports.
+a reachable host, correct announced IP and open port `40000`.
 Media flows through the host, which needs the corresponding bandwidth.
 
 ### How to know if you're behind CGNAT?

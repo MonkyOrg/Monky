@@ -113,7 +113,7 @@ export function describeCurrentProcess(id: string = randomUUID()): ProcessLockRe
 }
 
 /** Replaces the file in one step, so readers never see a half-written lock. */
-function writeAtomically(file: string, contents: string): void {
+export function writeAtomically(file: string, contents: string): void {
   const pending = `${file}.${randomUUID()}.tmp`;
   try {
     fs.writeFileSync(pending, contents, { encoding: 'utf8', mode: 0o600, flag: 'wx' });

@@ -52,7 +52,7 @@ A referência completa está em [Monky CLI](/cli).
 | `3000` (ou escolhida) | TCP | Login, chat, canais e sinalização | Sim, no firewall da VPS |
 | `41234` | UDP | Descoberta na rede local | Não, numa VPS |
 | Altas dinâmicas nos participantes | UDP | Voz, vídeo e tela P2P | São conexões dos clientes, não uma faixa adicional a abrir na VPS sem relay |
-| `40000-49151` | UDP e TCP | Mídia WebRTC no Modo SFU (mediasoup) | Só com o modo SFU ativado |
+| `40000` | UDP e TCP | Mídia WebRTC no Modo SFU (mediasoup), de todas as chamadas | Só com o modo SFU ativado |
 | `3478` | TCP e UDP | Relay TURN, se você ligar | Só com o relay ligado |
 | `49152-65535` | UDP | Mídia repassada pelo relay | Só com o relay ligado |
 
@@ -65,15 +65,27 @@ muito restritas continua sendo uma VPN.
 ### Abrindo as portas do Modo SFU
 
 No Modo SFU a mídia não vai mais direto entre as pessoas: ela entra no servidor
-por esse range. Como é tráfego UDP que chega sem ninguém ter pedido antes, a
-regra de `RELATED,ESTABLISHED` que a maioria das distribuições traz **não
-cobre** — o range precisa ser aberto explicitamente, e o mesmo vale para TCP,
-que é o caminho de quem está numa rede que bloqueia UDP.
+pela porta `40000`, a primeira da faixa `40000-49151`. Toda chamada, câmera e
+tela usa essa mesma porta, em UDP e em TCP; o servidor separa cada conexão
+pelo identificador ICE, então o número de portas não cresce com o número de
+pessoas. Quem já tinha liberado a faixa inteira não precisa mudar nada.
+
+Se a `40000` já estiver ocupada nesta máquina (por outro servidor Monky, por
+exemplo), o SFU usa a próxima porta livre da faixa, sempre com o mesmo número
+em UDP e TCP, e volta a usar essa porta nos próximos reinícios enquanto ela
+estiver livre. `monky status`, `monky config` e o monitor do servidor no app
+mostram qual porta liberar. Se nenhuma porta da faixa estiver livre, o modo SFU
+avisa e não liga.
+
+Como é tráfego UDP que chega sem ninguém ter pedido antes, a regra de
+`RELATED,ESTABLISHED` que a maioria das distribuições traz **não cobre** — a
+porta precisa ser aberta explicitamente, e o mesmo vale para TCP, que é o
+caminho de quem está numa rede que bloqueia UDP.
 
 ```bash
-# Abrir o range da mídia SFU
-sudo iptables -I INPUT -p udp --dport 40000:49151 -j ACCEPT
-sudo iptables -I INPUT -p tcp --dport 40000:49151 -j ACCEPT
+# Abrir a porta da mídia SFU
+sudo iptables -I INPUT -p udp --dport 40000 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 40000 -j ACCEPT
 
 # Persistir (sobrevive a reboot)
 sudo netfilter-persistent save
@@ -85,14 +97,14 @@ firewall existente. Não misture gerenciadores de firewall sem revisar suas regr
 
 ::: tip Se usar `ufw` em vez de `iptables`
 ```bash
-sudo ufw allow 40000:49151/udp
-sudo ufw allow 40000:49151/tcp
+sudo ufw allow 40000/udp
+sudo ufw allow 40000/tcp
 ```
 :::
 
 ::: warning O firewall do provedor é outro
 Oracle Cloud, AWS, Azure, GCP e Hetzner têm um firewall fora da máquina, que o
-`iptables` não alcança. O range precisa ser liberado também no painel web, do
+`iptables` não alcança. A porta precisa ser liberada também no painel web, do
 mesmo jeito descrito em [Relay de mídia (TURN)](/turn#abrindo-portas-no-linux) —
 lá os exemplos são das portas do relay, mas o caminho no painel é o mesmo.
 :::
@@ -100,7 +112,7 @@ lá os exemplos são das portas do relay, mas o caminho no painel é o mesmo.
 Para conferir se está valendo, entre num canal de voz e veja se a mídia chega:
 
 ```bash
-sudo tcpdump -n -i any udp portrange 40000-49151 -c 20
+sudo tcpdump -n -i any udp port 40000 -c 20
 ```
 
 Teste com participantes em redes diferentes e confira a reprodução nos dois

@@ -120,11 +120,9 @@ async function createServerFixture(t, { voiceMode = 'p2p', password = '' } = {})
   const setAnnouncedIp = server.sfuManager.setAnnouncedIp.bind(server.sfuManager);
   t.mock.method(server.sfuManager, 'setAnnouncedIp', () => setAnnouncedIp('127.0.0.1'));
   server.sfuManager.setAnnouncedIp('127.0.0.1');
-  const { minPort, maxPort } = server.sfuManager.getPortRange();
-  t.mock.method(server.sfuManager, 'getListenInfos', () => ['udp', 'tcp'].map(protocol => ({
-    protocol, ip: '127.0.0.1', announcedAddress: '127.0.0.1',
-    portRange: { min: minPort, max: maxPort },
-  })));
+  // Loopback only, on a port the OS picks: the default range is shared by every server on the machine.
+  server.sfuManager.listenIp = '127.0.0.1';
+  server.sfuManager.rtcMinPort = 0;
   await server.start();
   const { port } = await server.getStats();
   const url = `ws://127.0.0.1:${port}`;

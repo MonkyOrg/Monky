@@ -16,7 +16,7 @@
 - The server listens on **TCP 3000** by default (HTTP and WebSocket). Use the port the user actually chose.
 - Voice and video modes (`Voice & Video Mode / Modo de Voz e Vídeo`):
   - `P2P Mesh (Direct) / P2P Mesh (Direto)`: friends send audio and video straight to each other; the server only needs its TCP port. Best for small groups.
-  - `Centralized SFU (mediasoup) / SFU Centralizado (mediasoup)`: the server relays the media, so it also needs **UDP 40000-49151** reachable by friends.
+  - `Centralized SFU (mediasoup) / SFU Centralizado (mediasoup)`: the server relays the media, so it also needs **port 40000 (UDP and TCP)** reachable by friends; every call shares that one port.
 - **Hosting from the Monky app**: click **+** at the end of the server list → `Create my server / Criar meu servidor`, fill in `Server name / Nome do Servidor`, `Local port / Porta Local` (default 3000), an optional `Access password / Senha de Acesso` and the voice mode, then `Create and Start Server / Criar e Iniciar Servidor`. This server runs inside Monky, so it is only online while Monky is open on that computer.
 - **Hosting on Linux with the Monky CLI** (`monky`, needs Node.js 22+): `monky create` (interactive), `monky status`, `monky logs --level ERROR --no-follow`, `monky restart`. Docs: https://monkyorg.github.io/Monky/en/cli
 - **Friends join** with **+** → `Join a server / Entrar em um servidor`. Easiest path: open the server, click its name at the top of the channel list → `Invite Friends / Convidar Amigos`, choose the right address (the list labels local network, VPN and public IPs) and copy the invitation.

@@ -51,7 +51,7 @@ The full reference is in [Monky CLI](/en/cli).
 | `3000` (or the chosen one) | TCP | Login, chat, channels and signalling | Yes, in the VPS firewall |
 | `41234` | UDP | Local network discovery | No, on a VPS |
 | High dynamic ports on participants | UDP | P2P voice, video and screen | These are client connections, not an extra range to open on a VPS without a relay |
-| `40000-49151` | UDP and TCP | WebRTC media in SFU mode (mediasoup) | Only with SFU mode enabled |
+| `40000` | UDP and TCP | WebRTC media in SFU mode (mediasoup), for every call | Only with SFU mode enabled |
 | `3478` | TCP and UDP | TURN relay, if you enable it | Only with the relay on |
 | `49152-65535` | UDP | Media forwarded by the relay | Only with the relay on |
 
@@ -63,15 +63,28 @@ it, the way out for very restricted networks is still a VPN.
 ### Opening the SFU mode ports
 
 In SFU mode media no longer goes straight between people: it comes into the
-server through that range. Because it is UDP traffic arriving without anyone
-having asked for it first, the `RELATED,ESTABLISHED` rule most distributions
-ship **does not cover it** — the range has to be opened explicitly, and the same
-goes for TCP, which is the way in for anyone on a network that blocks UDP.
+server through port `40000`, the first of the `40000-49151` range. Every call,
+camera and screen uses that same port, over UDP and TCP; the server tells
+connections apart by their ICE identifier, so the number of ports does not grow
+with the number of people. If you had already opened the whole range, nothing
+needs to change.
+
+If `40000` is already taken on this machine (by another Monky server, for
+example), the SFU uses the next free port of the range, always the same number
+over UDP and TCP, and keeps using it across restarts while it stays free.
+`monky status`, `monky config` and the server monitor in the app show which
+port to open. If no port of the range is free, SFU mode warns and does not
+turn on.
+
+Because it is UDP traffic arriving without anyone having asked for it first,
+the `RELATED,ESTABLISHED` rule most distributions ship **does not cover it** —
+the port has to be opened explicitly, and the same goes for TCP, which is the
+way in for anyone on a network that blocks UDP.
 
 ```bash
-# Open the SFU media range
-sudo iptables -I INPUT -p udp --dport 40000:49151 -j ACCEPT
-sudo iptables -I INPUT -p tcp --dport 40000:49151 -j ACCEPT
+# Open the SFU media port
+sudo iptables -I INPUT -p udp --dport 40000 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 40000 -j ACCEPT
 
 # Persist (survives a reboot)
 sudo netfilter-persistent save
@@ -84,14 +97,14 @@ their rules.
 
 ::: tip If you use `ufw` instead of `iptables`
 ```bash
-sudo ufw allow 40000:49151/udp
-sudo ufw allow 40000:49151/tcp
+sudo ufw allow 40000/udp
+sudo ufw allow 40000/tcp
 ```
 :::
 
 ::: warning The provider's firewall is a separate one
 Oracle Cloud, AWS, Azure, GCP and Hetzner have a firewall outside the machine
-that `iptables` cannot reach. The range has to be allowed in the web panel too,
+that `iptables` cannot reach. The port has to be allowed in the web panel too,
 the same way described in
 [Media relay (TURN)](/en/turn#opening-ports-on-linux) — the examples there are
 for the relay ports, but the path through the panel is the same.
@@ -100,7 +113,7 @@ for the relay ports, but the path through the panel is the same.
 To check it is in effect, join a voice channel and watch the media arrive:
 
 ```bash
-sudo tcpdump -n -i any udp portrange 40000-49151 -c 20
+sudo tcpdump -n -i any udp port 40000 -c 20
 ```
 
 Test with participants on different networks and confirm playback in both

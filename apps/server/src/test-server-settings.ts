@@ -68,7 +68,7 @@ function fixture() {
   server['coturnManager'] = turn;
   server['serverSettings']['ensureRelayCanRun'] = async () => null;
   const sfu = new SfuManager();
-  sfu.checkPortAvailability = async () => null;
+  sfu.checkPortAvailability = async () => ({ port: 40000 });
   sfu.init = async () => true;
   server['sfuManager'] = sfu;
   server['authorizer'].requirePermission = async (_session, _permission, requestId) => {

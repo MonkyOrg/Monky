@@ -131,3 +131,30 @@ test('the dashboard rereads TURN only after the database changed, at most every 
   assert.deepEqual([reads.mock.callCount(), turn.state.enabled], [4, true]);
   assert.equal(probes.mock.callCount(), 3, 'Enabling TURN probes it right away');
 });
+
+test('in SFU mode the status and the dashboard name the media port to open, following the one the server moved to', async (t) => {
+  const { dataDir, server } = await serverFixture(t);
+  const { writeSfuMediaPort } = require('../dist/infrastructure/sfu/sfuPortRecord');
+  let voiceMode = 'sfu';
+  t.mock.method(cliContext, 'withContext', async (_dataDir, action) => action({
+    serverRepo: { getLifecycleSettings: async () => ({ name: 'Fixture server', turnEnabled: false, voiceMode }) },
+  }));
+  const turn = new lifecycle.DashboardTurnStatus(dataDir);
+  await turn.refresh(0);
+  assert.equal(turn.state.sfuMediaPort, 40000, 'before any start, the first port of the range');
+  writeSfuMediaPort(dataDir, 40002);
+  await turn.refresh(2000);
+  assert.equal(turn.state.sfuMediaPort, 40002, 'the port the server bound, read on the next redraw');
+
+  fakePm2(t, [onlineEntry(dataDir)]);
+  t.mock.method(targets, 'resolveTargetServer', async () => server);
+  const printed = [];
+  console.log.mock.mockImplementation((line = '') => printed.push(String(line)));
+  await lifecycle.statusServerCommand({ args: [], dataDir, dataDirSpecified: true }, []);
+  assert.ok(printed.some((line) => line.includes('SFU media port') && line.includes('40002 (UDP and TCP)')), printed.join('\n'));
+
+  voiceMode = 'p2p';
+  printed.length = 0;
+  await lifecycle.statusServerCommand({ args: [], dataDir, dataDirSpecified: true }, []);
+  assert.equal(printed.some((line) => line.includes('SFU media port')), false, 'P2P mode has no media port to open');
+});

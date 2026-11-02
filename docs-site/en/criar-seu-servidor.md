@@ -52,7 +52,7 @@ When creating or managing a server, you choose the media topology:
 ## Open access over the internet
 
 - **Primary TCP Port:** Allow port `3000` (or your chosen port) in your firewall and configure router port forwarding.
-- **Ports for SFU (mediasoup):** If using SFU mode, also forward/allow the `40000-49151` range — on UDP and on TCP. On a VPS, see [Opening the SFU mode ports](/en/hospedar-em-vps#opening-the-sfu-mode-ports).
+- **Ports for SFU (mediasoup):** If using SFU mode, also forward/allow port `40000` — on UDP and on TCP (if you already opened the `40000-49151` range, nothing needs to change). On a VPS, see [Opening the SFU mode ports](/en/hospedar-em-vps#opening-the-sfu-mode-ports).
 - **Without touching the router:** Use a virtual network/VPN such as Radmin VPN, Hamachi, ZeroTier, or Tailscale.
 
 ## Administer

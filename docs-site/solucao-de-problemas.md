@@ -20,7 +20,7 @@ voz e vídeo estejam passando; TURN não corrige o endereço de login.
 | Nada em Servidores na Rede | A descoberta só funciona na mesma LAN; clique em Buscar de novo e verifique UDP `41234` no firewall |
 | Um participante ficou mudo só para mim | Clique com o botão direito nele e volte o volume individual para 100% |
 | Só não consigo falar com **uma** pessoa específica (com o resto funciona) | Aparece um ícone vermelho `link_off` ao lado dela. Os dois provavelmente estão atrás de CGNAT e não há rota direta. Quem hospeda pode ligar o [relay TURN](/turn); a alternativa é os dois entrarem numa VPN. Só acontece no modo P2P Mesh |
-| No **modo SFU**, ninguém ouve ninguém e a chamada nunca conecta | O range `40000-49151` precisa estar aberto em **UDP e TCP** no firewall e no roteador. A sinalização usa outra porta, então o servidor parece funcionar enquanto a mídia não passa. Veja [Abrindo as portas do Modo SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu) |
+| No **modo SFU**, ninguém ouve ninguém e a chamada nunca conecta | A porta `40000` precisa estar aberta em **UDP e TCP** no firewall e no roteador. A sinalização usa outra porta, então o servidor parece funcionar enquanto a mídia não passa. Veja [Abrindo as portas do Modo SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu) |
 | No **modo SFU**, a chamada cai e o app fica avisando que está reconectando | Pode ser falha do processo ou do trajeto de mídia. Criar transportes e produtores pela sinalização não comprova conectividade ICE/DTLS. Confira nos logs os endereços e portas anunciados, o firewall da VM e as regras do provedor; conseguir reservar uma porta localmente não comprova acesso externo |
 | O Avast (ou outro antivírus) apita ao instalar/atualizar | Confira a detecção, a origem e a integridade; não presuma falso positivo. Veja [Antivírus: Avast e similares](#antivirus-avast-e-similares) |
 | O botão do **relay TURN** está esmaecido e não deixa clicar | Confira o motivo exibido: plataforma não suportada, modo SFU, versão antiga ou falta de privilégio para instalar coturn. Para este último caso, siga a [instalação manual](/turn#instalacao-manual-do-coturn), respeitando os outros serviços do host |
@@ -141,8 +141,8 @@ WireGuard). A VPN cria uma rede virtual que contorna o CGNAT.
 No [modo SFU](/criar-seu-servidor#modos-de-voz-e-midia-p2p-mesh-vs-sfu) ninguém
 se conecta diretamente aos outros participantes: cada pessoa fala com o
 servidor. Isso evita depender do caminho direto entre os dois, mas ainda exige
-uma rota acessível até o host, IP anunciado correto e portas `40000-49151`
-liberadas. A mídia passa pelo host, que precisa da banda correspondente.
+uma rota acessível até o host, IP anunciado correto e porta `40000`
+liberada (UDP e TCP). A mídia passa pelo host, que precisa da banda correspondente.
 
 ### Como saber se estou atrás de CGNAT?
 
