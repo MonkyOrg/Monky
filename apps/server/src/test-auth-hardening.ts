@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import { randomUUID, sign } from 'node:crypto';
 import { setImmediate as immediate } from 'node:timers/promises';
@@ -6,6 +9,7 @@ import { deriveClientIdFromPublicKey, LIMITS, MessageType, Permission, PROTOCOL_
 import { createFixture, identity, record } from './testFixtures/bots';
 import { PasswordService } from './infrastructure/security/PasswordService';
 import { RateLimiter } from './infrastructure/security/RateLimiter';
+import { MonkyServer } from './server';
 
 async function authenticateWithIdentity(f: Awaited<ReturnType<typeof createFixture>>, keys: ReturnType<typeof identity>, nickname: string) {
   const peer = await f.connect();
@@ -64,6 +68,78 @@ test('same-IP concurrent authentication is admitted before password derivation',
   const results = await Promise.all(responses);
   assert.equal(results.filter(result => result.payload.code === ProtocolErrorCode.AUTH_RATE_LIMITED).length, 8);
   assert.equal(results.filter(result => result.payload.code === ProtocolErrorCode.AUTH_INVALID_PASSWORD).length, 8);
+});
+
+/** 16 wrong passwords at once, each connection sending the given forwarding headers. */
+async function wrongPasswordsWithHeaders(
+  f: Awaited<ReturnType<typeof createFixture>>, headersOf: (index: number) => Record<string, string>,
+): Promise<{ limited: number; refused: number }> {
+  await f.serverRepo.updateServer({ passwordHash: PasswordService.hashPassword('fixture') });
+  const peers = await Promise.all(Array.from({ length: 16 }, (_, i) => f.connect(headersOf(i))));
+  const key = identity().publicKey;
+  const results = await Promise.all(peers.map(peer => peer.request(MessageType.AUTH_CONNECT,
+    { protocolVersion: PROTOCOL_VERSION, nickname: 'Proxy fixture', publicKey: key, password: 'wrong' })));
+  return {
+    limited: results.filter(result => result.payload.code === ProtocolErrorCode.AUTH_RATE_LIMITED).length,
+    refused: results.filter(result => result.payload.code === ProtocolErrorCode.AUTH_INVALID_PASSWORD).length,
+  };
+}
+
+test('clients behind a trusted proxy get separate login quotas (#829)', async (t) => {
+  const f = await createFixture({ trustedProxies: ['127.0.0.1'] });
+  t.after(() => f.dispose());
+  const outcome = await wrongPasswordsWithHeaders(f, i => ({ 'x-forwarded-for': i % 2 ? '203.0.113.7' : '198.51.100.9' }));
+  assert.deepEqual(outcome, { limited: 0, refused: 16 });
+  // Each forwarded client still has its own cap.
+  const peer = await f.connect({ 'x-forwarded-for': '203.0.113.7' });
+  const again = await peer.request(MessageType.AUTH_CONNECT,
+    { protocolVersion: PROTOCOL_VERSION, nickname: 'Proxy fixture', publicKey: identity().publicKey, password: 'wrong' });
+  assert.equal(again.payload.code, ProtocolErrorCode.AUTH_RATE_LIMITED);
+});
+
+test('forwarding headers from an untrusted socket cannot choose a login quota (#829)', async (t) => {
+  // No proxy configured: the default, where every header is a client's word.
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const outcome = await wrongPasswordsWithHeaders(f, i => ({
+    'x-forwarded-for': `203.0.113.${i}`, forwarded: `for=198.51.100.${i}`,
+  }));
+  assert.deepEqual(outcome, { limited: 8, refused: 8 });
+});
+
+test('a client cannot prepend a fake hop in front of a trusted proxy (#829)', async (t) => {
+  const f = await createFixture({ trustedProxies: ['127.0.0.1'] });
+  t.after(() => f.dispose());
+  // The proxy appends the address it saw; whatever the client wrote before it is ignored.
+  const outcome = await wrongPasswordsWithHeaders(f, i => ({ 'x-forwarded-for': `10.9.9.${i}, 203.0.113.7` }));
+  assert.deepEqual(outcome, { limited: 8, refused: 8 });
+});
+
+test('bot diagnostics are keyed by the forwarded client too (#829)', async (t) => {
+  const f = await createFixture({ trustedProxies: ['127.0.0.1'] });
+  t.after(() => f.dispose());
+  const diagnostics = f.wsServer['botDiagnostics'];
+  assert.ok(diagnostics);
+  const requesters: string[] = [];
+  const original = diagnostics.diagnose.bind(diagnostics);
+  t.mock.method(diagnostics, 'diagnose', (payload: unknown, requesterIp: string) => {
+    requesters.push(requesterIp);
+    return original(payload, requesterIp);
+  });
+  const cases: Record<string, string>[] = [{ 'x-forwarded-for': '203.0.113.7' }, {}, { 'x-forwarded-for': 'unknown' }];
+  for (const headers of cases) {
+    const peer = await f.connect(headers);
+    await peer.request(MessageType.BOT_DIAGNOSTIC, { protocolVersion: PROTOCOL_VERSION });
+  }
+  assert.deepEqual(requesters, ['203.0.113.7', '127.0.0.1', '127.0.0.1']);
+});
+
+test('a server refuses to start with a trusted proxy list it cannot read (#829)', async () => {
+  // Refused before the data directory is touched.
+  const dataDir = path.join(os.tmpdir(), `monky-never-created-${randomUUID()}`);
+  await assert.rejects(MonkyServer.create({ port: 0, dataDir, trustedProxies: ['0.0.0.0/0'] }), /would trust every address/);
+  await assert.rejects(MonkyServer.create({ port: 0, dataDir, trustedProxies: ['proxy.local'] }), /Invalid trusted proxy "proxy.local"/);
+  assert.equal(fs.existsSync(dataDir), false);
 });
 
 test('disconnect during real asynchronous scrypt cannot resurrect a challenge', async (t) => {

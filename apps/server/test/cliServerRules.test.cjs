@@ -128,6 +128,22 @@ test('ports follow the protocol range: start, create and config set refuse what 
   await assert.rejects(f.run('start', '--port', '80'), { message: /Invalid value for port: 80/ });
 });
 
+test('trusted proxies stay off until set and follow the shared rule (#829)', async (t) => {
+  const f = await stoppedServer(t);
+  await f.run('config', 'show');
+  assert.ok(f.output.some((line) => line === `${translate('label.trustedProxies')} (trustedProxies): ${translate('config.trustedProxiesOff')}`));
+  await assert.rejects(f.run('config', 'set', 'trustedProxies', '127.0.0.1', 'localhost'),
+    { message: translate('config.invalidTrustedProxy', { entry: 'localhost' }) });
+  await assert.rejects(f.run('config', 'set', 'trustedProxies', '0.0.0.0/0'),
+    { message: translate('config.trustedProxyEveryone', { entry: '0.0.0.0/0' }) });
+  assert.equal(readLocalConfig(f.dataDir).trustedProxies, undefined, 'the refused list is not saved');
+  await f.run('config', 'set', 'trustedProxies', '127.0.0.1,', '10.0.0.0/8', '::ffff:127.0.0.1');
+  assert.deepEqual(readLocalConfig(f.dataDir).trustedProxies, ['127.0.0.1', '10.0.0.0/8']);
+  assert.ok(f.output.includes(translate('config.trustedProxiesNextStart')));
+  await f.run('config', 'set', 'trustedProxies', 'none');
+  assert.equal('trustedProxies' in readLocalConfig(f.dataDir), false);
+});
+
 test('roles are created by the server rules: no ADMINISTRATOR, no second Admin, at most 32 characters', async (t) => {
   assert.equal(PERMISSION_OPTIONS.some((entry) => entry.name === 'ADMINISTRATOR'), false, 'ADMINISTRATOR is not offered');
   for (const token of ['ADMINISTRATOR', 'administrator', 'Administrator']) {

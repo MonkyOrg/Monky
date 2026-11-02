@@ -4,6 +4,7 @@ import { MonkyServer, ServerConfig } from './server';
 import { Logger } from './infrastructure/logger/Logger';
 import { getLocalVersion } from './cli/commands/update';
 import { consumeUpdateRestart } from './infrastructure/lifecycle/updateRestart';
+import { readLocalConfig } from './cli/context';
 
 function parseArgs(): ServerConfig {
   const args = process.argv.slice(2);
@@ -33,6 +34,15 @@ function parseArgs(): ServerConfig {
     } else if (arg === '--text-channel' && args[i + 1]) {
       config.initialTextChannel = args[++i];
     }
+  }
+
+  // Kept in monky.json by `monky config set trustedProxies`; validated by MonkyServer.create.
+  const { trustedProxies } = readLocalConfig(config.dataDir);
+  if (trustedProxies !== undefined) {
+    if (!Array.isArray(trustedProxies) || trustedProxies.some((entry) => typeof entry !== 'string')) {
+      throw new Error('Invalid "trustedProxies" in monky.json: expected a list of IP addresses or networks.');
+    }
+    config.trustedProxies = trustedProxies;
   }
 
   return config;

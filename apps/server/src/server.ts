@@ -2,7 +2,7 @@ import http from 'http';
 import path from 'path';
 import { readUpdateInventory } from './infrastructure/database/updateInventory';
 import { v4 as uuidv4 } from 'uuid';
-import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ServerStats, UserSummary, VoiceMode, stripAdministrator, type LogEntry, type ServerInviteInfoPayload, type ServerShutdownReason } from '@monky/shared';
+import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ServerStats, UserSummary, VoiceMode, parseTrustedProxies, stripAdministrator, type LogEntry, type ServerInviteInfoPayload, type ServerShutdownReason, type TrustedProxyProblem } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { AttachmentService } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
@@ -78,6 +78,11 @@ export interface ServerConfig {
   initialVoiceChannel?: string;
   initialTextChannel?: string;
   categoryLocale?: 'pt-BR' | 'en';
+  /**
+   * Reverse proxies whose forwarding headers name the client (#829): IPs or
+   * networks. Empty by default, and then those headers are ignored.
+   */
+  trustedProxies?: readonly string[];
 }
 
 type ServerSeedConfig = Pick<
@@ -199,6 +204,14 @@ async function migrateAdministratorRoles(roleRepo: SqliteRoleRepository): Promis
   );
 }
 
+function describeTrustedProxyProblem(problem: TrustedProxyProblem): string {
+  switch (problem.code) {
+    case 'invalid': return `Invalid trusted proxy "${problem.entry}": use an IP address or a network such as 10.0.0.0/8.`;
+    case 'everyone': return `Trusted proxy "${problem.entry}" would trust every address; list the proxies themselves.`;
+    case 'too-many': return `Too many trusted proxies: at most ${problem.max}.`;
+  }
+}
+
 export class MonkyServer {
   private dbConn: DatabaseConnection;
   private httpServer: http.Server;
@@ -245,6 +258,11 @@ export class MonkyServer {
   }
 
   public static async create(config: ServerConfig): Promise<MonkyServer> {
+    // Refused before anything is opened: a list that cannot be read would
+    // otherwise start a server that silently trusts nobody, or worse.
+    const proxies = parseTrustedProxies(config.trustedProxies ?? []);
+    if (!proxies.ok) throw new Error(describeTrustedProxyProblem(proxies.problem));
+    config = { ...config, trustedProxies: proxies.entries };
     const resources = new ServerResourceScope();
     const logScope = new ServerLogScope();
     resources.defer('monitor log history', () => logScope.close());
@@ -510,6 +528,7 @@ export class MonkyServer {
       recentSoundCache,
       audit: new ServerAuditService(serverRecord.id, new SqliteServerAuditRepository(db), rateLimiter),
       botStorageService: botStorage,
+      trustedProxies: config.trustedProxies,
     });
     resources.defer('WebSocket server', () => wsServer.close(instance?.shutdownReason ?? 'stopped'));
 
@@ -548,6 +567,9 @@ export class MonkyServer {
     this.startedAt = Date.now();
     Logger.info('INFO', `Monky Server running on 0.0.0.0:${this.config.port}`);
     Logger.info('INFO', `Data directory: ${this.config.dataDir}`);
+    if (this.config.trustedProxies?.length) {
+      Logger.info('NETWORK', `Client addresses forwarded by trusted proxies are honored: ${this.config.trustedProxies.join(', ')}`);
+    }
     this.startupTasks.push(
       this.attachmentService.reconcile().catch((error) => Logger.warn('ATTACHMENT', 'Startup reconciliation failed', error)),
       this.startTurnIfEnabled(),

@@ -1,6 +1,7 @@
 import http from 'http';
 import { WebSocket, WebSocketServer as WSServer } from 'ws';
 import {
+  createTrustedProxyMatcher,
   hasChannelPermission,
   LIMITS,
   MessageType,
@@ -58,7 +59,7 @@ import { Logger } from '../logger/Logger';
 import { RateLimiter } from '../security/RateLimiter';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
-import { clientAddress, DISCARDABLE_MESSAGES, WS_FLOW_LIMITS, type WsFlowLimits } from './flowControl';
+import { clientAddress, clientAddressOf, DISCARDABLE_MESSAGES, WS_FLOW_LIMITS, type WsFlowLimits } from './flowControl';
 import { type ClientSession, type SignedInSession } from './ClientSession';
 import { toProtocolError, type UnexpectedFailure } from './protocolErrors';
 import { RtcSignalRelay, type RtcSignalHost } from './voice/RtcSignalRelay';
@@ -119,6 +120,8 @@ export interface WebSocketServerDeps {
   recentSoundCache?: RecentSoundCacheService;
   audit?: ServerAuditService;
   botStorageService?: BotStorageService;
+  /** Proxies whose `X-Forwarded-For`/`Forwarded` name the client (#829); none by default. */
+  trustedProxies?: readonly string[];
 }
 
 /** What the modules of the server use of it, each through its own part of it. */
@@ -209,6 +212,7 @@ export class WebSocketServer {
   private readonly pollService?: NativePollService;
   private readonly recentSoundCache?: RecentSoundCacheService;
   private readonly audit?: ServerAuditService;
+  private readonly isTrustedProxy: (address: string) => boolean;
 
   constructor(deps: WebSocketServerDeps) {
     this.httpServer = deps.httpServer;
@@ -233,6 +237,7 @@ export class WebSocketServer {
     this.pollService = deps.pollService;
     this.recentSoundCache = deps.recentSoundCache;
     this.audit = deps.audit;
+    this.isTrustedProxy = createTrustedProxyMatcher(deps.trustedProxies ?? []);
     // Built before anything else starts: a message type answered by two routes
     // stops the server here, instead of on the first frame a client sends.
     this.messageRouter = this.buildRouter();
@@ -714,7 +719,11 @@ export class WebSocketServer {
       Logger.error('NETWORK', 'WebSocket server error', error);
     });
     this.wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
-      const ip = req.socket.remoteAddress || 'unknown';
+      const socketAddress = req.socket.remoteAddress || 'unknown';
+      // Every limit keyed by address (anonymous sockets, login attempts, bot
+      // diagnostics) reads this one, so a trusted proxy's clients each get
+      // their own quota and nobody else can pick theirs (#829).
+      const ip = clientAddressOf(socketAddress, req.headers, this.isTrustedProxy);
       const address = clientAddress(ip);
       if (address !== undefined &&
           (this.anonymousPerAddress.get(address) ?? 0) >= WebSocketServer.flowLimits.PREAUTH_MAX_SOCKETS_PER_ADDRESS) {
@@ -733,7 +742,9 @@ export class WebSocketServer {
         this.settleAnonymous(oldest);
         oldest.ws.terminate();
       }
-      Logger.info('NETWORK', `New connection established from ${ip}`);
+      Logger.info('NETWORK', ip === socketAddress
+        ? `New connection established from ${ip}`
+        : `New connection established from ${ip} through proxy ${socketAddress}`);
 
       const session: ClientSession = {
         ws,

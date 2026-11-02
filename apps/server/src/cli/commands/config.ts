@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { LIMITS } from '@monky/shared';
+import { LIMITS, parseTrustedProxies, type TrustedProxyProblem } from '@monky/shared';
 import type { ServerRecord } from '../../domain/entities';
 import {
   normalizeServerName,
@@ -29,10 +29,10 @@ import { CoturnManager } from '../../infrastructure/turn/CoturnManager';
 import { checkSfuPreflight } from '../../infrastructure/sfu/SfuPreflight';
 
 /** Settings kept outside `server.db`, so changing them never conflicts with a running server. */
-type DatabaseConfigKey = Exclude<ConfigKey, 'port' | 'autoUpdate'>;
+type DatabaseConfigKey = Exclude<ConfigKey, 'port' | 'autoUpdate' | 'trustedProxies'>;
 
 function isDatabaseConfigKey(key: ConfigKey): key is DatabaseConfigKey {
-  return key !== 'port' && key !== 'autoUpdate';
+  return key !== 'port' && key !== 'autoUpdate' && key !== 'trustedProxies';
 }
 
 function parseConfigKey(value: string): ConfigKey {
@@ -112,6 +112,7 @@ export async function showConfig(ctx: CliContext): Promise<void> {
   console.log(`${configKeyLabel('maxAttachmentFileBytes')}: ${server.maxAttachmentFileBytes ?? '-'}`);
   console.log(`${configKeyLabel('maxAttachmentStorageBytes')}: ${server.maxAttachmentStorageBytes ?? '-'}`);
   console.log(`${configKeyLabel('autoUpdate')}: ${formatBool(isAutoUpdateEnabled())}`);
+  console.log(`${configKeyLabel('trustedProxies')}: ${localConfig.trustedProxies?.length ? localConfig.trustedProxies.join(', ') : t('config.trustedProxiesOff')}`);
   console.log(`${t('label.createdAt')}: ${formatDate(server.createdAt)}`);
 }
 
@@ -145,6 +146,10 @@ export async function setConfigCommand(globalArgs: GlobalArgs, rawKey: string, v
     await setPortCommand(target, value);
     return;
   }
+  if (key === 'trustedProxies') {
+    await setTrustedProxiesCommand(target, value);
+    return;
+  }
   await withWritableContext(target.dataDir, (ctx) => setConfig(ctx, key, value));
 }
 
@@ -174,6 +179,40 @@ async function setPortCommand(target: RegisteredServer, value?: string): Promise
     return;
   }
   console.log(color(t('config.portNextStartOrRestart'), ANSI.dim));
+}
+
+/** The CLI's words for a list `parseTrustedProxies` refuses. */
+function describeTrustedProxyProblem(problem: TrustedProxyProblem): string {
+  switch (problem.code) {
+    case 'invalid': return t('config.invalidTrustedProxy', { entry: problem.entry });
+    case 'everyone': return t('config.trustedProxyEveryone', { entry: problem.entry });
+    case 'too-many': return t('config.tooManyTrustedProxies', { max: problem.max });
+  }
+}
+
+/**
+ * Off by default (#829). Read by the server when it starts, like the port, so
+ * a running server is offered the regular restart.
+ */
+async function setTrustedProxiesCommand(target: RegisteredServer, value?: string): Promise<void> {
+  const config = readLocalConfig(target.dataDir);
+  const answer = value ?? (await ask(t('config.askTrustedProxies'), config.trustedProxies?.join(', ') ?? ''));
+  const off = ['', 'none', 'off', 'clear', 'remove', 'false'].includes(answer.trim().toLowerCase());
+  const parsed = parseTrustedProxies(off ? '' : answer);
+  if (!parsed.ok) throw new Error(describeTrustedProxyProblem(parsed.problem));
+  const { trustedProxies: _previous, ...rest } = config;
+  writeLocalConfig(target.dataDir, parsed.entries.length ? { ...rest, trustedProxies: parsed.entries } : rest);
+  console.log(color(t('config.updated', { key: 'trustedProxies' }), ANSI.green));
+
+  if (!findOnlinePm2Process(target.dataDir)) {
+    console.log(color(t('config.trustedProxiesNextStart'), ANSI.dim));
+    return;
+  }
+  if (await confirm(t('config.restartForTrustedProxies'), true) &&
+      await restartServerCommand({ args: [], dataDir: target.dataDir, dataDirSpecified: true })) {
+    return;
+  }
+  console.log(color(t('config.trustedProxiesNextStartOrRestart'), ANSI.dim));
 }
 
 async function setAutoUpdateCommand(value?: string): Promise<void> {

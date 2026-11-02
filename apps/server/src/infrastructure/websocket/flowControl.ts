@@ -1,4 +1,5 @@
-import { MessageType } from '@monky/shared';
+import type http from 'http';
+import { MessageType, resolveClientAddress } from '@monky/shared';
 import { isPublicUnicastAddress, normalizeIpAddress } from '../network/ReachabilityProber';
 
 /** Limits of the WebSocket transport itself, before and after authentication. */
@@ -33,6 +34,24 @@ export const WS_FLOW_LIMITS: WsFlowLimits = Object.freeze({
  */
 export function clientAddress(remoteAddress: string): string | undefined {
   return isPublicUnicastAddress(remoteAddress) ? normalizeIpAddress(remoteAddress) : undefined;
+}
+
+/**
+ * Who a connection stands for: the socket address, or, when the socket is one
+ * of the operator's trusted proxies, the client it forwarded (#829). Without
+ * trusted proxies the forwarding headers are anyone's word and are ignored.
+ */
+export function clientAddressOf(
+  socketAddress: string,
+  headers: http.IncomingHttpHeaders,
+  isTrustedProxy: (address: string) => boolean,
+): string {
+  const header = (name: string): string | undefined => {
+    const value = headers[name];
+    return Array.isArray(value) ? value.join(', ') : value;
+  };
+  return resolveClientAddress(socketAddress,
+    { forwardedFor: header('x-forwarded-for'), forwarded: header('forwarded') }, isTrustedProxy);
 }
 
 /** A sound that would only arrive late anyway can be skipped without losing any state. */
