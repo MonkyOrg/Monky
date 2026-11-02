@@ -182,6 +182,7 @@ export function registerDmIpc(registry: IpcRegistry, mainWindow: BrowserWindow, 
   }));
   registry.handle(DM_IPC.editMessage, DM_POLICY, (_event, peer, id, content) => withDm(dm =>
     dm.editMessage(text(peer), text(id), text(content))));
+  registry.handle(DM_IPC.resendMessage, DM_POLICY, (_event, peer, id) => withDm(dm => dm.resendMessage(text(peer), text(id))));
   registry.handle(DM_IPC.deleteMessage, DM_POLICY, (_event, peer, id) => withDm(dm => dm.deleteMessage(text(peer), text(id))));
   registry.handle(DM_IPC.react, DM_POLICY, (_event, peer, id, emoji, add) => withDm(dm =>
     dm.react(text(peer), text(id), text(emoji), add !== false)));

@@ -73,6 +73,8 @@ export interface OutboxEntry {
   body?: unknown;
   statement?: SignedStatement;
   lastSentAt: number;
+  /** When it entered the outbox, if not at `ts` (a message sent again); what its deadline counts from. */
+  queuedAt?: number;
 }
 
 export interface ConversationMeta {

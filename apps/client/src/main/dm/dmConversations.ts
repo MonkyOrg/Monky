@@ -156,6 +156,23 @@ export class DmConversations {
     return dispatchFor(peer, items, [this.outbox.selfCopy(peer, 'edit', newDmId(), editedAt, body)]);
   }
 
+  /**
+   * A message that was not delivered (its friend did not come back in time,
+   * or stopped being a friend) goes into the outbox again, as it is now.
+   */
+  resendMessage(peerKey: string, messageId: string): DmDispatch {
+    const record = this.ledger.requireFriend(peerKey);
+    const peer = record.publicKey;
+    const message = this.ledger.findMessage(peer, messageId);
+    if (!message || message.author !== this.ledger.me || message.deleted) throw new DmError('not-found', 'Mensagem não encontrada.');
+    if (message.delivery !== 'failed') return {};
+    message.delivery = 'pending';
+    const item = this.outbox.requeueMessage(record, message);
+    this.ledger.changed(peer, [message]);
+    this.ledger.emitMessages(peer, [message]);
+    return dispatchFor(peer, [item]);
+  }
+
   deleteMessage(peerKey: string, messageId: string): DmDispatch {
     const peer = this.ledger.requirePeerKey(peerKey);
     const record = this.ledger.state.peers[peer];

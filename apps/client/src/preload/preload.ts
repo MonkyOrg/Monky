@@ -129,6 +129,7 @@ const api: ElectronApi = {
     unblock: peer => invoke(DM_IPC.unblock, peer),
     sendMessage: input => invoke(DM_IPC.sendMessage, input),
     editMessage: (peer, messageId, content) => invoke(DM_IPC.editMessage, peer, messageId, content),
+    resendMessage: (peer, messageId) => invoke(DM_IPC.resendMessage, peer, messageId),
     deleteMessage: (peer, messageId) => invoke(DM_IPC.deleteMessage, peer, messageId),
     react: (peer, messageId, emoji, add) => invoke(DM_IPC.react, peer, messageId, emoji, add),
     markRead: peer => invoke(DM_IPC.markRead, peer),

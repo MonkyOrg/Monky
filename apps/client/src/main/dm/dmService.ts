@@ -83,6 +83,7 @@ export class DmService {
     this.profile = new DmProfile(this.ledger, this.outbox);
     this.sync = new DmDeviceSync(this.ledger, this.outbox, this.friends, this.profile, this.conversations);
     store.onWritten = (written) => this.outbox.releaseStoredAcks(written);
+    this.outbox.expire(this.ledger.now());
   }
 
   /** Identifies this running device in own-device exchanges. */
@@ -198,6 +199,11 @@ export class DmService {
     return this.conversations.editMessage(peerKey, messageId, content);
   }
 
+  /** Sends a message that was not delivered again (see {@link DmOutbox.expire}). */
+  resendMessage(peerKey: string, messageId: string): DmDispatch {
+    return this.conversations.resendMessage(peerKey, messageId);
+  }
+
   deleteMessage(peerKey: string, messageId: string): DmDispatch {
     return this.conversations.deleteMessage(peerKey, messageId);
   }
@@ -243,6 +249,7 @@ export class DmService {
    * that only need the sync.
    */
   hello(toFriends: boolean, announce = true): DmDispatch {
+    this.outbox.expire(this.ledger.now());
     const broadcast = this.friends.syncItems();
     // Other devices of this identity answer with what they have that this one lacks.
     if (announce) broadcast.push(...this.sync.helloItems());
@@ -283,6 +290,8 @@ export class DmService {
    */
   outgoing(peerKeys: string[], force = false): DmDispatch {
     const now = this.ledger.now();
+    // Every friend, reachable or not: the ones who do not come back are the ones whose messages expire.
+    this.outbox.expire(now);
     const peers: Record<string, DmRelayItem[]> = {};
     const everywhere: Record<string, DmRelayItem[]> = {};
     let dirty = false;

@@ -45,6 +45,7 @@ function fakeApi(overrides: Partial<DmApi>): DmApi {
     unblock: nothing,
     sendMessage: nothing,
     editMessage: nothing,
+    resendMessage: nothing,
     deleteMessage: nothing,
     react: nothing,
     markRead: nothing,

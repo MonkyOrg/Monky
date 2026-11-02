@@ -24,6 +24,7 @@ import {
 import { DmKeyring, newDmId, verifyDmCertificate } from '../src/main/dm/dmCrypto';
 import { DmHistory, monthOf } from '../src/main/dm/dmHistory';
 import { DAY_MS, SELF_REPEAT_WINDOW_MS, messageFingerprint, type StoredMessage } from '../src/main/dm/dmModel';
+import { OUTBOX_MESSAGE_TTL_MS } from '../src/main/dm/dmOutbox';
 import { DmPersistence } from '../src/main/dm/dmPersistence';
 import { DmError, DmService, DM_DOWNLOAD_STALL_MS, DM_FILE_CHUNK_BYTES, DM_FILE_TRANSFER_IDLE_MS } from '../src/main/dm/dmService';
 import { DmTransport, type DmRelayApi } from '../src/renderer/core/DmTransport';
@@ -2184,4 +2185,58 @@ test('the fingerprint of each day is what earlier versions compute, so own devic
   assert.equal(summary.count, messages.filter((message) => !message.deleted).length);
   assert.equal(summary.unread, messages.filter((message) => !message.deleted && message.author === peerKey).length);
   assert.equal(summary.last?.id, ordered.filter((message) => !message.deleted).at(-1)?.id);
+});
+
+test('a message a friend does not come back for in 30 days shows as not delivered, and can be sent again', () => {
+  const clock = { now: Date.UTC(2026, 3, 1, 12) };
+  const now = () => clock.now;
+  const aliceIdentity = createIdentity();
+  const alice = createDevice('Alice', aliceIdentity, undefined, now);
+  const bob = createDevice('Bob', createIdentity(), undefined, now);
+  befriend([alice, bob], alice, bob);
+  const bobKey = bob.identity.publicKey;
+  const delivery = (device: Device) => device.service.getConversation(bobKey).messages.at(-1)?.delivery;
+
+  // Bob does not come back: the message waits in Alice's outbox.
+  alice.service.sendMessage({ peer: bobKey, content: 'você sumiu?' });
+  const { id, createdAt } = alice.service.getConversation(bobKey).messages.at(-1)!;
+  clock.now = createdAt + OUTBOX_MESSAGE_TTL_MS - 1;
+  alice.service.outgoing([]);
+  assert.equal(delivery(alice), 'pending');
+  assert.deepEqual(alice.service.resendMessage(bobKey, id), {}, 'Only a message not delivered is sent again');
+
+  clock.now += 1;
+  alice.service.outgoing([]);
+  assert.equal(delivery(alice), 'failed');
+  assert.ok(alice.events.some((event) => event.type === 'messages' && event.messages.some((message) =>
+    message.id === id && message.delivery === 'failed')), 'The open conversation is told');
+  assert.deepEqual(alice.service.pendingPeers(), [], 'Nothing waits for Bob anymore');
+  alice.service.flush();
+  assert.equal(createDevice('Alice', aliceIdentity, alice.dir, now).service.getConversation(bobKey).messages.at(-1)?.delivery, 'failed');
+
+  // Sent again: a new deadline, counted from now.
+  const again = alice.service.resendMessage(bobKey, id);
+  assert.equal(again.peers?.[bobKey]?.length, 1);
+  assert.equal(delivery(alice), 'pending');
+  clock.now += OUTBOX_MESSAGE_TTL_MS - 1;
+  alice.service.outgoing([]);
+  assert.equal(delivery(alice), 'pending');
+
+  // Past it, a device that opens later shows it as not delivered right away.
+  clock.now += 1;
+  alice.service.flush();
+  const reopened = createDevice('Alice', aliceIdentity, alice.dir, now);
+  assert.equal(delivery(reopened), 'failed');
+
+  // Bob is back: the message reaches him once, at the time it was written, and shows as delivered.
+  relay([reopened, bob], reopened, reopened.service.resendMessage(bobKey, id));
+  relay([reopened, bob], reopened, reopened.service.resendMessage(bobKey, id));
+  assert.equal(delivery(reopened), 'delivered');
+  const received = bob.service.getConversation(alice.identity.publicKey).messages;
+  assert.deepEqual(received.map((message) => message.content), ['você sumiu?']);
+  assert.equal(received[0].createdAt, alice.service.getConversation(bobKey).messages.at(-1)?.createdAt);
+
+  // Only a friend's message can be sent again.
+  relay([reopened, bob], reopened, reopened.service.removeFriend(bobKey));
+  assert.throws(() => reopened.service.resendMessage(bobKey, id), (error: unknown) => error instanceof DmError && error.code === 'not-friend');
 });
