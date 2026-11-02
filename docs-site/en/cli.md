@@ -718,7 +718,7 @@ The CLI automatically computes and displays a **capacity estimate** based on ava
 
 | Port | Protocol | Purpose |
 |---|---|---|
-| `40000-49151` | UDP and TCP | mediasoup worker WebRTC media ports |
+| `40000` | UDP and TCP | mediasoup worker WebRTC media port, shared by every call |
 
 The range must be open in your server firewall (Oracle Cloud Security List, AWS Security Group, iptables/ufw) — on UDP and on TCP too, which is the way in for anyone on a network that blocks UDP. Ready-to-run commands and how to check them are in [Opening the SFU mode ports](/en/hospedar-em-vps#opening-the-sfu-mode-ports).
 

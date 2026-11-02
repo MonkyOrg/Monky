@@ -42,7 +42,7 @@ Windows usually treats the Radmin network as public or unidentified, so it block
 New-NetFirewallRule -DisplayName "Monky server (Radmin VPN)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3000 -RemoteAddress 26.0.0.0/8
 ```
 
-In SFU mode add a second rule with `-Protocol UDP -LocalPort 40000-49151`. Undo with `Remove-NetFirewallRule -DisplayName "Monky server (Radmin VPN)"`.
+In SFU mode add a second rule with `-Protocol UDP -LocalPort 40000` and a third with `-Protocol TCP -LocalPort 40000` (for networks that block UDP). Undo with `Remove-NetFirewallRule -DisplayName "Monky server (Radmin VPN)"`.
 
 ### 7. Test from a friend's computer
 

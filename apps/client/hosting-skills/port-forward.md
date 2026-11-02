@@ -44,7 +44,7 @@ The user opens `http://<router-address>` in a browser and signs in (they type th
 | Protocol | External port | Internal IP | Internal port | When |
 |---|---|---|---|---|
 | TCP | 3000 | host's local IP | 3000 | always |
-| UDP | 40000-49151 | host's local IP | 40000-49151 | only in SFU mode |
+| UDP and TCP | 40000 | host's local IP | 40000 | only in SFU mode |
 
 Use the real port if it isn't 3000. Don't use DMZ instead of a rule.
 
@@ -56,9 +56,9 @@ Use the real port if it isn't 3000. Don't use DMZ instead of a rule.
   New-NetFirewallRule -DisplayName "Monky server (internet)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3000
   ```
 
-  In SFU mode add `-Protocol UDP -LocalPort 40000-49151` in a second rule. Undo with `Remove-NetFirewallRule -DisplayName "Monky server (internet)"`.
+  In SFU mode add `-Protocol UDP -LocalPort 40000` in a second rule and `-Protocol TCP -LocalPort 40000` in a third. Undo with `Remove-NetFirewallRule -DisplayName "Monky server (internet)"`.
 - **macOS**: allow Monky to accept incoming connections (System Settings → Network → Firewall).
-- **Linux with ufw**: `sudo ufw allow 3000/tcp` (and `sudo ufw allow 40000:49151/udp` in SFU mode).
+- **Linux with ufw**: `sudo ufw allow 3000/tcp` (and `sudo ufw allow 40000/udp` plus `sudo ufw allow 40000/tcp` in SFU mode).
 
 ### 7. Test from outside the house
 

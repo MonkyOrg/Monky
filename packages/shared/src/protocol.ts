@@ -71,7 +71,7 @@ export enum ProtocolErrorCode {
    */
   TURN_UNAVAILABLE = 'TURN_UNAVAILABLE',
   /**
-   * The SFU cannot carry media on this host — typically a UDP range that is
+   * The SFU cannot carry media on this host — typically a media port that is
    * blocked or already taken. Same intent as TURN_UNAVAILABLE: the switch is
    * refused with an actionable reason instead of being accepted and silently
    * degrading to P2P (#515).

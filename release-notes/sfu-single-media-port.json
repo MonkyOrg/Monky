@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Servidores no modo SFU agora usam uma só porta para toda a mídia: 40000, em UDP e TCP. Já liberou a faixa 40000-49151? Não precisa mudar nada. Firewall novo? Basta abrir essa porta, por mais gente que entre na chamada.",
+  "en": "Servers in SFU mode now use a single port for all media: 40000, over UDP and TCP. Already opened the 40000-49151 range? Nothing to change. New firewall? Just open that port, however many people join the call."
+}

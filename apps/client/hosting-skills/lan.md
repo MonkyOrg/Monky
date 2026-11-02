@@ -38,7 +38,7 @@ Follow "Hosting from the Monky app" above. P2P mode is a good fit for a local ne
   New-NetFirewallRule -DisplayName "Monky server (LAN)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3000 -RemoteAddress LocalSubnet
   ```
 
-  In SFU mode add a second rule with `-Protocol UDP -LocalPort 40000-49151`. Undo with `Remove-NetFirewallRule -DisplayName "Monky server (LAN)"`.
+  In SFU mode add a second rule with `-Protocol UDP -LocalPort 40000` and a third with `-Protocol TCP -LocalPort 40000` (for networks that block UDP). Undo with `Remove-NetFirewallRule -DisplayName "Monky server (LAN)"`.
 - **macOS**: if asked whether Monky may accept incoming connections, choose Allow. The setting lives in System Settings → Network → Firewall.
 - **Linux with ufw**: `sudo ufw allow from 192.168.0.0/24 to any port 3000 proto tcp` (use the real local subnet).
 
