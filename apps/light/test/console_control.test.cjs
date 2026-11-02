@@ -61,6 +61,18 @@ test('native console quit does not wait for the controller to close stdin', { ti
   assert.equal(fixture.output().stderr, '');
 });
 
+// Closing the Terminal window sends SIGHUP: it must stop the program through
+// main, as SIGTERM and Ctrl+C do, instead of killing it before it logs out (#825).
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  test(`${signal} stops the native console through main`, { skip: process.platform === 'win32', timeout: 5000 }, async t => {
+    const fixture = start(t, ['--slow-teardown']);
+    await ready(fixture);
+    fixture.child.kill(signal);
+    assert.deepEqual(await fixture.closed, [0, null], `${signal} ended the process instead of main`);
+    assert.equal(fixture.output().stderr, '');
+  });
+}
+
 test('closing the console holds the process while the core logs out, and main still ends it',
   { skip: process.platform !== 'win32', timeout: 15_000 }, async t => {
     const fixture = start(t, ['--slow-teardown'], { inConsole: true });

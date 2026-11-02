@@ -827,8 +827,8 @@ test('broadcasts the native core never reads stay out of its queue, and one that
   await light.close();
 });
 
-test('a native core whose events nobody reads leaves the call and logs out', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
-  // macOS ends the process with SIGPIPE before any of this can run (D7).
+test('a native core whose events nobody reads leaves the call and logs out', { timeout: 30_000 }, async t => {
+  // Outside Windows the lost stdout raises SIGPIPE, which must not end the process first (#825).
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');
   const light = new NativeClient(fixture, { nickname: 'Unread Light' });
@@ -845,6 +845,29 @@ test('a native core whose events nobody reads leaves the call and logs out', { s
     false, 'The core dropped its connection instead of logging out');
   assert.deepEqual(await light.closed, { code: 1, signal: null });
 });
+
+test('closing the Terminal, which hangs up the native core, logs out instead of leaving a ghost (#825)',
+  { skip: process.platform === 'win32', timeout: 30_000 }, async t => {
+    const fixture = await createServerFixture(t);
+    const admin = await fixture.connectHuman('Fixture admin');
+    for (const tray of [false, true]) {
+      const light = new NativeClient(fixture, { nickname: tray ? 'Hung up tray' : 'Hung up Light', tray });
+      const auth = await light.wait('authenticated');
+      await light.join(auth.channels.find(channel => channel.type === 'VOICE').id);
+      const since = admin.peer.messages.length;
+      light.child.kill('SIGHUP');
+      await admin.peer.wait(message => message.type === MessageType.USER_LEFT && message.payload.userId === auth.userId,
+        since, 10_000);
+      assert.equal(admin.peer.messages.slice(since).some(message => message.type === MessageType.USER_CONNECTION_STATE),
+        false, 'The core dropped its connection instead of logging out');
+      assert.deepEqual(await light.closed, { code: 0, signal: null }, 'SIGHUP ended the process before main');
+      assert.ok(light.events.some(event => event.event === 'stopped'));
+      if (tray) {
+        assert.ok(light.events.some(event => event.event === 'fixture-interface-stopped'),
+          'The interface never heard that the core stopped, so the tray icon would stay behind');
+      }
+    }
+  });
 
 test('closing the native console logs out at once and ends the process through main, also under an interface',
   { skip: process.platform !== 'win32', timeout: 45_000 }, async t => {
