@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Com o Histórico de eventos aberto, um evento encerrado que foi excluído, ou que deixou de estar visível para você, agora some da lista sozinho. Antes ele só saía ao ser aberto ou ao religar o Histórico.",
+  "en": "With the event History open, an ended event that was deleted, or that you can no longer see, now leaves the list on its own. It used to stay until you opened it or switched the History back on."
+}

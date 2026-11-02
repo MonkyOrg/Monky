@@ -20,6 +20,8 @@ import { locationIcon } from './communityMarkup';
 
 /** Shortest wait between two checks of an event the snapshot does not carry. */
 const EVENT_CHECK_INTERVAL_MS = 1000;
+/** Shortest wait between two fetches of the event history while snapshots keep arriving. */
+const HISTORY_REFRESH_INTERVAL_MS = 1000;
 
 /** How the server answers for an event that was deleted or is no longer visible to this member. */
 function isEventRefused(error: unknown): boolean {
@@ -239,34 +241,84 @@ export function openEvents(ctx: CommunityContext): void {
     const toggle = modal.content.querySelector<HTMLInputElement>('[data-history]');
     if (toggle) toggle.checked = history;
   };
-  const refresh = async () => {
-    if (history) {
-      const response: unknown = await feed.client.sendRequest(MessageType.COMMUNITY_GET, { includeEnded: true });
-      if (modal.signal.aborted) return;
-      previous = communitySnapshotSchema.parse(response).events;
+  // In the server's order: what is on or coming first (the pushed snapshot), then the ended and
+  // cancelled from `ended`, which the server only sends when asked.
+  const mergeHistory = (ended: readonly ServerEventPublic[]) => {
+    const current = new Map((feed.snapshot?.events ?? []).map((event) => [event.id, event]));
+    return [...current.values(), ...ended.filter((event) => !current.has(event.id) && ['ended', 'cancelled'].includes(event.status))];
+  };
+  // Pushed snapshots never carry ended events, so one deleted or no longer visible is only
+  // learned by asking again: each snapshot asks, at most once per interval and one at a time.
+  let historyRequest: string | null = null;
+  let historyStale = false;
+  let historyTimer: ReturnType<typeof setTimeout> | undefined;
+  let historyFetchedAt = -Infinity;
+  let seenEvents = feed.snapshot?.events;
+  const stopHistory = () => {
+    clearTimeout(historyTimer);
+    historyTimer = undefined;
+    historyStale = false;
+    if (historyRequest) feed.client.cancelRequest(historyRequest);
+    historyRequest = null;
+  };
+  const fetchHistory = async (): Promise<void> => {
+    stopHistory();
+    const requestId = crypto.randomUUID();
+    historyRequest = requestId;
+    historyFetchedAt = performance.now();
+    // An answer for a fetch the history was closed or a newer fetch replaced changes nothing.
+    const outdated = () => historyRequest !== requestId || !history || modal.signal.aborted;
+    try {
+      const response: unknown = await feed.client.sendRequest(MessageType.COMMUNITY_GET, { includeEnded: true }, requestId);
+      if (outdated()) return;
+      const fetched = communitySnapshotSchema.parse(response).events;
+      const listed = new Set([...fetched, ...feed.snapshot?.events ?? []].map((event) => event.id));
+      // Deleted or no longer visible: whatever else shows it, such as its open dialog, lets it
+      // go first, so focus returns to its card before the card leaves the list.
+      for (const gone of previous.filter((event) => !listed.has(event.id))) ctx.forgetEvent(gone.id);
+      previous = mergeHistory(fetched);
+      render();
+    } catch (error) {
+      if (!outdated()) throw error;
+    } finally {
+      if (historyRequest === requestId) {
+        historyRequest = null;
+        if (historyStale) scheduleHistory();
+      }
     }
-    render();
+  };
+  const scheduleHistory = () => {
+    historyStale = true;
+    if (historyRequest || historyTimer !== undefined) return;
+    historyTimer = setTimeout(() => {
+      historyTimer = undefined;
+      // A failed check keeps the copy shown; the next snapshot asks again.
+      fetchHistory().catch((error: unknown) => console.warn('[Community] Event history refresh failed.', error));
+    }, Math.max(0, historyFetchedAt + HISTORY_REFRESH_INTERVAL_MS - performance.now()));
   };
   modal.content.addEventListener('change', (event) => {
     if (event.target instanceof HTMLInputElement && event.target.hasAttribute('data-history')) {
       history = event.target.checked;
-      void modal.run(refresh);
+      if (history) void modal.run(fetchHistory);
+      else { stopHistory(); render(); }
     }
   }, { signal: modal.signal });
   bindEventActions(ctx, modal, events);
-  // The history is a copy fetched once: an event the server refused since then leaves it.
+  // An event the server refused since the last fetch leaves the history at once.
   const unwatch = ctx.watchEvents((id) => {
     if (!previous.some((event) => event.id === id)) return;
     previous = previous.filter((event) => event.id !== id);
     render();
   });
-  modal.signal.addEventListener('abort', unwatch, { once: true });
+  modal.signal.addEventListener('abort', () => { unwatch(); stopHistory(); }, { once: true });
   followFeed(feed, modal, () => {
     if (!feed.snapshot?.settings.eventsEnabled) { modal.close(true); return; }
+    // A vote replaces the snapshot but keeps its events: only a snapshot from the server asks.
+    const pushed = feed.snapshot.events !== seenEvents;
+    seenEvents = feed.snapshot.events;
     if (history) {
-      // In the server's order: what is on or coming first, then the ended and cancelled.
-      const current = new Map(feed.snapshot.events.map((event) => [event.id, event]));
-      previous = [...current.values(), ...previous.filter((event) => !current.has(event.id) && ['ended', 'cancelled'].includes(event.status))];
+      previous = mergeHistory(previous);
+      if (pushed) scheduleHistory();
     }
     render();
   });
