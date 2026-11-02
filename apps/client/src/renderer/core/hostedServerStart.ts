@@ -46,6 +46,7 @@ export function ensureHostedServerStarted(server: CreatedServer): Promise<void> 
       serverId: target.id,
       maxUsers: target.maxUsers,
       voiceMode: target.voiceMode,
+      trustedProxies: target.trustedProxies,
     }).catch((error: unknown) => {
       throw new Error(t('main.serverStartFailedMessage'), { cause: error });
     });

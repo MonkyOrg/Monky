@@ -1,7 +1,7 @@
 import { ConnectionStatus } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
-import { LIMITS, VoiceMode } from '@monky/shared';
+import { LIMITS, parseTrustedProxies, VoiceMode } from '@monky/shared';
 import { favoritesStore } from './favoritesStore';
 import { settingsStore } from './settingsStore';
 import { isLoopbackHost, sameServerAddress, serverAddressKey, type ServerAddress } from '../utils/serverAddress';
@@ -53,6 +53,8 @@ export interface CreatedServer {
   maxUsers?: number;
   /** Voice mode ('p2p' | 'sfu') picked on creation (#515). */
   voiceMode?: VoiceMode;
+  /** Reverse proxies trusted to name the client (#829); absent means off. Applied on start. */
+  trustedProxies?: string[];
 }
 
 export class ConnectionStore {
@@ -489,6 +491,12 @@ export class ConnectionStore {
           typeof server.createdAt === 'number' &&
           typeof server.lastStarted === 'number'
         ))
+        .map((server) => {
+          if (server.trustedProxies === undefined) return server;
+          const list = server.trustedProxies;
+          const valid = Array.isArray(list) && list.every((entry) => typeof entry === 'string') && parseTrustedProxies(list).ok;
+          return valid ? server : { ...server, trustedProxies: undefined };
+        })
         .sort((a, b) => b.lastStarted - a.lastStarted)
         .slice(0, 10);
       this.separateCreatedServerPorts();

@@ -552,6 +552,11 @@ export interface HostServerOptions {
    * Voice mode ('p2p' | 'sfu') chosen when the server was created (#515).
    */
   voiceMode?: 'p2p' | 'sfu';
+  /**
+   * Reverse proxies whose forwarding headers name the client (#829). Read on
+   * every start; absent or empty means no proxy is trusted.
+   */
+  trustedProxies?: string[];
 }
 
 /** One server hosted by this app. The port identifies it while it runs. */

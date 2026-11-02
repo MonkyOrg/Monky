@@ -4,7 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { test } = require('node:test');
 const ts = require('typescript');
-const { LIMITS } = require('@monky/shared');
+const { LIMITS, parseTrustedProxies } = require('@monky/shared');
 
 const mainRoot = path.resolve(__dirname, '..', 'src', 'main');
 const serverA = { port: 3000, serverName: 'A', serverId: 'a' };
@@ -100,7 +100,7 @@ function fixture(create) {
         ],
       },
     }],
-    ['@monky/shared', { LIMITS }],
+    ['@monky/shared', { LIMITS, parseTrustedProxies }],
     ['@monky/server', {
       readStoredUpdateInventory: async filename => {
         io.snapshots.push(filename);
@@ -181,6 +181,20 @@ test('real ServerManager wiring serializes concurrent IPC starts and never repla
     channel: 'server-host:status-changed',
     args: [running({ port: 3000, serverId: 'a' })],
   }]);
+});
+
+test('trusted proxies reach the hosted server only as a list the server accepts (#829)', async () => {
+  const f = fixture(async () => runtime());
+  for (const trustedProxies of [['0.0.0.0/0'], ['proxy.local'], '127.0.0.1', [127]]) {
+    const result = await f.manager.startServer({ ...serverA, trustedProxies });
+    assert.equal(result.success, false, JSON.stringify(trustedProxies));
+    assert.equal(result.error, f.i18n.mt('error.startServerFailed'));
+  }
+  assert.equal(f.configCalls.length, 0, 'nothing starts with a list the server would refuse');
+  assert.equal((await f.manager.startServer({ ...serverA, trustedProxies: ['127.0.0.1', '10.0.0.0/8'] })).success, true);
+  assert.deepEqual(f.configCalls[0].trustedProxies, ['127.0.0.1', '10.0.0.0/8']);
+  assert.equal((await f.manager.startServer({ ...serverB })).success, true);
+  assert.equal(f.configCalls[1].trustedProxies, undefined, 'off unless the person turned it on');
 });
 
 test('two servers run side by side, each with its own stats, logs and stop', async () => {

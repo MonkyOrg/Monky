@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Servidores atrás de proxy reverso ou túnel podem informar seus proxies confiáveis: cada pessoa passa a ter o próprio limite de tentativas de login, em vez de todos dividirem o do proxy. Fica no menu do servidor criado no app (Proxy reverso) e no CLI (monky config set trustedProxies). Vem desligado.",
+  "en": "Servers behind a reverse proxy or tunnel can now list their trusted proxies: each person gets their own login attempt limit instead of everyone sharing the proxy's. It is in the menu of a server created in the app (Reverse proxy) and in the CLI (monky config set trustedProxies). Off by default."
+}

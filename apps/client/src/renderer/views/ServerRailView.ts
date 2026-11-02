@@ -29,6 +29,7 @@ import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { appEvents } from '../core/EventBus';
 import { addServerModal } from './addServer/AddServerModal';
 import { folderSettingsModal } from './FolderSettingsModal';
+import { trustedProxiesModal } from './TrustedProxiesModal';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter } from '../utils/surfaceMotion';
 import { markSessionRead } from '../core/readState';
@@ -770,6 +771,11 @@ export class ServerRailView {
           icon: 'monitoring',
           disabled: !running,
           onClick: () => { void import('./ServerMonitorModal').then(({ serverMonitorModal }) => serverMonitorModal.openLocal(owned.port)); },
+        },
+        {
+          label: t('trustedProxies.menu'),
+          icon: 'lan',
+          onClick: () => trustedProxiesModal.open(owned.id),
         },
         {
           label: t('connection.deleteSavedServer'),

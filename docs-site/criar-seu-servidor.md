@@ -55,6 +55,7 @@ Ao criar ou administrar o servidor, você escolhe o modo de voz e vídeo:
 - **Porta TCP principal:** Libere a porta `3000` (ou a escolhida) no firewall e configure o port forwarding no roteador.
 - **Portas para o SFU (mediasoup):** Se usar o modo SFU, libere também o range `40000-49151` — em UDP e em TCP — no roteador/firewall. Numa VPS, veja [Abrindo as portas do Modo SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu).
 - **Sem mexer no roteador:** É possível usar uma VPN como Radmin VPN, Hamachi, ZeroTier ou Tailscale.
+- **Atrás de um proxy reverso ou túnel:** Clique com o botão direito no ícone do servidor e abra **Proxy reverso** para informar os endereços dos seus proxies. Sem isso, todos dividem o mesmo limite de tentativas de login. Veja [Atrás de um proxy reverso](/hospedar-em-vps#atras-de-um-proxy-reverso).
 
 ## Administrar
 
