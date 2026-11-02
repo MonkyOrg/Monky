@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Servidores cujo nome começa com emoji não mostram mais um \"�\" no ícone da barra lateral. O emoji agora aparece inteiro no lugar da inicial.",
+  "en": "Servers whose name starts with an emoji no longer show a \"�\" in the sidebar icon. The whole emoji is now shown in place of the initial."
+}

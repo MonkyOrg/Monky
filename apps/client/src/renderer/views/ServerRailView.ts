@@ -23,6 +23,7 @@ import {
 import { resolveImageUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
 import { serverAddressKey } from '../utils/serverAddress';
 import { initialImageState } from '../utils/imageFallback';
+import { firstInitial } from '../utils/initial';
 import { followPointerReorder, onPrimaryPress } from '../utils/pointerReorder';
 import { t } from '../i18n';
 import { contextMenu, type ContextMenuEntry } from './ContextMenu';
@@ -422,7 +423,7 @@ export class ServerRailView {
     const liveIcon = resolveImageUrl(live?.serverStore.serverDetails?.iconUrl, live?.client.getHttpBaseUrl() ?? '');
     return {
       iconUrl: liveIcon || srv.iconUrl,
-      initial: (srv.name || srv.host || '?').trim().charAt(0).toUpperCase(),
+      initial: firstInitial(srv.name || srv.host),
     };
   }
   private renderServerItem(

@@ -10,6 +10,7 @@ import { t } from '../i18n';
 import { renderAudioMuteIndicators } from './AudioStateIcon';
 import { arrangeOverlayCards, fitOverlayCards } from '../utils/overlayLayout';
 import { getOverlayCardSize, overlayCardAspect, overlaySignalSchema } from '@monky/shared';
+import { firstInitial } from '../utils/initial';
 import { waitForIceGatheringComplete } from '../core/webrtc/iceGathering';
 
 type OverlayTile = {
@@ -477,7 +478,7 @@ export class OverlayStageView {
           ${tile.p.avatarUrl ? html`
             <img src="${tile.p.avatarUrl}" alt="${name}" class="overlay-avatar-img ${isSpeaking ? 'speaking-pulse' : ''}" data-fallback="avatar" />
           ` : html`
-            <div class="overlay-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${(name || '').charAt(0).toUpperCase()}</div>
+            <div class="overlay-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${firstInitial(name, '')}</div>
           `}
         </div>
       `}
@@ -497,7 +498,7 @@ export class OverlayStageView {
         ${p.avatarUrl ? html`
           <img src="${p.avatarUrl}" alt="${name}" class="overlay-mini-avatar ${isSpeaking ? 'speaking-pulse' : ''}" data-fallback="avatar" />
         ` : html`
-          <div class="overlay-mini-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${(name || '').charAt(0).toUpperCase()}</div>
+          <div class="overlay-mini-avatar-placeholder ${isSpeaking ? 'speaking-pulse' : ''}">${firstInitial(name, '')}</div>
         `}
       </div>
       <span class="overlay-mini-name">${name}</span>
