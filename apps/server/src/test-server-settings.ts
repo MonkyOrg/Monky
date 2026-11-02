@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import dgram from 'node:dgram';
 import os from 'node:os';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
@@ -260,7 +261,16 @@ test('the TURN relay refuses TCP relays and every internal network, and writes o
     'denied-peer-ip=100.64.0.0-100.127.255.255', 'denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255',
     'denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', 'denied-peer-ip=2002::-2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
   ]) assert.ok(lines.includes(expected), expected);
-  assert.equal(lines.some((line) => line.startsWith('allowed-peer-ip')), false);
+  // Behind NAT the host's private address is reopened, and only that one (#827).
+  assert.deepEqual(lines.filter((line) => line.startsWith('allowed-peer-ip')), ['allowed-peer-ip=10.0.0.5']);
+  assert.ok(lines.indexOf('allowed-peer-ip=10.0.0.5') > lines.indexOf('denied-peer-ip=10.0.0.0-10.255.255.255'));
+
+  // A host holding its public address on the interface stays as it was: no mapping, nothing reopened.
+  for (const [external, local] of [['198.51.100.20', '198.51.100.20'], ['198.51.100.20', null], [null, '10.0.0.5']] as const) {
+    const config = manager['buildConfig']('secret', external, local).split('\n');
+    assert.equal(config.some((line) => line.startsWith('allowed-peer-ip')), false, `${external}/${local}`);
+    assert.equal(config.some((line) => line.includes('/')), false, `${external}/${local}`);
+  }
 
   // An address from an external service that carries a line break never becomes a directive.
   const injected = manager['buildConfig']('secret', '198.51.100.20\nallowed-peer-ip=10.0.0.1', '10.0.0.5\nno-auth');
@@ -268,7 +278,31 @@ test('the TURN relay refuses TCP relays and every internal network, and writes o
   assert.equal(injected.includes('no-auth'), false);
   assert.equal(injected.split('\n').some((line) => line.startsWith('external-ip')), false);
   // A mapping only pairs addresses of the same family.
-  assert.ok(manager['buildConfig']('secret', '2001:db8::1', '10.0.0.5').split('\n').includes('external-ip=2001:db8::1'));
+  const mixed = manager['buildConfig']('secret', '2001:db8::1', '10.0.0.5').split('\n');
+  assert.ok(mixed.includes('external-ip=2001:db8::1'));
+  assert.equal(mixed.some((line) => line.startsWith('allowed-peer-ip')), false);
+});
+
+test('the TURN relay maps the interface the default route uses, not a Docker bridge or a VPN listed first (#827)', async (t) => {
+  t.mock.method(os, 'networkInterfaces', () => ({
+    lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+    docker0: [{ address: '172.17.0.1', family: 'IPv4', internal: false }],
+    tailscale0: [{ address: '100.101.102.103', family: 'IPv4', internal: false }],
+    ens3: [{ address: 'fe80::1', family: 'IPv6', internal: false }, { address: '10.0.0.5', family: 'IPv4', internal: false }],
+  }));
+  let route: string | null = '10.0.0.7';
+  t.mock.method(dgram.Socket.prototype, 'connect', function (this: dgram.Socket, _port: number, _address: string, connected: () => void) {
+    if (route) queueMicrotask(connected);
+    else queueMicrotask(() => this.emit('error', new Error('ENETUNREACH')));
+  });
+  t.mock.method(dgram.Socket.prototype, 'address', () => ({ address: route, family: 'IPv4', port: 40000 }));
+
+  assert.equal(await CoturnManager['detectLocalIp'](), '10.0.0.7');
+  // Without a route to the internet, the physical interface wins over bridges and tunnels.
+  route = null;
+  assert.equal(await CoturnManager['detectLocalIp'](), '10.0.0.5');
+  // A host with only virtual interfaces still gets an address rather than none.
+  assert.equal(CoturnManager['pickInterfaceAddress']({ docker0: [{ address: '172.17.0.1', family: 'IPv4', internal: false, netmask: '255.255.0.0', mac: '', cidr: null }] }), '172.17.0.1');
 });
 
 test('relay availability is probed off the event loop once for every sign-in, and again after an installation or a start (S-VOICE-6)', async (t) => {
