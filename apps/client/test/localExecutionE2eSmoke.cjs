@@ -463,7 +463,13 @@ async function runMediaSmoke(t, mode) {
     else process.env.MONKY_HOME = oldHome;
     if (clean) await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     else t.diagnostic(`Unconfirmed cleanup: preserving the exact isolated fixture directory ${root}`);
-    if (failures.length) throw new AggregateError(failures, 'E2E cleanup failed.');
+    if (failures.length) {
+      for (const failure of failures) {
+        t.diagnostic(`Cleanup failure: ${failure?.stack ?? failure}`);
+        for (const inner of failure?.errors ?? []) t.diagnostic(`  caused by: ${inner?.stack ?? inner}`);
+      }
+      throw new AggregateError(failures, 'E2E cleanup failed.');
+    }
   });
   if (mode === 'sfu') {
     sfu = await configureRealSfu(t, path.join(repoRoot, 'apps', 'server', 'dist', 'infrastructure', 'sfu', 'SfuManager.js'));

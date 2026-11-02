@@ -159,6 +159,10 @@ const shutdown = async () => {
     if (handlers) await handlers.dispose();
     else if (manager) await manager.dispose();
   } catch (error) { errors.push(error); }
+  // Exit notifications and Windows process teardown arrive asynchronously: confirm within a bound, never sooner.
+  const settledBy = Date.now() + 5000;
+  const leftovers = () => workers.size || caches.size || [...nativeIds].some(alive);
+  while (leftovers() && Date.now() < settledBy) await new Promise(resolve => setTimeout(resolve, 50));
   if (workers.size) errors.push(new Error(`${workers.size} private workers are still live.`));
   for (const pid of nativeIds) if (alive(pid)) errors.push(new Error(`Native fixture process ${pid} is still live.`));
   if (caches.size) errors.push(new Error(`${caches.size} native cache leases remain owned.`));
