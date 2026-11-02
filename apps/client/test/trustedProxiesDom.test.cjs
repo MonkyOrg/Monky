@@ -144,6 +144,24 @@ if (!process.versions.electron) {
       await check(await waitFor('!window.fixture.modal()'), 'saving off closes the modal');
       await check(await evaluate('window.fixture.saved().trustedProxies === undefined'), 'off removes the list');
 
+      // Saved while a start is still pending: finishing the start must not bring the old list back.
+      await evaluate(`window.fixture.gate = new Promise(resolve => { window.fixture.release = resolve; });
+        window.fixture.pending = window.fixture.start(); null`);
+      await evaluate('window.fixture.open()');
+      await check(await waitFor('window.fixture.modal()'), 'opens during a pending start');
+      await evaluate('window.fixture.toggle().click()');
+      await evaluate(`window.fixture.type('127.0.0.1')`);
+      await evaluate('window.fixture.submit()');
+      await check(await waitFor('!window.fixture.modal()'), 'saves during a pending start');
+      await evaluate('window.fixture.release(); window.fixture.gate = null; window.fixture.pending');
+      await check(await evaluate(`JSON.stringify(window.fixture.saved().trustedProxies) === '["127.0.0.1"]'`),
+        'the edit made during the start survives it');
+      await evaluate('window.fixture.open()');
+      await check(await waitFor('window.fixture.modal()'), 'reopens to turn it off');
+      await evaluate('window.fixture.toggle().click()');
+      await evaluate('window.fixture.submit()');
+      await check(await waitFor('!window.fixture.modal() && window.fixture.saved().trustedProxies === undefined'), 'off again');
+
       // A stored list the server would refuse is dropped on load rather than blocking every start.
       await check(await evaluate('window.fixture.reloadWith(["0.0.0.0/0"]) === undefined'), 'an unreadable stored list is dropped');
       await check(await evaluate(`JSON.stringify(window.fixture.reloadWith(["127.0.0.1"])) === '["127.0.0.1"]'`), 'a valid one is kept');
@@ -170,7 +188,11 @@ async function setupFixture() {
   const starts = [];
   window.api = {
     hostServerStatus: async () => ({ servers: [] }),
-    hostServerStart: async (options) => { starts.push(structuredClone(options)); return { success: true }; },
+    hostServerStart: async (options) => {
+      starts.push(structuredClone(options));
+      if (window.fixture.gate) await window.fixture.gate;
+      return { success: true };
+    },
   };
   const modal = () => document.querySelector('.trusted-proxies-modal');
   const list = () => modal()?.querySelector('#trusted-proxies-list');

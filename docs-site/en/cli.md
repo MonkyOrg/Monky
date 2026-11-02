@@ -155,7 +155,7 @@ such as `true`, `false`, `p2p` and `sfu` are not translated.
 | Path | Contents |
 |---|---|
 | `server.db` | SQLite database: members, roles, channels and messages. |
-| `monky.json` | Server port. |
+| `monky.json` | Server port and trusted proxies. |
 | `ecosystem.config.cjs` | PM2 configuration, rewritten on every `start`/`restart`. |
 | `attachments/`, `avatars/`, `icons/` | Uploaded files. |
 | `server.lock` | Exists while the server is running. See [Changes while the server is running](#changes-while-the-server-is-running). |

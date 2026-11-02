@@ -157,7 +157,7 @@ valores como `true`, `false`, `p2p` e `sfu` não são traduzidos.
 | Caminho | Conteúdo |
 |---|---|
 | `server.db` | Banco SQLite: membros, cargos, canais e mensagens. |
-| `monky.json` | Porta do servidor. |
+| `monky.json` | Porta do servidor e proxies confiáveis. |
 | `ecosystem.config.cjs` | Configuração do PM2, regravada a cada `start`/`restart`. |
 | `attachments/`, `avatars/`, `icons/` | Arquivos enviados. |
 | `server.lock` | Existe enquanto o servidor está em execução. Veja [Alterações com o servidor no ar](#alteracoes-com-o-servidor-no-ar). |
