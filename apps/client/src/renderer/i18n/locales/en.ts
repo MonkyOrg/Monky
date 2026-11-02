@@ -1256,6 +1256,9 @@ export const en: TranslationMap = {
   'connection.use': 'Use',
   'connection.removeFromSaved': 'Remove from saved',
   'connection.editSavedServer': 'Edit connection',
+  'connection.addServerAddress': 'Add address',
+  'connection.addServerAddressMessage': 'Another address of the same server "{name}", such as its local network IP or public IP. It is saved as one more server that only accepts this one\'s identity key. Only add addresses you know lead to this server.',
+  'connection.addServerAddressExists': 'This address is already saved.',
   'connection.serverOnline': 'Server online',
   'connection.serverOffline': 'Server offline',
   'connection.unknownUser': 'User',
@@ -2047,6 +2050,10 @@ export const en: TranslationMap = {
 
   // ── Network and connection (NetworkClient.ts) ────────────────────────────
   'network.genericConnectError': 'Could not connect. The server may be offline or closed, or the IP/port may be wrong.',
+  'network.serverKeyChanged': 'This server\'s identity key changed since you last joined. Monky did not join, so your sign-in is not handed to another server. If the owner changed the key on purpose, ask them for a new invitation and join through it.',
+  'network.serverKeyMissing': 'This server presented an identity key before and now presented none. Monky did not join, so your sign-in is not handed to another server. If the server went back to an old version, ask the owner to update it.',
+  'network.serverKeyOfOtherServer': 'This address presented the identity key of another server you saved. Monky did not join, because a server may be relaying that one\'s sign-in. If it is the same server at another address, add this address from the saved server\'s menu, under "Add address".',
+  'network.serverKeyInvalid': 'The server did not prove it holds the identity key it presented. Monky did not join.',
   'network.notMonkyServer': '{host}:{port} answered, but it is not a valid Monky server. Check the port.',
   'network.portClosed': 'The computer {host} is online, but no Monky server is running on port {port}. Check that the server was started.',
   'network.hostUnreachable': 'Could not find a server at {host}:{port}. The computer seems to be offline. Check the IP and your connection.',

@@ -8,6 +8,7 @@
 #include "profile_identity.hpp"
 #include "protocol.hpp"
 #include "protocol_session.hpp"
+#include "server_invite.hpp"
 
 #include <rtc_base/logging.h>
 
@@ -39,6 +40,9 @@ struct Options {
   bool muted = false;
   bool deafened = false;
   bool tray = false;
+  // From an invitation link given as --server (#821): the key it names and its password.
+  std::optional<std::string> invitedServerKey;
+  std::optional<std::string> invitedPassword;
 };
 
 std::int64_t unixMilliseconds() {
@@ -71,6 +75,13 @@ Options parseOptions(const std::vector<std::string>& arguments) {
   }
   if (!result.profile.is_absolute() || result.server.empty() || result.nickname.empty()) {
     throw std::invalid_argument("--profile (absolute), --server and --nickname are required");
+  }
+  // An invitation link stands for its server, as in the desktop app. Its key is the only way a pinned key is replaced.
+  if (looksLikeServerInvite(result.server)) {
+    auto invite = parseServerInviteLink(result.server);
+    result.server = invite.serverUrl();
+    result.invitedServerKey = std::move(invite.serverKey);
+    result.invitedPassword = std::move(invite.password);
   }
   websocket_detail::validateUrl(result.server);
   return result;
@@ -124,16 +135,31 @@ std::optional<std::string> passwordFromEnvironment() {
 #endif
 }
 
+// The environment password wins over one an invitation carries, as an explicit choice of the user.
+std::optional<std::string> sessionPassword(const std::optional<std::string>& invited) {
+  auto password = passwordFromEnvironment();
+  return password ? password : invited;
+}
+
 class Application final {
  public:
   Application(Options options, HeadlessConfiguration audio)
       : options_(std::move(options)), audio_(std::move(audio)), identity_(options_.profile),
-        session_({identity_.publicKeyHex(), identity_.deviceId(), options_.nickname, passwordFromEnvironment()},
+        session_({identity_.publicKeyHex(), identity_.deviceId(), options_.nickname,
+                  sessionPassword(options_.invitedPassword),
+                  identity_.serverKey(options_.server), identity_.serverKeysExcept(options_.server),
+                  options_.invitedServerKey},
                  {[this](const std::string& frame) {
                     const auto attempt = attempt_;
                     loop_.post([this, attempt, frame] { send(attempt, frame); }, frame.size());
                   },
-                  [this](const ProtocolSession::Nonce& nonce) { return identity_.signChallenge(nonce); },
+                  [this](const ProtocolSession::Nonce& nonce, const std::optional<ProtocolSession::ServerProof>& proof)
+                      -> std::optional<std::string> {
+                    if (!proof) return identity_.signChallenge(nonce);
+                    // Nothing is signed for a server that does not prove the key it presents (#821).
+                    if (!verifyServerChallenge(nonce, proof->key, proof->signature)) return std::nullopt;
+                    return identity_.signServerChallenge(nonce, proof->key);
+                  },
                   [] { return randomUuid(); },
                   [this](const SessionEvent& event) {
                     const auto attempt = attempt_;
@@ -508,12 +534,22 @@ class Application final {
     operationDeadline_ = Clock::now() + 10ms;
   }
 
+  // The first protected sign-in pins this server's key in the profile; later runs require it (#821).
+  void pinServerKey(const std::string& key) {
+    try {
+      identity_.pinServerKey(options_.server, key);
+    } catch (const std::exception& error) {
+      output({{"event", "warning"}, {"detail", std::string("Could not remember the server key: ") + error.what()}});
+    }
+  }
+
   void onSession(std::uint64_t attempt, const SessionEvent& event) {
     if (event.connection != session_.connection()) return;
     switch (event.kind) {
       case SessionEventKind::authenticated:
         if (!closing_ && session_.authentication()) {
           const auto& auth = *session_.authentication();
+          if (auth.serverKey) pinServerKey(*auth.serverKey);
           output({{"event", "authenticated"}, {"userId", auth.userId}, {"sessionId", auth.sessionId},
                   {"voiceMode", session_.voiceMode() == VoiceMode::sfu ? "sfu" : "p2p"},
                   {"serverName", auth.server.at("name")},
@@ -773,9 +809,9 @@ int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio)
   try {
     if (arguments == std::vector<std::string>{"--help"}) {
       std::cout << "Monky Light native voice core (development)\n"
-                   "  --profile <absolute-path> --server <ws[s]://host:port> --nickname <name>\n"
+                   "  --profile <absolute-path> --server <ws[s]://host:port | invitation link> --nickname <name>\n"
                    "  [--channel <voice-channel-id>] [--muted] [--deafened] [--tray]\n"
-                   "The profile parent must exist. Password: MONKY_LIGHT_PASSWORD environment variable.\n"
+                   "The profile parent must exist. Password: MONKY_LIGHT_PASSWORD environment variable, else the invitation's.\n"
                    "Control: one JSON object per line on stdin; events are JSON lines on stdout.\n"
                    "{\"command\":\"join\",\"channelId\":\"...\"}\n"
                    "{\"command\":\"mute\",\"enabled\":true}\n"

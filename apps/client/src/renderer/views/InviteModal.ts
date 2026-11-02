@@ -2,6 +2,7 @@ import { createServerInviteLink, MessageType, PUBLIC_IP_INTERFACE_NAME, ServerIn
 import { v4 as uuidv4 } from 'uuid';
 import { getActiveNetworkClient, networkClient, type NetworkClient } from '../core/NetworkClient';
 import { serverStore } from '../stores/serverStore';
+import { connectionStore } from '../stores/connectionStore';
 import { sessionManager } from '../core/SessionManager';
 import { findOwnedServer } from '../core/hostedServerStart';
 import { escapeHtml } from '../utils/html';
@@ -81,6 +82,8 @@ export class InviteModal {
   private tlsAddress: { host: string; port: number } | null = null;
   /** The port the server listens on, for the invitations that skip the proxy. */
   private serverPort = 3000;
+  /** The key the active server signed in with here, so the invited sign in bound to it (#821). */
+  private serverKey: string | undefined;
 
   public async open(): Promise<void> {
     this.close();
@@ -96,6 +99,7 @@ export class InviteModal {
     const active = sessionManager.getActive();
     this.knownPassword = active?.password
       || (active ? findOwnedServer(active.host, active.port)?.password : undefined);
+    this.serverKey = active ? connectionStore.serverKeyExpectation(active).pinned : undefined;
 
     const shell = openModal({
       card: `
@@ -435,6 +439,7 @@ export class InviteModal {
           v: 1, name: this.serverName, host: tls?.host ?? this.selectedIp, port: tls?.port ?? this.selectedPort,
           ...(tls ? { tls: true as const } : {}),
           ...(chkPassword?.checked && this.knownPassword ? { password: this.knownPassword } : {}),
+          ...(this.serverKey ? { serverKey: this.serverKey } : {}),
         }, getLanguage());
       } catch (error: unknown) {
         reportError(t('invite.copyFailed'), { log: 'APP', error });
@@ -451,6 +456,7 @@ export class InviteModal {
   private teardown(shell: ModalShell): void {
     if (this.shell !== shell) return;
     this.knownPassword = undefined;
+    this.serverKey = undefined;
     this.requestAbort?.abort();
     this.requestAbort = null;
     if (this.pendingRequest) this.pendingRequest.client.cancelRequest(this.pendingRequest.id);

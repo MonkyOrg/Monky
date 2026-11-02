@@ -15,6 +15,7 @@ import {
   authConnectSchema,
   canAccessChannel,
   deriveClientIdFromPublicKey,
+  memberAuthChallenge,
   normalizePublicKeyHex,
   type ServerSettingsUpdatedPayload,
 } from '@monky/shared';
@@ -24,6 +25,7 @@ import { CapacityEstimator } from '../../domain/services/CapacityEstimator';
 import { ICategoryRepository, IChannelRepository, IMentionRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 import { AvatarStorageService, publicImageUrl } from '../../infrastructure/security/AvatarStorageService';
 import { PasswordService } from '../../infrastructure/security/PasswordService';
+import type { ServerIdentity } from '../../infrastructure/security/ServerIdentity';
 import { Logger } from '../../infrastructure/logger/Logger';
 import { AttachmentService } from './AttachmentService';
 import { toChannelSummary } from './ChannelService';
@@ -94,6 +96,8 @@ interface PendingAuthChallenge {
   nickname: string;
   password: string;
   nonce: string;
+  /** The server key this sign-in is bound to (server-key-auth); absent for the bare nonce. */
+  serverKey?: string;
   /** Which installation is connecting, so two devices of the same person coexist (#309). */
   deviceId: string;
   /** The user wants to appear offline to everyone else (#561). */
@@ -141,15 +145,19 @@ export class AuthService {
     private attachmentService: AttachmentService,
     private permissionService: PermissionService,
     private roleService: RoleService,
+    private serverIdentity: ServerIdentity,
     private categoryRepo?: ICategoryRepository
   ) {}
 
   public async createChallenge(
     ws: WebSocket,
-    payload: AuthConnectPayload
+    payload: AuthConnectPayload,
+    bindToServerKey = false
   ): Promise<{
     success: boolean;
     nonce?: string;
+    serverKey?: string;
+    serverSignature?: string;
     errorCode?: ProtocolErrorCode;
     errorMessage?: string;
     serverProtocolVersion?: number;
@@ -217,12 +225,14 @@ export class AuthService {
     }
 
     const nonce = randomBytes(32).toString('hex');
+    const serverKey = bindToServerKey ? this.serverIdentity.publicKey : undefined;
     this.pendingChallenges.set(ws, {
       publicKey,
       clientId: deriveClientIdFromPublicKey(publicKey),
       nickname: parseResult.data.nickname.trim(),
       password: parseResult.data.password || '',
       nonce,
+      serverKey,
       // Clients that predate #309 send nothing; give them a random id so each of
       // their connections is still a distinct session.
       deviceId: parseResult.data.deviceId || randomBytes(16).toString('hex'),
@@ -237,6 +247,7 @@ export class AuthService {
     return {
       success: true,
       nonce,
+      ...(serverKey ? { serverKey, serverSignature: this.serverIdentity.signChallenge(nonce) } : {}),
     };
   }
 
@@ -267,7 +278,10 @@ export class AuthService {
     try {
       isValidSignature = verify(
         null,
-        Buffer.from(pending.nonce, 'hex'),
+        // Bound to this server's key when the member offered server-key-auth (#821).
+        pending.serverKey
+          ? Buffer.from(memberAuthChallenge(pending.nonce, pending.serverKey), 'utf8')
+          : Buffer.from(pending.nonce, 'hex'),
         this.getNodePublicKey(pending.publicKey),
         Buffer.from(normalizedSignature, 'hex')
       );
@@ -334,6 +348,19 @@ export class AuthService {
       userRecord = byClientId;
     }
 
+    // A member who once signed in bound to this server's key is refused with the
+    // bare nonce: a server relaying this one's challenge to an app that never saw
+    // it with a key would otherwise still obtain a usable signature (#821).
+    if (userRecord && !pending.serverKey && await this.userRepo.requiresServerKey(userRecord.id)) {
+      Logger.security(`Unbound sign-in refused for a member that requires server-key-auth: ${pending.nickname}`);
+      return {
+        success: false,
+        authFailed: true,
+        errorCode: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+        errorMessage: 'Esta identidade já entrou neste servidor com a assinatura vinculada a ele. Atualize o Monky para entrar.',
+      };
+    }
+
     // Only a brand-new member consumes a slot — an existing member must never be
     // locked out of their own server once it fills up. A cap of
     // MAX_USERS_UNLIMITED means the owner opted out of any limit (#403).
@@ -397,6 +424,7 @@ export class AuthService {
     }
 
     let rolesChanged = await this.roleService.ensureDefaultRolesAssigned(userRecord.id);
+    if (pending.serverKey) await this.userRepo.requireServerKey(userRecord.id);
 
     if (!server.ownerUserId) {
       await this.serverRepo.updateServer({ ownerUserId: userRecord.id });

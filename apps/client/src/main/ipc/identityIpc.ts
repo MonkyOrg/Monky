@@ -5,6 +5,7 @@ import {
   createIdentity, deleteIdentity, exportIdentity, getClientId, getIdentity, getIdentityStatus, importIdentity, signChallenge,
 } from '../identityService';
 import { exportDirectMessages, importDirectMessages, resetDirectMessages, wipeDirectMessages } from '../dm/dmIpc';
+import { serverChallengeBindingSchema } from '@monky/shared';
 import { openBackup, sealBackup } from '../secretEnvelope';
 import { mt } from '../i18n';
 import type { IpcRegistry } from './registry';
@@ -25,7 +26,12 @@ export function registerIdentityIpc(registry: IpcRegistry, { window, sanitizeFil
   registry.handle('identity:create', 'main', async () => createIdentity());
   registry.handle('identity:get', 'main', async () => getIdentity(true));
   registry.handle('identity:get-client-id', 'main', async () => getClientId());
-  registry.handle('identity:sign-challenge', 'main', async (_event, nonceHex) => signChallenge(nonceHex));
+  registry.handle('identity:sign-challenge', 'main', async (_event, nonceHex, binding) => {
+    // A binding the page made up is refused before the identity key is touched.
+    const parsed = binding === undefined ? undefined : serverChallengeBindingSchema.safeParse(binding);
+    if (parsed && !parsed.success) throw new Error('Vínculo de servidor inválido.');
+    return signChallenge(nonceHex, parsed?.data);
+  });
   registry.handle('identity:export', 'main', async (_event, password, extras, dmMode) =>
     exportIdentity(
       password,

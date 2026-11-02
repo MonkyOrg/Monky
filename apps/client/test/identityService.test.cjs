@@ -123,13 +123,35 @@ test('the identity is read once: signing on every reconnection does not touch th
   fs.rmSync(app.file);
   for (let attempt = 0; attempt < 5; attempt++) {
     const nonce = crypto.randomBytes(32).toString('hex');
-    const signature = app.service.signChallenge(nonce);
+    const { signature } = app.service.signChallenge(nonce);
     const publicKey = crypto.createPublicKey({ key: Buffer.from(identity.publicKey, 'hex'), format: 'der', type: 'spki' });
     assert.ok(crypto.verify(null, Buffer.from(nonce, 'hex'), publicKey, Buffer.from(signature, 'hex')));
   }
   assert.equal(app.service.getClientId(), identity.clientId);
   assert.equal(app.safeStorage.decrypts, 1, 'The keychain is asked once per launch');
   assert.equal(fs.existsSync(app.file), false, 'Nothing rewrote the file behind the user');
+});
+
+test('a challenge bound to a server is signed for that server only, once the server proved its key (#821)', (t) => {
+  const app = launch(t);
+  const identity = app.service.getIdentity(true);
+  const member = crypto.createPublicKey({ key: Buffer.from(identity.publicKey, 'hex'), format: 'der', type: 'spki' });
+  const server = crypto.generateKeyPairSync('ed25519');
+  const serverKey = server.publicKey.export({ format: 'der', type: 'spki' }).toString('hex');
+  const nonce = crypto.randomBytes(32).toString('hex');
+  const serverSignature = crypto.sign(null, Buffer.from(shared.serverAuthChallenge(nonce, serverKey), 'utf8'), server.privateKey).toString('hex');
+
+  const { signature } = app.service.signChallenge(nonce, { serverKey, serverSignature });
+  assert.ok(crypto.verify(null, Buffer.from(shared.memberAuthChallenge(nonce, serverKey), 'utf8'), member, Buffer.from(signature, 'hex')));
+  assert.equal(crypto.verify(null, Buffer.from(nonce, 'hex'), member, Buffer.from(signature, 'hex')), false,
+    'The bound signature is useless as a bare-nonce answer');
+
+  // A proof made for another nonce, or by another key, is refused before anything is signed.
+  const otherNonce = crypto.randomBytes(32).toString('hex');
+  assert.deepEqual(plain(app.service.signChallenge(otherNonce, { serverKey, serverSignature })), { refused: 'server-signature' });
+  const impostor = crypto.generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).toString('hex');
+  assert.deepEqual(plain(app.service.signChallenge(nonce, { serverKey: impostor, serverSignature })), { refused: 'server-signature' });
+  assert.throws(() => app.service.signChallenge(nonce, { serverKey: 'nope', serverSignature }));
 });
 
 for (const [label, reason, damage] of [

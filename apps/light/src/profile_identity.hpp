@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace monky::light {
 
@@ -35,6 +36,13 @@ class ProfileIdentity final {
   const std::string& deviceId() const noexcept;
   std::string signChallenge(const std::array<std::uint8_t, 32>& nonce) const;
   std::string signChallenge(std::string_view nonceHex) const;
+  std::string signServerChallenge(const std::array<std::uint8_t, 32>& nonce, std::string_view serverKeyHex) const;
+  // server-key-auth (#821): the identity key pinned for each server address this profile signed in to.
+  // An unreadable pin file throws and requires explicit recovery, like the identity itself.
+  std::optional<std::string> serverKey(const std::string& server) const;
+  std::vector<std::string> serverKeysExcept(const std::string& server) const;
+  // Atomically records the key of the first protected sign-in to this server.
+  void pinServerKey(const std::string& server, const std::string& key) const;
   // Throws for unreadable or invalid settings; a missing file yields defaults.
   ProfileSettings loadSettings() const;
   // Atomically replaces the settings file under the held profile lock.

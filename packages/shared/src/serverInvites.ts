@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { deflateSync, Inflate } from 'fflate';
+import { ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX } from './constants.js';
+import { serverPublicKeySchema } from './serverAuth.js';
 
 // A dedicated page, not the docs home: link previews (WhatsApp, Discord…) never
 // receive the fragment, so the page itself must carry the invitation card.
@@ -22,13 +24,59 @@ const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 class InviteSizeError extends Error {}
 
 /**
- * Flags that older apps must not trip on. The header has no bit left and older
- * readers refuse leftover body bytes, but they stop inflating at the end of the
- * deflate stream: flags travel after it, as `TRAILER_MAGIC` then one flag byte,
- * in an invitation that is always compressed.
+ * The extension: fields that older apps must not trip on. The header has no bit
+ * left and older readers refuse leftover body bytes, but they stop inflating at
+ * the end of the deflate stream, so the extension follows it, in an invitation
+ * that is then always compressed:
+ *
+ *   deflate stream | fields | flags (1) | fields length (1) | "M" "K" | version (1)
+ *
+ * Each flag bit announces a field, and the fields go in bit order. A field with
+ * no bytes (`tls`) is the bit alone. A reader that does not know a bit skips it:
+ * the length tells where the stream ends, and the fields it knows come first.
  */
-const TRAILER_MAGIC = [0x4d, 0x4b];
-const TRAILER_TLS = 1;
+const EXTENSION_MARKER = [0x4d, 0x4b, 1] as const;
+const EXTENSION_TAIL = 2 + EXTENSION_MARKER.length;
+const EXTENSION_TLS = 1;
+/** The 32 raw bytes of the server's Ed25519 key (server-key-auth, #821); the SPKI prefix is the same for every server. */
+const EXTENSION_SERVER_KEY = 2;
+const SERVER_KEY_BYTES = 32;
+
+type InviteExtension = Pick<ServerInvite, 'tls' | 'serverKey'>;
+
+function inviteExtension(invite: ServerInvite): number[] | null {
+  let flags = 0;
+  const fields: number[] = [];
+  if (invite.tls) flags |= EXTENSION_TLS;
+  if (invite.serverKey !== undefined) {
+    flags |= EXTENSION_SERVER_KEY;
+    fields.push(...hexBytes(invite.serverKey.slice(ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX.length)));
+  }
+  return flags ? [...fields, flags, fields.length, ...EXTENSION_MARKER] : null;
+}
+
+/** Where the deflate stream ends and how to read the fields after it, when the bytes close with an extension. */
+function readInviteExtension(bytes: Uint8Array): { streamEnd: number; fields: () => InviteExtension } | null {
+  const tail = bytes.length - EXTENSION_TAIL;
+  if (tail < 2 || EXTENSION_MARKER.some((value, index) => bytes[tail + 2 + index] !== value)) return null;
+  const flags = bytes[tail];
+  const fields = bytes.subarray(tail - bytes[tail + 1], tail);
+  const streamEnd = tail - fields.length;
+  if (streamEnd < 2) return null;
+  return {
+    streamEnd,
+    fields: () => {
+      const extension: InviteExtension = {};
+      if (flags & EXTENSION_TLS) extension.tls = true;
+      if (flags & EXTENSION_SERVER_KEY) {
+        if (fields.length < SERVER_KEY_BYTES) throw new Error('Truncated invitation extension');
+        extension.serverKey = ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX
+          + [...fields.subarray(0, SERVER_KEY_BYTES)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      }
+      return extension;
+    },
+  };
+}
 
 function validUnicode(value: string): boolean {
   return !/[\uD800-\uDFFF]/u.test(value);
@@ -61,6 +109,8 @@ export const serverInviteSchema = z.object({
   eventId: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/).optional(),
   /** Reached over TLS (`wss://`), as behind a reverse proxy. Apps that predate it ignore it and connect plain. */
   tls: z.literal(true).optional(),
+  /** The server's identity (server-key-auth, #821): the only way the app accepts a key other than the one it pinned. */
+  serverKey: serverPublicKeySchema.optional(),
 }).strict();
 
 export type ServerInvite = z.infer<typeof serverInviteSchema>;
@@ -89,6 +139,10 @@ function hostType(host: string): number {
   if (host === '[::1]') return 5;
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return 1;
   return host.startsWith('[') ? 2 : 0;
+}
+
+function hexBytes(value: string): number[] {
+  return Array.from({ length: value.length / 2 }, (_, index) => parseInt(value.slice(index * 2, index * 2 + 2), 16));
 }
 
 function ipv6Bytes(host: string): number[] {
@@ -129,7 +183,8 @@ function inviteToken(value: ServerInvite): string {
     }
     const raw = Uint8Array.from(body);
     const compressed = deflateSync(raw, { level: 9 });
-    if (invite.tls) return Uint8Array.from([header | 128, ...compressed, ...TRAILER_MAGIC, TRAILER_TLS]);
+    const extension = inviteExtension(invite);
+    if (extension) return Uint8Array.from([header | 128, ...compressed, ...extension]);
     return compressed.length < raw.length
       ? Uint8Array.from([header | 128, ...compressed]) : Uint8Array.from([header, ...raw]);
   };
@@ -233,19 +288,22 @@ function readInvite(header: number, body: Uint8Array): ServerInvite {
   });
 }
 
-/** The body, inflated when compressed, and the flags of a trailer after the deflate stream. */
-function inviteBody(bytes: Uint8Array): { body: Uint8Array; tls: boolean } {
-  if (!(bytes[0] & 128)) return { body: bytes.subarray(1), tls: false };
-  const end = bytes.length - TRAILER_MAGIC.length - 1;
-  if (end > 1 && TRAILER_MAGIC.every((value, index) => bytes[end + index] === value)) {
+/** The body, inflated when compressed, and the extension after its deflate stream. */
+function inviteBody(bytes: Uint8Array): { body: Uint8Array; extension: InviteExtension } {
+  if (!(bytes[0] & 128)) return { body: bytes.subarray(1), extension: {} };
+  const extension = readInviteExtension(bytes);
+  if (extension) {
+    let body: Uint8Array | null = null;
     try {
-      // A stream cut short does not inflate: success means those bytes really followed it.
-      return { body: inflateBody(bytes.subarray(1, end)), tls: (bytes[bytes.length - 1] & TRAILER_TLS) !== 0 };
+      // A stream cut short does not inflate: success means the extension really followed it.
+      body = inflateBody(bytes.subarray(1, extension.streamEnd));
     } catch (error: unknown) {
       if (error instanceof InviteSizeError) throw error;
     }
+    // A real extension that cannot be read refuses the invitation, rather than dropping a field.
+    if (body) return { body, extension: extension.fields() };
   }
-  return { body: inflateBody(bytes.subarray(1)), tls: false };
+  return { body: inflateBody(bytes.subarray(1)), extension: {} };
 }
 
 export function decodeServerInviteToken(token: unknown): ServerInviteResult {
@@ -260,10 +318,10 @@ export function decodeServerInviteToken(token: unknown): ServerInviteResult {
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
     if (bytes.length > MAX_INVITE_BYTES) return { ok: false, reason: 'too_long' };
     if (base64Url(bytes) !== encoded) return { ok: false, reason: 'invalid' };
-    const { body, tls } = inviteBody(bytes);
+    const { body, extension } = inviteBody(bytes);
     const invite = readInvite(bytes[0], body);
     return { ok: true, invite: serverInviteSchema.parse({
-      ...invite, ...(tls ? { tls: true } : {}), ...(eventId !== undefined ? { eventId } : {}),
+      ...invite, ...extension, ...(eventId !== undefined ? { eventId } : {}),
     }) };
   } catch (error: unknown) {
     return { ok: false, reason: error instanceof InviteSizeError ? 'too_long' : 'invalid' };

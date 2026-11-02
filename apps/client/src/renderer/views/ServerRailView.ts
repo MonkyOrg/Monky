@@ -16,6 +16,7 @@ import {
   RailNode,
 } from '../stores/connectionStore';
 import { showConfirm, showAlert, showTextForm } from './Dialog';
+import { reportError } from '../utils/feedback';
 import { checkServerOnline, fetchServerPreview } from '../utils/serverStatus';
 import {
   confirmStopHostedServer,
@@ -793,6 +794,11 @@ export class ServerRailView {
         onClick: () => { void this.editSavedServer(server); },
       },
       {
+        label: t('connection.addServerAddress'),
+        icon: 'add_link',
+        onClick: () => { void this.addServerAddress(server); },
+      },
+      {
         label: t(favorite ? 'favorites.removeShort' : 'favorites.addShort'),
         icon: favorite ? 'star' : 'star_border',
         onClick: () => { void this.toggleFavorite(server); },
@@ -906,6 +912,31 @@ export class ServerRailView {
       iconUrl: server.iconUrl,
       lastConnected: server.lastConnected || Date.now(),
     });
+  }
+
+  /**
+   * Another address of this same server (LAN and public IP, a domain): saved
+   * as its own entry that signs in bound to the key pinned here. A new address
+   * presenting a key another saved server pinned is refused otherwise (#821).
+   */
+  private async addServerAddress(server: SavedServer): Promise<void> {
+    const values = await showTextForm({
+      title: t('connection.addServerAddress'),
+      message: t('connection.addServerAddressMessage', { name: server.name }),
+      fields: [
+        { label: t('connection.hostLabel'), value: '', validate: value => value.trim() ? undefined : t('connection.hostLabel') },
+        { label: t('connection.portLabel'), value: String(server.port), validate: value => {
+          const port = Number(value);
+          return Number.isInteger(port) && port >= 1024 && port <= 65535 ? undefined : t('connection.portLabel');
+        } },
+      ],
+      focusInput: 0,
+    });
+    if (!values) return;
+    const [host, portText] = values;
+    if (!connectionStore.addServerAddress(server, { host: host.trim(), port: Number(portText) })) {
+      reportError(t('connection.addServerAddressExists'));
+    }
   }
 
   private async toggleFavorite(server: SavedServer): Promise<void> {

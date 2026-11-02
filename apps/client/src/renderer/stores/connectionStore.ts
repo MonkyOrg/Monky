@@ -1,7 +1,7 @@
-import { ConnectionStatus } from '../core/NetworkClient';
+import type { ConnectionStatus } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
-import { LIMITS, parseTrustedProxies, VoiceMode } from '@monky/shared';
+import { LIMITS, VoiceMode, parseTrustedProxies, serverPublicKeySchema, type ServerKeyExpectation } from '@monky/shared';
 import { favoritesStore } from './favoritesStore';
 import { settingsStore } from './settingsStore';
 import { isLoopbackHost, isSecureServer, sameServerAddress, serverAddressKey, setServerTransport, type ServerAddress } from '../utils/serverAddress';
@@ -17,6 +17,13 @@ export interface SavedServer {
   serverId?: string;
   /** Reached over TLS (`wss://`), as behind a reverse proxy. Absent means plain `ws://`. */
   secure?: boolean;
+  /**
+   * The server's identity key (server-key-auth, #821), pinned on the first
+   * protected sign-in at this address, by an invitation or by "Add address".
+   * Signatures for this address are bound to it, and a server presenting
+   * another key, or none, is refused.
+   */
+  serverKey?: string;
 }
 
 export interface RailServerNode {
@@ -37,6 +44,11 @@ export interface RailFolderNode {
 }
 
 export const DEFAULT_FOLDER_COLOR = '#5865f2';
+
+function storedServerKey(value: unknown): string | undefined {
+  const parsed = serverPublicKeySchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
 const FOLDER_COLOR = /^#[0-9a-f]{6}$/i;
 const MAX_FOLDER_NAME_LENGTH = 100;
 
@@ -72,6 +84,10 @@ export class ConnectionStore {
   public railLayout: RailNode[] = [];
   public createdServers: CreatedServer[] = [];
   public savedNickname: string = '';
+  /** Keys pinned at addresses signed in to but not saved yet, by address key. */
+  private readonly unsavedServerKeys = new Map<string, string>();
+  /** Keys brought by invitations being accepted, by address key. */
+  private readonly invitedServerKeys = new Map<string, string>();
   public savedAvatarBase64: string = '';
 
   constructor() {
@@ -132,6 +148,7 @@ export class ConnectionStore {
               serverId: typeof server.serverId === 'string' && server.serverId.length > 0 && server.serverId.length <= 256
                 ? server.serverId : undefined,
               secure: server.secure === true ? true : undefined,
+              serverKey: storedServerKey(server.serverKey),
             }))
           : [];
       }
@@ -165,13 +182,17 @@ export class ConnectionStore {
         server.iconUrl = existing.iconUrl;
       }
       if (!server.serverId) server.serverId = existing.serverId;
+      // A pin only changes through pinServerKey, never by saving the entry again.
+      server.serverKey = existing.serverKey;
       if (existing.serverId && server.serverId !== existing.serverId) {
         this.clearServerAutoEntry(existing);
       }
       this.savedServers[existingIdx] = server;
     } else {
+      server.serverKey = this.unsavedServerKeys.get(serverAddressKey(server));
       this.savedServers.unshift(server);
     }
+    this.unsavedServerKeys.delete(serverAddressKey(server));
     // Sort by lastConnected descending
     this.savedServers.sort((a, b) => b.lastConnected - a.lastConnected);
     // Keep max 15
@@ -186,6 +207,7 @@ export class ConnectionStore {
     clientLog.info('STORE', `Removing saved server: ${host}:${port}`);
     this.savedServers = this.savedServers.filter((s) => !sameServerAddress(s, { host, port }));
     setServerTransport({ host, port }, false);
+    this.unsavedServerKeys.delete(serverAddressKey({ host, port }));
     this.syncSavedServerFavorites();
     this.syncRailLayoutWithSavedServers();
     this.saveSavedServers();
@@ -225,6 +247,75 @@ export class ConnectionStore {
     appEvents.emit('connection.saved_servers_changed');
   }
 
+  /** What the app expects of the key of the server at this address (server-key-auth, #821). */
+  public serverKeyExpectation(address: ServerAddress): ServerKeyExpectation {
+    const key = serverAddressKey(address);
+    return {
+      pinned: this.findSavedServer(address)?.serverKey ?? this.unsavedServerKeys.get(key),
+      invited: this.invitedServerKeys.get(key),
+    };
+  }
+
+  /** Whether a saved server at another address pinned this key. */
+  public isServerKeyPinnedElsewhere(serverKey: string, address: ServerAddress): boolean {
+    return this.savedServers.some((server) => server.serverKey === serverKey && !sameServerAddress(server, address))
+      || [...this.unsavedServerKeys].some(([key, pinned]) => pinned === serverKey && key !== serverAddressKey(address));
+  }
+
+  /**
+   * Accepting an invitation that names the server's key: its sign-in at this
+   * address expects that key instead of a pinned one, until it ends. This is
+   * the only way a pinned key is ever replaced.
+   */
+  public expectInvitedServerKey(address: ServerAddress, serverKey: string): () => void {
+    const key = serverAddressKey(address);
+    this.invitedServerKeys.set(key, serverKey);
+    return () => {
+      if (this.invitedServerKeys.get(key) === serverKey) this.invitedServerKeys.delete(key);
+    };
+  }
+
+  /**
+   * Pins the key a protected sign-in at this address just used. A server not
+   * saved yet (an invitation being accepted) keeps it until it is saved.
+   */
+  public pinServerKey(address: ServerAddress, serverKey: string): void {
+    const key = serverAddressKey(address);
+    this.invitedServerKeys.delete(key);
+    const server = this.findSavedServer(address);
+    if (!server) {
+      this.unsavedServerKeys.set(key, serverKey);
+      return;
+    }
+    if (server.serverKey === serverKey) return;
+    clientLog.info('STORE', `Pinning the server key of ${server.host}:${server.port}`, { replaced: Boolean(server.serverKey) });
+    server.serverKey = serverKey;
+    this.saveSavedServers();
+    appEvents.emit('connection.saved_servers_changed');
+  }
+
+  /**
+   * "Add address": another address of the same saved server, which signs in
+   * bound to the key that server pinned. A key presented at a new address is
+   * otherwise refused when another saved server pinned it.
+   */
+  public addServerAddress(source: SavedServer, address: ServerAddress): SavedServer | null {
+    if (this.findSavedServer(address)) return null;
+    const added: SavedServer = {
+      host: address.host,
+      port: address.port,
+      name: source.name,
+      lastConnected: source.lastConnected,
+      ...(source.password !== undefined ? { password: source.password } : {}),
+      ...(source.iconUrl !== undefined ? { iconUrl: source.iconUrl } : {}),
+      ...(source.serverId !== undefined ? { serverId: source.serverId } : {}),
+    };
+    this.unsavedServerKeys.delete(serverAddressKey(address));
+    if (source.serverKey) this.unsavedServerKeys.set(serverAddressKey(address), source.serverKey);
+    this.addSavedServer(added);
+    return this.findSavedServer(address) ?? null;
+  }
+
   public invalidateSavedServerIdentity(host: string, port: number): void {
     const server = this.findSavedServer({ host, port });
     if (!server) return;
@@ -254,6 +345,8 @@ export class ConnectionStore {
     setServerTransport(updated, updated.secure === true);
     const idx = this.savedServers.findIndex((s) => sameServerAddress(s, { host: oldHost, port: oldPort }));
     if (idx >= 0) {
+      // Editing the entry keeps its pin: a server that moved signs in as before, any other is refused.
+      updated.serverKey = this.savedServers[idx].serverKey;
       if (sameServerAddress(this.savedServers[idx], updated)) {
         updated.serverId = this.savedServers[idx].serverId;
       } else {

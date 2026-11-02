@@ -6,7 +6,7 @@ import { partialUpdate } from './partialUpdate';
 import { indexMessageMentions } from './messageSearchMentions';
 import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema, botMessageLocalizationsSchema } from '@monky/shared';
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NewServerRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
-import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
+import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerIdentityRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 import { SERVER_SETTING_DEFAULTS } from '../../domain/serverSettings';
 
 /**
@@ -112,7 +112,7 @@ const BOT_COLUMNS: { readonly [K in keyof BotRecord]?: string } = {
   keyProofRequired: 'key_proof_required',
 };
 
-export class SqliteServerRepository implements IServerRepository {
+export class SqliteServerRepository implements IServerRepository, IServerIdentityRepository {
   constructor(private db: IDatabaseDriver) {}
 
   async getLifecycleSettings(): Promise<Pick<ServerRecord, 'name' | 'turnEnabled'> | null> {
@@ -193,6 +193,18 @@ export class SqliteServerRepository implements IServerRepository {
       `UPDATE server_meta SET ${update.set} WHERE id = (SELECT id FROM server_meta LIMIT 1)`
     ).run(...update.values);
   }
+
+  async getIdentityKey(): Promise<string | null> {
+    const row: unknown = this.db.prepare('SELECT private_key AS privateKey FROM server_identity WHERE id = 1').get();
+    return row && typeof row === 'object' && 'privateKey' in row && typeof row.privateKey === 'string' ? row.privateKey : null;
+  }
+
+  async createIdentityKey(privateKeyHex: string, createdAt: number): Promise<string> {
+    this.db.prepare('INSERT OR IGNORE INTO server_identity (id, private_key, created_at) VALUES (1, ?, ?)').run(privateKeyHex, createdAt);
+    const stored = await this.getIdentityKey();
+    if (!stored) throw new Error('The server identity was not stored.');
+    return stored;
+  }
 }
 
 export class SqliteUserRepository implements IUserRepository {
@@ -259,6 +271,15 @@ export class SqliteUserRepository implements IUserRepository {
   async count(): Promise<number> {
     const row = this.db.prepare('SELECT COUNT(*) as total FROM users').get() as { total: number } | undefined;
     return row?.total ?? 0;
+  }
+
+  async requiresServerKey(id: string): Promise<boolean> {
+    const row: unknown = this.db.prepare('SELECT server_key_required AS required FROM users WHERE id = ?').get(id);
+    return Boolean(row && typeof row === 'object' && 'required' in row && row.required);
+  }
+
+  async requireServerKey(id: string): Promise<void> {
+    this.db.prepare('UPDATE users SET server_key_required = 1 WHERE id = ? AND server_key_required = 0').run(id);
   }
 
   async findByIds(ids: string[]): Promise<UserRecord[]> {

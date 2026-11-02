@@ -127,11 +127,18 @@ std::uint64_t ProtocolSession::opened(Time now, std::int64_t unixMilliseconds) {
   authId_ = freshId();
   challengeAnswered_ = false;
   signatureSent_ = false;
+  boundKey_.reset();
   retired_.clear();
   authDeadline_ = now + authTimeout;
   pingDeadline_ = now + std::chrono::milliseconds(monky::protocol::limits::HEARTBEAT_INTERVAL_MS);
   pongDeadline_ = now + pongTimeout;
-  Json payload{{"protocolVersion", monky::protocol::VERSION}, {"publicKey", identity_.publicKeyHex},
+  Json features = Json::array();
+  for (const auto feature : monky::protocol::CLIENT_FEATURES) features.push_back(std::string(feature));
+  // An explicit offer, as the desktop app sends: the server binds sign-ins only for clients that ask (#821).
+  Json payload{{"protocolVersion", monky::protocol::VERSION},
+               {"protocolOffer", Json{{"minimumVersion", monky::protocol::MIN_CLIENT_VERSION},
+                                      {"features", std::move(features)}}},
+               {"publicKey", identity_.publicKeyHex},
                {"deviceId", identity_.deviceId}, {"nickname", identity_.nickname}};
   if (identity_.password) payload["password"] = *identity_.password;
   send(msg::AUTH_CONNECT, std::move(payload), authId_);
@@ -204,7 +211,7 @@ void ProtocolSession::authenticate(const Json& payload) {
     }
     ice = payload.at("iceServers");
   }
-  auth_ = Authenticated{userId, session, server, std::move(ice)};
+  auth_ = Authenticated{userId, session, server, std::move(ice), boundKey_};
   mode_ = mode;
   policy_.serverMuted = serverMuted;
   policy_.serverDeafened = serverDeafened;
@@ -260,25 +267,65 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
     Nonce nonce{};
     for (std::size_t i = 0; i < nonce.size(); ++i)
       nonce[i] = static_cast<std::uint8_t>(std::stoul(nonceHex.substr(i * 2, 2), nullptr, 16));
+    const bool presented = payload.contains("serverKey");
+    require(presented == payload.contains("serverSignature"), "Incomplete server key proof");
+    std::optional<ServerProof> proof;
+    if (presented) {
+      auto key = text(payload, "serverKey");
+      std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+      require(hex(key, 88) && key.substr(0, 24) == "302a300506032b6570032100", "Invalid server key");
+      auto signature = text(payload, "serverSignature");
+      require(hex(signature, 128), "Invalid server key signature");
+      proof = ServerProof{std::move(key), std::move(signature)};
+    }
     challengeAnswered_ = true;
+    // The same rule as the desktop app (decideServerKey): no downgrade and no other key than the one expected
+    // (the invitation's, else the pinned one), and no key of another server where a key arrives anew.
+    const auto& pinned = identity_.serverKey;
+    const auto& elsewhere = identity_.keysPinnedElsewhere;
+    const auto invited = identity_.invitedServerKey != pinned ? identity_.invitedServerKey : std::nullopt;
+    const auto& expected = invited ? invited : pinned;
+    if (!proof && expected) {
+      loseConnection(now, {FailureKind::authentication, "SERVER_KEY_MISSING",
+                           "This server presented an identity key before and now presented none"}, false);
+      return;
+    }
+    if (proof && expected && *expected != proof->key) {
+      loseConnection(now, {FailureKind::authentication, "SERVER_KEY_CHANGED",
+                           "This server's identity key changed since the last sign-in"}, false);
+      return;
+    }
+    if (proof && (invited || !pinned) && std::find(elsewhere.begin(), elsewhere.end(), proof->key) != elsewhere.end()) {
+      loseConnection(now, {FailureKind::authentication, "SERVER_KEY_OF_OTHER_SERVER",
+                           "This server presented the identity key of another server of this profile"}, false);
+      return;
+    }
+    boundKey_ = proof ? std::optional<std::string>(proof->key) : std::nullopt;
     const auto connection = connection_;
     const auto authId = authId_;
-    effects_.push_back([this, nonce, connection, authId] {
+    effects_.push_back([this, nonce, proof, connection, authId] {
       if (!online_ || connection_ != connection || authId_ != authId) return;
-      std::string signature;
+      std::optional<std::string> signature;
       try {
-        signature = callbacks_.signNonce(nonce);
+        signature = callbacks_.signNonce(nonce, proof);
       } catch (const std::exception&) {
         loseConnection(now_, {FailureKind::authentication, {}, "Nonce signer failed"}, false);
         return;
       }
       if (!online_ || connection_ != connection || authId_ != authId) return;
-      if (!hex(signature, 128)) {
+      if (!signature) {
+        loseConnection(now_, {FailureKind::authentication, "SERVER_KEY_INVALID",
+                              "The server did not prove it holds the identity key it presented"}, false);
+        return;
+      }
+      if (!hex(*signature, 128)) {
         loseConnection(now_, {FailureKind::authentication, {}, "Invalid signature encoding"}, false);
         return;
       }
       signatureSent_ = true;
-      send(msg::AUTH_CHALLENGE_RESPONSE, Json{{"signature", signature}}, authId);
+      send(msg::AUTH_CHALLENGE_RESPONSE, Json{{"signature", *signature}}, authId);
     });
     return;
   }
@@ -286,6 +333,11 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
     if (phase_ != SessionPhase::authenticating || id != authId_) return;
     require(signatureSent_, "Authentication success before signed response");
     authenticate(payload);
+    // Reconnections of this run expect the key the first protected sign-in used; the invitation is spent.
+    if (boundKey_) {
+      identity_.serverKey = boundKey_;
+      identity_.invitedServerKey.reset();
+    }
     if (desired_) beginJoin(now, false);
     return;
   }

@@ -1,6 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
 import {
-  AuthChallengePayload,
   AuthConnectPayload,
   AuthFailedPayload,
   AuthSuccessPayload,
@@ -17,6 +16,9 @@ import {
   ServerErrorPayload,
   ServerShutdownPayload,
   serverShutdownSchema,
+  authChallengeSchema,
+  decideServerKey,
+  type ServerKeyRefusal,
 } from '@monky/shared';
 import { appEvents, type EventArgs, type EventName } from './EventBus';
 import type { AppEvents } from './appEventMap';
@@ -26,6 +28,7 @@ import { clientLog } from './ClientLogService';
 import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
 import { settingsStore } from '../stores/settingsStore';
+import { connectionStore } from '../stores/connectionStore';
 import { normalizeHost, toWsUrl } from '../utils/serverAddress';
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';
@@ -96,6 +99,8 @@ interface ClientIdentity {
 interface PendingAuthRequest {
   retriedProtocol?: boolean;
   requestId: string;
+  /** The server key the signature was bound to, pinned once the server lets this sign-in in. */
+  serverKey?: string;
   resolve: (value: AuthSuccessPayload) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -104,6 +109,12 @@ interface PendingAuthRequest {
 type ConnectState = AuthConnectPayload & ClientIdentity;
 
 const DEVICE_ID_STORAGE_KEY = 'monky_device_id';
+/** Why the app refused to sign for a server, as the person is told (#821). */
+const SERVER_KEY_REFUSALS = {
+  'key-changed': 'network.serverKeyChanged',
+  'key-missing': 'network.serverKeyMissing',
+  'key-of-other-server': 'network.serverKeyOfOtherServer',
+} as const satisfies Record<ServerKeyRefusal, string>;
 const LOCAL_EXECUTION_EVENTS = new Set<MessageType>([
   MessageType.BOT_LOCAL_TASK_OFFER, MessageType.BOT_LOCAL_TASK_CONTROL,
   MessageType.BOT_LOCAL_TASK_EVENT, MessageType.BOT_LOCAL_MEDIA_SIGNAL,
@@ -150,6 +161,8 @@ export class NetworkClient {
   private pendingAuth: PendingAuthRequest | null = null;
   private pendingConnect: { reject: (reason: Error) => void } | null = null;
   private currentServerUrl: string = '';
+  /** The address this client dialled, as the user saved it: server keys are pinned per address (#821). */
+  private dialled: { host: string; port: number } | null = null;
   private serverName: string = '';
   private lastConnectPayload: ConnectState | null = null;
   private manualDisconnect: boolean = false;
@@ -345,6 +358,7 @@ export class NetworkClient {
 
     // IPv6 needs its brackets in the URL; the TCP probe of a failure needs them gone.
     const probeHost = normalizeHost(host);
+    this.dialled = { host, port };
     this.currentServerUrl = toWsUrl({ host, port });
     this.serverName = '';
     if (!this.sessionKey) this.sessionKey = this.currentServerUrl;
@@ -640,13 +654,15 @@ export class NetworkClient {
 
     if (this.pendingAuth && requestId === this.pendingAuth.requestId) {
       if (type === MessageType.AUTH_CHALLENGE) {
-        void this.respondToAuthChallenge(payload as AuthChallengePayload, requestId);
+        void this.respondToAuthChallenge(payload, requestId);
         return;
       }
 
       if (type === MessageType.AUTH_SUCCESS) {
         clientLog.info('NETWORK', 'Authentication successful');
         if (payload && typeof payload === 'object' && 'server' in payload) this.captureServerName(payload.server);
+        // The first protected sign-in at this address pins its key; later ones keep it (#821).
+        if (this.pendingAuth.serverKey && this.dialled) connectionStore.pinServerKey(this.dialled, this.pendingAuth.serverKey);
         this.pendingAuth.resolve(payload as AuthSuccessPayload);
         return;
       }
@@ -708,16 +724,35 @@ export class NetworkClient {
     }
   }
 
-  private async respondToAuthChallenge(payload: AuthChallengePayload, requestId?: string): Promise<void> {
+  private async respondToAuthChallenge(payload: unknown, requestId?: string): Promise<void> {
     const auth = this.pendingAuth;
     const connectionId = this.connectionId;
-    if (!auth || !requestId || auth.requestId !== requestId) return;
+    const address = this.dialled;
+    if (!auth || !requestId || auth.requestId !== requestId || !address) return;
     const isCurrent = () => this.pendingAuth === auth && this.connectionId === connectionId;
 
     try {
-      const signature = await window.api.signChallenge(payload.nonce);
+      const challenge = authChallengeSchema.safeParse(payload);
+      if (!challenge.success) throw new Error(t('network.genericConnectError'));
+      // Which key, if any, this signature may name is the app's call, from its pins (#821).
+      const decision = decideServerKey(challenge.data, connectionStore.serverKeyExpectation(address),
+        key => connectionStore.isServerKeyPinnedElsewhere(key, address));
+      if (decision.kind === 'refuse') {
+        clientLog.warn('NETWORK', 'Refused the server key presented at sign-in', { reason: decision.reason });
+        auth.reject(new Error(t(SERVER_KEY_REFUSALS[decision.reason])));
+        return;
+      }
+      const result = await window.api.signChallenge(challenge.data.nonce,
+        decision.kind === 'bind' && 'serverSignature' in challenge.data
+          ? { serverKey: decision.serverKey, serverSignature: challenge.data.serverSignature } : undefined);
       if (!isCurrent()) return;
-      this.send(MessageType.AUTH_CHALLENGE_RESPONSE, { signature }, requestId);
+      if ('refused' in result) {
+        clientLog.warn('NETWORK', 'The server did not prove the key it presented at sign-in');
+        auth.reject(new Error(t('network.serverKeyInvalid')));
+        return;
+      }
+      auth.serverKey = decision.kind === 'bind' ? decision.serverKey : undefined;
+      this.send(MessageType.AUTH_CHALLENGE_RESPONSE, { signature: result.signature }, requestId);
     } catch (error) {
       if (isCurrent()) auth.reject(error instanceof Error ? error : new Error(String(error)));
     }

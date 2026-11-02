@@ -124,7 +124,14 @@ export class JoinInviteModal {
         const reused = getServerSessionForAddress(invite.host, invite.port)?.client.getStatus() === 'CONNECTED';
         // The invitation says how the server is reached; one without TLS stays plain.
         if (!reused) setServerTransport(invite, invite.tls === true);
-        const result = await openServerSession(invite.host, invite.port, identity, name, serverPassword);
+        // The key the invitation names is expected at this address, whatever was pinned there (#821).
+        const forgetInvitedKey = invite.serverKey ? connectionStore.expectInvitedServerKey(invite, invite.serverKey) : null;
+        let result: Awaited<ReturnType<typeof openServerSession>>;
+        try {
+          result = await openServerSession(invite.host, invite.port, identity, name, serverPassword);
+        } finally {
+          forgetInvitedKey?.();
+        }
         if (shell.closed) return;
         if (!reused) {
           if (identityNickname === null && connectionStore.savedNickname === previousNickname) {
