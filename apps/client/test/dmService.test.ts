@@ -22,7 +22,9 @@ import {
   type UserSummary,
 } from '@monky/shared';
 import { DmKeyring, newDmId, verifyDmCertificate } from '../src/main/dm/dmCrypto';
-import { SELF_REPEAT_WINDOW_MS } from '../src/main/dm/dmModel';
+import { DmHistory, monthOf } from '../src/main/dm/dmHistory';
+import { DAY_MS, SELF_REPEAT_WINDOW_MS, messageFingerprint, type StoredMessage } from '../src/main/dm/dmModel';
+import { OUTBOX_MESSAGE_TTL_MS } from '../src/main/dm/dmOutbox';
 import { DmPersistence } from '../src/main/dm/dmPersistence';
 import { DmError, DmService, DM_DOWNLOAD_STALL_MS, DM_FILE_CHUNK_BYTES, DM_FILE_TRANSFER_IDLE_MS } from '../src/main/dm/dmService';
 import { DmTransport, type DmRelayApi } from '../src/renderer/core/DmTransport';
@@ -584,7 +586,7 @@ test('state persists encrypted and reloads; export restores friends and history'
   relay(devices, alice, alice.service.sendMessage({ peer: bob.identity.publicKey, content: 'segredo persistente' }));
   alice.service.flush();
 
-  for (const name of fs.readdirSync(alice.dir)) {
+  for (const name of fs.readdirSync(alice.dir, { recursive: true, encoding: 'utf8' })) {
     const full = path.join(alice.dir, name);
     if (fs.statSync(full).isFile()) {
       assert.equal(fs.readFileSync(full).indexOf('segredo'), -1, `${name} has clear text`);
@@ -772,13 +774,7 @@ test('forward markers persist, survive export/import and older stores load witho
   assert.equal(forwardedOf(restoredTampered, bob.identity, plain.id), null);
 
   // A conversation file written by an older version has no `forwarded` on its messages.
-  const store = new DmPersistence(alice.dir, new DmKeyring(aliceIdentity.publicKey, aliceIdentity.privateKey).storageKey());
-  const file = DmPersistence.peerFileName(bobKey);
-  const legacy = store.readJson(file, (value): value is { messages: Array<Record<string, unknown>> } =>
-    typeof value === 'object' && value !== null && 'messages' in value && Array.isArray(value.messages));
-  assert.ok(legacy);
-  for (const message of legacy.messages) delete message.forwarded;
-  store.writeJsonNow(file, legacy);
+  toLegacyStore(alice, bobKey, (message) => delete message.forwarded);
   const legacyDevice = createDevice('Alice', aliceIdentity, alice.dir);
   const messages = legacyDevice.service.getConversation(bobKey).messages;
   assert.equal(messages.length, 2);
@@ -864,6 +860,27 @@ function storeOf(device: Device): DmPersistence {
   return new DmPersistence(device.dir, new DmKeyring(device.identity.publicKey, device.identity.privateKey).storageKey());
 }
 
+type RawMessage = Record<string, unknown>;
+
+function hasMessages(value: unknown): value is { messages: RawMessage[] } {
+  return typeof value === 'object' && value !== null && 'messages' in value && Array.isArray(value.messages);
+}
+
+/**
+ * Turns a conversation of `device` back into the single file versions before #823 kept it in: the messages of
+ * every month in one list (each passed to `change`), and no folder. Returns what the file holds.
+ */
+function toLegacyStore(device: Device, peerKey: string, change: (message: RawMessage) => void = () => undefined): RawMessage[] {
+  device.service.flush();
+  const store = storeOf(device);
+  const messages = store.listSegments(peerKey).sort((a, b) => a - b)
+    .flatMap((month) => store.readJson(DmPersistence.segmentName(peerKey, month), hasMessages)?.messages ?? []);
+  for (const message of messages) change(message);
+  store.writeJsonNow(DmPersistence.peerFileName(peerKey), { version: 1, peer: peerKey, messages });
+  fs.rmSync(path.join(device.dir, DmPersistence.conversationDir(peerKey)), { recursive: true, force: true });
+  return messages;
+}
+
 test('acks leave only after the message is saved, and a save that fails is tried again instead of dropped', () => {
   const alice = createDevice('Alice', createIdentity());
   const bob = createDevice('Bob', createIdentity());
@@ -874,8 +891,8 @@ test('acks leave only after the message is saved, and a save that fails is tried
   // The conversation is open on Bob's side when its file stops accepting writes (a folder in the way fails the
   // rename the way a file held by an antivirus does).
   bob.service.getConversation(aliceKey);
-  const conversationFile = path.join(bob.dir, DmPersistence.peerFileName(aliceKey));
-  fs.mkdirSync(conversationFile);
+  const conversationFile = path.join(bob.dir, DmPersistence.segmentName(aliceKey, monthOf(Date.now())));
+  fs.mkdirSync(conversationFile, { recursive: true });
 
   const [item] = alice.service.sendMessage({ peer: bobKey, content: 'precisa chegar ao disco' }).peers![bobKey];
   const received = bob.service.ingest({ from: aliceKey, kind: item.kind, data: item.data });
@@ -908,7 +925,7 @@ test('an unreadable conversation is set aside instead of overwritten, and one th
   befriend([alice, bob], alice, bob);
   relay([alice, bob], alice, alice.service.sendMessage({ peer: bobKey, content: 'guardada' }));
   alice.service.flush();
-  const name = DmPersistence.peerFileName(bobKey);
+  const name = DmPersistence.segmentName(bobKey, monthOf(Date.now()));
   const file = path.join(alice.dir, name);
   const saved = fs.readFileSync(file);
 
@@ -929,9 +946,10 @@ test('an unreadable conversation is set aside instead of overwritten, and one th
   const reloaded = createDevice('Alice', aliceIdentity, alice.dir);
   assert.equal(peer(reloaded, bob.identity)?.relation, 'friend', 'Friends live in another file and stay');
   assert.deepEqual(reloaded.service.getConversation(bobKey).messages, []);
-  const aside = fs.readdirSync(alice.dir).filter((entry) => entry.startsWith(`${name}.corrupt-`));
+  const folder = path.dirname(file);
+  const aside = fs.readdirSync(folder).filter((entry) => entry.startsWith(`${path.basename(file)}.corrupt-`));
   assert.equal(aside.length, 1);
-  assert.ok(fs.readFileSync(path.join(alice.dir, aside[0])).equals(damaged));
+  assert.ok(fs.readFileSync(path.join(folder, aside[0])).equals(damaged));
 
   // A state file that cannot be read now keeps the whole store closed instead of starting it empty.
   const state = path.join(alice.dir, 'state.mkdm');
@@ -1911,4 +1929,314 @@ test('own devices whose copies of a deleted message disagree on its edit mark ag
       assert.deepEqual(versionOf(device, alice.identity, sent.id), edited, `${situation}: the newest edit mark wins on both`);
     }
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// History stored by month (#823)
+// ---------------------------------------------------------------------------
+
+interface MonthsHistory {
+  alice: Device;
+  bob: Device;
+  aliceIdentity: Identity;
+  clock: { now: number };
+  /** Every message of the conversation, oldest first. */
+  ids: string[];
+}
+
+/** Alice and Bob, friends, with three messages in each of January, February and March. */
+function historyAcrossMonths(): MonthsHistory {
+  const clock = { now: Date.UTC(2026, 0, 10, 12) };
+  const now = () => clock.now;
+  const aliceIdentity = createIdentity();
+  const alice = createDevice('Alice', aliceIdentity, undefined, now);
+  const bob = createDevice('Bob', createIdentity(), undefined, now);
+  const devices = [alice, bob];
+  befriend(devices, alice, bob);
+  for (const [month, day] of [[0, 10], [1, 3], [2, 20]]) {
+    clock.now = Date.UTC(2026, month, day, 12);
+    relay(devices, alice, alice.service.sendMessage({ peer: bob.identity.publicKey, content: `alice ${month}` }));
+    clock.now += 60_000;
+    relay(devices, bob, bob.service.sendMessage({ peer: alice.identity.publicKey, content: `bob ${month}` }));
+    clock.now += 60_000;
+    relay(devices, alice, alice.service.sendMessage({ peer: bob.identity.publicKey, content: `alice ${month} de novo` }));
+  }
+  alice.service.flush();
+  bob.service.flush();
+  const ids = alice.service.getConversation(bob.identity.publicKey, null, 500).messages.map((message) => message.id);
+  assert.equal(ids.length, 9);
+  return { alice, bob, aliceIdentity, clock, ids };
+}
+
+function segmentPath(device: Device, peerKey: string, month: number): string {
+  return path.join(device.dir, DmPersistence.segmentName(peerKey, month));
+}
+
+test('a conversation is kept by month, and a new message rewrites only its month', () => {
+  const { alice, bob, clock } = historyAcrossMonths();
+  const bobKey = bob.identity.publicKey;
+  assert.deepEqual(storeOf(alice).listSegments(bobKey).sort(), [202601, 202602, 202603]);
+  assert.equal(fs.existsSync(path.join(alice.dir, DmPersistence.peerFileName(bobKey))), false, 'Nothing in the old single file');
+  const january = fs.readFileSync(segmentPath(alice, bobKey, 202601));
+  const february = fs.readFileSync(segmentPath(alice, bobKey, 202602));
+  const march = fs.readFileSync(segmentPath(alice, bobKey, 202603));
+
+  clock.now = Date.UTC(2026, 2, 21, 9);
+  relay([alice, bob], alice, alice.service.sendMessage({ peer: bobKey, content: 'só março muda' }));
+  alice.service.flush();
+  // Every write seals with a new nonce: an untouched file is one that was not written again.
+  assert.ok(fs.readFileSync(segmentPath(alice, bobKey, 202601)).equals(january));
+  assert.ok(fs.readFileSync(segmentPath(alice, bobKey, 202602)).equals(february));
+  assert.ok(!fs.readFileSync(segmentPath(alice, bobKey, 202603)).equals(march));
+
+  // An edit of an old message rewrites its own month.
+  const old = alice.service.getConversation(bobKey, null, 500).messages[0];
+  relay([alice, bob], alice, alice.service.editMessage(bobKey, old.id, 'janeiro editado'));
+  alice.service.flush();
+  assert.ok(!fs.readFileSync(segmentPath(alice, bobKey, 202601)).equals(january));
+  assert.ok(fs.readFileSync(segmentPath(alice, bobKey, 202602)).equals(february));
+  const reloaded = createDevice('Alice', alice.identity, alice.dir);
+  assert.equal(reloaded.service.getConversation(bobKey, null, 500).messages[0].content, 'janeiro editado');
+});
+
+test('pages go from the newest message back across months', () => {
+  const { alice, bob, ids } = historyAcrossMonths();
+  const bobKey = bob.identity.publicKey;
+  const fresh = createDevice('Alice', alice.identity, alice.dir);
+  const newest = fresh.service.getConversation(bobKey, null, 4);
+  assert.deepEqual(newest.messages.map((message) => message.id), ids.slice(5));
+  assert.equal(newest.hasMore, true);
+
+  const collected: string[] = [];
+  let before: string | null = null;
+  for (let round = 0; round < 10; round += 1) {
+    const page = fresh.service.getConversation(bobKey, before, 2);
+    collected.unshift(...page.messages.map((message) => message.id));
+    if (!page.hasMore) break;
+    before = page.messages[0].id;
+  }
+  assert.deepEqual(collected, ids);
+
+  // A page that starts right at the first message of a month continues in the month before.
+  const page = fresh.service.getConversation(bobKey, ids[3], 2);
+  assert.deepEqual(page.messages.map((message) => message.id), ids.slice(1, 3));
+  assert.equal(page.hasMore, true);
+  assert.deepEqual(fresh.service.getConversation(bobKey, ids[1], 5).messages.map((message) => message.id), ids.slice(0, 1));
+  assert.equal(fresh.service.getConversation(bobKey, ids[1], 5).hasMore, false);
+});
+
+test('the digest of a session that just connected reads no message, only each conversation head', (context) => {
+  const { alice, bob } = historyAcrossMonths();
+  const bobKey = bob.identity.publicKey;
+  const fresh = createDevice('Alice', alice.identity, alice.dir);
+  const reads = context.mock.method(DmPersistence.prototype, 'readJson');
+  const hello = fresh.service.hello(false);
+  assert.ok((hello.broadcast ?? []).length > 0);
+  const names = reads.mock.calls.map((call) => call.arguments[0]);
+  assert.deepEqual(names.filter((name) => /\/\d{6}\.mkdm$/.test(name)), [], 'No month was read for the digest');
+  assert.ok(names.includes(DmPersistence.headName(bobKey)));
+
+  // And the conversation list comes from the state alone.
+  reads.mock.resetCalls();
+  const restarted = createDevice('Alice', alice.identity, alice.dir);
+  const summary = restarted.service.snapshot().conversations.find((conversation) => conversation.peer === bobKey);
+  assert.equal(summary?.lastMessagePreview, 'alice 2 de novo');
+  assert.deepEqual(reads.mock.calls.map((call) => call.arguments[0]), ['state.mkdm']);
+});
+
+test('an own device that catches up from a long history gets every month and the same day index', () => {
+  const { alice, bob, aliceIdentity, clock, ids } = historyAcrossMonths();
+  const second = createDevice('Alice 2', aliceIdentity, undefined, () => clock.now);
+  relay([alice, bob, second], second, second.service.hello(false));
+  const bobKey = bob.identity.publicKey;
+  assert.deepEqual(second.service.getConversation(bobKey, null, 500).messages.map((message) => message.id), ids);
+  // With the same days on both, a new digest asks for nothing.
+  second.service.flush();
+  const before = second.events.length;
+  relay([alice, bob, second], second, second.service.hello(false));
+  assert.equal(second.events.slice(before).filter((event) => event.type === 'messages').length, 0);
+});
+
+test('a conversation from the single file of earlier versions moves to months, even when the move was interrupted', () => {
+  const { alice, bob, ids } = historyAcrossMonths();
+  const bobKey = bob.identity.publicKey;
+  const tombstoned = newDmId();
+  const legacyMessages = toLegacyStore(alice, bobKey);
+  // A delete that arrived before its message, kept in the old file too.
+  const store = storeOf(alice);
+  store.writeJsonNow(DmPersistence.peerFileName(bobKey), {
+    version: 1, peer: bobKey, messages: legacyMessages, tombstones: [{ id: tombstoned, author: bobKey }],
+  });
+  const legacyFile = path.join(alice.dir, DmPersistence.peerFileName(bobKey));
+  const head = path.join(alice.dir, DmPersistence.headName(bobKey));
+
+  // A month that cannot be read right now stops the move: the old file stays, and no head marks it as done.
+  const blocked = segmentPath(alice, bobKey, 202603);
+  fs.mkdirSync(blocked, { recursive: true });
+  const interrupted = createDevice('Alice', alice.identity, alice.dir);
+  assert.throws(() => interrupted.service.getConversation(bobKey));
+  assert.ok(fs.existsSync(legacyFile));
+  assert.equal(fs.existsSync(head), false);
+  fs.rmSync(blocked, { recursive: true });
+
+  // A move that stopped after writing January (with an older copy of a message): the next one merges into it.
+  const january = legacyMessages.filter((message) => typeof message.createdAt === 'number' && monthOf(message.createdAt) === 202601);
+  store.writeJsonNow(DmPersistence.segmentName(bobKey, 202601), {
+    version: 2, peer: bobKey, month: 202601, messages: january.slice(0, 2),
+  });
+  assert.deepEqual(interrupted.service.getConversation(bobKey, null, 500).messages.map((message) => message.id), ids);
+  assert.equal(fs.existsSync(legacyFile), false);
+  assert.ok(fs.existsSync(head));
+  assert.deepEqual(storeOf(alice).listSegments(bobKey).sort(), [202601, 202602, 202603]);
+  const summary = interrupted.service.snapshot().conversations.find((conversation) => conversation.peer === bobKey);
+  assert.equal(summary?.lastMessagePreview, 'alice 2 de novo');
+
+  // Stopped after the head, before the old file went: the months win and the old file goes.
+  store.writeJsonNow(DmPersistence.peerFileName(bobKey), { version: 1, peer: bobKey, messages: legacyMessages.slice(0, 2) });
+  const afterHead = createDevice('Alice', alice.identity, alice.dir);
+  assert.deepEqual(afterHead.service.getConversation(bobKey, null, 500).messages.map((message) => message.id), ids);
+  assert.equal(fs.existsSync(legacyFile), false);
+
+  // The delete from the old file still keeps that message out.
+  const message = { id: tombstoned, author: bobKey, content: 'apagada antes', createdAt: Date.UTC(2026, 2, 20, 13), editedAt: null,
+    deleted: false, replyTo: null, reactions: {}, attachments: [] };
+  afterHead.service.importData({ version: 1, peers: [], settings: {}, conversations: [{ version: 1, peer: bobKey, messages: [message] }] });
+  const kept = afterHead.service.getConversation(bobKey, null, 500).messages.find((entry) => entry.id === tombstoned);
+  assert.equal(kept?.deleted, true);
+  assert.equal(kept?.content, '');
+
+  // A backup of the moved history restores every month.
+  const restored = createDevice('Alice', alice.identity);
+  restored.service.importData(JSON.parse(JSON.stringify(afterHead.service.exportData(true))));
+  assert.deepEqual(restored.service.getConversation(bobKey, null, 500).messages.filter((entry) => !entry.deleted)
+    .map((entry) => entry.id), ids);
+  restored.service.flush();
+  assert.deepEqual(storeOf(restored).listSegments(bobKey).sort(), [202601, 202602, 202603]);
+});
+
+test('months leave the memory past the limit, but never one still waiting to be saved', async (context) => {
+  const { alice, bob, clock } = historyAcrossMonths();
+  const bobKey = bob.identity.publicKey;
+  const limit = DmHistory.maxCachedMessages;
+  context.after(() => { DmHistory.maxCachedMessages = limit; });
+  DmHistory.maxCachedMessages = 3;
+  const fresh = createDevice('Alice', alice.identity, alice.dir, () => clock.now);
+  fresh.service.getConversation(bobKey, null, 500);
+  await nextTurn();
+  const reads = context.mock.method(DmPersistence.prototype, 'readJson');
+  fresh.service.getConversation(bobKey, null, 500);
+  assert.ok(reads.mock.calls.some((call) => /\/\d{6}\.mkdm$/.test(call.arguments[0])), 'Months over the limit are read again');
+
+  // A month not saved yet stays: the edit right after finds the message that is only in memory.
+  DmHistory.maxCachedMessages = 0;
+  clock.now = Date.UTC(2026, 2, 22, 10);
+  const sent = fresh.service.sendMessage({ peer: bobKey, content: 'ainda não salva' });
+  assert.ok(sent.peers?.[bobKey]);
+  const id = fresh.service.getConversation(bobKey).messages.at(-1)!.id;
+  await nextTurn();
+  fresh.service.editMessage(bobKey, id, 'salva e editada');
+  fresh.service.flush();
+  await nextTurn();
+  assert.equal(createDevice('Alice', alice.identity, alice.dir).service.getConversation(bobKey).messages.at(-1)?.content,
+    'salva e editada');
+});
+
+test('the fingerprint of each day is what earlier versions compute, so own devices on either version agree', () => {
+  const identity = createIdentity();
+  const peerKey = createIdentity().publicKey;
+  const store = new DmPersistence(fs.mkdtempSync(path.join(tempRoot, 'history-')),
+    new DmKeyring(identity.publicKey, identity.privateKey).storageKey());
+  const history = new DmHistory(store, identity.publicKey);
+  const base = Date.UTC(2026, 4, 30, 22);
+  const messages: StoredMessage[] = [];
+  for (let index = 0; index < 40; index += 1) {
+    const message: StoredMessage = {
+      id: newDmId(),
+      author: index % 3 === 0 ? peerKey : identity.publicKey,
+      content: `m${index}`,
+      createdAt: base + Math.floor(index / 2) * 3 * 60 * 60_000,
+      editedAt: index % 5 === 0 ? base : null,
+      deleted: index % 7 === 0,
+      replyTo: null,
+      reactions: index % 4 === 0 ? { '👍': { [peerKey]: { on: true, ts: base + index } } } : {},
+      attachments: [],
+      delivery: null,
+    };
+    messages.push(message);
+  }
+  // Inserted out of order, as history from other devices arrives.
+  for (const message of [...messages].reverse()) assert.equal(history.insert(peerKey, message), true);
+  assert.equal(history.insert(peerKey, { ...messages[3] }), false, 'A message is kept once');
+
+  const ordered = [...messages].sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
+  const expected = new Map<number, string>();
+  const hashes = new Map<number, ReturnType<typeof createHash>>();
+  for (const message of ordered) {
+    const day = Math.floor(message.createdAt / DAY_MS);
+    if (!hashes.has(day)) hashes.set(day, createHash('sha256'));
+    hashes.get(day)!.update(messageFingerprint(message));
+  }
+  for (const [day, hash] of hashes) expected.set(day, hash.digest('hex').slice(0, 12));
+  assert.deepEqual(history.dayHashes(peerKey), expected);
+  assert.ok(new Set([...expected.keys()].map((day) => monthOf(day * DAY_MS))).size > 1, 'The days span two months');
+
+  const summary = history.summary(peerKey, 0);
+  assert.equal(summary.count, messages.filter((message) => !message.deleted).length);
+  assert.equal(summary.unread, messages.filter((message) => !message.deleted && message.author === peerKey).length);
+  assert.equal(summary.last?.id, ordered.filter((message) => !message.deleted).at(-1)?.id);
+});
+
+test('a message a friend does not come back for in 30 days shows as not delivered, and can be sent again', () => {
+  const clock = { now: Date.UTC(2026, 3, 1, 12) };
+  const now = () => clock.now;
+  const aliceIdentity = createIdentity();
+  const alice = createDevice('Alice', aliceIdentity, undefined, now);
+  const bob = createDevice('Bob', createIdentity(), undefined, now);
+  befriend([alice, bob], alice, bob);
+  const bobKey = bob.identity.publicKey;
+  const delivery = (device: Device) => device.service.getConversation(bobKey).messages.at(-1)?.delivery;
+
+  // Bob does not come back: the message waits in Alice's outbox.
+  alice.service.sendMessage({ peer: bobKey, content: 'você sumiu?' });
+  const { id, createdAt } = alice.service.getConversation(bobKey).messages.at(-1)!;
+  clock.now = createdAt + OUTBOX_MESSAGE_TTL_MS - 1;
+  alice.service.outgoing([]);
+  assert.equal(delivery(alice), 'pending');
+  assert.deepEqual(alice.service.resendMessage(bobKey, id), {}, 'Only a message not delivered is sent again');
+
+  clock.now += 1;
+  alice.service.outgoing([]);
+  assert.equal(delivery(alice), 'failed');
+  assert.ok(alice.events.some((event) => event.type === 'messages' && event.messages.some((message) =>
+    message.id === id && message.delivery === 'failed')), 'The open conversation is told');
+  assert.deepEqual(alice.service.pendingPeers(), [], 'Nothing waits for Bob anymore');
+  alice.service.flush();
+  assert.equal(createDevice('Alice', aliceIdentity, alice.dir, now).service.getConversation(bobKey).messages.at(-1)?.delivery, 'failed');
+
+  // Sent again: a new deadline, counted from now.
+  const again = alice.service.resendMessage(bobKey, id);
+  assert.equal(again.peers?.[bobKey]?.length, 1);
+  assert.equal(delivery(alice), 'pending');
+  clock.now += OUTBOX_MESSAGE_TTL_MS - 1;
+  alice.service.outgoing([]);
+  assert.equal(delivery(alice), 'pending');
+
+  // Past it, a device that opens later shows it as not delivered right away.
+  clock.now += 1;
+  alice.service.flush();
+  const reopened = createDevice('Alice', aliceIdentity, alice.dir, now);
+  assert.equal(delivery(reopened), 'failed');
+
+  // Bob is back: the message reaches him once, at the time it was written, and shows as delivered.
+  relay([reopened, bob], reopened, reopened.service.resendMessage(bobKey, id));
+  relay([reopened, bob], reopened, reopened.service.resendMessage(bobKey, id));
+  assert.equal(delivery(reopened), 'delivered');
+  const received = bob.service.getConversation(alice.identity.publicKey).messages;
+  assert.deepEqual(received.map((message) => message.content), ['você sumiu?']);
+  assert.equal(received[0].createdAt, alice.service.getConversation(bobKey).messages.at(-1)?.createdAt);
+
+  // Only a friend's message can be sent again.
+  relay([reopened, bob], reopened, reopened.service.removeFriend(bobKey));
+  assert.throws(() => reopened.service.resendMessage(bobKey, id), (error: unknown) => error instanceof DmError && error.code === 'not-friend');
 });

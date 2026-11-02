@@ -74,7 +74,7 @@ function pendingMessage(owner: Side, other: Side): string {
   const record = owner.ledger.state.peers[other.key];
   const id = newDmId();
   const ts = owner.ledger.stamp();
-  owner.ledger.conversation(other.key).messages.push({
+  owner.ledger.history.insert(other.key, {
     id, author: owner.key, content: 'ainda sem ack', createdAt: ts, editedAt: null, deleted: false, replyTo: null,
     reactions: {}, attachments: [], delivery: 'pending', forwarded: null,
   });

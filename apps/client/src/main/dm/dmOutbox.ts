@@ -16,6 +16,8 @@ import { isRecord } from './dmWire';
 const RESEND_AFTER_MS = 20_000;
 /** Ids one ack envelope carries; the receiving side reads at most this many. */
 const MAX_ACK_IDS = 200;
+/** A message the friend has not confirmed this long after it was queued shows as not delivered, to send again (#823). */
+export const OUTBOX_MESSAGE_TTL_MS = 30 * 24 * 60 * 60_000;
 
 /** What the renderer sends after an operation: `items` to one friend (null entries dropped), `broadcast` to every session. */
 export function dispatchFor(peer: string, items: Array<DmRelayItem | null>, broadcast: DmRelayItem[] = []): DmDispatch {
@@ -138,16 +140,66 @@ export class DmOutbox {
 
   dropPendingEnvelopes(peer: string): void {
     const entries = this.ledger.state.outbox[peer] ?? [];
-    const failedIds = new Set(entries.filter((entry) => entry.kind === 'envelope' && entry.type === 'msg').map((entry) => entry.id));
+    const failed = entries.filter((entry) => entry.kind === 'envelope' && entry.type === 'msg');
     this.ledger.state.outbox[peer] = entries.filter((entry) => entry.kind === 'friend');
-    if (failedIds.size === 0) return;
+    this.markFailed(peer, failed);
+  }
+
+  /**
+   * Messages that waited {@link OUTBOX_MESSAGE_TTL_MS} for a friend who did
+   * not come back leave the outbox and show as not delivered; the user can
+   * send them again. What else is queued for that friend stays.
+   */
+  expire(now: number): void {
+    let expired = false;
+    for (const [peer, entries] of Object.entries(this.ledger.state.outbox)) {
+      const old = entries.filter((entry) =>
+        entry.kind === 'envelope' && entry.type === 'msg' && now - (entry.queuedAt ?? entry.ts) >= OUTBOX_MESSAGE_TTL_MS);
+      if (old.length === 0) continue;
+      try {
+        this.markFailed(peer, old);
+      } catch (error) {
+        // The conversation cannot be read right now: the messages stay queued and expire on the next try.
+        console.error('[DM] Could not mark expired messages as not delivered yet.', error);
+        continue;
+      }
+      this.ledger.state.outbox[peer] = entries.filter((entry) => !old.includes(entry));
+      expired = true;
+    }
+    if (expired) this.ledger.changed();
+  }
+
+  /**
+   * Queues a message that was not delivered again, as it is now and with a
+   * new deadline. It keeps its id and time, so a friend who did get it
+   * (only the ack was lost) still has a single copy.
+   */
+  requeueMessage(record: PeerRecord, message: StoredMessage): DmRelayItem | null {
+    const now = this.ledger.now();
+    const body = {
+      content: message.content,
+      replyTo: message.replyTo,
+      attachments: message.attachments.map(({ fileId, name, size, mime, sha256 }) => ({ fileId, name, size, mime, sha256 })),
+      ...(message.forwarded ? { forwarded: message.forwarded } : {}),
+      // Edited while it waited: older edits still on their way stay behind this text (see `editMessage`).
+      ...(message.contentAt !== undefined ? { contentAt: message.contentAt } : {}),
+    };
+    const entry: OutboxEntry = { id: message.id, kind: 'envelope', type: 'msg', ts: message.createdAt, body, lastSentAt: now, queuedAt: now };
+    this.entries(record.publicKey).push(entry);
+    return this.item(record, entry);
+  }
+
+  private markFailed(peer: string, entries: OutboxEntry[]): void {
     const changed: StoredMessage[] = [];
-    for (const message of this.ledger.conversation(peer).messages) {
-      if (failedIds.has(message.id) && message.delivery === 'pending') {
+    for (const entry of entries) {
+      const message = this.ledger.findMessage(peer, entry.id, entry.ts);
+      if (message && message.delivery === 'pending') {
         message.delivery = 'failed';
         changed.push(message);
       }
     }
+    if (changed.length === 0) return;
+    this.ledger.saveConversation(peer, changed);
     this.ledger.emitMessages(peer, changed);
   }
 
@@ -216,11 +268,11 @@ export class DmOutbox {
     if (ids.length === 0) return;
     const acked = new Set(ids);
     const entries = this.ledger.state.outbox[peer] ?? [];
-    const ackedMessages = entries.filter((entry) => acked.has(entry.id) && entry.type === 'msg').map((entry) => entry.id);
+    const ackedMessages = entries.filter((entry) => acked.has(entry.id) && entry.type === 'msg');
     this.ledger.state.outbox[peer] = entries.filter((entry) => !acked.has(entry.id));
     const changedMessages: StoredMessage[] = [];
-    for (const id of ackedMessages) {
-      const message = this.ledger.findMessage(peer, id);
+    for (const { id, ts } of ackedMessages) {
+      const message = this.ledger.findMessage(peer, id, ts);
       if (message && message.delivery !== 'delivered') {
         message.delivery = 'delivered';
         changedMessages.push(message);
@@ -228,7 +280,7 @@ export class DmOutbox {
     }
     this.ledger.saveState();
     if (changedMessages.length > 0) {
-      this.ledger.saveConversation(peer);
+      this.ledger.saveConversation(peer, changedMessages);
       this.ledger.emitMessages(peer, changedMessages);
     }
   }

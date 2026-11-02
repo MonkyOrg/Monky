@@ -73,6 +73,8 @@ export interface OutboxEntry {
   body?: unknown;
   statement?: SignedStatement;
   lastSentAt: number;
+  /** When it entered the outbox, if not at `ts` (a message sent again); what its deadline counts from. */
+  queuedAt?: number;
 }
 
 export interface ConversationMeta {
@@ -142,6 +144,7 @@ export interface StoredMessage {
   forwarded?: MessageForward | null;
 }
 
+/** A conversation as versions before #823 kept it: one file with every message. Read only to migrate it. */
 export interface StoredConversation {
   version: 1;
   peer: string;
@@ -151,6 +154,40 @@ export interface StoredConversation {
    * out instead of showing up for good. Absent in stores written before #490.
    */
   tombstones?: Array<{ id: string; author: string }>;
+}
+
+export const DAY_MS = 86_400_000;
+
+/**
+ * One UTC day of a conversation (#823): the fingerprint own devices compare
+ * (`h`, see {@link messageFingerprint}), and how many of its messages are not
+ * deleted (`n`) and, of those, came from the friend (`i`).
+ */
+export interface DayIndex {
+  h: string;
+  n: number;
+  i: number;
+}
+
+/**
+ * What a conversation keeps besides its messages (#823), small enough to read
+ * without them: the deletes that came before their message and one
+ * {@link DayIndex} per day (key: days since 1970), from which the digest,
+ * the message count and the unread count come.
+ */
+export interface ConversationHead {
+  version: 2;
+  peer: string;
+  tombstones: Array<{ id: string; author: string }>;
+  days: Record<string, DayIndex>;
+}
+
+/** The messages of one UTC month of a conversation (`yyyymm`), in conversation order. */
+export interface ConversationSegment {
+  version: 2;
+  peer: string;
+  month: number;
+  messages: StoredMessage[];
 }
 
 export interface AttachmentMeta {
