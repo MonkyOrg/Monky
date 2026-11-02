@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Uma postagem de bot que menciona você em outro idioma agora toca o som e mostra o @ na hora, como já acontecia ao reconectar. Antes, o aviso ao vivo só olhava o texto no seu idioma.",
+  "en": "A bot post that mentions you in another language now plays the sound and shows the @ right away, as it already did after reconnecting. The live notice used to check only the text in your language."
+}
