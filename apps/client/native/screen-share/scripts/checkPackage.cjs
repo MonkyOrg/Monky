@@ -155,6 +155,7 @@ function verifyMacSourceInputs(arch) {
   const rtc = JSON.parse(fs.readFileSync(path.join(bin, 'rtc-build.json'), 'utf8'));
   verify(path.join(root, 'scripts', 'buildMac.cjs'), capture.sourceRecipe);
   verify(path.join(root, 'scripts', 'buildMacRtc.cjs'), rtc.sourceRecipe);
+  verify(path.join(root, 'scripts', 'rtcBuildCommon.cjs'), rtc.sharedRecipe);
   assert.equal(capture.tests?.deviceFree, true, 'The target capture executable must pass its device-free self-test.');
   assert.deepEqual(capture.sourceFiles.map(file => file.path).sort(), regularFiles(path.join(root, 'src', 'mac')));
   for (const file of capture.sourceFiles) verify(path.join(root, 'src', 'mac', file.path), file);

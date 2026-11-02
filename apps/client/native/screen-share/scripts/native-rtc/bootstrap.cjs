@@ -5,12 +5,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const windowsToolchain = require('../windowsToolchain.cjs');
-const { transientNetworkFailure } = require('../buildTools.cjs');
+const pinnedGit = require('../pinnedGit.cjs');
 
 const OWNER = '.native-rtc-owner.json';
 const STATE = '.native-rtc-state.json';
 const LOCK = '.native-rtc-lock.json';
-const EMPTY_GIT_CONFIG = 'empty-gitconfig';
 const OWNER_NAME = 'monky-native-rtc-source-bootstrap';
 const REPOSITORIES = ['depot_tools', 'webrtc', 'libmediasoupclient', 'libsdptransform'];
 const DIRECTORIES = {
@@ -175,42 +174,14 @@ function envValue(env, name) {
 }
 
 function childEnvironment(context) {
-  const result = {};
-  const clean = windowsToolchain.cleanWindowsEnvironment(context.env);
-  for (const [key, value] of Object.entries(clean)) {
-    if (/^(GIT_|GCM_|PYTHON|DEPOT_TOOLS_|VPYTHON_|CIPD_|GCLIENT_|GYP_|GN_)/iu.test(key) ||
-        /^(PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|LOCALAPPDATA|APPDATA|TEMP|TMP|INCLUDE|LIB|LIBPATH|VIRTUAL_ENV|__PYVENV_LAUNCHER__|ELECTRON_RUN_AS_NODE)$/iu.test(key)) continue;
-    result[key] = value;
-  }
-  const cache = path.join(context.paths.workspace, 'cache');
-  const home = path.join(cache, 'home');
   const pathParts = [
     context.tools.gclientPython && path.dirname(context.tools.gclientPython),
     context.tools.git && path.dirname(context.tools.git),
     context.tools.python && path.dirname(context.tools.python),
     path.join(context.paths.workspace, 'depot_tools'),
-    clean.PATH,
   ].filter(Boolean);
-  Object.assign(result, {
-    PATH: pathParts.join(path.delimiter),
-    HOME: home, USERPROFILE: home, HOMEDRIVE: path.parse(home).root.slice(0, 2),
-    HOMEPATH: home.slice(2), LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
-    APPDATA: path.join(home, 'AppData', 'Roaming'),
-    TEMP: path.join(cache, 'tmp'), TMP: path.join(cache, 'tmp'),
-    CIPD_CACHE_DIR: path.join(cache, 'cipd'),
-    VPYTHON_VIRTUALENV_ROOT: path.join(cache, 'vpython'),
-    DEPOT_TOOLS_UPDATE: '0', DEPOT_TOOLS_WIN_TOOLCHAIN: '0',
-    GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(cache, EMPTY_GIT_CONFIG),
-    GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never',
-    GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1',
-    GIT_CONFIG_COUNT: '5',
-    GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: path.join(context.paths.workspace, '.hooks-disabled'),
-    GIT_CONFIG_KEY_1: 'core.fsmonitor', GIT_CONFIG_VALUE_1: 'false',
-    GIT_CONFIG_KEY_2: 'core.untrackedCache', GIT_CONFIG_VALUE_2: 'false',
-    GIT_CONFIG_KEY_3: 'credential.helper', GIT_CONFIG_VALUE_3: '',
-    GIT_CONFIG_KEY_4: 'core.longpaths', GIT_CONFIG_VALUE_4: 'true',
-    PYTHONDONTWRITEBYTECODE: '1',
-  });
+  const result = pinnedGit.toolEnvironment(windowsToolchain.cleanWindowsEnvironment(context.env),
+    context.paths.workspace, { paths: pathParts, platform: 'win32' });
   if (context.tools.windowsToolchain) {
     const selected = windowsToolchain.buildEnvironment(context.tools.windowsToolchain,
       context.tools.gclientPython || context.tools.python, result);
@@ -702,29 +673,17 @@ async function acquire(context, name) {
   const definition = context.manifest.repositories[name];
   const directory = path.join(context.paths.workspace, DIRECTORIES[name]);
   if (!exists(context, directory)) {
-    createDirectory(context, directory);
-    requireValue(context.fs.readdirSync(directory).length === 0, 'ERR_RTC_CHECKOUT_RACE', 'New checkout directory is no longer empty.');
-    await git(context, directory, ['init', '--template', path.join(context.paths.workspace, '.hooks-disabled'), '--'],
-      { mutating: true, label: `Initialize new ${name}` });
-    await git(context, directory, ['remote', 'add', 'origin', definition.url],
-      { mutating: true, label: `Record official ${name} origin` });
-    context.log(`FETCH ${name} ${definition.commit} from ${definition.url}`);
+    inspectPath(context, directory);
     ++context.downloadCommands;
-    // A transient upstream 5xx or dropped connection is retried with backoff; the pinned SHA is
-    // still verified by inspectCheckout, and any other failure stops at once.
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await git(context, directory, ['fetch', '--no-tags', '--depth=1', 'origin', definition.commit],
-          { mutating: true, label: `Fetch exact ${name} SHA (not HEAD)` });
-        break;
-      } catch (error) {
-        if (attempt >= 4 || error?.code !== 'ERR_RTC_COMMAND' || !transientNetworkFailure(error)) throw error;
-        context.log(`FETCH ${name}: transient network failure on attempt ${attempt}/4; retrying.`);
-        await context.sleep([10_000, 30_000, 60_000][attempt - 1]);
-      }
-    }
-    await git(context, directory, ['checkout', '--detach', definition.commit],
-      { mutating: true, label: `Check out newly fetched ${name} SHA` });
+    // The shared pinned acquisition: exact SHA (never HEAD) into a private directory renamed into place
+    // only once verified, with bounded retries of transient upstream failures. Each Git command runs
+    // in its own guarded job.
+    await pinnedGit.acquireAsync({
+      directory, url: definition.url, commit: definition.commit,
+      isolation: pinnedGit.workspaceIsolation(context.paths.workspace),
+      io: context.fs, randomId: context.randomId, log: context.log, sleep: context.sleep,
+      git: ({ directory: cwd, args, label, mutating }) => git(context, cwd, args, { mutating, label }),
+    });
   }
   const identity = await inspectCheckout(context, directory, definition);
   return { ...identity, license: licenseRecord(context, directory, definition) };
@@ -926,20 +885,12 @@ async function fetchWorkspace(context, checked) {
   try {
     validateOwner(context, jsonFile(context, path.join(workspace, OWNER)));
     requireValue(!exists(context, path.join(workspace, STATE)), 'ERR_RTC_STATE_RACE', 'Completed state appeared while locking.');
-    for (const relative of ['.hooks-disabled', 'cache', 'cache\\home', 'cache\\home\\AppData',
-      'cache\\home\\AppData\\Local', 'cache\\home\\AppData\\Roaming', 'cache\\tmp', 'cache\\cipd', 'cache\\vpython']) {
-      const directory = path.join(workspace, ...relative.split('\\'));
+    const isolation = pinnedGit.workspaceIsolation(workspace);
+    for (const directory of isolation.directories) {
       if (!exists(context, directory)) createDirectory(context, directory);
       else inspectPath(context, directory);
     }
-    // Git for Windows 2.56 rejects GIT_CONFIG_GLOBAL=NUL. An owned empty file isolates every Git
-    // version; before it exists (preflight), Git treats the absent global configuration as empty.
-    const gitConfig = path.join(workspace, 'cache', EMPTY_GIT_CONFIG);
-    if (!exists(context, gitConfig)) context.fs.closeSync(context.fs.openSync(gitConfig, 'wx'));
-    requireValue(context.fs.lstatSync(gitConfig).isFile() && context.fs.lstatSync(gitConfig).size === 0,
-      'ERR_RTC_GIT_CONFIG', 'The isolated global Git configuration must remain an empty file.');
-    requireValue(context.fs.readdirSync(path.join(workspace, '.hooks-disabled')).length === 0,
-      'ERR_RTC_HOOKS', 'The disabled-hooks directory changed before acquisition.');
+    pinnedGit.prepareIsolation(isolation, context.fs);
     // Recheck all existing top-level trees/configuration before the first download.
     for (const name of REPOSITORIES.filter(value => value !== 'webrtc')) {
       const directory = path.join(workspace, DIRECTORIES[name]);
@@ -991,7 +942,7 @@ async function fetchWorkspace(context, checked) {
         'ERR_RTC_LOCK_CHANGED', 'Ownership lock changed during the operation; it is not removed.');
       context.fs.unlinkSync(lockPath);
     }
-    else context.log('FETCH failed: the ownership lock and any partial trees are retained for manual review. No reset/delete/retry is performed.');
+    else context.log('FETCH failed: the ownership lock and any partial gclient tree are retained for manual review. No reset or resync is performed; a failed Git acquisition removes only its own temporary checkout.');
   }
 }
 

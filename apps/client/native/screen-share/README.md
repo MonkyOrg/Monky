@@ -804,6 +804,20 @@ o RTC e a captura de `screen-share` e reúne as licenças; **não compila
 build do `gclient`. Checkouts modificados ou incompletos interrompem a
 preparação; não são resetados ou substituídos silenciosamente.
 
+Windows e macOS obtêm as fontes Git fixadas pelo mesmo módulo,
+`scripts/pinnedGit.cjs` (OBS em `fetchObs.cjs`, o SDK do macOS em
+`prepareMacRtc.cjs` e o bootstrap do Windows): o Git roda sem a configuração
+do sistema e do usuário, sem hooks, credenciais nem remotos `file://`; busca
+só o SHA exato, com novas tentativas para falhas transitórias de rede, em um
+diretório temporário que só é renomeado para o nome final depois de conferido.
+Uma falha não deixa checkout pela metade. No macOS, gclient, CIPD e pip também
+usam home, temporários e caches dentro de `.native-screen/mac-rtc`, como no
+Windows. Um checkout existente com outra revisão é recusado: apague-o para
+obter a revisão fixada de novo. O build do WebRTC compartilha entre as duas
+plataformas as entradas, o overlay, os argumentos GN, as verificações e o
+manifesto (`scripts/rtcBuildCommon.cjs`); `binding.gyp`, a assinatura e o job
+MSVC continuam em `buildRtc.cjs` e `buildMacRtc.cjs`.
+
 O venv recebe o httplib2 e o six apenas dos wheels fixados em
 `scripts/native-rtc/pins.json`, no Windows e no macOS (`prepareMacRtc.cjs`):
 o pip recusa um arquivo cujo SHA-256 seja diferente. No Windows, se essa

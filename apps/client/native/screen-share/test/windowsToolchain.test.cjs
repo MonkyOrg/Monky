@@ -439,7 +439,7 @@ function modelBuilder(name, f, selected, env, paths = path) {
   for (const relative of [paths.join('vendor', 'obs', 'sources.json'),
     paths.join('vendor', 'obs', 'runtime-inputs.json'), paths.join('capture', 'runtime-additions.json')])
     inputs[paths.join(source, relative)] = require(path.join(realSource, ...relative.split(paths.sep)));
-  const module = script(name, {
+  const overrides = {
     ...inputs, 'node:fs': io, 'node:path': paths,
     './windowsToolchain.cjs': { ...tools, resolveWindowsToolchain: () => selected, msvcEnvironment: () => env },
     './buildTools.cjs': { ...real, root: packageRoot, write: save, regularFiles: () => [],
@@ -465,7 +465,10 @@ function modelBuilder(name, f, selected, env, paths = path) {
         if (base === 'lib.exe') return '';
         assert.fail(`Unmodeled build command: ${exe} ${args.join(' ')}`);
       } },
-  });
+  };
+  // The steps shared with macOS run against the same modeled filesystem and tools.
+  overrides['./rtcBuildCommon.cjs'] = script('rtcBuildCommon.cjs', overrides);
+  const module = script(name, overrides);
   return { module, calls, files, stopped, packageRoot };
 }
 
