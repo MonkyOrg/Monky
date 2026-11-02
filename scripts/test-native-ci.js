@@ -85,6 +85,7 @@ test('Electron is explicitly installed before browser tests instead of downloadi
       'Exercise native and Chromium voice through a real isolated server'],
     [ci.jobs['client-dom'], 'Install dependencies', 'Exercise client DOM and microphone state in Electron'],
     [ci.jobs['client-dom-mac'], 'Install dependencies', 'Exercise client DOM and microphone state in Electron'],
+    [ci.jobs['local-execution-e2e'], 'Install dependencies', 'Exercise local execution end to end'],
     [ci.jobs['package-win'], 'Install dependencies', 'Exercise prepared application startup and scenarios'],
     [ci.jobs['package-mac'], 'Install dependencies', 'Exercise prepared application startup and scenarios'],
   ]) {
@@ -193,12 +194,14 @@ test('DOM lanes run from the start on both systems, independently of native comp
   assert.equal(gate.name, 'Build check (${{ matrix.platform }})');
   assert.deepEqual(gate.strategy.matrix.platform, ['win', 'mac']);
   assert.equal(gate.if, 'always()');
-  assert.deepEqual(gate.needs, ['changes', 'package-win', 'package-mac', 'client-dom', 'client-dom-mac', 'mac-native-sources']);
+  assert.deepEqual(gate.needs, ['changes', 'package-win', 'package-mac', 'client-dom', 'client-dom-mac', 'local-execution-e2e',
+    'mac-native-sources']);
   const check = step(gate, 'Require packaging, DOM and native hardware success');
   assert.deepEqual(check.env, {
     DOCS_ONLY: '${{ needs.changes.outputs.docs-only }}',
     PACKAGE_WIN: '${{ needs.package-win.result }}', PACKAGE_MAC: '${{ needs.package-mac.result }}',
     DOM_WIN: '${{ needs.client-dom.result }}', DOM_MAC: '${{ needs.client-dom-mac.result }}',
+    LOCAL_E2E: '${{ needs.local-execution-e2e.result }}',
     NATIVE_MAC: '${{ needs.mac-native-sources.result }}',
   });
   const bash = process.platform === 'win32'
@@ -236,13 +239,13 @@ test('CI exercises channel permissions and screen privacy alongside voice lifecy
 });
 
 test('both build lanes and release retain the qualified Windows toolchain and no validation bypass', () => {
-  for (const job of [ci.jobs['client-dom'], ci.jobs['package-win'], release.jobs.build]) {
+  for (const job of [ci.jobs['client-dom'], ci.jobs['package-win'], ci.jobs['local-execution-e2e'], release.jobs.build]) {
     assert.deepEqual(step(job, 'Setup MSVC (Windows)').with, {
       vsversion: '2022', toolset: '14.44', sdk: '10.0.26100.0',
     });
   }
   for (const job of [ci.jobs['client-dom'], ci.jobs['client-dom-mac'], ci.jobs['package-win'], ci.jobs['package-mac'],
-    ci.jobs['mac-native'], ci.jobs['mac-sources'], release.jobs.build]) {
+    ci.jobs['local-execution-e2e'], ci.jobs['mac-native'], ci.jobs['mac-sources'], release.jobs.build]) {
     assert.equal(job.steps.find(candidate => candidate.uses === 'actions/setup-python@v5').with['python-version'], '3.11');
     assert.equal(job.steps.find(candidate => candidate.uses === 'actions/setup-node@v4').with['node-version'], 22);
     assert.ok(job.steps.every(candidate => !candidate['continue-on-error']));
@@ -996,7 +999,7 @@ test('DOM shards run every command exactly once, keep the suite order and balanc
 test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only runner-only steps', () => {
   const { plan, pairs } = require('./ci-local.cjs');
   for (const platform of ['win32', 'darwin']) for (const nativeReady of [true, false]) {
-    const steps = plan({ base: 'a'.repeat(40), head: 'b'.repeat(40), platform, nativeReady });
+    const steps = plan({ base: 'a'.repeat(40), head: 'b'.repeat(40), platform, nativeReady, fixtureFfmpeg: null });
     const labels = steps.map(candidate => candidate.label);
     for (const command of commands.map(command => command.join(' '))) assert.ok(labels.includes(command), command);
     for (const name of ['Test bot contracts and SDK', 'Test server, client state and real bot conversations',
@@ -1017,30 +1020,85 @@ test('ci:local mirrors CI commands from ci.yml and the DOM runner, skipping only
     assert.ok(skipped.some(label => label.startsWith('node scripts/ci-build-artifact.js collect')));
     assert.ok(skipped.some(label => label.includes('electron-builder')), 'Packaging is opt-in locally.');
     assert.equal(steps.filter(candidate => candidate.stage === 'native').every(candidate => !!candidate.skip), !nativeReady);
-    assert.equal(skipped.length, nativeReady ? 3 : 6);
+    assert.equal(skipped.length, nativeReady ? 4 : 7);
+    const e2e = 'npm run test:local-execution:e2e --workspace=apps/client';
+    assert.equal(steps.find(candidate => candidate.label === e2e).skip,
+      'PULADO (sem FFmpeg de fixture: rode node scripts/fixture-ffmpeg.cjs ensure ou defina MONKY_WORKER_TEST_FFMPEG)');
+    const fixture = plan({ base: 'a', head: 'b', platform, nativeReady, fixtureFfmpeg: 'C:\\fixture\\ffmpeg.exe' })
+      .find(candidate => candidate.label === e2e);
+    assert.equal(fixture.skip, undefined);
+    assert.deepEqual(fixture.env, { MONKY_WORKER_TEST_FFMPEG: 'C:\\fixture\\ffmpeg.exe' });
     const addon = labels.indexOf('npm exec --no -- node-gyp rebuild --directory=apps/client/native/screen-audio');
     assert.ok(addon >= 0 && addon < labels.indexOf('node apps/client/test/shortcutsDomSmoke.cjs'),
       'Without packaging, the screen-audio addon must be built before the shortcut smokes load it.');
-    assert.ok(!plan({ base: 'a', head: 'b', platform, nativeReady, packageApp: true })
+    assert.ok(!plan({ base: 'a', head: 'b', platform, nativeReady, packageApp: true, fixtureFfmpeg: null })
       .some(candidate => (candidate.label.includes('electron-builder') && candidate.skip)
         || candidate.label.includes('node-gyp rebuild --directory=apps/client/native/screen-audio')));
   }
   assert.ok(pairs(ci).some(([pt, en]) => pt === 'CONTRIBUTING.md' && en === 'CONTRIBUTING.en.md'));
   for (const platform of ['win32', 'darwin']) {
-    const docsOnly = plan({ base: 'a', head: 'b', platform, nativeReady: true, docsOnly: true, before: new Set() });
+    const docsOnly = plan({ base: 'a', head: 'b', platform, nativeReady: true, docsOnly: true, fixtureFfmpeg: 'ffmpeg', before: new Set() });
     assert.ok(docsOnly.some(candidate => candidate.stage === 'docs'));
     for (const candidate of docsOnly)
       assert.equal(!!candidate.skip, !['docs', 'clean'].includes(candidate.stage), `${candidate.stage} ${candidate.label}`);
   }
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).scripts['ci:local'], 'node scripts/ci-local.cjs');
   const { checkClean } = require('./ci-local.cjs');
-  const last = plan({ base: 'a', head: 'b', platform: 'win32', nativeReady: true, before: new Set() }).at(-1);
+  const last = plan({ base: 'a', head: 'b', platform: 'win32', nativeReady: true, fixtureFfmpeg: null, before: new Set() }).at(-1);
   assert.equal(last.stage, 'clean', 'The clean-checkout check runs after every other step.');
   assert.match(fs.readFileSync(path.join(root, 'scripts', 'ci-local.cjs'), 'utf8'), /step\.stage !== 'clean'/u,
     '--only must not skip the clean-checkout check.');
   checkClean(new Set([' M scripts/edited.js']), new Set([' M scripts/edited.js']));
   assert.throws(() => checkClean(new Set([' M scripts/edited.js']), new Set([' M scripts/edited.js', '?? scripts/__pycache__/'])),
     /scripts\/__pycache__/u, 'Files left by the steps must fail locally, as the CI build export does.');
+});
+
+test('the local execution E2E runs on Windows with a pinned, hash-verified fixture FFmpeg cached between runs', async t => {
+  const job = ci.jobs['local-execution-e2e'];
+  assert.equal(job['runs-on'], 'windows-2022');
+  assert.equal(job.needs, 'changes');
+  assert.equal(job.if, "needs.changes.outputs.docs-only != 'true'");
+  const names = job.steps.map(candidate => candidate.name);
+  const order = ['Build workspaces', 'Identify the pinned fixture FFmpeg', 'Restore the verified fixture FFmpeg',
+    'Prepare the fixture FFmpeg', 'Save the verified fixture FFmpeg', 'Exercise local execution end to end'];
+  const indices = order.map(name => names.indexOf(name));
+  assert.ok(indices.every((index, position) => index > (position ? indices[position - 1] : -1)), `Step order: ${indices}`);
+  const key = step(job, 'Identify the pinned fixture FFmpeg');
+  const prepare = step(job, 'Prepare the fixture FFmpeg');
+  assert.equal(key.run, 'node scripts/fixture-ffmpeg.cjs key');
+  assert.equal(prepare.run, 'node scripts/fixture-ffmpeg.cjs ensure');
+  assert.deepEqual(prepare.env, key.env, 'Key and preparation must agree on the cached directory.');
+  for (const name of ['Restore the verified fixture FFmpeg', 'Save the verified fixture FFmpeg']) {
+    assert.deepEqual(step(job, name).with, {
+      path: '${{ steps.ffmpeg-key.outputs.path }}', key: '${{ steps.ffmpeg-key.outputs.key }}',
+    });
+  }
+  assert.equal(step(job, 'Save the verified fixture FFmpeg').if, "steps.ffmpeg-cache.outputs.cache-hit != 'true'");
+  const e2e = step(job, 'Exercise local execution end to end');
+  assert.equal(e2e.run, 'npm run test:local-execution:e2e --workspace=apps/client');
+  assert.deepEqual(e2e.env, { MONKY_WORKER_TEST_FFMPEG: '${{ steps.ffmpeg.outputs.executable }}' });
+
+  const fixture = require('./fixture-ffmpeg.cjs');
+  assert.match(fixture.FFMPEG.url, /^https:\/\/github\.com\/GyanD\/codexffmpeg\/releases\/download\/8\.0\//u);
+  assert.match(fixture.FFMPEG.archiveSha256, /^[a-f0-9]{64}$/u);
+  assert.match(fixture.FFMPEG.executableSha256, /^[a-f0-9]{64}$/u);
+  assert.equal(fixture.fixtureKey(), `fixture-ffmpeg-v1-win32-x64-8.0-${fixture.FFMPEG.archiveSha256.slice(0, 16)}`);
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'monky-fixture-ffmpeg-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.equal(fixture.fixtureRoot({ MONKY_TEST_FIXTURES: root }), root);
+  assert.equal(fixture.verifiedExecutable(root), null);
+  fs.mkdirSync(fixture.fixtureDirectory(root), { recursive: true });
+  fs.writeFileSync(fixture.executablePath(root), 'not the pinned build');
+  assert.equal(fixture.verifiedExecutable(root), null, 'A cached executable is reused only with its pinned hash.');
+  let unpacked = false;
+  await assert.rejects(fixture.ensureExecutable({
+    root, platform: 'win32', fetchTo: async (_url, destination) => fs.writeFileSync(destination, 'tampered archive'),
+    unpack: () => { unpacked = true; },
+  }), /does not match its pinned hash/u);
+  assert.equal(unpacked, false, 'An archive is never extracted before its hash is verified.');
+  assert.deepEqual(fs.readdirSync(root).filter(name => name.startsWith('.stage-')), []);
+  await assert.rejects(fixture.ensureExecutable({ root, platform: 'darwin', fetchTo: () => assert.fail('no download') }),
+    /MONKY_WORKER_TEST_FFMPEG/u);
 });
 
 test('the mediasoup worker cache pins the locked package, host and compiler, and restores only verified workers', async t => {
