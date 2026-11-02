@@ -21,6 +21,15 @@ const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 class InviteSizeError extends Error {}
 
+/**
+ * Flags that older apps must not trip on. The header has no bit left and older
+ * readers refuse leftover body bytes, but they stop inflating at the end of the
+ * deflate stream: flags travel after it, as `TRAILER_MAGIC` then one flag byte,
+ * in an invitation that is always compressed.
+ */
+const TRAILER_MAGIC = [0x4d, 0x4b];
+const TRAILER_TLS = 1;
+
 function validUnicode(value: string): boolean {
   return !/[\uD800-\uDFFF]/u.test(value);
 }
@@ -50,6 +59,8 @@ export const serverInviteSchema = z.object({
   name: z.string().min(1).max(100).refine(validUnicode).optional(),
   password: z.string().min(1).max(1024).refine(validUnicode).refine(value => !/[\x00-\x1f\x7f]/.test(value)).optional(),
   eventId: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/).optional(),
+  /** Reached over TLS (`wss://`), as behind a reverse proxy. Apps that predate it ignore it and connect plain. */
+  tls: z.literal(true).optional(),
 }).strict();
 
 export type ServerInvite = z.infer<typeof serverInviteSchema>;
@@ -118,6 +129,7 @@ function inviteToken(value: ServerInvite): string {
     }
     const raw = Uint8Array.from(body);
     const compressed = deflateSync(raw, { level: 9 });
+    if (invite.tls) return Uint8Array.from([header | 128, ...compressed, ...TRAILER_MAGIC, TRAILER_TLS]);
     return compressed.length < raw.length
       ? Uint8Array.from([header | 128, ...compressed]) : Uint8Array.from([header, ...raw]);
   };
@@ -221,6 +233,21 @@ function readInvite(header: number, body: Uint8Array): ServerInvite {
   });
 }
 
+/** The body, inflated when compressed, and the flags of a trailer after the deflate stream. */
+function inviteBody(bytes: Uint8Array): { body: Uint8Array; tls: boolean } {
+  if (!(bytes[0] & 128)) return { body: bytes.subarray(1), tls: false };
+  const end = bytes.length - TRAILER_MAGIC.length - 1;
+  if (end > 1 && TRAILER_MAGIC.every((value, index) => bytes[end + index] === value)) {
+    try {
+      // A stream cut short does not inflate: success means those bytes really followed it.
+      return { body: inflateBody(bytes.subarray(1, end)), tls: (bytes[bytes.length - 1] & TRAILER_TLS) !== 0 };
+    } catch (error: unknown) {
+      if (error instanceof InviteSizeError) throw error;
+    }
+  }
+  return { body: inflateBody(bytes.subarray(1)), tls: false };
+}
+
 export function decodeServerInviteToken(token: unknown): ServerInviteResult {
   if (typeof token !== 'string' || !token.startsWith(SERVER_INVITE_FRAGMENT_PREFIX)) return { ok: false, reason: 'invalid' };
   if (token.length > MAX_SERVER_INVITE_LENGTH) return { ok: false, reason: 'too_long' };
@@ -233,9 +260,11 @@ export function decodeServerInviteToken(token: unknown): ServerInviteResult {
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
     if (bytes.length > MAX_INVITE_BYTES) return { ok: false, reason: 'too_long' };
     if (base64Url(bytes) !== encoded) return { ok: false, reason: 'invalid' };
-    const body = bytes[0] & 128 ? inflateBody(bytes.subarray(1)) : bytes.subarray(1);
+    const { body, tls } = inviteBody(bytes);
     const invite = readInvite(bytes[0], body);
-    return { ok: true, invite: serverInviteSchema.parse({ ...invite, ...(eventId !== undefined ? { eventId } : {}) }) };
+    return { ok: true, invite: serverInviteSchema.parse({
+      ...invite, ...(tls ? { tls: true } : {}), ...(eventId !== undefined ? { eventId } : {}),
+    }) };
   } catch (error: unknown) {
     return { ok: false, reason: error instanceof InviteSizeError ? 'too_long' : 'invalid' };
   }

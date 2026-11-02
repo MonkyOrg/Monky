@@ -182,3 +182,25 @@ test('unrelated pages, query parameters, credentials and the unshipped old forma
     oldWebLink(invite), `${SERVER_INVITE_WEB_URL}#${Buffer.from(JSON.stringify(invite)).toString('base64url')}`,
   ]) assert.equal(parseServerInviteLink(value).ok, false);
 });
+
+test('TLS rides after the deflate stream, so apps that predate it still open the invitation over ws', () => {
+  const plainInvite: ServerInvite = { v: 1, host: 'monky.example.com', port: 443, name: 'Atrás do proxy' };
+  for (const extra of [{}, { password: 'segredo' }, { eventId: 'event-1' }]) {
+    const invite: ServerInvite = { ...plainInvite, ...extra, tls: true };
+    const link = createServerInviteLink(invite);
+    assert.deepEqual(parseServerInviteLink(link), { ok: true, invite });
+    assert.deepEqual(parseServerInviteLink(createServerInviteAppLink(invite)), { ok: true, invite });
+    // What an older app does: inflate everything after the header, the trailer included.
+    const bytes = Buffer.from(new URL(link).hash.slice(2).split('.')[0], 'base64url');
+    assert.equal(bytes[0] & 128, 128, 'a TLS invitation is always compressed');
+    const legacyBody = inflateSync(bytes.subarray(1));
+    const { tls: _tls, eventId: _event, ...withoutTls } = invite;
+    const plainBytes = Buffer.from(createServerInviteAppLink(withoutTls).slice('monky://#~'.length), 'base64url');
+    const plainBody = plainBytes[0] & 128 ? inflateSync(plainBytes.subarray(1)) : plainBytes.subarray(1);
+    assert.deepEqual([...legacyBody], [...plainBody], 'the fields an older app reads are the same');
+    assert.equal(bytes[0], plainBytes[0] | 128, 'and so is the header, apart from compression');
+  }
+  // Without the flag nothing changes, byte for byte.
+  assert.equal(createServerInviteAppLink({ v: 1, host: 'localhost', port: 3000 }), 'monky://#~Aw');
+  assert.equal(serverInviteSchema.safeParse({ v: 1, host: 'localhost', port: 3000, tls: false }).success, false);
+});

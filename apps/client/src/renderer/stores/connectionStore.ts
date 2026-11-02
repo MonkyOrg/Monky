@@ -4,7 +4,7 @@ import { clientLog } from '../core/ClientLogService';
 import { LIMITS, parseTrustedProxies, VoiceMode } from '@monky/shared';
 import { favoritesStore } from './favoritesStore';
 import { settingsStore } from './settingsStore';
-import { isLoopbackHost, sameServerAddress, serverAddressKey, type ServerAddress } from '../utils/serverAddress';
+import { isLoopbackHost, isSecureServer, sameServerAddress, serverAddressKey, setServerTransport, type ServerAddress } from '../utils/serverAddress';
 
 export interface SavedServer {
   host: string;
@@ -15,6 +15,8 @@ export interface SavedServer {
   iconUrl?: string;
   /** Logical identity learned from an authenticated server, never its name. */
   serverId?: string;
+  /** Reached over TLS (`wss://`), as behind a reverse proxy. Absent means plain `ws://`. */
+  secure?: boolean;
 }
 
 export interface RailServerNode {
@@ -129,6 +131,7 @@ export class ConnectionStore {
               ...server,
               serverId: typeof server.serverId === 'string' && server.serverId.length > 0 && server.serverId.length <= 256
                 ? server.serverId : undefined,
+              secure: server.secure === true ? true : undefined,
             }))
           : [];
       }
@@ -137,6 +140,7 @@ export class ConnectionStore {
     }
     this.savedServers.sort((a, b) => b.lastConnected - a.lastConnected);
     this.savedServers = this.savedServers.slice(0, 15);
+    for (const server of this.savedServers) setServerTransport(server, server.secure === true);
     this.syncSavedServerFavorites();
   }
 
@@ -147,6 +151,9 @@ export class ConnectionStore {
 
   public addSavedServer(server: SavedServer): void {
     clientLog.info('STORE', `Saving server: ${server.host}:${server.port}`, { name: server.name });
+    // Saved the way it was just reached, unless the caller says otherwise.
+    server.secure = (server.secure ?? isSecureServer(server)) || undefined;
+    setServerTransport(server, server.secure === true);
     const existingIdx = this.savedServers.findIndex((s) => sameServerAddress(s, server));
     if (existingIdx >= 0) {
       // Preserve existing fields if new values are default/empty
@@ -178,6 +185,7 @@ export class ConnectionStore {
   public removeSavedServer(host: string, port: number): void {
     clientLog.info('STORE', `Removing saved server: ${host}:${port}`);
     this.savedServers = this.savedServers.filter((s) => !sameServerAddress(s, { host, port }));
+    setServerTransport({ host, port }, false);
     this.syncSavedServerFavorites();
     this.syncRailLayoutWithSavedServers();
     this.saveSavedServers();
@@ -241,6 +249,9 @@ export class ConnectionStore {
   }
 
   public updateSavedServer(oldHost: string, oldPort: number, updated: SavedServer): void {
+    updated.secure = updated.secure || undefined;
+    setServerTransport({ host: oldHost, port: oldPort }, false);
+    setServerTransport(updated, updated.secure === true);
     const idx = this.savedServers.findIndex((s) => sameServerAddress(s, { host: oldHost, port: oldPort }));
     if (idx >= 0) {
       if (sameServerAddress(this.savedServers[idx], updated)) {
@@ -597,6 +608,7 @@ export class ConnectionStore {
    * reconciled against the now empty list, so no ghosts survive.
    */
   public clearAccountData(): void {
+    for (const server of this.savedServers) setServerTransport(server, false);
     this.savedServers = [];
     this.createdServers = [];
     this.railLayout = [];

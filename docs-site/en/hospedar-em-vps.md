@@ -118,28 +118,25 @@ or nginx can receive the connections and forward them to that port, which then
 only needs to be open to the proxy itself. Voice and video media do not go
 through the proxy: the UDP ports in the table above still apply.
 
-::: warning The app connects without TLS
-The desktop app always connects with `ws://host:port`, without TLS. Bots accept
-`wss://`. For members who join through the app, the proxy must also listen on a
-port without TLS; the TLS site serves the bots.
+::: tip How members join
+In the app, under **Join a server**, type the host with `wss://` in front
+(`wss://monky.example.com`) and port `443`. Without the scheme the app connects
+without TLS (`ws://`), as always. An invitation made by someone connected
+through the proxy already carries TLS: in **Invite Friends**, pick **This connection,
+over TLS**. Older app versions open that invitation but try to connect without
+TLS, and cannot join until they are updated.
 :::
 
 **Caddy** (obtains and renews the certificate on its own, forwards the
 WebSocket and already sends `X-Forwarded-For` and `X-Forwarded-Proto`):
 
 ```text
-# Bots: wss://monky.example.com
 monky.example.com {
-  reverse_proxy 127.0.0.1:3000
-}
-
-# App: monky.example.com, port 3001
-http://monky.example.com:3001 {
   reverse_proxy 127.0.0.1:3000
 }
 ```
 
-**nginx** (inside the `server` block of each port, with or without TLS):
+**nginx** (inside the `server` block with the certificate, on `listen 443 ssl`):
 
 ```nginx
 location / {
@@ -155,7 +152,9 @@ location / {
 ```
 
 Keep the original `Host` and send `X-Forwarded-Proto`: the server builds the
-bots' callback address from them.
+bots' callback address from them, and bots also connect through
+`wss://monky.example.com`. Attachments, avatars and server icons then come over
+`https://` from the same address.
 
 ### Trusted proxies
 

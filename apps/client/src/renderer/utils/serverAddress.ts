@@ -2,9 +2,16 @@
 export interface ServerAddress {
   host: string;
   port: number;
+  /**
+   * Over TLS (`wss://`, `https://`), as behind a reverse proxy. Left out, the
+   * address follows what this app knows about it, which is plain by default.
+   */
+  secure?: boolean;
 }
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+/** Addresses this app reaches over TLS. Kept by the saved servers and by whoever opens a new one. */
+const secureAddresses = new Set<string>();
 
 /** `WS://[::1] ` and `::1` are the same host: no scheme, IPv6 brackets, spaces or capitals. */
 export function normalizeHost(host: string): string {
@@ -17,6 +24,28 @@ export function normalizeHost(host: string): string {
  */
 export function serverAddressKey(server: ServerAddress): string {
   return JSON.stringify([normalizeHost(server.host), server.port]);
+}
+
+/**
+ * Splits a typed address into host and transport: `wss://` or `https://` ask
+ * for TLS, `ws://` or `http://` for plain, and no scheme leaves it undecided
+ * (`secure: undefined`), which connects plain.
+ */
+export function parseServerHostInput(value: string): { host: string; secure?: boolean } {
+  const trimmed = value.trim();
+  const scheme = /^(wss|https|ws|http):\/\//i.exec(trimmed);
+  if (!scheme) return { host: trimmed };
+  return { host: trimmed.slice(scheme[0].length), secure: /^(wss|https)$/i.test(scheme[1]) };
+}
+
+/** Records how this app reaches a server; every URL derived from its address follows it. */
+export function setServerTransport(server: ServerAddress, secure: boolean): void {
+  if (secure) secureAddresses.add(serverAddressKey(server));
+  else secureAddresses.delete(serverAddressKey(server));
+}
+
+export function isSecureServer(server: ServerAddress): boolean {
+  return server.secure ?? secureAddresses.has(serverAddressKey(server));
 }
 
 export function sameServerAddress(a: ServerAddress, b: ServerAddress): boolean {
@@ -38,11 +67,12 @@ function urlHost(host: string): string {
 }
 
 export function toWsUrl(server: ServerAddress): string {
-  return `ws://${urlHost(server.host)}:${server.port}`;
+  return `${isSecureServer(server) ? 'wss' : 'ws'}://${urlHost(server.host)}:${server.port}`;
 }
 
+/** Attachments, avatars and the preview come from the same address, over the same transport. */
 export function toHttpBase(server: ServerAddress): string {
-  return `http://${urlHost(server.host)}:${server.port}`;
+  return `${isSecureServer(server) ? 'https' : 'http'}://${urlHost(server.host)}:${server.port}`;
 }
 
 /** Host and port of a server URL; a regex on `//host:port` cannot read IPv6. */

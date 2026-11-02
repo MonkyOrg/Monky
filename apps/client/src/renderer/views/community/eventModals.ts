@@ -62,7 +62,7 @@ function eventLink(feed: CommunityFeed, event: ServerEventPublic): string {
   const address = new URL(feed.client.getHttpBaseUrl());
   return createServerInviteLink({
     v: 1, host: address.hostname, port: Number(address.port || (address.protocol === 'https:' ? 443 : 80)),
-    name: feed.server.serverDetails?.name, eventId: event.id,
+    name: feed.server.serverDetails?.name, eventId: event.id, ...(address.protocol === 'https:' ? { tls: true } : {}),
   }, getLanguage());
 }
 

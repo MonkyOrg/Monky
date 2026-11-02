@@ -118,28 +118,25 @@ nginx pode receber as conexões e repassá-las para essa porta, que então só
 precisa ficar aberta para o próprio proxy. A mídia de voz e vídeo não passa pelo
 proxy: as portas UDP da tabela acima continuam valendo.
 
-::: warning O app conecta sem TLS
-O app desktop sempre conecta com `ws://host:porta`, sem TLS. Bots aceitam
-`wss://`. Para os membros que entram pelo app, o proxy precisa atender também
-numa porta sem TLS; o site com TLS serve aos bots.
+::: tip Como os membros entram
+No app, em **Entrar em um servidor**, digite o host com `wss://` na frente
+(`wss://monky.exemplo.com`) e a porta `443`. Sem o esquema, o app conecta sem
+TLS (`ws://`), como sempre. O convite gerado por quem está conectado pelo proxy
+já sai com TLS: em **Convidar Amigos**, escolha **Esta conexão, com TLS**. Apps de
+versões anteriores abrem esse convite, mas tentam conectar sem TLS e não entram
+até serem atualizados.
 :::
 
 **Caddy** (gera e renova o certificado sozinho, repassa o WebSocket e já envia
 `X-Forwarded-For` e `X-Forwarded-Proto`):
 
 ```text
-# Bots: wss://monky.exemplo.com
 monky.exemplo.com {
-  reverse_proxy 127.0.0.1:3000
-}
-
-# App: monky.exemplo.com, porta 3001
-http://monky.exemplo.com:3001 {
   reverse_proxy 127.0.0.1:3000
 }
 ```
 
-**nginx** (dentro do `server` de cada porta, com ou sem TLS):
+**nginx** (dentro do `server` com o certificado, em `listen 443 ssl`):
 
 ```nginx
 location / {
@@ -155,7 +152,9 @@ location / {
 ```
 
 Preserve o `Host` original e envie `X-Forwarded-Proto`: é com eles que o
-servidor monta o endereço de retorno dos bots.
+servidor monta o endereço de retorno dos bots, que também conectam por
+`wss://monky.exemplo.com`. Anexos, avatares e ícones do servidor passam a vir
+por `https://` do mesmo endereço.
 
 ### Proxies confiáveis
 
