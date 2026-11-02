@@ -29,7 +29,7 @@ export function renderServerInviteCard(invite: ServerInvite, link: string, sent:
   const name = inviteName(invite);
   const heading = inviteHeading(invite, sent);
   // The name is chosen by whoever made the link, so the address stays visible next to it.
-  const address = `${invite.host}:${invite.port}`;
+  const address = inviteAddress(invite);
   const initial = (name.match(/[\p{L}\p{N}]/u)?.[0] ?? Array.from(name)[0] ?? '?').toUpperCase();
   return `
     <div class="chat-invite-card" role="group" aria-label="${escapeHtml(`${heading}: ${name}`)}">
@@ -47,13 +47,18 @@ export function renderServerInviteCard(invite: ServerInvite, link: string, sent:
   `;
 }
 
+/** The address as the person would type it, with `wss://` when the server is reached over TLS. */
+function inviteAddress(invite: ServerInvite): string {
+  return `${invite.tls ? 'wss://' : ''}${invite.host}:${invite.port}`;
+}
+
 /** Compact version for the composer, before the message is sent. */
 export function renderComposeServerInvite(invite: ServerInvite): string {
   return `
     <div class="compose-link-preview-text">
       <div class="compose-link-preview-site">${escapeHtml(t(invite.eventId ? 'invite.cardComposeEvent' : 'invite.cardCompose'))}</div>
       <div class="compose-link-preview-title">${escapeHtml(inviteName(invite))}</div>
-      <div class="compose-link-preview-desc">${escapeHtml(`${invite.host}:${invite.port}`)}</div>
+      <div class="compose-link-preview-desc">${escapeHtml(inviteAddress(invite))}</div>
     </div>
   `;
 }

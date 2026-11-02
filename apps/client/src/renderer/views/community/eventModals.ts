@@ -68,7 +68,8 @@ function eventLink(feed: CommunityFeed, event: ServerEventPublic): string {
   // The key this app pinned for the server, so whoever follows the link signs in bound to it (#821).
   const serverKey = connectionStore.serverKeyExpectation({ host, port }).pinned;
   return createServerInviteLink({
-    v: 1, host, port, name: feed.server.serverDetails?.name, eventId: event.id, ...(serverKey ? { serverKey } : {}),
+    v: 1, host, port, name: feed.server.serverDetails?.name, eventId: event.id,
+    ...(serverKey ? { serverKey } : {}), ...(address.protocol === 'https:' ? { tls: true } : {}),
   }, getLanguage());
 }
 

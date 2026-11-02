@@ -123,11 +123,90 @@ incorreto, falta de envio ou uso de TCP; não diagnostique só pela captura.
 Confira a ordem das regras com `sudo iptables -L INPUT -n -v --line-numbers`
 e os endereços/portas anunciados nos logs do servidor.
 
+## Atrás de um proxy reverso (WebSocket com TLS) {#atras-de-um-proxy-reverso}
+
+O Monky fala WebSocket na porta TCP do servidor. Um proxy reverso como Caddy ou
+nginx pode receber as conexões e repassá-las para essa porta, que então só
+precisa ficar aberta para o próprio proxy. A mídia de voz e vídeo não passa pelo
+proxy: as portas UDP da tabela acima continuam valendo.
+
+::: tip Como os membros entram
+No app, em **Entrar em um servidor**, digite o host com `wss://` na frente
+(`wss://monky.exemplo.com`) e a porta `443`. Sem o esquema, o app conecta sem
+TLS (`ws://`), como sempre. O convite gerado por quem está conectado pelo proxy
+já sai com TLS: em **Convidar Amigos**, escolha **Esta conexão, com TLS**. Apps de
+versões anteriores abrem esse convite, mas tentam conectar sem TLS e não entram
+até serem atualizados.
+:::
+
+**Caddy** (gera e renova o certificado sozinho, repassa o WebSocket e já envia
+`X-Forwarded-For` e `X-Forwarded-Proto`):
+
+```text
+monky.exemplo.com {
+  reverse_proxy 127.0.0.1:3000
+}
+```
+
+**nginx** (dentro do `server` com o certificado, em `listen 443 ssl`):
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:3000;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_read_timeout 1h;
+}
+```
+
+Preserve o `Host` original e envie `X-Forwarded-Proto`: é com eles que o
+servidor monta o endereço de retorno dos bots, que também conectam por
+`wss://monky.exemplo.com`. Anexos, avatares e ícones do servidor passam a vir
+por `https://` do mesmo endereço.
+
+### Proxies confiáveis
+
+Atrás do proxy, todas as conexões chegam ao servidor com o endereço do proxy. O
+limite de tentativas de login (8 por minuto por endereço) passa a valer para
+todo mundo junto: algumas senhas erradas, ou muita gente reconectando ao mesmo
+tempo depois de reiniciar o servidor, bloqueiam o login de todos por até um
+minuto. Informe os endereços dos seus proxies para o servidor usar o de cada
+pessoa:
+
+```bash
+monky config set trustedProxies 127.0.0.1          # proxy na mesma máquina
+monky config set trustedProxies "127.0.0.1, ::1"   # mais de um, separados por vírgula
+monky config set trustedProxies 172.16.0.0/12      # uma rede, por exemplo a do Docker
+monky config set trustedProxies none               # desliga
+```
+
+Só as conexões que vêm de um desses endereços têm o `X-Forwarded-For` lido; nas
+demais, o cabeçalho é ignorado. O servidor percorre a lista de trás para frente,
+pula os proxies confiáveis e usa o primeiro endereço que não é um deles, porque o
+que vem antes foi escrito pelo próprio cliente. Sem `X-Forwarded-For`, lê o
+`Forwarded`. Se o seu proxy só escreve `Forwarded`, faça-o descartar o
+`X-Forwarded-For` que o cliente mandar.
+
+A opção vem desligada. Sem ela, os cabeçalhos são ignorados, porque qualquer
+pessoa pode enviá-los e escolheria o próprio endereço. Liste só os seus proxies:
+`0.0.0.0/0` e `::/0` são recusados. A lista vale a partir do próximo início;
+com o servidor no ar, o comando oferece reiniciar. Num túnel (cloudflared, ngrok)
+o proxy é o processo do túnel nesta máquina (`127.0.0.1`); confira na documentação
+do túnel se ele envia `X-Forwarded-For`.
+
+No servidor hospedado pelo app, a mesma opção fica no menu do servidor, ao clicar
+com o botão direito no ícone dele: **Proxy reverso**.
+
 ## Manutenção
 
 ```bash
 monky logs --level WARN         # o que precisa de atenção
 monky config set port 3010      # muda a porta e oferece reiniciar
+monky config set trustedProxies 127.0.0.1  # servidor atrás de proxy reverso
 monky update --check            # há versão nova?
 monky config set autoUpdate true  # configura a agenda de atualização automática
 ```

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Servidores atrás de proxy reverso ou túnel podem informar seus proxies confiáveis, e cada pessoa passa a ter o próprio limite de tentativas de login. Fica no menu do servidor criado no app, em Proxy reverso, e no CLI. Vem desligado.",
+  "en": "Servers behind a reverse proxy or tunnel can now list their trusted proxies, so each person gets their own login attempt limit. It is in the menu of a server created in the app, under Reverse proxy, and in the CLI. Off by default."
+}

@@ -1,10 +1,10 @@
 import type { ConnectionStatus } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
-import { LIMITS, VoiceMode, serverPublicKeySchema, type ServerKeyExpectation } from '@monky/shared';
+import { LIMITS, VoiceMode, parseTrustedProxies, serverPublicKeySchema, type ServerKeyExpectation } from '@monky/shared';
 import { favoritesStore } from './favoritesStore';
 import { settingsStore } from './settingsStore';
-import { isLoopbackHost, sameServerAddress, serverAddressKey, type ServerAddress } from '../utils/serverAddress';
+import { isLoopbackHost, isSecureServer, sameServerAddress, serverAddressKey, setServerTransport, type ServerAddress } from '../utils/serverAddress';
 
 export interface SavedServer {
   host: string;
@@ -15,6 +15,8 @@ export interface SavedServer {
   iconUrl?: string;
   /** Logical identity learned from an authenticated server, never its name. */
   serverId?: string;
+  /** Reached over TLS (`wss://`), as behind a reverse proxy. Absent means plain `ws://`. */
+  secure?: boolean;
   /**
    * The server's identity key (server-key-auth, #821), pinned on the first
    * protected sign-in at this address, by an invitation or by "Add address".
@@ -65,6 +67,8 @@ export interface CreatedServer {
   maxUsers?: number;
   /** Voice mode ('p2p' | 'sfu') picked on creation (#515). */
   voiceMode?: VoiceMode;
+  /** Reverse proxies trusted to name the client (#829); absent means off. Applied on start. */
+  trustedProxies?: string[];
 }
 
 export class ConnectionStore {
@@ -143,6 +147,7 @@ export class ConnectionStore {
               ...server,
               serverId: typeof server.serverId === 'string' && server.serverId.length > 0 && server.serverId.length <= 256
                 ? server.serverId : undefined,
+              secure: server.secure === true ? true : undefined,
               serverKey: storedServerKey(server.serverKey),
             }))
           : [];
@@ -152,6 +157,7 @@ export class ConnectionStore {
     }
     this.savedServers.sort((a, b) => b.lastConnected - a.lastConnected);
     this.savedServers = this.savedServers.slice(0, 15);
+    for (const server of this.savedServers) setServerTransport(server, server.secure === true);
     this.syncSavedServerFavorites();
   }
 
@@ -162,6 +168,9 @@ export class ConnectionStore {
 
   public addSavedServer(server: SavedServer): void {
     clientLog.info('STORE', `Saving server: ${server.host}:${server.port}`, { name: server.name });
+    // Saved the way it was just reached, unless the caller says otherwise.
+    server.secure = (server.secure ?? isSecureServer(server)) || undefined;
+    setServerTransport(server, server.secure === true);
     const existingIdx = this.savedServers.findIndex((s) => sameServerAddress(s, server));
     if (existingIdx >= 0) {
       // Preserve existing fields if new values are default/empty
@@ -197,6 +206,7 @@ export class ConnectionStore {
   public removeSavedServer(host: string, port: number): void {
     clientLog.info('STORE', `Removing saved server: ${host}:${port}`);
     this.savedServers = this.savedServers.filter((s) => !sameServerAddress(s, { host, port }));
+    setServerTransport({ host, port }, false);
     this.unsavedServerKeys.delete(serverAddressKey({ host, port }));
     this.syncSavedServerFavorites();
     this.syncRailLayoutWithSavedServers();
@@ -330,6 +340,9 @@ export class ConnectionStore {
   }
 
   public updateSavedServer(oldHost: string, oldPort: number, updated: SavedServer): void {
+    updated.secure = updated.secure || undefined;
+    setServerTransport({ host: oldHost, port: oldPort }, false);
+    setServerTransport(updated, updated.secure === true);
     const idx = this.savedServers.findIndex((s) => sameServerAddress(s, { host: oldHost, port: oldPort }));
     if (idx >= 0) {
       // Editing the entry keeps its pin: a server that moved signs in as before, any other is refused.
@@ -582,6 +595,12 @@ export class ConnectionStore {
           typeof server.createdAt === 'number' &&
           typeof server.lastStarted === 'number'
         ))
+        .map((server) => {
+          if (server.trustedProxies === undefined) return server;
+          const list = server.trustedProxies;
+          const valid = Array.isArray(list) && list.every((entry) => typeof entry === 'string') && parseTrustedProxies(list).ok;
+          return valid ? server : { ...server, trustedProxies: undefined };
+        })
         .sort((a, b) => b.lastStarted - a.lastStarted)
         .slice(0, 10);
       this.separateCreatedServerPorts();
@@ -682,6 +701,7 @@ export class ConnectionStore {
    * reconciled against the now empty list, so no ghosts survive.
    */
   public clearAccountData(): void {
+    for (const server of this.savedServers) setServerTransport(server, false);
     this.savedServers = [];
     this.createdServers = [];
     this.railLayout = [];

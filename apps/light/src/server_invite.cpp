@@ -15,8 +15,10 @@ constexpr std::size_t kMaxInviteLength = 16384;
 constexpr std::size_t kMaxInviteBytes = 4800;
 constexpr std::uint16_t kDefaultPort = 3000;
 constexpr std::size_t kServerKeyBytes = 32;
-constexpr std::array<std::uint8_t, 3> kServerKeyMarker{0x4d, 0x4b, 1};
-constexpr std::size_t kServerKeySuffix = kServerKeyBytes + kServerKeyMarker.size();
+constexpr std::array<std::uint8_t, 3> kExtensionMarker{0x4d, 0x4b, 1};
+constexpr std::size_t kExtensionTail = 2 + kExtensionMarker.size();
+constexpr std::uint8_t kExtensionTls = 1;
+constexpr std::uint8_t kExtensionServerKey = 2;
 constexpr std::string_view kSpkiPrefix = "302a300506032b6570032100";
 constexpr std::array<std::string_view, 12> kWebPaths{
     "/Monky", "/Monky/", "/Monky/index.html", "/Monky/en", "/Monky/en/", "/Monky/en/index.html",
@@ -460,19 +462,34 @@ ServerInvite readInvite(std::uint8_t header, const Bytes& body) {
   return invite;
 }
 
-std::optional<ServerInvite> readKeyedInvite(const Bytes& bytes) {
-  if (!(bytes[0] & 128) || bytes.size() <= 1 + kServerKeySuffix ||
-      !std::equal(kServerKeyMarker.begin(), kServerKeyMarker.end(), bytes.end() - kServerKeyMarker.size())) {
+// The extension after the deflate stream (packages/shared/src/serverInvites.ts):
+// fields | flags | fields length | "M" "K" | version. Each flag bit announces a field,
+// in bit order; unknown bits are skipped, the length tells where the stream ends.
+std::optional<ServerInvite> readExtendedInvite(const Bytes& bytes) {
+  if (!(bytes[0] & 128) || bytes.size() < 1 + 2 + kExtensionTail ||
+      !std::equal(kExtensionMarker.begin(), kExtensionMarker.end(), bytes.end() - kExtensionMarker.size())) {
     return std::nullopt;
   }
+  const auto tail = bytes.size() - kExtensionTail;
+  const std::uint8_t flags = bytes[tail];
+  const std::size_t fieldsLength = bytes[tail + 1];
+  if (tail < fieldsLength + 2) return std::nullopt;
+  const auto fields = tail - fieldsLength;
+  ServerInvite invite;
   try {
-    auto invite = readInvite(bytes[0], Inflater(bytes.data() + 1, bytes.size() - 1 - kServerKeySuffix).run());
-    invite.serverKey = std::string(kSpkiPrefix) + hex(bytes.data() + bytes.size() - kServerKeySuffix, kServerKeyBytes);
-    return invite;
+    // A stream cut short does not inflate: success means the extension really followed it.
+    invite = readInvite(bytes[0], Inflater(bytes.data() + 1, fields - 1).run());
   } catch (const std::invalid_argument&) {
     // A plain invitation whose compressed bytes happen to end like the marker.
     return std::nullopt;
   }
+  // A real extension that cannot be read refuses the invitation, rather than dropping a field.
+  if (flags & kExtensionTls) invite.tls = true;
+  if (flags & kExtensionServerKey) {
+    if (fieldsLength < kServerKeyBytes) invalid("truncated invitation extension");
+    invite.serverKey = std::string(kSpkiPrefix) + hex(bytes.data() + fields, kServerKeyBytes);
+  }
+  return invite;
 }
 
 ServerInvite decodeToken(std::string_view token) {
@@ -493,7 +510,7 @@ ServerInvite decodeToken(std::string_view token) {
   }
   const auto bytes = base64Url(parts[0].substr(1));
   if (bytes.size() > kMaxInviteBytes) invalid("invitation is too large");
-  auto keyed = readKeyedInvite(bytes);
+  auto keyed = readExtendedInvite(bytes);
   auto invite = keyed ? std::move(*keyed)
                       : readInvite(bytes[0], bytes[0] & 128 ? Inflater(bytes.data() + 1, bytes.size() - 1).run()
                                                             : Bytes(bytes.begin() + 1, bytes.end()));
@@ -514,7 +531,7 @@ std::string_view trim(std::string_view value) {
 }  // namespace
 
 std::string ServerInvite::serverUrl() const {
-  return "ws://" + host + ":" + std::to_string(port);
+  return (tls ? "wss://" : "ws://") + host + ":" + std::to_string(port);
 }
 
 bool looksLikeServerInvite(std::string_view value) {

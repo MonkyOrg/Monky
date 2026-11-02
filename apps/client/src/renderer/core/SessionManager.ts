@@ -77,7 +77,8 @@ export function publishedCustomStatus(): CustomStatus | null {
 
 /** One session per server, however its address is spelled (case, scheme, IPv6 brackets). */
 export function sessionKeyFor(host: string, port: number): string {
-  return toWsUrl({ host: normalizeHost(host), port });
+  // Transport-free: the key of a server never changes when it moves to TLS.
+  return toWsUrl({ host: normalizeHost(host), port, secure: false });
 }
 
 /** What the rail shows for a server's messages: a mention outranks a plain unread (#479). */

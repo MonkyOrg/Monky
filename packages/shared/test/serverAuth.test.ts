@@ -76,7 +76,7 @@ test('an invitation carries the server key compactly and keeps it through a roun
   assert.throws(() => createServerInviteLink({ ...plain, serverKey: 'not-a-key' }));
 });
 
-test('apps released before #821 open an invitation with a server key, only without the key', () => {
+test('apps released before #821 open an invitation with a server key, TLS or both, only without them', () => {
   const real = () => generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).toString('hex');
   const cases: ServerInvite[] = [
     { v: 1, host: 'localhost', port: 3000 },
@@ -87,13 +87,30 @@ test('apps released before #821 open an invitation with a server key, only witho
   ];
   for (const invite of cases) {
     for (let attempt = 0; attempt < 20; attempt++) {
-      const keyed = { ...invite, serverKey: real() };
-      for (const link of [createServerInviteLink(keyed), createServerInviteAppLink(keyed), createServerInviteLink(keyed, 'en')]) {
-        assert.deepEqual(parseBefore821(link), { ok: true, invite: beforeSchema.parse(invite) }, link);
-        assert.deepEqual(parseServerInviteLink(link), { ok: true, invite: keyed });
+      // The extension (#829): one marker after the deflate stream for every field the old parsers must skip.
+      for (const extension of [{ serverKey: real() }, { tls: true as const }, { serverKey: real(), tls: true as const }]) {
+        const extended = { ...invite, ...extension };
+        for (const link of [createServerInviteLink(extended), createServerInviteAppLink(extended), createServerInviteLink(extended, 'en')]) {
+          assert.deepEqual(parseBefore821(link), { ok: true, invite: beforeSchema.parse(invite) }, link);
+          assert.deepEqual(parseServerInviteLink(link), { ok: true, invite: extended });
+        }
       }
       // And invitations made by those apps keep opening here, without a key.
       assert.deepEqual(parseServerInviteLink(createBefore821(invite)), { ok: true, invite });
     }
   }
+});
+
+test('the invitation extension refuses a field it announces but does not carry', () => {
+  const link = createServerInviteAppLink({ v: 1, host: '203.0.113.7', port: 3000, tls: true });
+  const bytes = Buffer.from(link.slice('monky://#~'.length), 'base64url');
+  // flags | fields length | "M" "K" | version: announce a server key with no key bytes.
+  const forged = Buffer.from(bytes);
+  forged[forged.length - 5] |= 2;
+  assert.deepEqual(parseServerInviteLink(`monky://#~${forged.toString('base64url')}`), { ok: false, reason: 'invalid' });
+  // A bit no reader knows yet is skipped, and the fields it knows still come first.
+  const future = Buffer.from(bytes);
+  future[future.length - 5] |= 128;
+  assert.deepEqual(parseServerInviteLink(`monky://#~${future.toString('base64url')}`),
+    { ok: true, invite: { v: 1, host: '203.0.113.7', port: 3000, tls: true } });
 });

@@ -7,7 +7,8 @@ import { settingsStore } from '../src/renderer/stores/settingsStore';
 import { toAbsoluteServerIconUrl } from '../src/renderer/utils/avatar';
 import { captureHostedServerLeaveState } from '../src/renderer/utils/hostedServer';
 import {
-  isLoopbackHost, normalizeHost, parseServerUrl, sameServerAddress, serverAddressKey, toHttpBase, toWsUrl,
+  isLoopbackHost, isSecureServer, normalizeHost, parseServerHostInput, parseServerUrl, sameServerAddress, serverAddressKey,
+  setServerTransport, toHttpBase, toWsUrl,
 } from '../src/renderer/utils/serverAddress';
 
 function withGlobal(name: 'localStorage' | 'window', value: unknown, run: () => void | Promise<void>): Promise<void> {
@@ -116,4 +117,62 @@ test('leaving an empty server hosted on IPv6 loopback still offers to shut it do
   } finally {
     settingsStore.askShutdownOnLastLeave = previous;
   }
+});
+
+test('a typed scheme picks the transport; without one the address stays plain', () => {
+  assert.deepEqual(parseServerHostInput(' wss://Monky.example '), { host: 'Monky.example', secure: true });
+  assert.deepEqual(parseServerHostInput('HTTPS://monky.example'), { host: 'monky.example', secure: true });
+  assert.deepEqual(parseServerHostInput('ws://[::1]'), { host: '[::1]', secure: false });
+  assert.deepEqual(parseServerHostInput('http://example.test'), { host: 'example.test', secure: false });
+  assert.deepEqual(parseServerHostInput(' 192.168.0.2 '), { host: '192.168.0.2' });
+});
+
+test('a server reached over TLS derives wss and https everywhere, under the same session key', () => {
+  const server = { host: 'Proxy.Example', port: 443 };
+  assert.equal(toWsUrl(server), 'ws://Proxy.Example:443', 'plain until told otherwise');
+  setServerTransport({ host: 'proxy.example', port: 443 }, true);
+  try {
+    assert.equal(isSecureServer(server), true, 'any spelling of the address');
+    assert.equal(toWsUrl(server), 'wss://Proxy.Example:443');
+    assert.equal(toHttpBase(server), 'https://Proxy.Example:443');
+    assert.equal(toAbsoluteServerIconUrl('proxy.example', 443, '/avatars/icon.png'), 'https://proxy.example:443/avatars/icon.png');
+    assert.equal(sessionKeyFor('proxy.example', 443), 'ws://proxy.example:443', 'the session key ignores the transport');
+    assert.equal(toWsUrl({ ...server, secure: false }), 'ws://Proxy.Example:443', 'an explicit transport wins');
+    assert.equal(toWsUrl({ host: 'proxy.example', port: 444 }), 'ws://proxy.example:444', 'another port is another server');
+  } finally {
+    setServerTransport(server, false);
+  }
+  assert.equal(toHttpBase(server), 'http://Proxy.Example:443');
+});
+
+test('saved servers keep their transport across restarts, edits and removal', async () => {
+  const storage = storageWith({
+    monky_saved_servers: [
+      { host: 'tls.example', port: 443, name: 'TLS', lastConnected: 3, secure: true },
+      { host: 'plain.example', port: 3000, name: 'Plain', lastConnected: 2, secure: 'yes' },
+    ],
+  });
+  await withGlobal('localStorage', storage, () => {
+    const store = new ConnectionStore();
+    try {
+      assert.equal(toWsUrl({ host: 'tls.example', port: 443 }), 'wss://tls.example:443', 'loaded saved servers connect over TLS');
+      assert.equal(store.findSavedServer({ host: 'plain.example', port: 3000 })?.secure, undefined, 'only true means TLS');
+      assert.equal(toWsUrl({ host: 'plain.example', port: 3000 }), 'ws://plain.example:3000');
+
+      // Joined over TLS (typed wss:// or a TLS invitation): saved that way.
+      setServerTransport({ host: 'new.example', port: 8443 }, true);
+      store.addSavedServer({ host: 'new.example', port: 8443, name: 'New', lastConnected: 4 });
+      assert.equal(store.findSavedServer({ host: 'new.example', port: 8443 })?.secure, true);
+      assert.equal(JSON.parse(storage.getItem('monky_saved_servers') ?? '[]')[0].secure, true, 'persisted');
+
+      store.updateSavedServer('tls.example', 443, { host: 'tls.example', port: 443, name: 'TLS', lastConnected: 3, secure: false });
+      assert.equal(store.findSavedServer({ host: 'tls.example', port: 443 })?.secure, undefined);
+      assert.equal(toWsUrl({ host: 'tls.example', port: 443 }), 'ws://tls.example:443', 'editing to plain switches it back');
+
+      store.removeSavedServer('new.example', 8443);
+      assert.equal(toWsUrl({ host: 'new.example', port: 8443 }), 'ws://new.example:8443', 'a removed server is forgotten');
+    } finally {
+      store.clearAccountData();
+    }
+  });
 });

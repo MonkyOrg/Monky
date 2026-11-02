@@ -179,6 +179,7 @@ export async function createFixture(options: {
   approvedBotCapabilities?: BotCapability[];
   webSocketHeaders?: Record<string, string>;
   webSocketPath?: string;
+  trustedProxies?: readonly string[];
 } = {}) {
   const dataDir = path.join(__dirname, '..', '..', `.bot-test-data-${process.pid}-${randomUUID()}`);
   const database = await DatabaseConnection.create(path.join(dataDir, 'server.db'));
@@ -278,6 +279,7 @@ export async function createFixture(options: {
     forumService,
     pollService,
     botStorageService: botStorage,
+    trustedProxies: options.trustedProxies,
   });
   online = () => wsServer.getOnlineUsersMap();
   httpServer.listen(0, '127.0.0.1');
@@ -286,9 +288,9 @@ export async function createFixture(options: {
   assert.ok(address && typeof address === 'object');
   const url = `ws://127.0.0.1:${address.port}`;
   const peers: Peer[] = [];
-  const connect = async () => {
+  const connect = async (headers?: Record<string, string>) => {
     const peer = new Peer(new WebSocket(`${url}${options.webSocketPath ?? ''}`, {
-      headers: options.webSocketHeaders,
+      headers: { ...options.webSocketHeaders, ...headers },
     }), options.approvedBotCapabilities);
     peers.push(peer);
     await once(peer.ws, 'open');

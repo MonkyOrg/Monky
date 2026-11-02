@@ -73,7 +73,10 @@ favorite or set **Join on startup**.
 
 Fill in **Server IP / Host**, **Port** (usually `3000`) and **Server Password**
 if one exists. Monky uses the global nickname saved under **My Profile**. Then
-click **Join**.
+click **Join**. For a server behind a TLS reverse proxy, type the host with
+`wss://` in front and the proxy's port, usually `443`; without the scheme the
+connection has no TLS. See
+[Behind a reverse proxy](/en/hospedar-em-vps#behind-a-reverse-proxy).
 
 ## Several servers at once
 

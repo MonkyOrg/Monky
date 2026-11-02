@@ -76,6 +76,7 @@ export * from './serverAuth.js';
 export * from './messageBlocks.js';
 export * from './nativePolls.js';
 export * from './nativeLiveForms.js';
+export * from './trustedProxies.js';
 export { releaseRequiresProtocolUpdate } from './releaseCompatibility.js';
 export { createMessageContentSchema } from './validators.js';
 export * from './soundboardEditing';

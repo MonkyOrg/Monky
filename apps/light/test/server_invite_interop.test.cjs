@@ -25,7 +25,7 @@ test('native server invitation scenarios remain active in Release builds', () =>
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
-test('Monky Light reads every invitation the app and the website create, server key included (#821)', () => {
+test('Monky Light reads every invitation the app and the website create, server key and TLS included (#821, #829)', () => {
   const invites = [];
   const hosts = ['localhost', '127.0.0.1', '[::1]', '203.0.113.7', 'monky.example.com', '[2001:db8::1]',
     '[2001:db8:0:1:0:0:0:1]', '[fe80::]', 'xn--mnky-6qa.example'];
@@ -36,6 +36,8 @@ test('Monky Light reads every invitation the app and the website create, server 
       invites.push({ v: 1, host, port, password: 'abcdef0123456789', serverKey: key() });
       invites.push({ v: 1, host, port, password: 'ABCDEF012', name: 'x'.repeat(100), serverKey: key(), eventId: 'event_1-a' });
       invites.push({ v: 1, host, port, name: 'Casa '.repeat(19).trim(), password: 'p'.repeat(900), serverKey: key() });
+      invites.push({ v: 1, host, port, tls: true });
+      invites.push({ v: 1, host, port, name: 'Proxy', password: 'abc', serverKey: key(), tls: true, eventId: 'e-1' });
     }
   }
   const links = invites.flatMap(invite => [createServerInviteLink(invite), createServerInviteAppLink(invite),
@@ -47,15 +49,18 @@ test('Monky Light reads every invitation the app and the website create, server 
     assert.ok(parsed.ok, link);
     const { invite } = parsed;
     assert.equal(decoded[index], ['ok', invite.host, invite.port, hex(invite.name), hex(invite.password),
-      invite.serverKey ?? '-', invite.eventId ?? '-', `ws://${invite.host}:${invite.port}`].join(' '), link);
+      invite.serverKey ?? '-', invite.eventId ?? '-', `${invite.tls ? 'wss' : 'ws'}://${invite.host}:${invite.port}`].join(' '), link);
   });
 });
 
 test('Monky Light refuses what the shared parser refuses', () => {
   const valid = createServerInviteAppLink({ v: 1, host: '203.0.113.7', port: 3000, serverKey: key() });
+  // An extension that announces a server key without carrying one.
+  const bare = Buffer.from(createServerInviteAppLink({ v: 1, host: '203.0.113.7', port: 3000, tls: true }).slice('monky://#~'.length), 'base64url');
+  bare[bare.length - 5] |= 2;
   const links = [
     valid.replace('monky://', 'monky://host'), `${valid}.event.`, `${valid}.extra`, valid.slice(0, -2),
-    valid.replace('#~', '#'), 'monky://#~Ax', 'https://example.com/Monky/convite/#~Aw',
+    valid.replace('#~', '#'), 'monky://#~Ax', 'https://example.com/Monky/convite/#~Aw', `monky://#~${bare.toString('base64url')}`,
   ];
   for (const [index, line] of decode(links).entries()) {
     assert.equal(parseServerInviteLink(links[index]).ok, false, links[index]);

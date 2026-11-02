@@ -20,6 +20,8 @@ struct ServerInvite {
   // Lowercase Ed25519 SPKI DER hex.
   std::optional<std::string> serverKey;
   std::optional<std::string> eventId;
+  // Reached over TLS (#829): the address is wss://.
+  bool tls = false;
 
   // The WebSocket address the desktop app dials for this invitation.
   std::string serverUrl() const;

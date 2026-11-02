@@ -46,6 +46,7 @@ export function ensureHostedServerStarted(server: CreatedServer): Promise<void> 
       serverId: target.id,
       maxUsers: target.maxUsers,
       voiceMode: target.voiceMode,
+      trustedProxies: target.trustedProxies,
     }).catch((error: unknown) => {
       throw new Error(t('main.serverStartFailedMessage'), { cause: error });
     });
@@ -54,7 +55,9 @@ export function ensureHostedServerStarted(server: CreatedServer): Promise<void> 
         ? `${t('main.serverStartFailedMessage')}\n${result.error}`
         : t('main.serverStartFailedMessage'));
     }
-    connectionStore.saveCreatedServer({ ...target, lastStarted: Date.now() });
+    // Re-read: the entry may have been edited (trusted proxies) while the start was pending.
+    const current = connectionStore.createdServers.find(server => server.id === target.id) ?? target;
+    connectionStore.saveCreatedServer({ ...current, lastStarted: Date.now() });
   })();
 
   pendingStarts.set(target.id, promise);

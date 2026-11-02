@@ -38,6 +38,10 @@ void decodesKnownInvitations() {
   require(bare.host == "localhost" && bare.port == 3000 && !bare.name && !bare.password && !bare.serverKey,
           "The smallest invitation did not decode");
   require(bare.serverUrl() == "ws://localhost:3000", "The invitation address is not the desktop's");
+  // Behind a TLS reverse proxy (#829): the flag rides in the extension after the deflate stream.
+  const auto tls = parseServerInviteLink("monky://#~iBPMzc_LrtRLrUjMLchJ1UvOz2XcDQABAE1LAQ");
+  require(tls.tls && !tls.serverKey && tls.serverUrl() == "wss://monky.example.com:443",
+          "A TLS invitation did not decode to a wss address");
   require(parseServerInviteLink("  https://monkyorg.github.io/Monky/en/convite/#~Aw.event.event-1  ").eventId ==
               std::optional<std::string>("event-1"),
           "A web invitation with an event did not decode");

@@ -22,7 +22,7 @@ import {
   confirmStopHostedServer,
 } from '../utils/hostedServer';
 import { resolveImageUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
-import { serverAddressKey } from '../utils/serverAddress';
+import { parseServerHostInput, serverAddressKey } from '../utils/serverAddress';
 import { initialImageState } from '../utils/imageFallback';
 import { followPointerReorder, onPrimaryPress } from '../utils/pointerReorder';
 import { t } from '../i18n';
@@ -30,6 +30,7 @@ import { contextMenu, type ContextMenuEntry } from './ContextMenu';
 import { appEvents } from '../core/EventBus';
 import { addServerModal } from './addServer/AddServerModal';
 import { folderSettingsModal } from './FolderSettingsModal';
+import { trustedProxiesModal } from './TrustedProxiesModal';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter } from '../utils/surfaceMotion';
 import { markSessionRead } from '../core/readState';
@@ -773,6 +774,11 @@ export class ServerRailView {
           onClick: () => { void import('./ServerMonitorModal').then(({ serverMonitorModal }) => serverMonitorModal.openLocal(owned.port)); },
         },
         {
+          label: t('trustedProxies.menu'),
+          icon: 'lan',
+          onClick: () => trustedProxiesModal.open(owned.id),
+        },
+        {
           label: t('connection.deleteSavedServer'),
           icon: 'delete',
           danger: true,
@@ -882,20 +888,24 @@ export class ServerRailView {
       title: t('connection.editSavedServer'),
       fields: [
         { label: t('connection.serverNameLabel'), value: server.name || '' },
-        { label: t('connection.hostLabel'), value: server.host, validate: value => value.trim() ? undefined : t('connection.hostLabel') },
+        // The scheme shows, and changes, how it is reached: `wss://` over TLS, none for plain.
+        { label: t('connection.hostLabel'), value: server.secure ? `wss://${server.host}` : server.host,
+          validate: value => parseServerHostInput(value).host ? undefined : t('connection.hostLabel') },
         { label: t('connection.portLabel'), value: String(server.port), validate: value => {
           const port = Number(value);
-          return Number.isInteger(port) && port >= 1024 && port <= 65535 ? undefined : t('connection.portLabel');
+          return Number.isInteger(port) && port >= 1 && port <= 65535 ? undefined : t('connection.portLabel');
         } },
         { label: t('connection.passwordLabel'), value: server.password || '' },
       ],
       focusInput: 0,
     });
     if (!values) return;
-    const [name, host, portText, password] = values;
+    const [name, hostText, portText, password] = values;
     const port = Number(portText);
+    const { host, secure } = parseServerHostInput(hostText);
     connectionStore.updateSavedServer(server.host, server.port, {
-      host: host.trim(),
+      host,
+      secure: secure === true,
       port,
       name: name.trim() || server.name,
       password: password || undefined,

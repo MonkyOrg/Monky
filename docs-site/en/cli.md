@@ -155,7 +155,7 @@ such as `true`, `false`, `p2p` and `sfu` are not translated.
 | Path | Contents |
 |---|---|
 | `server.db` | SQLite database: members, roles, channels and messages. |
-| `monky.json` | Server port. |
+| `monky.json` | Server port and trusted proxies. |
 | `ecosystem.config.cjs` | PM2 configuration, rewritten on every `start`/`restart`. |
 | `attachments/`, `avatars/`, `icons/` | Uploaded files. |
 | `server.lock` | Exists while the server is running. See [Changes while the server is running](#changes-while-the-server-is-running). |
@@ -177,7 +177,7 @@ data require the server to be stopped:
 
 - `monky admin add` and `monky admin remove`;
 - `monky roles create`, `assign`, `unassign` and `delete`;
-- `monky config set`, except the `port` and `autoUpdate` keys, which live outside the database.
+- `monky config set`, except the `port`, `autoUpdate` and `trustedProxies` keys, which live outside the database.
 
 With the server running, whether under PM2, hosted by the app or started by
 hand, the command is refused without writing anything and explains how to
@@ -621,9 +621,10 @@ monky config set <key> [value]     # change it directly
 | `voiceMode` | Voice mode: `p2p` (direct mesh) or `sfu` (Selective Forwarding Unit) | `p2p` |
 | `autoUpdate` | Enables the machine's automatic updates (`true`/`false`). See [Automatic updates](#automatic-updates) | `false` |
 | `turn` | Enables the TURN media relay (`true`/`false`). Linux only, requires coturn installed | `false` |
+| `trustedProxies` | IPs or networks (CIDR) of your reverse proxies, separated by commas. `none` turns it off. See [Behind a reverse proxy](/en/hospedar-em-vps#behind-a-reverse-proxy) | off |
 
-`port` and `autoUpdate` can change while the server runs. Changing `port`
-with the server running offers to restart right away, through the same path
+`port`, `autoUpdate` and `trustedProxies` can change while the server runs. Changing
+`port` or `trustedProxies` with the server running offers to restart right away, through the same path
 as `monky restart`: it warns people in a call, rewrites the PM2 registration
 and runs `pm2 save`, so the new port survives a reboot. The other keys live in
 the database and require the server to be stopped (see
@@ -640,6 +641,7 @@ monky config set password clear     # removes the password
 monky config set maxUsers 50
 monky config set autoUpdate true
 monky config set turn true          # see "Media relay (TURN)" below
+monky config set trustedProxies 127.0.0.1   # server behind a reverse proxy
 ```
 
 ---

@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { app, BrowserWindow } from 'electron';
 import type { MonkyServer, ServerConfig } from '@monky/server';
-import { LIMITS, type HostedUpdateServer, type HostServerOptions, type HostServerStatus, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
+import { LIMITS, parseTrustedProxies, type HostedUpdateServer, type HostServerOptions, type HostServerStatus, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
 import { mt, type MainTranslationKey } from './i18n';
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from './serverDataDir';
 import { HostedServerCleanupError, HostedServerConflictError, HostedServerLifecycle } from './hostedServerLifecycle';
@@ -41,7 +41,9 @@ export class ServerManager {
       (options.serverId !== undefined && (typeof options.serverId !== 'string' || !isSafeServerId(options.serverId))) ||
       [options.password, options.initialVoiceChannel, options.initialTextChannel].some(value => value !== undefined && typeof value !== 'string') ||
       (options.maxUsers !== undefined && (!Number.isSafeInteger(options.maxUsers) || options.maxUsers < 0)) ||
-      (options.voiceMode !== undefined && options.voiceMode !== 'p2p' && options.voiceMode !== 'sfu')
+      (options.voiceMode !== undefined && options.voiceMode !== 'p2p' && options.voiceMode !== 'sfu') ||
+      (options.trustedProxies !== undefined && (!Array.isArray(options.trustedProxies) ||
+        options.trustedProxies.some(entry => typeof entry !== 'string') || !parseTrustedProxies(options.trustedProxies).ok))
     ) {
       return { success: false, error: mt('error.startServerFailed') };
     }
@@ -84,6 +86,7 @@ export class ServerManager {
       categoryLocale: options.categoryLocale,
       maxUsers: options.maxUsers,
       voiceMode: options.voiceMode,
+      trustedProxies: options.trustedProxies,
     };
     const { MonkyServer } = await loadServerModule();
     return MonkyServer.create(config);
