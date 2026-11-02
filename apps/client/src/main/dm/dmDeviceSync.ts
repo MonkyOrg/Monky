@@ -4,12 +4,11 @@ import { isIdentityPublicKey, newDmId, normalizeIdentityKey } from './dmCrypto';
 import type { DmConversations } from './dmConversations';
 import type { DmFriends } from './dmFriends';
 import type { DmLedger } from './dmLedger';
-import { MAX_CLOCK_SKEW_MS, SELF_REPEAT_WINDOW_MS, messageFingerprint, type StoredMessage } from './dmModel';
+import { MAX_CLOCK_SKEW_MS, SELF_REPEAT_WINDOW_MS } from './dmModel';
 import type { DmOutbox } from './dmOutbox';
 import type { DmProfile } from './dmProfile';
 import { isDmId, isRecord, toWireMessage, utf8Length } from './dmWire';
 
-const DAY_MS = 86_400_000;
 const MAX_DIGEST_DAYS = 1000;
 /** Plaintext bytes per sealed item, so the relay's 64 KiB item limit holds after encryption. */
 const MAX_SEALED_ITEM_BYTES = 44_000;
@@ -48,7 +47,6 @@ export class DmDeviceSync {
   /** `peer:day:hash` already sent to each own device, so copies of a digest do not resend history. */
   private readonly pushedDays = new Map<string, Set<string>>();
   private readonly pendingDigests = new Map<string, PendingDigest>();
-  private readonly dayBucketCache = new Map<string, Map<number, string>>();
 
   constructor(
     private readonly ledger: DmLedger,
@@ -64,11 +62,6 @@ export class DmDeviceSync {
       this.outbox.selfItem('hello-self', { device: this.device, reply: false, prof: this.profile.summary() }, 'signal'),
       ...this.digestItems(false, null),
     ];
-  }
-
-  /** A conversation changed: its fingerprints per day are computed again when next needed. */
-  conversationChanged(peer: string): void {
-    this.dayBucketCache.delete(peer);
   }
 
   /** Another own device greeted: it is greeted back with a digest, and their profile and this one's compared. */
@@ -195,7 +188,7 @@ export class DmDeviceSync {
     const convs: DigestConversation[] = [];
     for (const [peer, meta] of Object.entries(this.ledger.state.conversations)) {
       if (!this.ledger.state.peers[peer]) continue;
-      const days = [...this.dayBuckets(peer)].sort((a, b) => b[0] - a[0]);
+      const days = [...this.ledger.history.dayHashes(peer)].sort((a, b) => b[0] - a[0]);
       if (days.length === 0 && meta.lastReadAt === 0 && meta.peerReadAt === 0) continue;
       const kept = days.slice(0, MAX_DIGEST_DAYS);
       convs.push({
@@ -236,26 +229,6 @@ export class DmDeviceSync {
       }, 'signal'));
   }
 
-  /** Per-day fingerprints of a conversation, cached until it changes. */
-  private dayBuckets(peer: string): Map<number, string> {
-    const cached = this.dayBucketCache.get(peer);
-    if (cached) return cached;
-    const hashes = new Map<number, ReturnType<typeof createHash>>();
-    for (const message of this.ledger.conversation(peer).messages) {
-      const day = Math.floor(message.createdAt / DAY_MS);
-      let hash = hashes.get(day);
-      if (!hash) {
-        hash = createHash('sha256');
-        hashes.set(day, hash);
-      }
-      hash.update(messageFingerprint(message));
-    }
-    const buckets = new Map<number, string>();
-    for (const [day, hash] of hashes) buckets.set(day, hash.digest('hex').slice(0, 12));
-    this.dayBucketCache.set(peer, buckets);
-    return buckets;
-  }
-
   private applyReadMarkers(convs: DigestConversation[]): void {
     const limit = this.ledger.now() + MAX_CLOCK_SKEW_MS;
     let dirty = false;
@@ -289,7 +262,7 @@ export class DmDeviceSync {
     let total = 0;
     let more = false;
     outer: for (const peer of peers) {
-      const local = this.dayBuckets(peer);
+      const local = this.ledger.history.dayHashes(peer);
       if (local.size === 0) continue;
       const theirs = remote.get(peer);
       const theirBuckets = new Map<number, string>();
@@ -302,13 +275,6 @@ export class DmDeviceSync {
         .filter((day) => day >= from && theirBuckets.get(day) !== local.get(day) && !pushed.has(`${peer}:${day}:${local.get(day)}`))
         .sort((a, b) => b - a);
       if (days.length === 0) continue;
-      const byDay = new Map<number, StoredMessage[]>();
-      for (const message of this.ledger.conversation(peer).messages) {
-        const day = Math.floor(message.createdAt / DAY_MS);
-        const list = byDay.get(day);
-        if (list) list.push(message);
-        else byDay.set(day, [message]);
-      }
       const nickname = this.ledger.state.peers[peer]?.nickname ?? '';
       let batch: unknown[] = [];
       let batchSize = 0;
@@ -326,7 +292,7 @@ export class DmDeviceSync {
           break outer;
         }
         pushed.add(`${peer}:${day}:${local.get(day)}`);
-        for (const message of byDay.get(day) ?? []) {
+        for (const message of this.ledger.history.messagesOfDay(peer, day)) {
           const wire = toWireMessage(message);
           const length = utf8Length(JSON.stringify(wire)) + 1;
           if (length > MAX_SEALED_ITEM_BYTES - 2_000) continue;

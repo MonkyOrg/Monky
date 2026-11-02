@@ -138,16 +138,22 @@ export class DmOutbox {
 
   dropPendingEnvelopes(peer: string): void {
     const entries = this.ledger.state.outbox[peer] ?? [];
-    const failedIds = new Set(entries.filter((entry) => entry.kind === 'envelope' && entry.type === 'msg').map((entry) => entry.id));
+    const failed = entries.filter((entry) => entry.kind === 'envelope' && entry.type === 'msg');
     this.ledger.state.outbox[peer] = entries.filter((entry) => entry.kind === 'friend');
-    if (failedIds.size === 0) return;
+    this.markFailed(peer, failed);
+  }
+
+  private markFailed(peer: string, entries: OutboxEntry[]): void {
     const changed: StoredMessage[] = [];
-    for (const message of this.ledger.conversation(peer).messages) {
-      if (failedIds.has(message.id) && message.delivery === 'pending') {
+    for (const entry of entries) {
+      const message = this.ledger.findMessage(peer, entry.id, entry.ts);
+      if (message && message.delivery === 'pending') {
         message.delivery = 'failed';
         changed.push(message);
       }
     }
+    if (changed.length === 0) return;
+    this.ledger.saveConversation(peer, changed);
     this.ledger.emitMessages(peer, changed);
   }
 
@@ -216,11 +222,11 @@ export class DmOutbox {
     if (ids.length === 0) return;
     const acked = new Set(ids);
     const entries = this.ledger.state.outbox[peer] ?? [];
-    const ackedMessages = entries.filter((entry) => acked.has(entry.id) && entry.type === 'msg').map((entry) => entry.id);
+    const ackedMessages = entries.filter((entry) => acked.has(entry.id) && entry.type === 'msg');
     this.ledger.state.outbox[peer] = entries.filter((entry) => !acked.has(entry.id));
     const changedMessages: StoredMessage[] = [];
-    for (const id of ackedMessages) {
-      const message = this.ledger.findMessage(peer, id);
+    for (const { id, ts } of ackedMessages) {
+      const message = this.ledger.findMessage(peer, id, ts);
       if (message && message.delivery !== 'delivered') {
         message.delivery = 'delivered';
         changedMessages.push(message);
@@ -228,7 +234,7 @@ export class DmOutbox {
     }
     this.ledger.saveState();
     if (changedMessages.length > 0) {
-      this.ledger.saveConversation(peer);
+      this.ledger.saveConversation(peer, changedMessages);
       this.ledger.emitMessages(peer, changedMessages);
     }
   }

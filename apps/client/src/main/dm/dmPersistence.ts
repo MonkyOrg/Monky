@@ -10,7 +10,9 @@ import { openAtRest, sealAtRest, sealAtRestStream } from './dmCrypto';
  * Every file is sealed with the identity-derived storage key (AES-256-GCM) and
  * written atomically (temp + fsync + rename). JSON documents are written with a
  * short debounce so a burst of messages costs one write; a write that fails
- * stays pending and is tried again with backoff, never dropped. Attachments
+ * stays pending and is tried again with backoff, never dropped. Conversations
+ * live in one folder each, split by month, so a change rewrites only its month
+ * (#823). Attachments
  * are stored as separate sealed blobs; partial downloads are appended as
  * individually sealed chunks so nothing touches the disk in clear text.
  */
@@ -38,8 +40,46 @@ export class DmPersistence {
     fs.mkdirSync(path.join(dir, 'files'), { recursive: true });
   }
 
+  /** Folder of a conversation (#823): one sealed file per month and its `index.mkdm`. */
+  static conversationDir(peer: string): string {
+    return `conv-${createHash('sha256').update(peer, 'utf8').digest('hex').slice(0, 40)}`;
+  }
+
+  /** The single file a conversation lived in before #823; only read to migrate it. */
   static peerFileName(peer: string): string {
-    return `conv-${createHash('sha256').update(peer, 'utf8').digest('hex').slice(0, 40)}.mkdm`;
+    return `${DmPersistence.conversationDir(peer)}.mkdm`;
+  }
+
+  static segmentName(peer: string, month: number): string {
+    return `${DmPersistence.conversationDir(peer)}/${month}.mkdm`;
+  }
+
+  static headName(peer: string): string {
+    return `${DmPersistence.conversationDir(peer)}/index.mkdm`;
+  }
+
+  /** The months (`yyyymm`) a conversation has a file for. */
+  listSegments(peer: string): number[] {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.filePath(DmPersistence.conversationDir(peer)));
+    } catch (error) {
+      if (fileErrorCode(error) === 'ENOENT') return [];
+      throw error;
+    }
+    return names.flatMap((name) => {
+      const match = /^(\d{6})\.mkdm$/.exec(name);
+      return match ? [Number(match[1])] : [];
+    });
+  }
+
+  exists(name: string): boolean {
+    return fs.existsSync(this.filePath(name));
+  }
+
+  /** Deletes a document; one that is already gone is fine. Throws when the disk refuses. */
+  remove(name: string): void {
+    fs.rmSync(this.filePath(name), { force: true });
   }
 
   private filePath(name: string): string {
@@ -104,6 +144,10 @@ export class DmPersistence {
   /** Documents changed in memory that have not reached the disk yet. */
   pendingNames(): Set<string> {
     return new Set(this.pendingWrites.keys());
+  }
+
+  hasPending(name: string): boolean {
+    return this.pendingWrites.has(name);
   }
 
   private schedule(name: string, entry: PendingWrite, delayMs: number): void {

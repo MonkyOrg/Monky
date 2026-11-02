@@ -82,7 +82,6 @@ export class DmService {
     this.conversations = new DmConversations(this.ledger, this.outbox, this.files);
     this.profile = new DmProfile(this.ledger, this.outbox);
     this.sync = new DmDeviceSync(this.ledger, this.outbox, this.friends, this.profile, this.conversations);
-    this.ledger.onConversationChanged = (peer) => this.sync.conversationChanged(peer);
     store.onWritten = (written) => this.outbox.releaseStoredAcks(written);
   }
 
@@ -460,13 +459,8 @@ export class DmService {
     };
     if (includeHistory) {
       data.conversations = Object.keys(this.ledger.state.conversations)
-        .map((peer) => this.ledger.conversation(peer))
-        .filter((conversation) => conversation.messages.length > 0)
-        .map((conversation) => ({
-          version: 1 as const,
-          peer: conversation.peer,
-          messages: conversation.messages.map((message) => toWireMessage(message)),
-        }));
+        .map((peer) => ({ version: 1 as const, peer, messages: this.ledger.history.all(peer).map((message) => toWireMessage(message)) }))
+        .filter((conversation) => conversation.messages.length > 0);
     }
     return data;
   }
