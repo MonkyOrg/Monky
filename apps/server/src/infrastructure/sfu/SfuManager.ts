@@ -904,9 +904,9 @@ export class SfuManager {
     if (record.purpose === 'screen' && !isScreenMedia(appData)) {
       throw new Error('Screen transport only accepts screen video and screen audio');
     }
-    if ('nativeScreen' in appData && appData.nativeScreen !== undefined) {
+    if ('nativeScreen' in appData) {
       const nativeScreen = nativeScreenRenditionSchema.parse(appData.nativeScreen);
-      if (record.purpose !== 'screen' || record.screenSessionId !== nativeScreen.pipelineId || !isScreenMedia(appData)) {
+      if (record.purpose !== 'screen' || record.screenSessionId !== nativeScreen.pipelineId) {
         throw new Error('Native screen media must belong to its own rendition transport');
       }
     }
@@ -1117,18 +1117,6 @@ export class SfuManager {
   public getConsumerProducerId(sessionId: string, channelId: string, consumerId: string): string | undefined {
     const record = this.consumers.get(consumerId);
     return record?.sessionId === sessionId && record.channelId === channelId ? record.producerId : undefined;
-  }
-
-  public getScreenViewers(publisherSessionId: string, channelId: string, shareId: string): string[] {
-    const viewers = new Set<string>();
-    for (const record of this.consumers.values()) {
-      if (record.channelId !== channelId || record.consumer.closed || record.consumer.paused) continue;
-      const source = this.producers.get(record.producerId);
-      if (source && !source.producer.closed && source.channelId === channelId && source.sessionId === publisherSessionId
-        && source.kind === 'video' && source.appData.mediaType === 'screen_video' && source.appData.shareId === shareId)
-        viewers.add(record.sessionId);
-    }
-    return [...viewers];
   }
 
   public revokeConsumers(canReceive: (sessionId: string, channelId: string, producerId: string) => boolean): void {

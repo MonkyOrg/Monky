@@ -113,22 +113,13 @@ async function run() {
     await native.join(channelId);
     await browser.peer.request(MessageType.VOICE_JOIN, { channelId, isMuted: false, isDeafened: false },
       [MessageType.VOICE_USER_JOINED]);
-    if (mode === 'p2p') {
-      const streamId = await evaluate('peerFixture.screenStreamId');
-      const videoId = await evaluate('peerFixture.videoStreamId');
-      assert.notEqual(streamId, videoId, 'Screen audio and video must use distinct stream identities');
-      await browser.peer.request(MessageType.VOICE_STATE_UPDATE, {
-        screenShareIds: [videoId], isScreenSharing: true, isSharingScreenAudio: true,
-      }, [MessageType.VOICE_STATE_CHANGED]);
-      sendSignal({ signalType: 'screen-audio-meta', streamId });
-    }
     await evaluate('peerFixture.start()');
     await native.untilState(value => {
       check();
       return value.audioDevice.playoutCallbacks > 25;
     }, 'Chromium audio did not establish native playout');
     const silent = await native.state();
-    assert.ok(silent.audioDevice.outputRms < 0.00001, 'Screen audio was incorrectly treated as the microphone');
+    assert.ok(silent.audioDevice.outputRms < 0.00001, 'A muted Chromium microphone reached the native output');
     await evaluate('peerFixture.microphoneGain.gain.value = 0.0625');
     await native.untilState(value => {
       check();
@@ -148,7 +139,6 @@ async function run() {
     assert.equal(metrics.silentSink, true, 'Browser fixture must never open physical audio output');
     if (mode === 'p2p') {
       assert.equal(metrics.videoRejected, true, 'Voice-only native answer must reject offered video');
-      assert.equal(metrics.directions[0], 'inactive', 'The screen-audio m-line must be inactive');
     }
     const codecs = await native.nativeAudioState();
     assert.equal(codecs.videoEncoderCreations, 0, 'Voice-only native call instantiated a video encoder');
@@ -189,7 +179,6 @@ async function setupBrowserPeer(config) {
     return { oscillator, gain, destination, track: destination.stream.getAudioTracks()[0] };
   };
   const microphone = tone(1000, 0);
-  const screen = tone(2000, 0.25);
   const canvas = document.createElement('canvas');
   canvas.width = 16;
   canvas.height = 16;
@@ -243,8 +232,7 @@ async function setupBrowserPeer(config) {
   };
   if (mode === 'p2p') {
     pc = new RTCPeerConnection({ iceServers: [] });
-    // Screen audio deliberately precedes the microphone to exercise classification by metadata.
-    pc.addTransceiver(screen.track, { direction: 'sendonly', streams: [screen.destination.stream] });
+    // Like the desktop call peer: the microphone and a camera; screens never travel here (#830).
     pc.addTransceiver(microphone.track, { direction: 'sendrecv', streams: [microphone.destination.stream] });
     pc.addTransceiver(video.getVideoTracks()[0], { direction: 'sendonly', streams: [video] });
     pc.ontrack = event => attach(event.track);
@@ -254,8 +242,6 @@ async function setupBrowserPeer(config) {
   }
   globalThis.peerFixture = {
     microphoneGain: microphone.gain,
-    screenStreamId: screen.destination.stream.id,
-    videoStreamId: video.id,
     complete({ id, result, error }) {
       const request = pending.get(id);
       if (!request) throw new Error('Unexpected fixture RPC completion');
@@ -330,7 +316,6 @@ async function setupBrowserPeer(config) {
         inbound: reports.filter(report => report.type === 'inbound-rtp' && report.kind === 'audio'),
         videoRejected: pc ? pc.getTransceivers().filter(transceiver => transceiver.receiver.track.kind === 'video')
           .every(transceiver => transceiver.currentDirection === 'inactive' || transceiver.currentDirection === null) : null,
-        directions: pc?.getTransceivers().map(transceiver => transceiver.currentDirection) ?? [],
       };
     },
     async stop() {
@@ -352,7 +337,7 @@ async function setupBrowserPeer(config) {
         element.srcObject = null;
         element.remove();
       }
-      for (const value of [microphone, screen]) {
+      for (const value of [microphone]) {
         value.track.stop();
         value.oscillator.stop();
         value.oscillator.disconnect();

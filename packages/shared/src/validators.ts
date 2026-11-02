@@ -14,23 +14,6 @@ export const sfuCreateWebRtcTransportSchema = z.object({
   purpose: rtcTransportPurposeSchema.default('call'),
   screenSessionId: z.string().uuid().optional(),
 }).strict().refine(value => value.screenSessionId === undefined || value.purpose === 'screen');
-export const screenWatchSignalSchema = z.object({
-  fromSessionId: messageReferenceSchema,
-  targetSessionId: messageReferenceSchema,
-  signalType: z.literal('screen-watch'),
-  streamId: screenShareIdSchema,
-  subscriptionId: screenShareIdSchema,
-  watcherSubscriptionId: screenShareIdSchema,
-  subscriptionRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  watching: z.boolean(),
-}).strict();
-export const screenMetadataSignalSchema = z.object({
-  fromSessionId: messageReferenceSchema,
-  targetSessionId: messageReferenceSchema,
-  signalType: z.enum(['screen-video-meta', 'screen-audio-meta']),
-  streamId: screenShareIdSchema,
-  subscriptionId: screenShareIdSchema,
-}).strict();
 /** An `RTCSessionDescriptionInit` as it travels in RTC_SIGNAL. */
 export const rtcSignalDescriptionSchema = z.object({
   type: z.enum(['offer', 'answer', 'pranswer', 'rollback']),
@@ -45,18 +28,19 @@ export const rtcSignalCandidateSchema = z.object({
   usernameFragment: z.string().max(256).nullable().optional(),
 });
 export type RtcSignalCandidate = z.infer<typeof rtcSignalCandidateSchema>;
-export const rtcSignalSchema = z.union([
-  screenWatchSignalSchema,
-  screenMetadataSignalSchema,
-  z.object({
-    fromSessionId: messageReferenceSchema,
-    targetSessionId: messageReferenceSchema,
-    signalType: z.enum(['offer', 'answer', 'candidate', 'user-left']),
-    subscriptionId: screenShareIdSchema.optional(),
-    sdp: rtcSignalDescriptionSchema.optional(),
-    candidate: rtcSignalCandidateSchema.optional(),
-  }).strict().refine(value => (value.signalType !== 'offer' && value.signalType !== 'answer') || !!value.subscriptionId),
-]);
+/**
+ * Screens travel only through the native runtime (#689), so a call peer
+ * negotiates its own media and nothing else (#830). `subscriptionId` is the
+ * epoch of the P2P connection that offer/answer belong to.
+ */
+export const rtcSignalSchema = z.object({
+  fromSessionId: messageReferenceSchema,
+  targetSessionId: messageReferenceSchema,
+  signalType: z.enum(['offer', 'answer', 'candidate', 'user-left']),
+  subscriptionId: screenShareIdSchema.optional(),
+  sdp: rtcSignalDescriptionSchema.optional(),
+  candidate: rtcSignalCandidateSchema.optional(),
+}).strict().refine(value => (value.signalType !== 'offer' && value.signalType !== 'answer') || !!value.subscriptionId);
 export const sfuConsumerClosedSchema = z.object({
   channelId: messageReferenceSchema,
   consumerId: messageReferenceSchema,
@@ -80,14 +64,14 @@ export const sfuConsumerSetPausedSchema = sfuConsumerClosedSchema.extend({
 export const sfuMediaAppDataSchema = z.discriminatedUnion('mediaType', [
   z.object({ mediaType: z.literal('mic') }).strict(),
   z.object({ mediaType: z.literal('camera') }).strict(),
+  // Screen media is always a native rendition on its own transport (#830).
   z.object({
     mediaType: z.literal('screen_video'), shareId: screenShareIdSchema,
-    nativeScreen: nativeScreenRenditionSchema.optional(),
+    nativeScreen: nativeScreenRenditionSchema,
   }).strict(),
-  // Screen audio is a single publisher resource, not one consumer per screen.
   z.object({
     mediaType: z.literal('screen_audio'), shareId: screenShareIdSchema,
-    nativeScreen: nativeScreenRenditionSchema.optional(),
+    nativeScreen: nativeScreenRenditionSchema,
   }).strict(),
 ]);
 export type SfuMediaAppData = z.infer<typeof sfuMediaAppDataSchema>;

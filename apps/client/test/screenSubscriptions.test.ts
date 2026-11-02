@@ -323,9 +323,13 @@ test('the call SFU consumes microphones and cameras, never screen producers', as
     onConnectionFailed: reason => { throw new Error(reason); }, onConnected() {},
   });
   t.mock.method(client, 'send', () => {});
+  const nativeScreen = {
+    sourceInstanceId: '2f4e6a8c-1b3d-4f5a-8c7e-9d0b1a2c3e4f', pipelineId: '6e5d4c3b-2a19-4f8e-9d7c-6b5a4e3d2c1b',
+    video: { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 },
+  };
   const producers: SfuNewProducerPayload[] = [
-    { channelId: 'room', producerSessionId: 'publisher', producerId: 'screen', kind: 'video', appData: { mediaType: 'screen_video', shareId: 'one' } },
-    { channelId: 'room', producerSessionId: 'publisher', producerId: 'screen-audio', kind: 'audio', appData: { mediaType: 'screen_audio', shareId: 'one' } },
+    { channelId: 'room', producerSessionId: 'publisher', producerId: 'screen', kind: 'video', appData: { mediaType: 'screen_video', shareId: 'one', nativeScreen } },
+    { channelId: 'room', producerSessionId: 'publisher', producerId: 'screen-audio', kind: 'audio', appData: { mediaType: 'screen_audio', shareId: 'one', nativeScreen } },
     { channelId: 'room', producerSessionId: 'publisher', producerId: 'mic', kind: 'audio', appData: { mediaType: 'mic' } },
     { channelId: 'room', producerSessionId: 'publisher', producerId: 'camera', kind: 'video', appData: { mediaType: 'camera' } },
   ];

@@ -773,17 +773,13 @@ void toleratesServerGrowth() {
   auto future = offer();
   future["signalType"] = "a future signal";
   f.receive(message::RTC_SIGNAL, future);
-  check(f.count(SessionEventKind::failure) == refused && f.count(SessionEventKind::rtcSignal) == routed,
-        "A signal this client does not use was reported or routed");
   auto screenAudio = offer();
   screenAudio["signalType"] = "screen-audio-meta";
   screenAudio.erase("sdp");
   screenAudio["streamId"] = "screen";
   f.receive(message::RTC_SIGNAL, screenAudio);
-  check(f.count(SessionEventKind::rtcSignal) == routed + 1, "Screen audio metadata no longer reaches the engine");
-  screenAudio.erase("streamId");
-  f.receive(message::RTC_SIGNAL, screenAudio);
-  check(f.count(SessionEventKind::failure) == refused + 1, "A signal the engine reads was accepted malformed");
+  check(f.count(SessionEventKind::failure) == refused && f.count(SessionEventKind::rtcSignal) == routed,
+        "A signal this client does not use was reported or routed");
 }
 
 // Speak is granted or denied per room. Denied, the microphone stays closed

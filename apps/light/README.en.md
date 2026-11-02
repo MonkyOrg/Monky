@@ -324,8 +324,8 @@ failures are isolated to that participant. In SFU, so is a microphone that
 cannot be received: the consumer the server created is closed and the call goes
 on. If the server refuses the microphone, the call keeps receiving until the
 next policy change. SFU transport recovery starts over whenever the call is
-healthy again. Screen audio is not mistaken for microphone audio, and another
-session of the same user's audio is not played.
+healthy again. Screens and their audio never travel on the call connection, and
+another session of the same user's audio is not played.
 
 Full-client offers may include video even when Light only wants voice. The
 pinned SDK requires nonempty video capabilities during this negotiation:
