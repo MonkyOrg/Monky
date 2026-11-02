@@ -1,6 +1,7 @@
 #include "mac_rtc_adapters.h"
 #include "codec_policy.h"
 #include "engine_shared.h"
+#include "receive_frame_policy.h"
 #include "videoDecoder.h"
 #include "api/make_ref_counted.h"
 #include "api/video/i420_buffer.h"
@@ -42,18 +43,26 @@ struct NativeRtcContext::State {
   std::atomic<std::size_t> queued_callbacks{0};
   dispatch_queue_t output_queue = dispatch_queue_create("org.monky.screen.decoded", DISPATCH_QUEUE_SERIAL);
   explicit State(AdapterOptions value) : options(value) {}
-  void Report(std::uint64_t id, const char* code, std::int32_t status, bool terminal) {
+  void Report(std::uint64_t id, const char* code, const char* message, std::int32_t status, bool terminal,
+              std::int32_t codec_status = WEBRTC_VIDEO_CODEC_ERROR) {
     std::lock_guard lock(mutex);
     AdapterDiagnostic diagnostic{};
     diagnostic.session_id = id;
     diagnostic.hresult = status;
-    diagnostic.codec_status = WEBRTC_VIDEO_CODEC_ERROR;
+    diagnostic.codec_status = codec_status;
     diagnostic.terminal = terminal;
     std::snprintf(diagnostic.code.data(), diagnostic.code.size(), "%s", code);
-    std::snprintf(diagnostic.message.data(), diagnostic.message.size(), "%s", "Native VideoToolbox decoding failed");
+    std::snprintf(diagnostic.message.data(), diagnostic.message.size(), "%s", message);
     if (diagnostics.size() == 64) diagnostics.erase(diagnostics.begin());
     diagnostics.push_back(diagnostic);
     ++failures;
+  }
+  // The code, message and statuses of what actually failed; `fallback` names only failures that carry no code.
+  void Report(std::uint64_t id, const std::exception& error, const char* fallback, bool terminal) {
+    if (const auto* adapter = dynamic_cast<const codec_policy::AdapterError*>(&error))
+      Report(id, adapter->code, adapter->what(), adapter->hresult, terminal, adapter->status);
+    else
+      Report(id, fallback, error.what(), 0, terminal);
   }
 };
 
@@ -108,8 +117,10 @@ class PixelBuffer : public webrtc::VideoFrameBuffer {
   int height() const override { return static_cast<int>(CVPixelBufferGetHeight(frame_->pixel)); }
   webrtc::scoped_refptr<webrtc::I420BufferInterface> ToI420() override {
     const auto pixel = frame_->pixel;
-    if (CVPixelBufferLockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
-      state_->Report(0, "ERR_RTC_MAC_READBACK_LOCK", 0, true);
+    // A failed readback loses this copy, not the screen: as on Windows, it is reported without closing the engine.
+    const auto locked = CVPixelBufferLockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
+    if (locked != kCVReturnSuccess) {
+      state_->Report(0, "ERR_RTC_MAC_READBACK_LOCK", "Cannot lock a decoded frame for I420 readback", locked, false);
       return nullptr;
     }
     struct Unlock {
@@ -124,7 +135,7 @@ class PixelBuffer : public webrtc::VideoFrameBuffer {
         static_cast<int>(CVPixelBufferGetBytesPerRowOfPlane(pixel, 1)),
         result->MutableDataY(), result->StrideY(), result->MutableDataU(), result->StrideU(),
         result->MutableDataV(), result->StrideV(), width(), height()) != 0) {
-      state_->Report(0, "ERR_RTC_MAC_READBACK", 0, true);
+      state_->Report(0, "ERR_RTC_MAC_READBACK", "Cannot convert a decoded frame to I420", 0, false);
       return nullptr;
     }
     ++state_->readbacks;
@@ -187,7 +198,7 @@ struct DecoderOutput : std::enable_shared_from_this<DecoderOutput> {
         } catch (const std::exception& error) {
           RTC_LOG(LS_ERROR) << "VideoToolbox output callback: " << error.what();
           owner->failed = true;
-          owner->state->Report(owner->id, "ERR_RTC_MAC_DECODER_CALLBACK", 0, true);
+          owner->state->Report(owner->id, error, "ERR_RTC_MAC_DECODER_CALLBACK", true);
         }
         --owner->state->queued_callbacks;
         owner->state->changed.notify_all();
@@ -216,7 +227,7 @@ class Decoder final : public webrtc::VideoDecoder {
       return true;
     } catch (const std::exception& error) {
       RTC_LOG(LS_ERROR) << "VideoToolbox decoder configuration: " << error.what();
-      state_->Report(id_, "ERR_RTC_MAC_DECODER_CONFIGURE", 0, true);
+      state_->Report(id_, error, "ERR_RTC_MAC_DECODER_CONFIGURE", true);
       return false;
     }
   }
@@ -237,7 +248,7 @@ class Decoder final : public webrtc::VideoDecoder {
       try { CloseCore(); }
       catch (const std::exception& error) {
         RTC_LOG(LS_ERROR) << "VideoToolbox decoder retirement: " << error.what();
-        state_->Report(id_, "ERR_RTC_MAC_DECODER_CLOSE", 0, true);
+        state_->Report(id_, error, "ERR_RTC_MAC_DECODER_CLOSE", true);
         result = WEBRTC_VIDEO_CODEC_ERROR;
       }
     });
@@ -299,7 +310,7 @@ class Decoder final : public webrtc::VideoDecoder {
             [output](CVPixelBufferRef pixel, int64_t timestamp) { output->Receive(pixel, timestamp); },
             [output](const char* code, OSStatus status) {
               output->failed = true;
-              output->state->Report(output->id, code, status, false);
+              output->state->Report(output->id, code, "Native VideoToolbox decoding failed", status, false);
             });
           output_ = output;
         } catch (...) {
@@ -344,7 +355,7 @@ class Decoder final : public webrtc::VideoDecoder {
     } catch (const std::exception& error) {
       RTC_LOG(LS_ERROR) << "VideoToolbox screen decoder: " << error.what();
       if (output_) output_->failed = true;
-      state_->Report(id_, "ERR_RTC_MAC_DECODER_INPUT", 0, false);
+      state_->Report(id_, error, "ERR_RTC_MAC_DECODER_INPUT", false);
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
   }
@@ -447,28 +458,36 @@ FactoryBundle CreateFactoryBundle(const AdapterOptions& options) {
   auto state = std::make_shared<NativeRtcContext::State>(options);
   return {std::make_shared<NativeRtcContext>(state), nullptr, std::make_unique<DecoderFactory>(state)};
 }
+// Like the Windows upload (engine/cpu_frame_upload.h): an odd render size loses its last column or row, and every
+// failure is an engine Error, so the engine drops a refused frame instead of closing the screen and its audio.
 std::shared_ptr<const PixelFrame> UploadCpuFrame(const webrtc::VideoFrame& input) {
+  using engine::Error;
   const auto& buffer = input.video_frame_buffer();
-  Require(buffer && buffer->type() == webrtc::VideoFrameBuffer::Type::kI420 &&
-      input.width() >= 4 && input.width() <= 3840 && input.height() >= 2 && input.height() <= 2160 &&
-      !(input.width() & 1) && !(input.height() & 1), "ERR_RTC_MAC_AV1_OUTPUT");
+  const auto size = engine::CpuUploadSize(input.width(), input.height());
+  if (!buffer || buffer->type() != webrtc::VideoFrameBuffer::Type::kI420 || !size)
+    throw Error("ERR_RTC_MAC_AV1_OUTPUT", "AV1 presentation requires bounded 8-bit I420 frames", MONKY_ENGINE_UNSUPPORTED);
   const auto pixels = buffer->GetI420();
-  Require(pixels != nullptr, "ERR_RTC_MAC_AV1_PLANES");
+  if (!pixels) throw Error("ERR_RTC_MAC_AV1_PLANES", "AV1 decoder returned no I420 planes", MONKY_ENGINE_FAILURE);
+  const auto width = static_cast<int>(size->width), height = static_cast<int>(size->height);
   CVPixelBufferRef pixel = nullptr;
   NSDictionary* attributes = @{(__bridge NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
       (__bridge NSString*)kCVPixelBufferMetalCompatibilityKey: @YES};
-  Require(CVPixelBufferCreate(kCFAllocatorDefault, input.width(), input.height(),
-      kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, (__bridge CFDictionaryRef)attributes, &pixel)
-      == kCVReturnSuccess, "ERR_RTC_MAC_AV1_SURFACE");
+  const auto created = CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+      kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, (__bridge CFDictionaryRef)attributes, &pixel);
+  if (created != kCVReturnSuccess)
+    throw Error("ERR_RTC_MAC_AV1_SURFACE", "Cannot allocate an AV1 presentation surface", MONKY_ENGINE_FAILURE, created);
   struct Release { CVPixelBufferRef pixel; ~Release() { CVPixelBufferRelease(pixel); } } release{pixel};
-  Require(CVPixelBufferLockBaseAddress(pixel, 0) == kCVReturnSuccess, "ERR_RTC_MAC_AV1_LOCK");
+  const auto locked = CVPixelBufferLockBaseAddress(pixel, 0);
+  if (locked != kCVReturnSuccess)
+    throw Error("ERR_RTC_MAC_AV1_LOCK", "Cannot lock the AV1 upload surface", MONKY_ENGINE_FAILURE, locked);
   const auto result = libyuv::I420ToNV12(pixels->DataY(), pixels->StrideY(), pixels->DataU(), pixels->StrideU(),
       pixels->DataV(), pixels->StrideV(), static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel, 0)),
       static_cast<int>(CVPixelBufferGetBytesPerRowOfPlane(pixel, 0)),
       static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel, 1)),
-      static_cast<int>(CVPixelBufferGetBytesPerRowOfPlane(pixel, 1)), input.width(), input.height());
+      static_cast<int>(CVPixelBufferGetBytesPerRowOfPlane(pixel, 1)), width, height);
   CVPixelBufferUnlockBaseAddress(pixel, 0);
-  Require(result == 0, "ERR_RTC_MAC_AV1_CONVERSION");
+  if (result != 0)
+    throw Error("ERR_RTC_MAC_AV1_CONVERSION", "Cannot convert decoded AV1 planes for presentation", MONKY_ENGINE_FAILURE);
   return std::make_shared<PixelFrame>(pixel);
 }
 }

@@ -77,8 +77,10 @@ struct ConsoleControl::Impl final {
   std::array<int, 2> descriptors{-1, -1};
   struct sigaction previousInterrupt {};
   struct sigaction previousTerminate {};
+  struct sigaction previousHangup {};
   bool interruptInstalled = false;
   bool terminateInstalled = false;
+  bool hangupInstalled = false;
 #endif
 
   explicit Impl(Callbacks value) : callbacks(std::move(value)) {
@@ -166,6 +168,12 @@ struct ConsoleControl::Impl final {
       throw std::runtime_error("Unable to register SIGTERM handling");
     }
     terminateInstalled = true;
+    // Closing the Terminal window hangs up the session: the same ending as
+    // SIGTERM, so the core leaves the call and logs out instead of dying.
+    if (sigaction(SIGHUP, &action, &previousHangup) != 0) {
+      throw std::runtime_error("Unable to register SIGHUP handling");
+    }
+    hangupInstalled = true;
 #endif
   }
 
@@ -255,6 +263,7 @@ struct ConsoleControl::Impl final {
     if (event && !held) CloseHandle(event);
 #else
     if (controlPipe == descriptors[1]) controlPipe = -1;
+    if (hangupInstalled) sigaction(SIGHUP, &previousHangup, nullptr);
     if (terminateInstalled) sigaction(SIGTERM, &previousTerminate, nullptr);
     if (interruptInstalled) sigaction(SIGINT, &previousInterrupt, nullptr);
     if (descriptors[1] >= 0) {

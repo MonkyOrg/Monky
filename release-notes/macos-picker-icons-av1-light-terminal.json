@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No macOS, o seletor de tela volta a mostrar o ícone de cada aplicativo e uma tela em AV1 não cai mais por um quadro de tamanho ímpar. No Monky Light para macOS, fechar o Terminal agora sai da chamada direito, sem deixar você aparecendo como conectado.",
+  "en": "On macOS, the screen picker shows each app's icon again and an AV1 screen no longer stops over an odd-sized frame. In Monky Light for macOS, closing the Terminal now leaves the call properly, instead of keeping you shown as connected."
+}

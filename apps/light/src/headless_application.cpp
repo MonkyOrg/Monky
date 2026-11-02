@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <future>
@@ -770,6 +771,13 @@ class Application final {
 }  // namespace
 
 int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio) {
+#ifndef _WIN32
+  // Writing to a stdout nobody reads raises SIGPIPE, which would end the process
+  // before it could leave the call and log out. Ignored, the write just fails,
+  // and that failure is how the core learns it lost its output. It stays
+  // ignored through teardown, which may still write.
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
   try {
     if (arguments == std::vector<std::string>{"--help"}) {
       std::cout << "Monky Light native voice core (development)\n"
