@@ -428,6 +428,63 @@ jobs:
         if: always()
         run: python scripts/macos-test-keychain.py restore
 
+  local-execution-e2e:
+    name: Local execution E2E (Windows)
+    # Real server, two Electron actors, the private worker and the SDK bot, in P2P and SFU (#831).
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    timeout-minutes: 30
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Setup MSVC (Windows)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.26100.0'
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Electron runtime before tests
+        run: npm exec --no -- install-electron
+      - name: Build workspaces
+        run: npm run build
+      - name: Identify the pinned fixture FFmpeg
+        id: ffmpeg-key
+        env:
+          MONKY_TEST_FIXTURES: ${{ runner.temp }}/monky-test-fixtures
+        run: node scripts/fixture-ffmpeg.cjs key
+      - name: Restore the verified fixture FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.ffmpeg-key.outputs.path }}
+          key: ${{ steps.ffmpeg-key.outputs.key }}
+      # A restored executable is used only if it still matches its pinned hash; otherwise the
+      # pinned archive is downloaded and verified again.
+      - name: Prepare the fixture FFmpeg
+        id: ffmpeg
+        env:
+          MONKY_TEST_FIXTURES: ${{ runner.temp }}/monky-test-fixtures
+        run: node scripts/fixture-ffmpeg.cjs ensure
+      - name: Save the verified fixture FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.ffmpeg-key.outputs.path }}
+          key: ${{ steps.ffmpeg-key.outputs.key }}
+      - name: Exercise local execution end to end
+        env:
+          MONKY_WORKER_TEST_FFMPEG: ${{ steps.ffmpeg.outputs.executable }}
+        run: npm run test:local-execution:e2e --workspace=apps/client
+
   # Native outputs are cached only under an exact key of their sources, recipes, pins and
   # toolchain (scripts/native-cache-key.cjs). A hit restores what a rebuild would produce and
   # still repeats the build's acceptance checks before anything uses it.
@@ -906,7 +963,7 @@ jobs:
   build:
     name: Build check (${{ matrix.platform }})
     if: always()
-    needs: [changes, package-win, package-mac, client-dom, client-dom-mac, mac-native-sources]
+    needs: [changes, package-win, package-mac, client-dom, client-dom-mac, local-execution-e2e, mac-native-sources]
     timeout-minutes: 5
     runs-on: ubuntu-latest
     strategy:
@@ -920,6 +977,7 @@ jobs:
           PACKAGE_MAC: ${{ needs.package-mac.result }}
           DOM_WIN: ${{ needs.client-dom.result }}
           DOM_MAC: ${{ needs.client-dom-mac.result }}
+          LOCAL_E2E: ${{ needs.local-execution-e2e.result }}
           NATIVE_MAC: ${{ needs.mac-native-sources.result }}
         run: |
           expected=success
@@ -927,7 +985,7 @@ jobs:
             expected=skipped
             echo "Não aplicável: o PR só muda documentação."
           fi
-          for result in "$PACKAGE_WIN" "$PACKAGE_MAC" "$DOM_WIN" "$DOM_MAC" "$NATIVE_MAC"; do
+          for result in "$PACKAGE_WIN" "$PACKAGE_MAC" "$DOM_WIN" "$DOM_MAC" "$LOCAL_E2E" "$NATIVE_MAC"; do
             test "$result" = "$expected"
           done
 

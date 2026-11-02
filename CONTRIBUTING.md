@@ -436,7 +436,9 @@ alterados; mudança só de documentação precisa apenas de `--only docs`.
 Passos que só rodam num runner descartável, como o clipboard real e a exportação
 do artefato, aparecem como **PULADO (só CI)**. Se a branch só muda documentação,
 todos os estágios menos `docs` aparecem como pulados, como no CI. Sem `npm run prepare:native-screen`,
-os testes nativos também aparecem como pulados, não como falha. No fim, ele
+os testes nativos também aparecem como pulados, não como falha. O E2E de execução local
+(estágio `local-e2e`) aparece como pulado até existir o FFmpeg fixado de teste
+(`node scripts/fixture-ffmpeg.cjs ensure`) ou `MONKY_WORKER_TEST_FFMPEG`. No fim, ele
 confere que os passos não deixaram arquivos novos no checkout, porque o CI só
 exporta o build de um checkout limpo; essa conferência roda mesmo com `--only`. No CI, cada
 parte da suíte DOM também executa tudo e lista **todas** as falhas no fim

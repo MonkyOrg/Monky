@@ -181,6 +181,12 @@ function startActor(config, rows) {
   });
   return {
     ready, call, child,
+    /** Ends only this test's own actor process, after it failed to confirm its cleanup. */
+    async terminate() {
+      if (exited) return;
+      child.kill();
+      await closed;
+    },
     async stop() {
       if (confirmed) { await closed; return; }
       if (exited) throw new Error(`${config.role} exited without confirmed native cleanup.\n${output}`);
@@ -371,7 +377,7 @@ async function assertTaskTrace(rows, taskId, frames, startIndex) {
 }
 
 for (const mode of ['p2p', 'sfu']) {
-  test(`${musicBotRoot ? 'production MonkyBot commands and mixed requester queue' : 'real protocol20 local executor -> private RTC -> SDK bot voice'} -> decoded renderer PCM (${mode.toUpperCase()})`, {
+  test(`${musicBotRoot ? 'production MonkyBot commands and mixed requester queue' : `real protocol${PROTOCOL_VERSION} local executor -> private RTC -> SDK bot voice`} -> decoded renderer PCM (${mode.toUpperCase()})`, {
     timeout: 180_000, concurrency: false,
   }, t => runMediaSmoke(t, mode));
 }
@@ -380,7 +386,6 @@ async function runMediaSmoke(t, mode) {
   assert.ok(ffmpeg && path.isAbsolute(ffmpeg),
     'Set MONKY_WORKER_TEST_FFMPEG to an existing explicit fixture FFmpeg; this smoke never installs tools.');
   assert.ok((await fs.stat(ffmpeg)).isFile());
-  assert.equal(PROTOCOL_VERSION, 20);
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `monky-local-execution-e2e-${mode}-`));
   const oldHome = process.env.MONKY_HOME;
   process.env.MONKY_HOME = path.join(root, 'monky-home');
@@ -429,7 +434,12 @@ async function runMediaSmoke(t, mode) {
     if (disposeMusic) try { await disposeMusic(); } catch (error) { clean = false; failures.push(error); }
     if (bot) try { await bot.close(); } catch (error) { clean = false; failures.push(error); }
     for (const actor of actors) {
-      try { await actor.stop(); } catch (error) { clean = false; failures.push(error); }
+      try { await actor.stop(); } catch (error) {
+        clean = false;
+        failures.push(error);
+        // The test still fails, but an unconfirmed actor never outlives it.
+        await actor.terminate();
+      }
     }
     if (server) try { await server.stop(); } catch (error) { clean = false; failures.push(error); }
     if (vite) try { await vite.close(); } catch (error) { clean = false; failures.push(error); }

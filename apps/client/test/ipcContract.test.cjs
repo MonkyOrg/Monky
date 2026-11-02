@@ -4,7 +4,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 const ts = require('typescript');
 const shared = require('@monky/shared');
-const { loadPreload } = require('./preloadFixture.cjs');
+const { loadPreload, exercisePreload } = require('./preloadFixture.cjs');
 
 const mainRoot = path.resolve(__dirname, '..', 'src', 'main');
 
@@ -54,16 +54,8 @@ function mainHandlers() {
 
 test('every channel the main window preload invokes has a handler in Main', async () => {
   const handled = mainHandlers();
-  const preload = loadPreload();
-  const noop = () => {};
-  for (const [name, value] of Object.entries(preload.api)) {
-    if (name === 'dm' || name === 'botStorage') {
-      for (const [member, method] of Object.entries(value)) await method(member.startsWith('on') ? noop : 'fixture');
-    } else if (typeof value === 'function') {
-      await value(name.startsWith('on') ? noop : undefined);
-    }
-  }
-  const invoked = new Set(preload.invoked.map(([channel]) => channel));
+  const preload = await exercisePreload();
+  const invoked = preload.channels;
   // Main answers these with `handle` too; they only come from the preload's own work.
   assert.ok(invoked.has(shared.MEDIA_FOLDERS_IPC.adopt) && invoked.has(shared.CRASH_RECOVERY_IPC.ready));
   assert.ok(invoked.size > 150, `the preload was exercised (${invoked.size} channels)`);
