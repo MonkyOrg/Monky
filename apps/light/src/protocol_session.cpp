@@ -281,21 +281,23 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
       proof = ServerProof{std::move(key), std::move(signature)};
     }
     challengeAnswered_ = true;
-    // The same rule as the desktop app (decideServerKey): no downgrade and no other key where a key
-    // was pinned, and no key of another server at a server seen for the first time.
+    // The same rule as the desktop app (decideServerKey): no downgrade and no other key than the one expected
+    // (the invitation's, else the pinned one), and no key of another server where a key arrives anew.
     const auto& pinned = identity_.serverKey;
     const auto& elsewhere = identity_.keysPinnedElsewhere;
-    if (!proof && pinned) {
+    const auto invited = identity_.invitedServerKey != pinned ? identity_.invitedServerKey : std::nullopt;
+    const auto& expected = invited ? invited : pinned;
+    if (!proof && expected) {
       loseConnection(now, {FailureKind::authentication, "SERVER_KEY_MISSING",
                            "This server presented an identity key before and now presented none"}, false);
       return;
     }
-    if (proof && pinned && *pinned != proof->key) {
+    if (proof && expected && *expected != proof->key) {
       loseConnection(now, {FailureKind::authentication, "SERVER_KEY_CHANGED",
                            "This server's identity key changed since the last sign-in"}, false);
       return;
     }
-    if (proof && !pinned && std::find(elsewhere.begin(), elsewhere.end(), proof->key) != elsewhere.end()) {
+    if (proof && (invited || !pinned) && std::find(elsewhere.begin(), elsewhere.end(), proof->key) != elsewhere.end()) {
       loseConnection(now, {FailureKind::authentication, "SERVER_KEY_OF_OTHER_SERVER",
                            "This server presented the identity key of another server of this profile"}, false);
       return;
@@ -331,8 +333,11 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
     if (phase_ != SessionPhase::authenticating || id != authId_) return;
     require(signatureSent_, "Authentication success before signed response");
     authenticate(payload);
-    // Reconnections of this run expect the key the first protected sign-in used.
-    if (boundKey_) identity_.serverKey = boundKey_;
+    // Reconnections of this run expect the key the first protected sign-in used; the invitation is spent.
+    if (boundKey_) {
+      identity_.serverKey = boundKey_;
+      identity_.invitedServerKey.reset();
+    }
     if (desired_) beginJoin(now, false);
     return;
   }

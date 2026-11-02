@@ -13,14 +13,14 @@ class NativeClient {
   ended = false;
   expectedPeerFailures = new Set();
 
-  constructor(fixture, { nickname, profile, password, synthetic = true, microphoneAccess, defaultProcessing = false, muted = false, deafened = false, tray = false, pseudoConsole = false } = {}) {
+  constructor(fixture, { nickname, profile, password, server, synthetic = true, microphoneAccess, defaultProcessing = false, muted = false, deafened = false, tray = false, pseudoConsole = false } = {}) {
     this.nickname = nickname;
     this.profile = profile ?? path.join(fixture.directory, `native-${randomUUID()}`);
     const env = { ...process.env };
     delete env.MONKY_LIGHT_PASSWORD;
     if (password !== undefined) env.MONKY_LIGHT_PASSWORD = password;
     const args = [
-      '--profile', this.profile, '--server', fixture.url, '--nickname', nickname,
+      '--profile', this.profile, '--server', server ?? fixture.url, '--nickname', nickname,
     ];
     if (microphoneAccess) {
       assert.ok(synthetic, 'Permission simulation is allowed only in the synthetic executable');

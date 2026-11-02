@@ -103,6 +103,9 @@ public:
     // servers. A server pinned once must present that key; a new one may not present another's.
     std::optional<std::string> serverKey;
     std::vector<std::string> keysPinnedElsewhere;
+    // The key an invitation given for this server names: the only way to replace the pinned one,
+    // and never accepted when another server of the profile pinned it.
+    std::optional<std::string> invitedServerKey;
   };
   // The key a server presents in AUTH_CHALLENGE and its signature proving it holds it.
   struct ServerProof {

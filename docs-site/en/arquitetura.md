@@ -498,7 +498,8 @@ has its own **Ed25519 identity key** and the signature names that key
    worthless at A.
 3. On the first protected sign-in, the app **pins** the key for that saved
    address (TOFU) and keeps it in the saved server itself, which travels with
-   the servers backup. An invitation may also carry the key.
+   the servers backup. An invitation may also carry the key; it still opens in
+   earlier versions of the app, which only do not pin it.
 
 The app decides (`decideServerKey`, in `@monky/shared`) before signing
 anything:
@@ -526,7 +527,8 @@ Changing the key (deleting the table, or starting a new database at the same
 address) makes apps refuse the server until they receive a new invitation.
 
 Monky Light follows the same rule and keeps the pinned keys in its profile, in
-`monky-light-servers.json`, by server address.
+`monky-light-servers.json`, by server address. It accepts an invitation link where it
+accepts the address, which is how it receives a new key; it has no **Add address**.
 
 **Residual risk.** The protection holds from the first protected sign-in to A.
 If you never joined A with an app that has the feature, a server M visited for

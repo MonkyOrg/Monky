@@ -85,7 +85,8 @@ struct Fixture {
   ProtocolSession session;
 
   static ProtocolSession::Identity identity() {
-    return {"302a300506032b6570032100" + std::string(64, 'a'), "independent-device", "Human", "secret"};
+    return {"302a300506032b6570032100" + std::string(64, 'a'), "independent-device", "Human", "secret",
+            std::nullopt, {}, std::nullopt};
   }
 
   explicit Fixture(std::size_t maxIncomingMessageBytes = ProtocolSession::defaultMaxIncomingMessageBytes,
@@ -1099,6 +1100,34 @@ void serverKeyBinding() {
     check(f.signedCount == 0 && f.count(SessionEventKind::failure) == 1, "An incomplete proof was accepted");
     f.receive(message::AUTH_CHALLENGE, challenge(key('a')), id);
     check(f.signedCount == 1 && f.sentCount(message::AUTH_CHALLENGE_RESPONSE) == 1, "The pinned key was refused");
+  }
+  const auto invited = [&](std::optional<std::string> serverKey, std::vector<std::string> elsewhere, std::string invitation) {
+    auto who = pinned(std::move(serverKey), std::move(elsewhere));
+    who.invitedServerKey = std::move(invitation);
+    return who;
+  };
+  {
+    // An invitation naming the new key unblocks a server whose key changed, and is spent once it binds.
+    Fixture f(ProtocolSession::defaultMaxIncomingMessageBytes, invited(key('a'), {}, key('b')));
+    f.open();
+    const auto id = f.lastId();
+    f.receive(message::AUTH_CHALLENGE, challenge(key('b')), id);
+    check(f.signedProof && f.signedProof->key == key('b'), "The invited key was not signed for");
+    f.receive(message::AUTH_SUCCESS, authenticated(), id);
+    check(f.session.authentication()->serverKey == key('b'), "The invited key was not reported for pinning");
+  }
+  for (const auto& [who, presented, code] : std::vector<std::tuple<ProtocolSession::Identity, Json, std::string>>{
+           // The invitation names the new key: the old one is now the one refused.
+           {invited(key('a'), {}, key('b')), challenge(key('a')), "SERVER_KEY_CHANGED"},
+           {invited(std::nullopt, {}, key('b')), Json{{"nonce", std::string(64, '1')}}, "SERVER_KEY_MISSING"},
+           // An invitation never vouches for another server's key.
+           {invited(std::nullopt, {key('c')}, key('c')), challenge(key('c')), "SERVER_KEY_OF_OTHER_SERVER"},
+           {invited(key('a'), {key('c')}, key('c')), challenge(key('c')), "SERVER_KEY_OF_OTHER_SERVER"},
+       }) {
+    Fixture f(ProtocolSession::defaultMaxIncomingMessageBytes, who);
+    f.open();
+    f.receive(message::AUTH_CHALLENGE, presented, f.lastId());
+    check(f.signedCount == 0 && refusal(f) == code, "An invitation bypassed the server key rule");
   }
 }
 } // namespace

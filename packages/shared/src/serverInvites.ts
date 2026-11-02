@@ -18,6 +18,9 @@ const MAX_INVITE_BYTES = 4800;
 // This is part of the invitation format, not a configurable server default.
 const INVITE_DEFAULT_PORT = 3000;
 const SERVER_KEY_BYTES = 32;
+// Closes an invitation carrying a server key: the 32 raw key bytes, then "MK" and the suffix version.
+const SERVER_KEY_MARKER = [0x4d, 0x4b, 1] as const;
+const SERVER_KEY_SUFFIX = SERVER_KEY_BYTES + SERVER_KEY_MARKER.length;
 const encoder = new TextEncoder();
 // A leading U+FEFF belongs to the field, including when that field is a password.
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -125,12 +128,14 @@ function inviteToken(value: ServerInvite): string {
         }
       }
     }
-    // The raw Ed25519 key closes the body; its SPKI prefix is the same for every server.
-    if (invite.serverKey !== undefined) {
-      body.push(...hexBytes(invite.serverKey.slice(ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX.length)));
-    }
     const raw = Uint8Array.from(body);
     const compressed = deflateSync(raw, { level: 9 });
+    // The server key (#821) follows the end of the deflate stream, where parsers that
+    // predate it stop reading: older apps open the invitation and only skip the key.
+    if (invite.serverKey !== undefined) {
+      return Uint8Array.from([header | 128, ...compressed,
+        ...hexBytes(invite.serverKey.slice(ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX.length)), ...SERVER_KEY_MARKER]);
+    }
     return compressed.length < raw.length
       ? Uint8Array.from([header | 128, ...compressed]) : Uint8Array.from([header, ...raw]);
   };
@@ -226,16 +231,28 @@ function readInvite(header: number, body: Uint8Array): ServerInvite {
     password = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('').slice(0, digits);
     if (passwordMode === 3) password = password.toUpperCase();
   }
-  const serverKey = body.length - offset === SERVER_KEY_BYTES
-    ? ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX + [...take(SERVER_KEY_BYTES)].map(byte => byte.toString(16).padStart(2, '0')).join('')
-    : undefined;
   if (offset !== body.length) throw new Error('Unexpected invitation data');
   return serverInviteSchema.parse({
     v: 1, host, port,
     ...(name !== undefined ? { name } : {}),
     ...(password !== undefined ? { password } : {}),
-    ...(serverKey !== undefined ? { serverKey } : {}),
   });
+}
+
+/** The invitation with the server key that follows its deflate stream, or null when it carries none. */
+function readKeyedInvite(bytes: Uint8Array): ServerInvite | null {
+  if (!(bytes[0] & 128) || bytes.length <= 1 + SERVER_KEY_SUFFIX
+    || SERVER_KEY_MARKER.some((value, index) => bytes[bytes.length - SERVER_KEY_MARKER.length + index] !== value)) return null;
+  const key = bytes.subarray(bytes.length - SERVER_KEY_SUFFIX, bytes.length - SERVER_KEY_MARKER.length);
+  try {
+    const invite = readInvite(bytes[0], inflateBody(bytes.subarray(1, bytes.length - SERVER_KEY_SUFFIX)));
+    return serverInviteSchema.parse({
+      ...invite, serverKey: ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX + [...key].map(byte => byte.toString(16).padStart(2, '0')).join(''),
+    });
+  } catch {
+    // A plain invitation whose compressed bytes happen to end like the marker.
+    return null;
+  }
 }
 
 export function decodeServerInviteToken(token: unknown): ServerInviteResult {
@@ -250,8 +267,8 @@ export function decodeServerInviteToken(token: unknown): ServerInviteResult {
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
     if (bytes.length > MAX_INVITE_BYTES) return { ok: false, reason: 'too_long' };
     if (base64Url(bytes) !== encoded) return { ok: false, reason: 'invalid' };
-    const body = bytes[0] & 128 ? inflateBody(bytes.subarray(1)) : bytes.subarray(1);
-    const invite = readInvite(bytes[0], body);
+    const invite = readKeyedInvite(bytes)
+      ?? readInvite(bytes[0], bytes[0] & 128 ? inflateBody(bytes.subarray(1)) : bytes.subarray(1));
     return { ok: true, invite: serverInviteSchema.parse({ ...invite, ...(eventId !== undefined ? { eventId } : {}) }) };
   } catch (error: unknown) {
     return { ok: false, reason: error instanceof InviteSizeError ? 'too_long' : 'invalid' };

@@ -181,6 +181,14 @@ if(WIN32)
     target_compile_options(monky-light-console-host PRIVATE -Wall -Wextra -Werror)
   endif()
 endif()
+# Invitation links (packages/shared/src/serverInvites.ts), platform-free and checked against the shared encoder.
+add_library(monky_light_invite STATIC src/server_invite.cpp)
+target_include_directories(monky_light_invite PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+add_executable(monky-light-invite-test test/server_invite_test.cpp)
+target_link_libraries(monky-light-invite-test PRIVATE monky_light_invite)
+set_target_properties(monky-light-invite-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
 add_executable(monky-light-loop-test test/application_loop_test.cpp)
 target_link_libraries(monky-light-loop-test PRIVATE monky_light_loop)
 set_target_properties(monky-light-loop-test PROPERTIES
@@ -194,6 +202,7 @@ set_target_properties(monky-light-platform-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
 
 foreach(target monky_light_platform monky-light-platform-test monky_light_loop monky-light-loop-test
+    monky_light_invite monky-light-invite-test
     monky_light_console monky-light-console-test monky-light-websocket-fixture)
   if(MSVC)
     target_compile_options(${target} PRIVATE /W4 /WX /EHsc /utf-8 /permissive-)
@@ -206,7 +215,7 @@ if(MONKY_LIGHT_WITH_RTC)
   target_include_directories(monky_light_application PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(monky_light_application PUBLIC
     monky_light_media monky_light_session monky_light_profile monky_light_console monky_light_loop
-    monky_light_platform)
+    monky_light_platform monky_light_invite)
   # The tray state machine is platform-free, so it is covered without a display.
   add_executable(monky-light-tray-test test/tray_model_test.cpp)
   target_include_directories(monky-light-tray-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

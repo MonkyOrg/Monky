@@ -6,7 +6,10 @@ import {
   serverPublicKeySchema,
 } from '../src/serverAuth';
 import { BOT_PROTOCOL_FEATURES, PROTOCOL_FEATURES } from '../src/protocolCompatibility';
-import { createServerInviteLink, parseServerInviteLink } from '../src/serverInvites';
+import { createServerInviteAppLink, createServerInviteLink, parseServerInviteLink, type ServerInvite } from '../src/serverInvites';
+import {
+  createServerInviteLink as createBefore821, parseServerInviteLink as parseBefore821, serverInviteSchema as beforeSchema,
+} from './fixtures/serverInvitesBefore821';
 
 const key = (digit: string) => `302a300506032b6570032100${digit.repeat(64)}`;
 const nonce = 'ab'.repeat(32);
@@ -67,8 +70,30 @@ test('an invitation carries the server key compactly and keeps it through a roun
   const invite = { ...plain, serverKey: real };
   const link = createServerInviteLink(invite);
   assert.deepEqual(parseServerInviteLink(link), { ok: true, invite });
-  assert.ok(link.length - createServerInviteLink(plain).length <= 44, 'Only the 32 raw key bytes are added');
+  assert.ok(link.length - createServerInviteLink(plain).length <= 64, 'The key adds its 32 raw bytes and a marker');
   assert.deepEqual(parseServerInviteLink(createServerInviteLink({ ...invite, eventId: 'event-1', password: 'abc' })),
     { ok: true, invite: { ...invite, eventId: 'event-1', password: 'abc' } });
   assert.throws(() => createServerInviteLink({ ...plain, serverKey: 'not-a-key' }));
+});
+
+test('apps released before #821 open an invitation with a server key, only without the key', () => {
+  const real = () => generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).toString('hex');
+  const cases: ServerInvite[] = [
+    { v: 1, host: 'localhost', port: 3000 },
+    { v: 1, host: '203.0.113.7', port: 3000, name: 'Casa' },
+    { v: 1, host: 'monky.example.com', port: 43210, name: 'Servidor com nome bem comprido '.repeat(3).trim(), password: 'senha' },
+    { v: 1, host: '[2001:db8::1]', port: 3001, password: 'ABCDEF0123', eventId: 'event-1' },
+    { v: 1, host: '10.0.0.2', port: 3000, name: 'ç'.repeat(90), password: 'x'.repeat(600) },
+  ];
+  for (const invite of cases) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const keyed = { ...invite, serverKey: real() };
+      for (const link of [createServerInviteLink(keyed), createServerInviteAppLink(keyed), createServerInviteLink(keyed, 'en')]) {
+        assert.deepEqual(parseBefore821(link), { ok: true, invite: beforeSchema.parse(invite) }, link);
+        assert.deepEqual(parseServerInviteLink(link), { ok: true, invite: keyed });
+      }
+      // And invitations made by those apps keep opening here, without a key.
+      assert.deepEqual(parseServerInviteLink(createBefore821(invite)), { ok: true, invite });
+    }
+  }
 });

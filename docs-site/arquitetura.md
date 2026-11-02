@@ -503,7 +503,8 @@ assinatura passa a nomear essa chave (recurso negociado `server-key-auth`):
    não vale em A.
 3. No primeiro login protegido, o app **fixa** a chave para aquele endereço
    salvo (TOFU) e a guarda no próprio servidor salvo, que vai junto no backup
-   de servidores. Um convite também pode trazer a chave.
+   de servidores. Um convite também pode trazer a chave; ele continua abrindo em
+   versões anteriores do app, que só não a fixam.
 
 O app decide (`decideServerKey`, em `@monky/shared`) antes de assinar
 qualquer coisa:
@@ -531,7 +532,8 @@ reinício. Trocar a chave (apagar a tabela, ou começar com um banco novo no
 mesmo endereço) faz os apps recusarem o servidor até receberem um convite novo.
 
 O Monky Light segue a mesma regra e guarda as chaves fixadas no perfil, em
-`monky-light-servers.json`, por endereço de servidor.
+`monky-light-servers.json`, por endereço de servidor. Ele aceita um link de convite
+onde aceita o endereço, e é assim que recebe uma chave nova; não tem **Adicionar endereço**.
 
 **Risco residual.** A proteção vale a partir do primeiro login protegido em A.
 Se você nunca entrou em A com um app que tenha o recurso, um servidor M visitado

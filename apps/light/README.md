@@ -64,6 +64,12 @@ adiante. `--channel` aceita o ID de um canal de voz;
 exigir senha, forneça `MONKY_LIGHT_PASSWORD` no ambiente do processo, não na
 linha de comando. Ela não é salva no perfil.
 
+`--server` também aceita um link de convite do Monky (`https://monkyorg.github.io/Monky/convite/#~…`
+ou `monky://#~…`), lido como o app desktop o lê: o Light entra no endereço do
+convite, usa a senha do convite quando `MONKY_LIGHT_PASSWORD` não está definida
+e, se o convite trouxer a chave de identidade do servidor, espera essa chave.
+É assim que o Light volta a entrar num servidor cuja chave mudou (veja abaixo).
+
 A saída contém eventos JSON, incluindo `authenticated` com o nome do servidor
 e a lista de canais, e `channels-changed` quando essa lista muda.
 Digite um objeto JSON por linha no terminal, usando o ID recebido:
@@ -233,6 +239,13 @@ apresentado uma, ou a chave fixada para outro endereço do perfil (veja
 [a assinatura vale para um servidor só](https://monkyorg.github.io/Monky/arquitetura.html#a-assinatura-vale-para-um-servidor-so)).
 Um arquivo de chaves ilegível nunca é recriado: ele exige recuperação explícita,
 para não reabrir a confiança do primeiro contato em silêncio.
+
+Como no app desktop, só um convite troca uma chave fixada: passar em `--server`
+um convite novo que traga a chave nova faz o Light aceitá-la e fixá-la no lugar
+da antiga. Um convite que traga a chave fixada para **outro** endereço do perfil
+é recusado, como no desktop, porque um servidor pode estar repassando o login
+daquele. O Light não tem "Adicionar endereço": um mesmo servidor alcançado por
+dois endereços precisa de um perfil para cada um.
 
 `IdentityStore` requer um diretório de perfil absoluto e já existente. Mantém um
 lock exclusivo durante sua vida e armazena uma seed Ed25519 de 32 bytes com

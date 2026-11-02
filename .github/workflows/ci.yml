@@ -108,7 +108,7 @@ jobs:
         run: python scripts/macos-test-keychain.py setup
       - name: Exercise native components without media devices
         # Keep the realtime audio clock check isolated from the other native processes.
-        run: node --test --test-concurrency=1 scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
+        run: node --test --test-concurrency=1 scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/server_invite_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
       # mediasoup has no prebuilt worker for every host (darwin-x64 compiles it for ~8 min). The
       # key pins the exact locked package, host image and compiler; a restored worker passes the
       # same checks as a fresh one and is saved only after the real interoperability tests.

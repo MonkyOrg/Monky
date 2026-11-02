@@ -259,14 +259,14 @@ void writeProfileFile(const fs::path& profile, const char* name, const char* pen
       bytes != contents.size() || !FlushFileBuffers(file.get())) {
     failIo("Write profile file");
   }
-  const auto name = (profile / name).native();
-  const auto nameBytes = static_cast<DWORD>(name.size() * sizeof(wchar_t));
+  const auto destination = (profile / name).native();
+  const auto nameBytes = static_cast<DWORD>(destination.size() * sizeof(wchar_t));
   const auto bufferBytes = static_cast<DWORD>(sizeof(FILE_RENAME_INFO) + nameBytes);
   const auto buffer = std::make_unique<std::byte[]>(bufferBytes);
   auto* rename = new (buffer.get()) FILE_RENAME_INFO{};
   rename->ReplaceIfExists = TRUE;
   rename->FileNameLength = nameBytes;
-  std::memcpy(rename->FileName, name.data(), nameBytes);
+  std::memcpy(rename->FileName, destination.data(), nameBytes);
   if (!SetFileInformationByHandle(file.get(), FileRenameInfo, rename, bufferBytes)) {
     failIo("Publish profile file");
   }
