@@ -189,12 +189,14 @@ test('the SFU moves to the next free port of the range, and keeps it across rest
   assert.equal(restarted.getMediaPort(), base + 1);
   restarted.close();
 
-  for (let port = base; port <= base + 2; port++) assert.ok(await holdUdpPort(t, port));
-  const blocked = manager();
+  // A fresh range: the closed worker process releases its sockets asynchronously.
+  const busy = await freeRange();
+  for (let port = busy; port <= busy + 2; port++) assert.ok(await holdUdpPort(t, port));
+  const blocked = new SfuManager({ listenIp: '127.0.0.1', announcedIp: '127.0.0.1', rtcMinPort: busy, rtcMaxPort: busy + 2, dataDir });
   assert.deepEqual(await blocked.checkPortAvailability(),
-    { problem: { code: 'range-busy', minPort: base, maxPort: base + 2 } });
+    { problem: { code: 'range-busy', minPort: busy, maxPort: busy + 2 } });
   assert.equal(await blocked.init(), false);
-  assert.match(blocked.getLastError() ?? '', new RegExp(`range ${base}-${base + 2}`));
+  assert.match(blocked.getLastError() ?? '', new RegExp(`range ${busy}-${busy + 2}`));
   blocked.close();
 });
 
