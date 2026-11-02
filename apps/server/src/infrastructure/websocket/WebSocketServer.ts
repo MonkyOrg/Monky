@@ -66,6 +66,7 @@ import { ScreenAccessCoordinator, type ScreenAccessHost } from './voice/ScreenAc
 import { SfuSignalingHandler, type SfuSignalingHost } from './voice/SfuSignalingHandler';
 import { VoiceSessionHandler, type VoiceSessionHost } from './voice/VoiceSessionHandler';
 import { requestHostname, requestServerUrl } from './requestAddress';
+import { isLocalRequest } from '../http/publicRoutes';
 import { AuditRecorder, type AuditRecorderHost } from './AuditRecorder';
 import { Outbox, type FanOutFrames, type OutboxHost } from './Outbox';
 import { AccessEpoch } from './access/AccessEpoch';
@@ -742,6 +743,7 @@ export class WebSocketServer {
         ip,
         countedAnonymous: true,
         requestHost: requestHostname(req.headers.host),
+        loopbackPeer: isLocalRequest(req),
         requestServerUrl: requestServerUrl(req),
       };
       this.anonymousSessions.add(session);

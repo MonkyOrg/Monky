@@ -100,9 +100,9 @@ export const ptBR = {
   'sfu.preflightHintReinstall': 'Reinstale o Monky CLI.',
   'sfu.preflightConsequence': 'O servidor sobe mesmo assim, mas as chamadas caem para P2P.',
   'sfu.portOverlap':
-    'O range UDP do SFU ({minPort}-{maxPort}) invade o range de relay do coturn ({turnMinPort}-{turnMaxPort}). Os dois disputariam as mesmas portas.',
+    'A porta de mídia do SFU ({port}) fica dentro do range de relay do coturn ({turnMinPort}-{turnMaxPort}). Os dois disputariam a mesma porta.',
   'sfu.portBindFailed':
-    'A porta {port}/UDP não pôde ser reservada, então o range {minPort}-{maxPort} não está utilizável. Libere esse range (UDP) no firewall e confira se nenhum outro processo o ocupa.',
+    'A porta {port}/{protocol} do SFU não pôde ser reservada. Confira se nenhum outro processo a ocupa e libere a porta {port} (UDP e TCP) no firewall.',
   'turn.portNotListening': 'A porta {port} não está escutando localmente. Verifique se nenhum outro processo está usando essa porta.',
   'turn.portExternalUnreachable': 'A porta {port} (UDP/TCP) não está acessível externamente no IP {publicIp}. Abra a porta {port} (UDP e TCP) e o range {minPort}-{maxPort} (UDP) no firewall da VPS para que o relay TURN funcione.',
   'turn.relayPortBindFailed': 'O range de portas UDP {minPort}-{maxPort} não está acessível (falha ao testar porta {port}/UDP). Abra o range {minPort}-{maxPort} (UDP) no firewall da VPS. Sem essas portas, o relay TURN não consegue transmitir mídia.',
@@ -146,7 +146,7 @@ export const ptBR = {
   'config.turnPortOk': '✔ Porta TURN (3478) acessível. Certifique-se de que o range 49152-65535/UDP também está aberto no firewall.',
   'config.turnUnavailable': 'indisponível: {reason}',
   'config.sfuUnavailable': 'inativo: {reason}',
-  'config.sfuPortOk': '✔ Range UDP do SFU reservável nesta máquina. Confirme que ele também está aberto no firewall da VPS.',
+  'config.sfuPortOk': '✔ A porta de mídia do SFU ({port}, UDP e TCP) está livre nesta máquina. Confirme que ela também está liberada no firewall da VPS.',
   'config.turnDisabledBySfu': 'TURN desligado automaticamente: no modo SFU o próprio servidor já faz o relay.',
   'config.turnBlockedBySfu':
     'O TURN não pode ser ativado no modo SFU — o próprio SFU já é o relay. Volte para o modo p2p antes de ligar o TURN.',

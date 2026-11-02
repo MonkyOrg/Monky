@@ -195,14 +195,15 @@ export async function createCommand(globalArgs: GlobalArgs, args: string[]): Pro
 
   if (voiceMode === 'sfu') {
     const { SfuManager } = await import('../../infrastructure/sfu/SfuManager');
-    const portProblem = await new SfuManager().checkPortAvailability();
+    const sfu = new SfuManager();
+    const portProblem = await sfu.checkPortAvailability();
     if (portProblem) {
       // A warning rather than a hard stop: the server does not exist yet, so
-      // the operator can still open the range before starting it (#515).
+      // the operator can still free or open the port before starting it (#515).
       console.log();
       console.log(color('⚠ ' + describeSfuPortProblem(portProblem), ANSI.yellow));
     } else {
-      console.log(color(t('config.sfuPortOk'), ANSI.green));
+      console.log(color(t('config.sfuPortOk', { port: String(sfu.getMediaPort()) }), ANSI.green));
     }
 
     const report = await estimateHostCapacity();

@@ -247,12 +247,9 @@ export class ServerSettingsHandler {
     //
     // Only an actual switch is probed. The desktop submits the current voice
     // mode on every save, so probing on `payload.voiceMode === 'sfu'` alone
-    // would bind UDP ports on every rename or password change — and a worker
-    // already serving a call legitimately holds ports in this range, so the
-    // probe would report the admin's own SFU as a blocked firewall. Comparing
-    // against the stored mode is what excludes that case; the worker's own
-    // state is not a substitute, since creating it binds no RTC port and so
-    // proves nothing about the range.
+    // would bind the media port on every rename or password change.
+    // `checkPortAvailability` also skips the probe while this server's own
+    // worker holds the port, which would otherwise read as a conflict.
     if (payload.voiceMode === 'sfu') {
       if (previousVoiceMode !== 'sfu') {
         const portProblem = await this.host.sfu.checkPortAvailability();

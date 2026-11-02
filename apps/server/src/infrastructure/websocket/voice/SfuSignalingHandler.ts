@@ -361,7 +361,7 @@ export class SfuSignalingHandler {
         session.sessionId,
         channelId,
         direction,
-        session.requestHost,
+        { host: session.requestHost, loopback: session.loopbackPeer },
         purpose,
         screenSessionId
       );

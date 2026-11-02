@@ -1035,6 +1035,8 @@ test('a dead SFU worker marks the calls failed and closes their producers, witho
   const worker = Object.create(EventEmitter.prototype) as MediasoupTypes.Worker;
   Object.defineProperty(worker, 'died', { value: false });
   worker.close = () => {};
+  const webRtcServer: Partial<MediasoupTypes.WebRtcServer> = { closed: false };
+  Object.defineProperty(worker, 'createWebRtcServer', { value: async () => webRtcServer });
   t.mock.method(mediasoup, 'createWorker', () => Promise.resolve(worker));
   t.mock.method(Logger, 'error', () => {});
   const f = await createFixture();
@@ -1076,13 +1078,43 @@ test('a dead SFU worker marks the calls failed and closes their producers, witho
 
 test('the address a client reached the server by is announced to ICE only in a form ICE can dial', (t) => {
   t.mock.method(os, 'networkInterfaces', () => ({}));
-  const announced = (listenIp: string, host: string) => new SfuManager({ listenIp })['getListenInfos'](host)
-    .flatMap((info) => info.protocol === 'udp' && info.announcedAddress ? [info.announcedAddress] : []);
-  assert.deepEqual(announced('0.0.0.0', 'monky.example.com'), ['monky.example.com', '127.0.0.1']);
-  assert.deepEqual(announced('0.0.0.0', '[2001:db8::1]'), ['127.0.0.1'],
+  const announced = (listenIp: string, host: string, loopback = false) =>
+    new SfuManager({ listenIp })['announcedAddresses']({ host, loopback });
+  assert.deepEqual(announced('0.0.0.0', 'monky.example.com'), ['monky.example.com']);
+  assert.deepEqual(announced('0.0.0.0', '[2001:db8::1]'), [],
     'IPv4 sockets cannot be reached on an IPv6 address, bracketed or not');
-  assert.deepEqual(announced('::', '[2001:db8::1]'), ['2001:db8::1', '127.0.0.1'], 'no brackets in a candidate');
-  assert.deepEqual(announced('0.0.0.0', 'localhost'), ['127.0.0.1']);
+  assert.deepEqual(announced('::', '[2001:db8::1]'), ['2001:db8::1'], 'no brackets in a candidate');
+  assert.deepEqual(announced('0.0.0.0', 'localhost', true), ['127.0.0.1']);
+});
+
+test('loopback is offered only to a client on this machine, and internal interfaces never otherwise', (t) => {
+  t.mock.method(os, 'networkInterfaces', () => ({
+    lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true, netmask: '255.0.0.0', mac: '', cidr: null }],
+    eth0: [{ address: '192.168.0.10', family: 'IPv4', internal: false, netmask: '255.255.255.0', mac: '', cidr: null }],
+  }));
+  const sfu = new SfuManager({ announcedIp: '203.0.113.7' });
+  assert.deepEqual(sfu['announcedAddresses']({ host: 'monky.example.com', loopback: false }),
+    ['203.0.113.7', 'monky.example.com', '192.168.0.10']);
+  assert.deepEqual(sfu['announcedAddresses']({ host: '127.0.0.1', loopback: true }),
+    ['203.0.113.7', '127.0.0.1', '192.168.0.10']);
+  assert.deepEqual(sfu['announcedAddresses'](), ['203.0.113.7', '192.168.0.10'], 'an unknown origin is not assumed local');
+});
+
+test('every announced address points at the one shared media port, best first', (t) => {
+  t.mock.method(os, 'networkInterfaces', () => ({}));
+  const sfu = new SfuManager({ announcedIp: '203.0.113.7' });
+  const server = [
+    { foundation: 'udpcandidate', priority: 1076558079, ip: '0.0.0.0', address: '0.0.0.0', protocol: 'udp', port: 40000, type: 'host' },
+    { foundation: 'tcpcandidate', priority: 1076276479, ip: '0.0.0.0', address: '0.0.0.0', protocol: 'tcp', port: 40000, type: 'host', tcpType: 'passive' },
+  ] as const;
+  const candidates = sfu['announceCandidates']([...server], { host: 'monky.example.com' });
+  assert.deepEqual(candidates.map(c => `${c.protocol} ${c.address}:${c.port}`), [
+    'udp 203.0.113.7:40000', 'tcp 203.0.113.7:40000', 'udp monky.example.com:40000', 'tcp monky.example.com:40000',
+  ]);
+  assert.equal(new Set(candidates.map(c => c.foundation)).size, candidates.length);
+  const byPriority = [...candidates].sort((a, b) => b.priority - a.priority).map(c => `${c.protocol} ${c.address}`);
+  assert.deepEqual(byPriority, ['udp 203.0.113.7', 'udp monky.example.com', 'tcp 203.0.113.7', 'tcp monky.example.com'],
+    'the configured address first, and UDP over TCP');
 });
 
 /**

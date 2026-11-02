@@ -79,6 +79,8 @@ function syntheticWorker() {
   let closes = 0;
   Object.defineProperty(worker, 'died', { value: false });
   worker.close = () => { closes++; };
+  const webRtcServer: Partial<mediasoup.types.WebRtcServer> = { closed: false };
+  Object.defineProperty(worker, 'createWebRtcServer', { value: async () => webRtcServer });
   return { worker, closes: () => closes };
 }
 

@@ -132,7 +132,8 @@ function transportCreationFixture(manager = new SfuManager()) {
     await beforeRouter();
     return router as SfuTypes.Router;
   };
-  manager['getListenInfos'] = () => [{ protocol: 'udp', ip: '127.0.0.1' }];
+  const webRtcServer: Partial<SfuTypes.WebRtcServer> = { closed: false };
+  manager['webRtcServer'] = webRtcServer as SfuTypes.WebRtcServer;
   return {
     manager, created,
     delayRouter: (callback: () => Promise<void>) => { beforeRouter = callback; },

@@ -340,14 +340,16 @@ export async function setConfig(
 
       if (mode === 'sfu' && !options.skipSfuDiagnostics) {
         // Refuse before persisting: the desktop path already blocks the switch
-        // when the range is unusable, and the CLI accepting it would be the
+        // when the port is unusable, and the CLI accepting it would be the
         // only way left to end up with a mode the host cannot serve (#515).
+        // Already in SFU mode, a running server holds the port itself.
         const { SfuManager } = await import('../../infrastructure/sfu/SfuManager');
-        const portProblem = await new SfuManager().checkPortAvailability();
+        const sfu = new SfuManager();
+        const portProblem = server.voiceMode === 'sfu' ? null : await sfu.checkPortAvailability();
         if (portProblem) {
           throw new Error(describeSfuPortProblem(portProblem));
         }
-        console.log(color(t('config.sfuPortOk'), ANSI.green));
+        if (server.voiceMode !== 'sfu') console.log(color(t('config.sfuPortOk', { port: String(sfu.getMediaPort()) }), ANSI.green));
       }
 
       // The SFU is the relay in this mode, so coturn is turned off rather than

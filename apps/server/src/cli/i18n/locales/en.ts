@@ -100,9 +100,9 @@ export const en: CliTranslationMap = {
   'sfu.preflightHintReinstall': 'Reinstall the Monky CLI.',
   'sfu.preflightConsequence': 'The server still starts, but calls fall back to P2P.',
   'sfu.portOverlap':
-    "The SFU UDP range ({minPort}-{maxPort}) overlaps coturn's relay range ({turnMinPort}-{turnMaxPort}). The two would compete for the same ports.",
+    "The SFU media port ({port}) is inside coturn's relay range ({turnMinPort}-{turnMaxPort}). The two would compete for the same port.",
   'sfu.portBindFailed':
-    'Port {port}/UDP could not be reserved, so the range {minPort}-{maxPort} is unusable. Open that range (UDP) in the firewall and check that no other process holds it.',
+    'SFU port {port}/{protocol} could not be reserved. Check that no other process holds it and open port {port} (UDP and TCP) in the firewall.',
   'turn.portNotListening': 'Port {port} is not listening locally. Check whether another process is using that port.',
   'turn.portExternalUnreachable': 'Port {port} (UDP/TCP) is not externally reachable at IP {publicIp}. Open port {port} (UDP and TCP) and the {minPort}-{maxPort} range (UDP) in the VPS firewall for the TURN relay to work.',
   'turn.relayPortBindFailed': 'The UDP port range {minPort}-{maxPort} is unavailable (port {port}/UDP could not be tested). Open the {minPort}-{maxPort} range (UDP) in the VPS firewall. Without these ports, the TURN relay cannot transmit media.',
@@ -146,7 +146,7 @@ export const en: CliTranslationMap = {
   'config.turnPortOk': '✔ TURN port (3478) is accessible. Make sure the 49152-65535/UDP range is also open in the firewall.',
   'config.turnUnavailable': 'unavailable: {reason}',
   'config.sfuUnavailable': 'inactive: {reason}',
-  'config.sfuPortOk': '✔ The SFU UDP range can be reserved on this machine. Make sure it is also open in the VPS firewall.',
+  'config.sfuPortOk': '✔ The SFU media port ({port}, UDP and TCP) is free on this machine. Make sure it is also open in the VPS firewall.',
   'config.turnDisabledBySfu': 'TURN turned off automatically: in SFU mode the server itself is the relay.',
   'config.turnBlockedBySfu':
     'TURN cannot be enabled in SFU mode — the SFU already is the relay. Switch back to p2p mode before enabling TURN.',

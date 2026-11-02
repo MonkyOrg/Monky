@@ -70,6 +70,11 @@ export interface ClientSession {
    * or on a LAN. Whatever brought the client here is reachable by definition.
    */
   requestHost?: string;
+  /**
+   * Whether the connection came from this machine with no proxy in between:
+   * only such a client can reach the SFU on 127.0.0.1.
+   */
+  loopbackPeer?: boolean;
   /** Full endpoint used by this connection, including a proxy's port and path. */
   requestServerUrl?: string;
 }

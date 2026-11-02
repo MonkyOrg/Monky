@@ -19,16 +19,14 @@ import {
 export function describeSfuPortProblem(problem: SfuPortProblem): string {
   if (problem.code === 'turn-overlap') {
     return t('sfu.portOverlap', {
-      minPort: String(problem.minPort),
-      maxPort: String(problem.maxPort),
+      port: String(problem.port),
       turnMinPort: String(problem.turnMinPort),
       turnMaxPort: String(problem.turnMaxPort),
     });
   }
   return t('sfu.portBindFailed', {
     port: String(problem.port),
-    minPort: String(problem.minPort),
-    maxPort: String(problem.maxPort),
+    protocol: problem.protocol.toUpperCase(),
   });
 }
 
