@@ -7,13 +7,14 @@ const { root, execute, write, digest, fingerprint, regularFiles } = require('./b
 const { workspace, checkSpace } = require('./prepareMacRtc.cjs');
 const pins = require('./native-rtc/pins.json');
 
-// Every device-free engine contract group except the Windows Media Foundation ones (contract_probe.cc).
+// Every device-free engine contract group except the Windows Media Foundation ones (contract_probe.cc), with the
+// macOS-only checks of its own adapters.
 const MAC_CONTRACT_GROUPS = [
   'signalingAndResources', 'presentationLease', 'operationCompletion', 'receiveMids', 'receiveRoutes',
   'receiverLifecycle', 'receiveFramePolicy', 'captureClock', 'externalH264', 'softwareAV1', 'peerStartupBitrate',
   'peerScreenCongestionRecovery', 'peerVideoPlayout', 'sfuVideoStartupBitrate', 'nodeEventQueue',
   'audioFoundations', 'audioOperationalPolicies', 'rtcSendDrops', 'rtcReceiveDiagnostics', 'rtcReceiveSdk',
-  'surfaceRecycler', 'binaryLayout',
+  'surfaceRecycler', 'macCpuUpload', 'macDecoderDiagnostics', 'binaryLayout',
 ];
 
 // Copies the owned inputs and generates the GN graph; notices only need this graph, not compiled objects.

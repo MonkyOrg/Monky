@@ -31,6 +31,8 @@ test('macOS runs every device-free engine contract group outside the Windows-onl
   assert.ok(windows.groups.includes('adapterPolicies') && windows.groups.includes('decoderMapping'));
   assert.ok(portable.groups.includes('captureClock') && portable.groups.includes('externalH264')
     && portable.groups.includes('softwareAV1') && portable.groups.includes('audioFoundations'));
+  assert.ok(portable.groups.includes('macCpuUpload') && portable.groups.includes('macDecoderDiagnostics'),
+    'macOS must check its own adapters (#825)');
 });
 
 test('Media Foundation checks and sources stay out of the macOS contract probe', () => {
