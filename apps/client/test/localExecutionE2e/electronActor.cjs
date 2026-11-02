@@ -2,18 +2,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const childProcess = require('node:child_process');
-const { createHash, generateKeyPairSync, randomUUID, sign } = require('node:crypto');
+const { createHash } = require('node:crypto');
 const { app, BrowserWindow, ipcMain, session: electronSession } = require('electron');
-const { AUDIO_PREVIEW_IPC, LOCAL_EXECUTION_IPC, SHORTCUT_IPC } = require('@monky/shared');
+const {
+  APP_SHUTDOWN_IPC, BOT_STORAGE_CHANGED, CRASH_RECOVERY_IPC, LOCAL_EXECUTION_IPC, SERVER_INVITE_IPC,
+} = require('@monky/shared');
+const { exercisePreload } = require(path.join(__dirname, '..', 'preloadFixture.cjs'));
 const clientRoot = path.resolve(__dirname, '..', '..');
-const mainRoot = path.join(clientRoot, 'dist-electron', 'main', 'localExecution');
-const { LocalTools } = require(path.join(mainRoot, 'LocalTools.js'));
-const { LocalPermissions } = require(path.join(mainRoot, 'LocalPermissions.js'));
-const { LocalExecutionService } = require(path.join(mainRoot, 'service.js'));
-const { setupLocalExecutionIpc } = require(path.join(mainRoot, 'ipc.js'));
-const { createLocalRuntimeTask } = require(path.join(mainRoot, 'workerClient.js'));
-const { AudioPreviews } = require(path.join(mainRoot, '..', 'audioPreviews.js'));
-const audioPreviews = new AudioPreviews();
+const distMain = path.join(clientRoot, 'dist-electron', 'main');
+const mainRoot = path.join(distMain, 'localExecution');
 
 assert.ok(process.send, 'This isolated Electron helper requires its test-owned IPC parent.');
 const config = JSON.parse(process.env.MONKY_LOCAL_E2E_CONFIG);
@@ -30,7 +27,11 @@ const caches = new Set();
 let spawnedWorkers = 0;
 let disposed = false;
 let window;
-let localIpc;
+let handlers;
+let appLevel;
+let unbindBotStorage = () => {};
+let unbindBotScreens = () => {};
+let unbindDevelopmentQa = () => {};
 let manager;
 let shuttingDown = false;
 let rendererInitialized = false;
@@ -41,6 +42,21 @@ const workerEntry = path.join(mainRoot, 'worker.js');
 const nativeSpawn = childProcess.spawn;
 
 app.setPath('userData', config.profile);
+// Main modules are loaded only now: some read userData while they register their channels.
+const { LocalTools } = require(path.join(mainRoot, 'LocalTools.js'));
+const { LocalPermissions } = require(path.join(mainRoot, 'LocalPermissions.js'));
+const { LocalExecutionService } = require(path.join(mainRoot, 'service.js'));
+const { createLocalRuntimeTask } = require(path.join(mainRoot, 'workerClient.js'));
+const localExecutionModule = require(path.join(mainRoot, 'createService.js'));
+const { setupIpcHandlers } = require(path.join(distMain, 'ipcHandlers.js'));
+const { IpcRegistry, sendEvent, windowContents } = require(path.join(distMain, 'ipc', 'registry.js'));
+const { isolatedWebPreferences } = require(path.join(distMain, 'windowPreferences.js'));
+const { globalInputHook } = require(path.join(distMain, 'globalInputHookProcess.js'));
+const { BotDeviceStorage } = require(path.join(distMain, 'botStorage', 'BotDeviceStorage.js'));
+const { bindBotDeviceStorage } = require(path.join(distMain, 'botStorage', 'ipc.js'));
+const { bindBotScreenDocuments } = require(path.join(distMain, 'botScreenDocuments.js'));
+const { ServerInviteInbox } = require(path.join(distMain, 'serverInvites.js'));
+const { bindDevelopmentQa } = require(path.join(distMain, 'developmentQa.js'));
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');
 app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -64,20 +80,53 @@ childProcess.spawn = (command, args, options) => {
   return child;
 };
 
-const legacy = Object.freeze({
-  identity: 'identity:get', clientId: 'identity:get-client-id', sign: 'identity:sign-challenge',
-  language: 'app:set-language', inServer: 'window:set-in-server', fitHome: 'window:fit-home-content',
-  hostStatus: 'server-host:status', clientLog: 'client-log:write',
-});
-const keys = generateKeyPairSync('ed25519');
-const identity = {
-  clientId: randomUUID(), publicKey: keys.publicKey.export({ type: 'spki', format: 'der' }).toString('hex'),
+// Main answers the renderer through the real IPC registry (setupIpcHandlers); only its dependencies
+// are fakes. The shortcut hook would observe this computer's keyboard, so it answers without a worker.
+for (const method of ['setActionHotkeys', 'setSoundboardHotkeys', 'setPttConfig', 'setShortcutCapture',
+  'startCapture', 'stopCapture']) globalInputHook[method] = async () => true;
+globalInputHook.init = () => {};
+globalInputHook.destroy = () => {};
+const unavailable = name => async () => { throw new Error(`${name} is unavailable in the isolated E2E.`); };
+// Hosting a server from this client is out of scope; the renderer only reads that none is hosted.
+const serverManager = {
+  getStatus: () => ({ servers: [] }), getLogs: () => [], clearLogs: () => {}, getStats: () => null,
+  startServer: unavailable('Hosting a server'), stopServer: unavailable('Hosting a server'),
+  deleteServerData: unavailable('Hosting a server'), getUpdateInventory: unavailable('The update inventory'),
 };
-const owns = event => event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame;
-const register = (channel, handler) => ipcMain.handle(channel, (event, ...args) => {
-  assert.ok(owns(event), 'Only the real owner frame can call this helper.');
-  return handler(...args);
-});
+const clientLogger = {
+  write: entry => { if (entry.level === 'ERROR') emit({ event: 'renderer.clientError', message: entry.message }); },
+};
+/**
+ * Channels main.ts registers itself, outside setupIpcHandlers, with the same behavior a healthy
+ * window sees: no pending invitation, crash recovery idle, shutdown acknowledged and no prepared QA.
+ */
+function registerAppLevelChannels() {
+  appLevel = new IpcRegistry(ipcMain, { main: () => windowContents(window), overlay: () => null });
+  const invites = new ServerInviteInbox();
+  appLevel.handle(SERVER_INVITE_IPC.take, 'main', () => invites.take());
+  appLevel.handle(APP_SHUTDOWN_IPC.acknowledge, 'main', () => undefined);
+  appLevel.handle(CRASH_RECOVERY_IPC.ready, 'main', () => true);
+  appLevel.handle(CRASH_RECOVERY_IPC.bootstrapFailed, 'main', (_event, failure) => {
+    emit({ event: 'renderer.bootstrapFailed', phase: failure?.phase });
+    return false;
+  });
+  const isOwner = contents => contents === window.webContents;
+  const storage = new BotDeviceStorage(path.join(config.profile, 'bot-storage'),
+    scopeId => sendEvent(windowContents(window), BOT_STORAGE_CHANGED, scopeId));
+  unbindBotScreens = bindBotScreenDocuments(isOwner, storage);
+  unbindBotStorage = bindBotDeviceStorage(isOwner, storage);
+  // Outside prepared QA, main.ts binds these with no configuration: they answer null and false.
+  unbindDevelopmentQa = bindDevelopmentQa(window, null, () => emit({ event: 'main.quitRequested' }));
+}
+
+/** Every channel the real preload can invoke must have a handler here, or the renderer meets "No handler registered". */
+async function assertPreloadChannelsAnswered(registered) {
+  const { channels } = await exercisePreload();
+  const missing = [...channels].filter(channel => !registered.has(channel)).sort();
+  assert.deepEqual(missing, [], `The local execution E2E actor does not answer ${missing.length} IPC channel(s) ` +
+    `the preload calls: ${missing.join(', ')}. Register them through setupIpcHandlers (src/main/ipcHandlers.ts) ` +
+    'so this actor mounts them too, or, for a channel main.ts registers itself, add it to registerAppLevelChannels.');
+}
 const run = (action, args = []) => {
   assert.ok(['identity', 'createBot', 'approveBot', 'join', 'invoke', 'sample', 'chat', 'mute', 'enablePermission',
     'leave', 'privateReady', 'privateClosed', 'failures', 'cleanup'].includes(action));
@@ -107,14 +156,18 @@ const shutdown = async () => {
     try { await run('cleanup'); } catch (error) { errors.push(error); }
   }
   try {
-    if (localIpc) await localIpc.dispose();
+    if (handlers) await handlers.dispose();
     else if (manager) await manager.dispose();
   } catch (error) { errors.push(error); }
   if (workers.size) errors.push(new Error(`${workers.size} private workers are still live.`));
   for (const pid of nativeIds) if (alive(pid)) errors.push(new Error(`Native fixture process ${pid} is still live.`));
   if (caches.size) errors.push(new Error(`${caches.size} native cache leases remain owned.`));
   childProcess.spawn = nativeSpawn;
-  if (window && !window.isDestroyed()) audioPreviews.cancelOwner(window.webContents.id);
+  unbindBotScreens();
+  unbindBotStorage();
+  unbindDevelopmentQa();
+  appLevel?.dispose();
+  // Closing the window disposes its IPC registry, as in the app.
   if (window && !window.isDestroyed()) window.destroy();
   if (errors.length) throw new AggregateError(errors, 'Isolated actor cleanup was not confirmed.');
   disposed = true;
@@ -129,11 +182,8 @@ const ready = app.whenReady().then(async () => {
   });
   window = new BrowserWindow({
     show: false, width: 1200, height: 850,
-    webPreferences: {
-      offscreen: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false,
-      sandbox: false, webSecurity: true, backgroundThrottling: false,
-      preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.js'),
-    },
+    // The same isolated preferences and bundled preload as the application window.
+    webPreferences: isolatedWebPreferences('preload', { offscreen: true, backgroundThrottling: false }),
   });
   window.webContents.on('console-message', (_event, level, message) => {
     if (message.startsWith('LOCAL_E2E ')) emit(JSON.parse(message.slice('LOCAL_E2E '.length)));
@@ -143,23 +193,6 @@ const ready = app.whenReady().then(async () => {
     emit({ event: 'renderer.gone', reason: details.reason });
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  register(legacy.identity, () => identity);
-  register(legacy.clientId, () => identity.clientId);
-  register(legacy.sign, nonce => {
-    assert.match(nonce, /^[0-9a-f]{64}$/i);
-    return sign(null, Buffer.from(nonce, 'hex'), keys.privateKey).toString('hex');
-  });
-  register(legacy.language, () => undefined);
-  register(legacy.inServer, () => undefined);
-  register(legacy.fitHome, () => undefined);
-  register(legacy.hostStatus, () => ({ servers: [] }));
-  register(legacy.clientLog, entry => {
-    if (entry.level === 'ERROR') emit({ event: 'renderer.clientError', message: entry.message });
-  });
-  // Fake microphone devices are local to this Chromium process. No global PTT hook is installed.
-  register(SHORTCUT_IPC.setPttConfig, () => true);
-  register(AUDIO_PREVIEW_IPC.load, input => audioPreviews.load(window.webContents.id, input));
-  register(AUDIO_PREVIEW_IPC.cancel, input => audioPreviews.cancel(window.webContents.id, input));
 
   manager = new LocalTools({
     root: path.join(config.profile, 'local-tools'),
@@ -201,27 +234,39 @@ const ready = app.whenReady().then(async () => {
     dispose: () => manager.dispose(),
   };
   const handle = ipcMain.handle.bind(ipcMain);
+  const registered = new Set();
   const observed = new Map([
     [LOCAL_EXECUTION_IPC.prepare, 'prepare'], [LOCAL_EXECUTION_IPC.startTask, 'start'],
     [LOCAL_EXECUTION_IPC.readFrames, 'read'], [LOCAL_EXECUTION_IPC.acknowledgeFrames, 'played'],
     [LOCAL_EXECUTION_IPC.setPaused, 'pause'],
   ]);
-  ipcMain.handle = (channel, handler) => handle(channel, async (event, input) => {
+  ipcMain.handle = (channel, handler) => {
+    registered.add(channel);
     const operation = observed.get(channel);
-    if (operation) emit({
-      event: `ipc.${operation}.begin`, playedFrames: input?.playedFrames,
-      privateTags: privateTags(input?.subject?.connectionId, input?.permit),
+    if (!operation) return handle(channel, handler);
+    return handle(channel, async (event, input, ...rest) => {
+      emit({
+        event: `ipc.${operation}.begin`, playedFrames: input?.playedFrames,
+        privateTags: privateTags(input?.subject?.connectionId, input?.permit),
+      });
+      const result = await handler(event, input, ...rest);
+      emit({
+        event: `ipc.${operation}.end`, status: result?.status, reason: result?.reason,
+        done: result?.done, frames: result?.frames?.length, playedFrames: input?.playedFrames,
+        privateTags: privateTags(result?.permit, result?.taskId),
+      });
+      return result;
     });
-    const result = await handler(event, input);
-    if (operation) emit({
-      event: `ipc.${operation}.end`, status: result?.status, reason: result?.reason,
-      done: result?.done, frames: result?.frames?.length, playedFrames: input?.playedFrames,
-      privateTags: privateTags(result?.permit, result?.taskId),
-    });
-    return result;
-  });
-  try {
-    localIpc = setupLocalExecutionIpc(window, notifications => new LocalExecutionService({
+  };
+  // setupIpcHandlers builds local execution through this export; the fixture service replaces it
+  // for the call, so no real tool is ever installed or downloaded.
+  const createService = localExecutionModule.createLocalExecutionService;
+  let fixtureService = false;
+  localExecutionModule.createLocalExecutionService = (owner, _userData, notifications, onTools) => {
+    assert.equal(owner, window, 'Local execution belongs to the actor window.');
+    fixtureService = true;
+    onTools?.(manager);
+    return new LocalExecutionService({
       owner: window.webContents.id, tools: toolHost,
       permissions: new LocalPermissions(path.join(config.profile, 'local-permissions.json'), notifications.changed),
       dialogs: {
@@ -247,11 +292,21 @@ const ready = app.whenReady().then(async () => {
         return task;
       },
       ...notifications, logError,
-    }));
+    });
+  };
+  try {
+    registerAppLevelChannels();
+    handlers = setupIpcHandlers(window, serverManager, undefined, {
+      clientLogger, quitApplication: () => emit({ event: 'main.quitRequested' }),
+    });
   } finally {
     ipcMain.handle = handle;
+    localExecutionModule.createLocalExecutionService = createService;
   }
-  await localIpc.service.initialize();
+  assert.ok(fixtureService, 'setupIpcHandlers no longer builds local execution through createLocalExecutionService; ' +
+    'update this actor so the authored E2E keeps its fixture tools.');
+  await assertPreloadChannelsAnswered(registered);
+  await handlers.service.initialize();
   await window.loadURL(config.rendererUrl);
   const result = await window.webContents.executeJavaScript(
     `import('/__local_execution_e2e_renderer__.mjs').then(module => module.startRenderer(${JSON.stringify({
@@ -280,7 +335,7 @@ process.on('message', message => {
       return {
         spawnedWorkers, workers: workers.size, caches: caches.size,
         nativeAlive: [...nativeIds].filter(alive),
-        state: await localIpc.service.snapshot(), logs,
+        state: await handlers.service.snapshot(), logs,
         privateClosed: await run('privateClosed'), failures: await run('failures'),
       };
     }
