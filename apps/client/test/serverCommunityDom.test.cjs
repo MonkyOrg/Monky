@@ -632,6 +632,12 @@ async function* regression(locale, inviteModule) {
   // A failure that is not a refusal, such as a timeout, for the next EVENT_GET requests.
   let eventGetFailure = null;
   const deletedEvents = new Set();
+  // Ended events the history asks for; the pushed snapshot never carries them. One deleted, or
+  // whose audience no longer includes this member, is left out and refused, as the server does.
+  let endedEvents = [];
+  const revokedEvents = new Set();
+  const hiddenEvent = id => deletedEvents.has(id) || revokedEvents.has(id);
+  let historyGate = null;
   let uploadedCommunityImages = 0;
   const cancelled = [];
   const calls = [], listeners = new Set();
@@ -672,12 +678,17 @@ async function* regression(locale, inviteModule) {
         if (forumLimiter.times.length >= 30) throw new ProtocolRequestError('Too many forum requests.', 'RATE_LIMITED');
         forumLimiter.times.push(sentAt);
       }
-      if (type === 'COMMUNITY_GET') return structuredClone(snapshot);
+      if (type === 'COMMUNITY_GET') {
+        if (!payload?.includeEnded) return structuredClone(snapshot);
+        const answer = structuredClone({ ...snapshot, events: [...snapshot.events, ...endedEvents.filter(entry => !hiddenEvent(entry.id))] });
+        if (historyGate) await historyGate;
+        return answer;
+      }
       if (type === 'EVENT_GET') {
         if (eventGetGate) await eventGetGate;
         if (eventGetFailure) throw eventGetFailure;
         // As the server answers for an event this member can no longer see.
-        if (payload.id === 'missing' || deletedEvents.has(payload.id)) throw new ProtocolRequestError('Event unavailable', 'PERMISSION_DENIED');
+        if (payload.id === 'missing' || hiddenEvent(payload.id)) throw new ProtocolRequestError('Event unavailable', 'PERMISSION_DENIED');
         return { event: { ...event, id: payload.id, ...(payload.id === 'historic' ? { status: 'ended' } : {}) } };
       }
       if (type === 'EVENT_GET_INTERESTED') {
@@ -2831,20 +2842,23 @@ async function* regression(locale, inviteModule) {
   const historyBaseline = snapshot;
   const historicCard = () => document.querySelector('.event-list-modal [data-event-id="historic"]');
   const listedEvents = () => [...document.querySelectorAll('.event-list-modal [data-event-id]')].map(card => card.dataset.eventId).join();
+  const historyGets = () => calls.filter(call => call.type === 'COMMUNITY_GET' && call.payload?.includeEnded).length;
   const showHistory = async () => {
     const toggle = document.querySelector('.event-list-modal [data-history]');
-    // What EVENT_GET answers for "historic" while it exists.
-    snapshot = { ...historyBaseline, events: [...historyBaseline.events, { ...event, id: 'historic', status: 'ended' }] };
+    endedEvents = [{ ...event, id: 'historic', status: 'ended' }];
     if (toggle.checked) {
       toggle.checked = false;
       toggle.dispatchEvent(new Event('change', { bubbles: true }));
       await until(() => !historicCard());
     }
+    const getsBefore = historyGets();
     toggle.checked = true;
     toggle.dispatchEvent(new Event('change', { bubbles: true }));
     await until(() => historicCard());
-    snapshot = historyBaseline;
     emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+    // The snapshot makes the open history ask again; it settles before the test goes on.
+    await until(() => historyGets() === getsBefore + 2);
+    await flush();
   };
   await showHistory();
   check(listedEvents() === 'card-c,card-d,historic',
@@ -2913,9 +2927,53 @@ async function* regression(locale, inviteModule) {
     check(historyExports.length === 1
       && document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('community.eventUnavailable')),
     'Exporting a history event deleted meanwhile writes no file, says why and drops it from the history');
+    // With the history open and nothing opened, the next snapshot asks again (#844): an ended
+    // event deleted, or whose audience no longer includes this member, leaves the list.
+    document.querySelectorAll('.chat-copy-toast').forEach(toast => toast.remove());
+    deletedEvents.delete('historic');
+    await showHistory();
+    let getsBefore = historyGets();
+    const readsBeforeSilentDelete = historicReads();
+    deletedEvents.add('historic');
+    emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+    await until(() => !historicCard());
+    check(historyGets() === getsBefore + 1 && historicReads() === readsBeforeSilentDelete && !detail()
+      && listedEvents() === 'card-c,card-d',
+    'An ended event deleted while the history is open leaves it at the next snapshot, without opening anything');
+    deletedEvents.delete('historic');
+    await showHistory();
+    getsBefore = historyGets();
+    revokedEvents.add('historic');
+    // A burst of snapshots asks once, after the shortest interval, not once per snapshot.
+    for (let i = 0; i < 3; i++) emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+    await until(() => !historicCard());
+    await flush();
+    check(historyGets() === getsBefore + 1 && !detail() && listedEvents() === 'card-c,card-d',
+      `An ended event whose audience no longer includes this member leaves the open history, with one request for a burst: ${historyGets() - getsBefore}`);
+    revokedEvents.delete('historic');
+    // An answer that arrives after the history was switched off brings nothing back.
+    await showHistory();
+    let releaseHistory;
+    historyGate = new Promise(resolve => { releaseHistory = resolve; });
+    getsBefore = historyGets();
+    emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+    await until(() => historyGets() === getsBefore + 1);
+    const lateRequest = calls.filter(call => call.type === 'COMMUNITY_GET' && call.payload?.includeEnded).at(-1).requestId;
+    const historyToggle = document.querySelector('.event-list-modal [data-history]');
+    historyToggle.checked = false;
+    historyToggle.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => !historicCard());
+    historyGate = null;
+    releaseHistory();
+    await flush();
+    check(!historicCard() && cancelled.includes(lateRequest) && listedEvents() === 'card-c,card-d',
+      'Switching the history off cancels its pending request, and its late answer changes nothing');
   } finally {
     if (historyApi === undefined) delete window.api; else window.api = historyApi;
     deletedEvents.delete('historic');
+    revokedEvents.clear();
+    endedEvents = [];
+    historyGate = null;
     snapshot = historyBaseline;
   }
   document.querySelector('.event-list-modal [data-community-close]').click();
