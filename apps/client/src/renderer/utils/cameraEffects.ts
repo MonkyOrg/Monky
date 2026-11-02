@@ -118,6 +118,27 @@ export function cameraEffectFrameRate(profileFps: number, limitQuality: boolean)
   return limitQuality ? Math.min(profileFps, CAMERA_EFFECT_LIMITS.optionalFpsCap) : profileFps;
 }
 
+/**
+ * Admits camera frames at a target rate from their own capture timestamps (ms), so late
+ * or batched delivery never changes the cadence and no frame is duplicated.
+ */
+export class CameraFrameAdmission {
+  private nextAt = -Infinity;
+
+  public reset(): void {
+    this.nextAt = -Infinity;
+  }
+
+  public admit(now: number, fps: number): boolean {
+    const interval = 1000 / fps;
+    if (now + Math.min(1, interval / 10) < this.nextAt) return false;
+    this.nextAt = Number.isFinite(this.nextAt)
+      ? this.nextAt + (Math.floor(Math.max(0, now - this.nextAt) / interval) + 1) * interval
+      : now + interval;
+    return true;
+  }
+}
+
 export function needsPersonSegmentation(mode: CameraEffectMode): boolean {
   return mode === 'blur' || mode === 'color' || mode === 'image';
 }

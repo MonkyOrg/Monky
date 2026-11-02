@@ -153,15 +153,23 @@ if (!process.versions.electron) {
     const keyColorsOnly = process.argv.includes('--key-colors-only');
     const gpuOnly = process.argv.includes('--gpu-only');
     const normalOnly = process.argv.includes('--normal-only');
+    const stallOnly = process.argv.includes('--stall-only');
+    const withoutTrackGenerator = process.argv.includes('--without-track-generator');
+    if (withoutTrackGenerator) {
+      // Exercise the main-thread fallback used where the worker track pipeline is unavailable.
+      const removed = await window.webContents.executeJavaScript(
+        'delete window.MediaStreamTrackGenerator; typeof window.MediaStreamTrackGenerator');
+      if (removed !== 'undefined') throw new Error('The fallback fixture could not remove MediaStreamTrackGenerator');
+    }
     const selectedPhases = [
       ...(ownershipOnly ? ['ownership'] : []), ...(keyColorsOnly ? ['key-colors'] : []),
       ...(fpsOnly ? ['quality'] : []), ...(transitionsOnly ? ['transitions'] : []), ...(chromaOnly ? ['chroma'] : []),
       ...(gpuOnly ? ['gpu'] : []),
-      ...(normalOnly ? ['normal'] : []),
+      ...(normalOnly ? ['normal'] : []), ...(stallOnly ? ['stall'] : []),
     ];
     const phases = selectedPhases.length ? selectedPhases
       : cpuCompositor ? ['chroma']
-        : ['gpu', 'ownership', 'key-colors', 'quality', 'transitions', 'missing-model', 'normal', 'recovery'];
+        : ['gpu', 'ownership', 'key-colors', 'quality', 'transitions', 'stall', 'missing-model', 'normal', 'recovery'];
     let checks = 0;
     for (const phase of phases) {
       blockModel = phase === 'missing-model';
@@ -180,7 +188,7 @@ if (!process.versions.electron) {
     }
     if (externalRequests.length) throw new Error(`Unexpected external requests: ${externalRequests.join(', ')}`);
     if (cpuCompositor && !injectedCpuCompositors) throw new Error('CPU fallback fixture did not reach the worker context factory');
-    console.log(`Camera effects ${phases.join(' + ')} (${packaged ? 'packaged offline' : 'dev'}) smoke: ${checks} checks passed; no external requests`);
+    console.log(`Camera effects ${phases.join(' + ')} (${packaged ? 'packaged offline' : 'dev'}${withoutTrackGenerator ? ', main-thread fallback' : ''}) smoke: ${checks} checks passed; no external requests`);
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
 }
@@ -548,8 +556,32 @@ async function runCameraEffectsSmoke(phase) {
   drawSource();
   const sourceStream = source.captureStream(30);
   const sourceTimer = setInterval(drawSource, 33);
+  // A camera produced off the main thread, like real capture, so main-thread stalls do not stop it.
+  let workerSource = null;
+  const startWorkerSource = (width, height, fps) => {
+    const generator = new MediaStreamTrackGenerator({ kind: 'video' });
+    const producer = new original.Worker(URL.createObjectURL(new Blob([`onmessage = ({ data }) => {
+      const writer = data.writable.getWriter();
+      const canvas = new OffscreenCanvas(${width}, ${height});
+      const context = canvas.getContext('2d');
+      const start = performance.now();
+      let index = 0;
+      const timer = setInterval(async () => {
+        context.fillStyle = '#00ff00';
+        context.fillRect(0, 0, ${width}, ${height});
+        context.fillStyle = '#e01010';
+        context.fillRect(${width * 0.375}, ${height * 2 / 9}, ${width / 4}, ${height * 11 / 18});
+        context.fillStyle = '#000000';
+        context.fillRect((index++ * 7) % ${width}, 0, 8, ${height / 5});
+        const frame = new VideoFrame(canvas, { timestamp: Math.round((performance.now() - start) * 1000) });
+        try { await writer.write(frame); } catch { clearInterval(timer); } finally { frame.close(); }
+      }, ${1000 / fps});
+    };`], { type: 'text/javascript' })));
+    producer.postMessage({ writable: generator.writable }, [generator.writable]);
+    workerSource = { stream: new MediaStream([generator]), stop: () => { generator.stop(); producer.terminate(); } };
+  };
   const capture = () => {
-    const stream = sourceStream.clone();
+    const stream = (captureMode === 'worker' ? workerSource.stream : sourceStream).clone();
     captures.push(stream);
     return stream;
   };
@@ -604,6 +636,28 @@ async function runCameraEffectsSmoke(phase) {
   function near(pixel, rgb, tolerance = 18) {
     return rgb.every((channel, index) => Math.abs(pixel[index] - channel) <= tolerance);
   }
+  let lastProcessed = null;
+  /** Reads processed pixels from the output track itself; the worker pipeline has no canvas to inspect. */
+  async function sampleProcessed(x, y) {
+    const processor = service.cameraProcessor;
+    const track = processor?.pipeline ? service.getCameraState().stream?.getVideoTracks()[0]?.clone() : null;
+    if (!track) return;
+    const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    try {
+      const { value } = await Promise.race([reader.read(), tick(4000).then(() => ({}))]);
+      if (!value) return;
+      try {
+        const frameCanvas = new OffscreenCanvas(value.displayWidth, value.displayHeight);
+        const context = frameCanvas.getContext('2d', { willReadFrequently: true });
+        context.drawImage(value, 0, 0);
+        lastProcessed = [...context.getImageData(
+          Math.floor(value.displayWidth * x), Math.floor(value.displayHeight * y), 1, 1).data];
+      } finally { value.close(); }
+    } finally {
+      void reader.cancel().catch(() => {});
+      track.stop();
+    }
+  }
   function frameDiagnostics(x, y, video = sampleVideo) {
     const state = service.getCameraState();
     const processor = service.cameraProcessor;
@@ -611,7 +665,7 @@ async function runCameraEffectsSmoke(phase) {
     const presented = video.readyState >= 2 && video.videoWidth && video.videoHeight ? pixel(x, y, video) : null;
     const processed = canvas && processor.context
       ? [...processor.context.getImageData(Math.floor(canvas.width * x), Math.floor(canvas.height * y), 1, 1).data]
-      : null;
+      : processor?.pipeline ? lastProcessed : null;
     return {
       phase, mode: store.snapshot.settings.mode, status: state.status, publishing: state.publishing,
       error: state.error?.code, cause: state.error?.cause?.message, failures: failures.map(error => error.code),
@@ -623,7 +677,8 @@ async function runCameraEffectsSmoke(phase) {
       },
       processor: processor ? {
         active: processor.active, revision: processor.revision, inFlight: processor.inFlightRevision,
-        targetFps: processor.targetFps, width: canvas?.width, height: canvas?.height, processed,
+        pipeline: processor.pipeline, targetFps: processor.targetFps,
+        width: processor.outputWidth, height: processor.outputHeight, processed,
       } : null,
     };
   }
@@ -721,6 +776,7 @@ async function runCameraEffectsSmoke(phase) {
         const resumed = delayPreview ? tick(600).then(() => sampleVideo.play()) : Promise.resolve();
         try {
           if (delayPreview) {
+            await sampleProcessed(0.07, 0.2);
             const observation = frameDiagnostics(0.07, 0.2);
             const processed = observation.processor?.processed;
             check(observation.status === 'ready' && observation.preview.paused
@@ -762,6 +818,70 @@ async function runCameraEffectsSmoke(phase) {
         'Malformed keys fail closed without unprocessed output or a renderer/process crash');
       check(store.snapshot.settings.keyColor === physicalColor && store.snapshot.settings.mode === 'chroma',
         'A failed malformed choice does not overwrite the previous valid privacy settings');
+      return checks;
+    }
+    if (phase === 'stall') {
+      check(typeof window.MediaStreamTrackGenerator === 'function', 'The stall regression needs the worker track pipeline');
+      startWorkerSource(640, 360, 30);
+      captureMode = 'worker';
+      settings.customProfile = { ...settings.customProfile, cameraWidth: 640, cameraHeight: 360, cameraFps: 30 };
+      service.setQualityPreset('CUSTOM');
+      await service.setCameraEffects({ mode: 'chroma', backgroundSource: 'color', limitQuality: false });
+      const stream = await service.startCamera();
+      check(service.cameraProcessor.pipeline, 'Published effects use the worker track pipeline');
+      peerA = new RTCPeerConnection({ iceServers: [] });
+      peerB = new RTCPeerConnection({ iceServers: [] });
+      peerA.onicecandidate = event => { if (event.candidate) void peerB.addIceCandidate(event.candidate); };
+      peerB.onicecandidate = event => { if (event.candidate) void peerA.addIceCandidate(event.candidate); };
+      let remote = null;
+      peerB.ontrack = event => { remote = event.streams[0]; };
+      sender = peerA.addTrack(stream.getVideoTracks()[0], stream);
+      await peerA.setLocalDescription(await peerA.createOffer());
+      await peerB.setRemoteDescription(peerA.localDescription);
+      await peerB.setLocalDescription(await peerB.createAnswer());
+      await peerA.setRemoteDescription(peerB.localDescription);
+      await until(() => remote, 'Loopback peer did not receive the processed camera');
+      const remoteVideo = document.createElement('video');
+      remoteVideo.muted = true;
+      remoteVideo.playsInline = true;
+      document.body.append(remoteVideo);
+      await watch(remote, remoteVideo);
+      await expectVideoPixel(0.9, 0.85, actual => near(actual, [17, 34, 221], 35),
+        'The receiver sees the keyed composite before the stall', remoteVideo);
+      // Decoding runs off the renderer main thread, so the receiver keeps counting during the stall.
+      const decoded = async () => {
+        for (const report of (await peerB.getStats()).values()) {
+          if (report.type === 'inbound-rtp' && report.kind === 'video') return report.framesDecoded ?? 0;
+        }
+        return 0;
+      };
+      const rate = async stall => {
+        const before = await decoded();
+        const started = performance.now();
+        while (performance.now() - started < 3000) {
+          if (stall) {
+            const blocked = performance.now();
+            while (performance.now() - blocked < stall) { /* a long main-thread task */ }
+          }
+          await tick(50);
+        }
+        return (await decoded() - before) * 1000 / (performance.now() - started);
+      };
+      await tick(1000);
+      const idle = await rate(0);
+      const stalled = await rate(300);
+      console.log('CAMERA TEST stall ' + JSON.stringify({ idleFps: idle.toFixed(1), stalledFps: stalled.toFixed(1) }));
+      check(idle >= 10, `The processed camera reaches the receiver steadily before stalls: ${idle.toFixed(1)} FPS`);
+      check(stalled >= Math.max(8, idle * 0.6),
+        `300 ms main-thread stalls must not freeze the processed camera for the receiver: ${stalled.toFixed(1)} of ${idle.toFixed(1)} FPS`);
+      peerA.close();
+      peerB.close();
+      peerA = peerB = sender = null;
+      remoteVideo.srcObject = null;
+      remoteVideo.remove();
+      service.stopCamera();
+      await until(() => workers.size === 0, 'Stall regression worker was not terminated');
+      check(allCapturedTracksStopped(), 'Stall regression releases its capture');
       return checks;
     }
     if (phase === 'missing-model') {
@@ -871,7 +991,7 @@ async function runCameraEffectsSmoke(phase) {
           await until(() => {
             const actual = stream.getVideoTracks()[0].getSettings();
             return sampleVideo.videoWidth === width && sampleVideo.videoHeight === height
-              && processor.canvas.width === width && processor.canvas.height === height
+              && processor.outputWidth === width && processor.outputHeight === height
               && actual.width === width && actual.height === height;
           }, message);
         } catch (error) {
@@ -883,8 +1003,8 @@ async function runCameraEffectsSmoke(phase) {
             requested: { width, height }, input: [source.width, source.height],
             source: dimensions(sourceStream.getVideoTracks()[0]), raw: dimensions(captures[0].getVideoTracks()[0]),
             processorInput: [processor.video?.videoWidth, processor.video?.videoHeight],
-            output: [processor.canvas?.width, processor.canvas?.height], preview: [sampleVideo.videoWidth, sampleVideo.videoHeight],
-            limitQuality: processor.limitQuality,
+            output: [processor.outputWidth, processor.outputHeight], preview: [sampleVideo.videoWidth, sampleVideo.videoHeight],
+            limitQuality: processor.limitQuality, pipeline: processor.pipeline,
           }));
           throw error;
         }
@@ -893,7 +1013,10 @@ async function runCameraEffectsSmoke(phase) {
       };
       check(processor.targetFps === 60 && store.snapshot.settings.limitQuality === false,
         'Real processor follows a 60 FPS profile by default instead of the old 15/24 ceiling');
-      check(!!processor.reader && !processor.video, 'Direct camera capture does not rely on a hidden video compositor');
+      check(!processor.video && (processor.pipeline ? !processor.reader && !processor.canvas : !!processor.reader),
+        'Direct camera capture does not rely on a hidden video compositor');
+      check(processor.pipeline === (typeof window.MediaStreamTrackGenerator === 'function'),
+        'Effects run in the worker track pipeline exactly when the browser provides a track generator');
       check(requests[0].video.width.exact === 1920 && requests[0].video.height.exact === 1080
         && requests[0].video.frameRate.exact === 60, 'Capture requests the selected full-resolution/FPS profile');
       await expectSize(1920, 1080, 'Uncapped genuine output retains the selected 1080p resolution');
@@ -907,7 +1030,7 @@ async function runCameraEffectsSmoke(phase) {
       let receivedFrames = 0;
       const receive = processor.receive;
       processor.receive = function (message) {
-        if (message.type === 'frame') receivedFrames++;
+        if (message.type === 'frame' || message.type === 'presented') receivedFrames++;
         receive.call(this, message);
       };
       try { await tick(1200); } finally {
@@ -1201,29 +1324,77 @@ async function runCameraEffectsSmoke(phase) {
         check(failures.length === 0, 'Rapid initial-load switching produces no false privacy/model failure');
       }
       await transition('chroma');
-      await transition('blur');
-      let capturedSnapshot = false;
-      window.createImageBitmap = async (source, ...options) => {
-        if ((source instanceof HTMLVideoElement || source instanceof VideoFrame) && !capturedSnapshot) {
-          capturedSnapshot = true;
-          await new Promise(resolve => { releaseSnapshot = resolve; });
+      console.log('CAMERA TEST rapid effect switching never presents a raw frame');
+      const rawFrames = [];
+      let presentedFrames = 0;
+      // Every frame written to the output track, independent of throttled hidden-window presentation.
+      const outputCopy = service.getCameraState().stream.getVideoTracks()[0].clone();
+      const outputFrames = new MediaStreamTrackProcessor({ track: outputCopy }).readable.getReader();
+      const inspectOutput = (async () => {
+        const frameCanvas = new OffscreenCanvas(2, 2);
+        const context = frameCanvas.getContext('2d', { willReadFrequently: true });
+        for (;;) {
+          const { value, done } = await outputFrames.read();
+          if (done || !value) return;
+          try {
+            if (frameCanvas.width !== value.displayWidth || frameCanvas.height !== value.displayHeight) {
+              frameCanvas.width = value.displayWidth;
+              frameCanvas.height = value.displayHeight;
+            }
+            context.drawImage(value, 0, 0);
+            presentedFrames++;
+            // The raw green background differs from every replacement used in these switches.
+            const actual = [...context.getImageData(Math.floor(value.displayWidth * 0.9), Math.floor(value.displayHeight * 0.85), 1, 1).data];
+            if (near(actual, [0, 255, 0], 60)) rawFrames.push(actual);
+          } finally { value.close(); }
         }
-        return await original.bitmap.call(window, source, ...options);
-      };
-      await until(() => releaseSnapshot, 'Snapshot race must hold a genuine camera frame');
-      const processor = service.cameraProcessor;
-      const heldRevision = processor.inFlightRevision;
-      const next = service.setCameraEffects({ mode: 'color' });
-      await until(() => processor.active && processor.revision !== heldRevision,
-        'Latest configuration must become ready while the obsolete bitmap remains pending');
-      check(!processedTrack.enabled, 'No old or unprocessed frame escapes during a held snapshot');
-      releaseSnapshot();
-      releaseSnapshot = null;
-      await next;
-      window.createImageBitmap = original.bitmap;
-      await inspectTransition('color');
-      check(processor.inFlightRevision === null || processor.inFlightRevision === processor.revision,
-        'An obsolete snapshot cannot leave the bounded frame slot stuck on an old revision');
+      })();
+      const switches = [];
+      for (const [index, mode] of ['color', 'chroma', 'image', 'chroma', 'color', 'image', 'chroma', 'color', 'chroma', 'image', 'chroma'].entries()) {
+        switches.push(observed(service.setCameraEffects({ mode, backgroundSource: 'color' })));
+        await tick(index % 3 === 0 ? 10 : 120);
+      }
+      const outcomes = await Promise.all(switches);
+      check(outcomes.every(outcome => !outcome.error || outcome.error.name === 'AbortError'),
+        'Rapid effect switching only completes or cancels superseded revisions', () => outcomes.map(o => o.error?.name ?? 'ok'));
+      await watch(service.getCameraState().stream);
+      await expectVideoPixel(0.9, 0.85, actual => near(actual, [17, 34, 221]), 'The last rapid effect owns the processed output');
+      await tick(1000);
+      await outputFrames.cancel();
+      outputCopy.stop();
+      await inspectOutput;
+      check(presentedFrames > 10 && rawFrames.length === 0,
+        'Rapid effect switching never presents an unprocessed camera frame', () => ({ presentedFrames, rawFrames: rawFrames.slice(0, 5) }));
+      check(failures.length === 0, 'Rapid effect switching reports no false failure');
+      previous = 'chroma';
+      await transition('blur');
+      if (!service.cameraProcessor.pipeline) {
+        // The main-thread fallback snapshots camera frames itself; hold one across a reconfiguration.
+        let capturedSnapshot = false;
+        window.createImageBitmap = async (source, ...options) => {
+          if ((source instanceof HTMLVideoElement || source instanceof VideoFrame) && !capturedSnapshot) {
+            capturedSnapshot = true;
+            await new Promise(resolve => { releaseSnapshot = resolve; });
+          }
+          return await original.bitmap.call(window, source, ...options);
+        };
+        await until(() => releaseSnapshot, 'Snapshot race must hold a genuine camera frame');
+        const processor = service.cameraProcessor;
+        const heldRevision = processor.inFlightRevision;
+        const next = service.setCameraEffects({ mode: 'color' });
+        await until(() => processor.active && processor.revision !== heldRevision,
+          'Latest configuration must become ready while the obsolete bitmap remains pending');
+        check(!processedTrack.enabled, 'No old or unprocessed frame escapes during a held snapshot');
+        releaseSnapshot();
+        releaseSnapshot = null;
+        await next;
+        window.createImageBitmap = original.bitmap;
+        await inspectTransition('color');
+        check(processor.inFlightRevision === null || processor.inFlightRevision === processor.revision,
+          'An obsolete snapshot cannot leave the bounded frame slot stuck on an old revision');
+      } else {
+        await transition('color');
+      }
 
       await transition('off');
       await until(() => workers.size === 0, 'Disposal race requires a fresh model context');
@@ -1567,6 +1738,7 @@ async function runCameraEffectsSmoke(phase) {
     await until(() => workers.size === 0, 'Camera worker leaked at fixture cleanup');
     clearInterval(sourceTimer);
     sourceStream.getTracks().forEach(track => track.stop());
+    workerSource?.stop();
     for (const stream of captures) stream.getTracks().forEach(track => track.stop());
     for (const video of videos) {
       video.pause();
