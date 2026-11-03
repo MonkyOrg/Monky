@@ -97,7 +97,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
   } };
   let commandHook = async () => {}, attachHook = async () => {}, current = true, connectionId = 'connection-one';
   let diagnosticsRetired = false;
-  let status = 'CONNECTED', watching = false, quality = 'source', muted = false, deafened = false, volume = 100, announces = 0;
+  let status = 'CONNECTED', watching = false, quality = 'source', muted = false, deafened = false, volume = 100, outputVolume = 100, announces = 0;
   let remote = { shareId: 'remote-screen', instanceId: randomUUID(), video, audio: true };
   class Stream {
     tracks = [];
@@ -233,7 +233,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
       },
     } },
     'stores/settingsStore': { settingsStore: {
-      getScreenAudioVolume: () => volume, screenSharePreviewPauseWhenUnfocused: true,
+      getScreenAudioVolume: () => volume, get outputVolume() { return outputVolume; }, screenSharePreviewPauseWhenUnfocused: true,
       getScreenShareReceiver: () => receiver,
       screenEncodingStrategy: 'automatic', screenEncodingMode: 'hardware', preferredScreenCodec: 'h264',
     } },
@@ -287,7 +287,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     },
     hook: callback => { commandHook = callback; }, attachHook: callback => { attachHook = callback; },
     quality: value => { quality = value; }, watching: value => { attachRemote(); watching = value; },
-    audio: value => { ({ muted = muted, deafened = deafened, volume = volume } = value); },
+    audio: value => { ({ muted = muted, deafened = deafened, volume = volume, outputVolume = outputVolume } = value); },
     otherVisibleContext: () => { visibleContext = { ...context, client: { ...client, sendRequest: async () => assert.fail('Visible server used.') } }; },
     disconnected: () => {
       status = 'RECONNECTING'; connectionId = 'replacement-connection';
@@ -1281,6 +1281,12 @@ test('Watch uses the owned DOM stream and current mute, deafen and per-user volu
   await f.controller.updateAudio();
   assert.deepEqual(f.commands.at(-1), { action: 'watch-audio', callId: command.callId, presentationId: command.presentationId,
     publisherSessionId: 'publisher', shareId: f.remote.shareId, muted: true, volume: 0.4 });
+  f.audio({ deafened: false, volume: 150, outputVolume: 50 });
+  await f.controller.updateAudio();
+  assert.equal(f.commands.at(-1).volume, 0.75, 'The master output level scales the per-user volume.');
+  f.audio({ volume: 200, outputVolume: 200 });
+  await f.controller.updateAudio();
+  assert.equal(f.commands.at(-1).volume, 2, 'The combined level never exceeds the native maximum.');
   f.watching(false); await f.controller.sync();
   assert.equal(f.watches.size, 0);
   assert.equal(f.elements.size, 0);

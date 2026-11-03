@@ -57,7 +57,7 @@ function fixture(t) {
   const exports = {};
   load(exports, name => {
     if (name.endsWith('settingsStore')) return { settingsStore: {
-      getScreenAudioVolume: () => 100, getUserVolume: () => 100, getAudioOutputDeviceId: () => 'default',
+      getScreenAudioVolume: () => 100, getUserVolume: () => 100, getAudioOutputDeviceId: () => 'default', outputVolume: 100,
     } };
     if (name.endsWith('voiceStore')) return { voiceStore: { getEffectiveDeafened: () => false } };
     if (name.endsWith('audioPreferences')) return { normalizeAudioOutputId: value => value };
