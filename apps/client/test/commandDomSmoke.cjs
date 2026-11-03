@@ -1579,13 +1579,29 @@ async function runAutocompleteDomSmoke() {
   key(autocompleteSlider, 'ArrowRight');
   check(invoked.length === beforeAutocompletePreviewInvoke && !!root.querySelector('[data-parameter-option]'),
     'Autocomplete preview volume must keep the result list open without invoking');
+  const panelHeightBeforeEdit = find('#bot-parameter-options').getBoundingClientRect().height;
   type(input(), 'beta');
   check(root.querySelectorAll('[data-parameter-option]').length === 0, 'Editing removes selectable stale results immediately');
+  const staleList = root.querySelector('#bot-parameter-options .bot-choice-list.is-stale');
+  check(!!staleList && staleList.inert && staleList.children.length === 20 &&
+    !staleList.querySelector('[data-audio-preview-action], [role], [id], [tabindex]') &&
+    !!root.querySelector('#bot-parameter-options [data-autocomplete-stale-status] .bot-loading-spinner') &&
+    Math.abs(find('#bot-parameter-options').getBoundingClientRect().height - panelHeightBeforeEdit) < 60,
+  'While the next search waits, the previous results stay as a dimmed, inert picture instead of collapsing the menu');
+  type(input(), 'bet');
+  check(root.querySelectorAll('#bot-parameter-options .bot-choice-list').length === 1 &&
+    root.querySelectorAll('[data-autocomplete-stale-status]').length === 1,
+  'Further typing keeps the same stale picture instead of stacking copies');
+  type(input(), 'beta');
   await waitFor(() => queries.length === 2);
   check(queries[1].time - queries[0].time >= 1000, 'Actual query sends must be spaced independently of debounce');
   response(queries[1], choices);
   await waitFor(() => !!root.querySelector('[data-parameter-option]'));
   check(find('[data-audio-preview-volume]').value === '41', 'Replacing search results keeps the same command volume');
+  check(!root.querySelector('.bot-choice-list.is-stale, [data-autocomplete-stale-status]') &&
+    root.querySelectorAll('[data-parameter-option]').length === 20 &&
+    root.querySelectorAll('#bot-parameter-options .bot-choice-list').length === 1,
+  'New results replace the stale picture instead of being appended to it');
   key(input(), 'ArrowDown');
   key(input(), 'Enter');
   await waitFor(() => invoked.length === 1 && !store.getCommandDraft('one'));

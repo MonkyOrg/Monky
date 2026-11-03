@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Ao digitar a busca de um comando de bot, como o /play, os resultados anteriores ficam esmaecidos na tela até chegarem os novos, em vez de a lista sumir a cada letra.",
+  "en": "While you type a bot command search, such as /play, the previous results stay dimmed on screen until the new ones arrive, instead of the list vanishing on every keystroke."
+}

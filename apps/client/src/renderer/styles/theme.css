@@ -5920,6 +5920,10 @@
   overflow-y: auto;
   padding: 0 8px 8px;
   overscroll-behavior: contain;
+  transition: opacity var(--motion-popover-duration) var(--motion-easing);
+}
+.bot-choice-list.is-stale {
+  opacity: 0.45;
 }
 .bot-autocomplete-status {
   margin: 8px;
