@@ -1148,9 +1148,11 @@ export class BotChatView {
       }
     }
     const previousCount = this.menuChoices.length;
+    // closeParameterMenu clears this, so only results of this same autocomplete session can be kept as stale.
+    const hadResults = this.autocompleteState !== null;
     const continuing = this.autocompleteState?.query === state.query &&
       state.choices.length >= previousCount && this.menuChoices.every((choice, index) => choice === state.choices[index]) &&
-      !!this.composer.querySelector('#bot-parameter-options .bot-choice-list');
+      !!this.composer.querySelector('#bot-parameter-options .bot-choice-list:not(.is-stale)');
     const activeIndex = continuing && previousCount > 0 && this.parameterMenu
       ? this.parameterMenu.activeIndex : state.choices.length ? 0 : -1;
     if (this.autocompleteState?.query !== state.query) this.autocompletePaged = false;
@@ -1172,6 +1174,7 @@ export class BotChatView {
     setSurfaceVisible(menu, true, 'popover');
     const label = t('botChat.parameterChoices', { name: commandParameterLabel(this.localizedCommand(draft.command), fieldName) });
     const volumeScope = commandPreviewVolumeScope(this.server.serverDetails?.id, draft.command.botId, draft.command.name);
+    const stale = hadResults && !continuing && busy && !state.choices.length && !!menu.querySelector('.bot-choice-list');
     if (continuing) {
       const list = menu.querySelector<HTMLElement>('.bot-choice-list');
       if (list && state.choices.length > previousCount) {
@@ -1183,6 +1186,8 @@ export class BotChatView {
       if (choicesHaveAudio(state.choices) && !menu.querySelector('[data-audio-preview-volume-control]')) {
         menu.querySelector('.bot-choice-panel-header')?.insertAdjacentHTML('beforeend', renderAudioPreviewVolume(volumeScope));
       }
+    } else if (stale) {
+      this.keepStaleChoices(menu, message);
     } else {
       // Empty nonterminal pages still need a stable list and continuation control.
       menu.innerHTML = state.choices.length || this.autocompletePaged
@@ -1196,6 +1201,7 @@ export class BotChatView {
     trigger.setAttribute('aria-expanded', 'true');
     trigger.setAttribute('aria-controls', 'bot-parameter-options');
     if (!continuing) trigger.removeAttribute('aria-activedescendant');
+    if (stale) return;
     [...menu.querySelectorAll<HTMLElement>('[data-parameter-option]')].slice(continuing ? previousCount : 0).forEach((option) => {
       // Appending rows can fire mouseenter beneath a stationary pointer.
       option.addEventListener('mousemove', (event) => {
@@ -1203,6 +1209,41 @@ export class BotChatView {
       });
     });
     if (state.choices.length && (!continuing || previousCount === 0)) this.setParameterMenuActive(activeIndex);
+  }
+
+  /**
+   * While the next search waits for its debounce, the previous results stay in place as a dimmed, inert picture, so
+   * the menu does not collapse on every keystroke. Their search was already cancelled, so the copy keeps no option
+   * identity: nothing in it can be chosen, previewed or mistaken for a current result.
+   */
+  private keepStaleChoices(menu: HTMLElement, message: string): void {
+    const panel = menu.querySelector<HTMLElement>('[data-selection-choice-panel]');
+    const list = panel?.querySelector<HTMLElement>('.bot-choice-list');
+    if (!panel || !list) return;
+    if (!list.classList.contains('is-stale')) {
+      list.inert = true;
+      list.classList.add('is-stale');
+      list.removeAttribute('role');
+      list.removeAttribute('aria-label');
+      for (const element of list.querySelectorAll<HTMLElement>('*')) {
+        element.classList.remove('active');
+        for (const { name } of [...element.attributes]) {
+          if (name.startsWith('data-') || name.startsWith('aria-') || ['id', 'role', 'tabindex'].includes(name)) {
+            element.removeAttribute(name);
+          }
+        }
+      }
+    }
+    let status = panel.querySelector<HTMLElement>('[data-autocomplete-stale-status]');
+    if (!status) {
+      status = document.createElement('p');
+      status.className = 'bot-autocomplete-status';
+      status.dataset.autocompleteStaleStatus = '';
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
+      panel.querySelector('.bot-choice-panel-header')?.replaceWith(status);
+    }
+    status.innerHTML = renderLoadingIndicator(message);
   }
 
   private renderAutocompletePagination(menu: HTMLElement, state: AutocompleteState): void {
