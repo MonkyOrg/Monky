@@ -556,6 +556,7 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
           if (task.terminal) this.transport.reportError(error);
           else this.mediaFailed(task, error);
         },
+        onTransportLost: (error) => this.transportLost(task, error),
       });
       void task.receiver.drained.then(() => {
         if (task.terminal) return;
@@ -793,17 +794,19 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
     } else this.terminate(task, error, false);
   }
 
-  private mediaFailed(task: PendingTask, error: Error): void {
+  /** A lost private connection waits for the server's verdict; the receiver is aborted with whichever comes first. */
+  private transportLost(task: PendingTask, error: Error): void {
     if (task.terminal || task.mediaFailureTimer) return;
-    if (!this.transport.isCurrent(task.connection)) { this.disconnectTask(task); return; }
-    if (!task.offer) { this.failTask(task, error); return; }
-    task.mediaFailureTimer = setTimeout(() => this.reportMediaFailure(task), MEDIA_FAILURE_GRACE_MS);
+    task.mediaFailureTimer = setTimeout(() => {
+      task.mediaFailureTimer = undefined;
+      this.mediaFailed(task, error);
+    }, MEDIA_FAILURE_GRACE_MS);
   }
 
-  private reportMediaFailure(task: PendingTask): void {
-    task.mediaFailureTimer = undefined;
-    if (task.terminal || !task.offer) return;
+  private mediaFailed(task: PendingTask, error: Error): void {
+    if (task.terminal) return;
     if (!this.transport.isCurrent(task.connection)) { this.disconnectTask(task); return; }
+    if (!task.offer) { this.failTask(task, error); return; }
     const failure = new LocalExecutionError({ state: 'failed', taskId: task.offer.taskId, reason: 'transport_failed' });
     this.terminate(task, failure, false);
     if (this.transport.isCurrent(task.connection)) {

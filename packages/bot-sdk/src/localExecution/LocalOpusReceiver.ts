@@ -13,6 +13,11 @@ export interface LocalOpusReceiverOptions {
   sendSignal(signal: LocalMediaSignal): void;
   onReady(): void;
   onError(error: Error): void;
+  /**
+   * The connection was lost before playback drained. With this, the owner decides when and with which
+   * error the receiver is aborted (its server may still explain why); without it, the receiver fails at once.
+   */
+  onTransportLost?(error: Error): void;
 }
 
 type MediaCandidate = Extract<LocalMediaSignal['signal'], { signalType: 'candidate' }>['candidate'];
@@ -404,7 +409,9 @@ export class LocalOpusReceiver {
 
   private transportEnded(error: Error): void {
     // After verified EOF/PLAYED, the owner still requires its bounded server completion ACK.
-    if (!this.hasDrained) this.fail(error);
+    if (this.hasDrained || this.closed) return;
+    if (this.options.onTransportLost) this.options.onTransportLost(error);
+    else this.fail(error);
   }
 
   private fail(error: Error): void {

@@ -2399,7 +2399,7 @@ export type CommandLocalizations = {
 
 ## `CommandOption` {#commandoption}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L346)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L344)
 
 ```ts
 export interface CommandOption {
@@ -2465,7 +2465,7 @@ export type CommandValues = {
 
 ## `CommandVoiceRequirement` {#commandvoicerequirement}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L361)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L359)
 
 ```ts
 export type CommandVoiceRequirement = "joined" | "same-bot-channel";
@@ -2911,7 +2911,7 @@ export type SelectionChoice = {
 
 ## `SlashCommand` {#slashcommand}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L364)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L362)
 
 ```ts
 export interface SlashCommand {
