@@ -1323,6 +1323,10 @@ export const en: TranslationMap = {
 
   // ── Main screen (MainView.ts) ────────────────────────────────────────────
   'main.resizeHandle': 'Drag to resize',
+  'main.hideNavigationSidebar': 'Hide servers and channels',
+  'main.showNavigationSidebar': 'Show servers and channels',
+  'main.hideMembersSidebar': 'Hide members',
+  'main.showMembersSidebar': 'Show members',
   'main.serverOptions': 'Server options',
   'main.serverSettingsTitle': 'Server Settings (change/remove password)',
   'main.inviteTitle': 'Invite Friends (copy IP)',
@@ -1684,6 +1688,10 @@ export const en: TranslationMap = {
   'settings.microphoneTestDisconnected': 'Test stopped because the connection state changed. Click to start again.',
   'settings.microphoneTestFailed': 'Could not play the microphone test. Check your microphone and audio output, then try again.',
   'settings.vadHint': 'Speak to watch the level. Set the slider (the line) just above where the level sits in silence. Lower values pick up whispers; higher ones ignore background noise.',
+  'settings.inputVolume': 'Input volume',
+  'settings.inputVolumeHint': 'Gain applied to your microphone before it is sent. 100% keeps the original signal; above that, it amplifies.',
+  'settings.outputVolume': 'Output volume',
+  'settings.outputVolumeHint': 'Overall level of everything you hear in the call, including stream audio. It multiplies each person\'s own volume.',
   'settings.rnnoiseLabel': 'Smart noise suppression (RNNoise)',
   'settings.rnnoiseDesc': 'Uses a neural network to remove background noise such as mechanical keyboards, clicks, bumps and breathing.',
   'settings.outputDevice': 'Output device (speakers / headphones)',

@@ -524,6 +524,198 @@
   display: none;
 }
 
+/* Folded sidebars shrink to nothing; the toggle buttons stay reachable at the edges of the center column. */
+.main-layout > .server-rail,
+.main-layout > .channels-sidebar,
+.main-layout > .members-sidebar {
+  transition: width var(--motion-panel-duration) var(--motion-easing),
+    min-width var(--motion-panel-duration) var(--motion-easing),
+    visibility 0s linear;
+}
+
+.main-layout--navigation-hidden > .server-rail,
+.main-layout--navigation-hidden > .channels-sidebar,
+.main-layout--members-hidden > .members-sidebar {
+  width: 0 !important;
+  min-width: 0 !important;
+  overflow: hidden;
+  border-width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  visibility: hidden;
+  transition-delay: 0s, 0s, var(--motion-panel-duration);
+}
+
+.main-center-column {
+  position: relative;
+}
+
+/* One toggle per sidebar, fixed in the corner of the center column (it folds and unfolds). */
+.sidebar-toggle {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--motion-popover-duration) var(--motion-easing), color var(--motion-popover-duration) var(--motion-easing);
+}
+
+.sidebar-toggle:hover,
+.sidebar-toggle:focus-visible {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary);
+}
+
+.sidebar-toggle--show {
+  position: absolute;
+  top: 12px;
+  z-index: 30;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-color);
+}
+
+/* Folded: the toggle lives in the corner of the center column, and the header makes room for it. */
+.sidebar-toggle.sidebar-toggle--show {
+  display: none;
+}
+
+.sidebar-toggle--show[data-sidebar-toggle="navigation"] {
+  left: 8px;
+}
+
+.sidebar-toggle--show[data-sidebar-toggle="members"] {
+  right: 8px;
+}
+
+.main-layout--navigation-hidden .sidebar-toggle--show[data-sidebar-toggle="navigation"],
+.main-layout--members-hidden .sidebar-toggle--show[data-sidebar-toggle="members"] {
+  display: grid;
+}
+
+.main-layout--search-open .sidebar-toggle--show[data-sidebar-toggle="members"],
+.main-layout--voice-chat-open .sidebar-toggle--show[data-sidebar-toggle="members"] {
+  display: none;
+}
+
+.main-layout--navigation-hidden .main-center-column .content-header {
+  padding-left: 48px;
+}
+
+.main-layout--members-hidden:not(.main-layout--search-open):not(.main-layout--voice-chat-open) .main-center-column .content-header {
+  padding-right: 48px;
+}
+
+/* The search field sits in the same corner as the members toggle. */
+.main-layout--members-hidden:not(.main-layout--search-open):not(.main-layout--voice-chat-open) .server-tools {
+  right: 52px;
+}
+
+/* Open: a strip along the sidebar divider reveals the tab; it adds nothing to the layout. */
+.channels-sidebar,
+.members-sidebar {
+  position: relative;
+}
+
+.sidebar-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  z-index: 21;
+}
+
+/* The channels resizer straddles this divider, so the strip stays clear of it. */
+.sidebar-edge--end {
+  right: 3px;
+}
+
+.sidebar-edge--start {
+  left: 0;
+}
+
+/* Folded: the strip moves to the edge of the center column, short so it never blocks a scrollbar. */
+.sidebar-edge--folded {
+  display: none;
+  top: 50%;
+  bottom: auto;
+  height: 96px;
+  margin-top: -48px;
+  width: 14px;
+}
+
+.main-layout--navigation-hidden .sidebar-edge--folded-navigation,
+.main-layout--members-hidden:not(.main-layout--search-open):not(.main-layout--voice-chat-open) .sidebar-edge--folded-members {
+  display: block;
+}
+
+.sidebar-edge--folded-navigation {
+  left: 0;
+}
+
+.sidebar-edge--folded-members {
+  right: 0;
+}
+
+.sidebar-edge--folded-navigation .sidebar-toggle--tab {
+  left: 4px;
+}
+
+.sidebar-edge--folded-members .sidebar-toggle--tab {
+  right: 4px;
+}
+
+/* A round handle centered on the divider. */
+.sidebar-toggle--tab {
+  position: absolute;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  margin-top: -12px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--bg-active);
+  color: var(--text-secondary, var(--text-muted));
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.7);
+  transition: opacity var(--motion-popover-duration) var(--motion-easing), transform var(--motion-popover-duration) var(--motion-easing), background var(--motion-popover-duration) var(--motion-easing), color var(--motion-popover-duration) var(--motion-easing);
+}
+
+.sidebar-edge--end .sidebar-toggle--tab {
+  right: -15px;
+}
+
+.sidebar-edge--start .sidebar-toggle--tab {
+  left: -12px;
+}
+
+.sidebar-toggle--tab:hover,
+.sidebar-toggle--tab:focus-visible {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--text-on-accent, #fff);
+}
+.sidebar-edge:hover .sidebar-toggle--tab,
+.sidebar-edge:focus-within .sidebar-toggle--tab,
+.channels-sidebar:has(.channels-resizer:hover, .channels-resizer.is-resizing) .sidebar-toggle--tab {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-toggle--tab {
+    transition: none;
+  }
+}
+
 .main-layout--voice-chat-open > .members-sidebar {
   display: none;
 }

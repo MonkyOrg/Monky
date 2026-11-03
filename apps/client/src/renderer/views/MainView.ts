@@ -1,6 +1,7 @@
 import { MessageType, Permission, ProtocolErrorCode, type ChannelDeletedPayload, type MessageSearchResultPayload, type ServerSettingsUpdatedPayload } from '@monky/shared';
 import { categoryModal } from './CategoryModal';
-import { html } from '../utils/html';
+import { html, type SafeHtml } from '../utils/html';
+import { settingsStore } from '../stores/settingsStore';
 import { animateEnter, cancelSurfaceMotion, hideWithMotion, showWithMotion } from '../utils/surfaceMotion';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { appEvents } from '../core/EventBus';
@@ -165,7 +166,7 @@ export class MainView {
     this.navigationKey = activeSessionKey;
 
     const markup = String(html`
-      <div class="main-layout">
+      <div class="main-layout${settingsStore.navigationSidebarHidden ? ' main-layout--navigation-hidden' : ''}${settingsStore.membersSidebarHidden ? ' main-layout--members-hidden' : ''}">
         <!-- Server Rail: saved servers + home (#29) -->
         <div class="server-rail" id="server-rail"></div>
 
@@ -180,10 +181,15 @@ export class MainView {
           </div>
 
           ${this.footer.markup({ nickname: user.nickname, avatarUrl: user.avatarUrl, server: server.name })}
+          ${this.sidebarEdgeTab('navigation')}
         </div>
 
         <!-- Center: Chat Feed or Voice Stage -->
         <div class="main-center-column">
+          ${this.sidebarToggleButton('navigation')}
+          ${this.sidebarToggleButton('members')}
+          ${this.sidebarEdgeTab('navigation', true)}
+          ${this.sidebarEdgeTab('members', true)}
           <div id="server-tools" class="server-tools" ${this.activeContentView === 'stage' ? 'hidden' : ''}></div>
           <div id="main-center-stage" class="main-content-area"></div>
         </div>
@@ -195,6 +201,7 @@ export class MainView {
             <span id="members-count-label">${t('main.membersCount', { count: 0 })}</span>
           </div>
           <div id="members-list-items" class="members-list"></div>
+          ${this.sidebarEdgeTab('members')}
         </div>
       </div>
     `);
@@ -412,7 +419,7 @@ export class MainView {
     this.unbindEvents = [];
     this.unbindEvents.push(this.footer.bind());
     this.attachChannelListMenu();
-    this.unbindEvents.push(this.header.bind(), this.channels.bind(), this.notices.bind());
+    this.unbindEvents.push(this.header.bind(), this.channels.bind(), this.notices.bind(), this.bindSidebarToggles());
 
     let lastLocalMuted = voiceStore.isMuted;
     let lastLocalDeafened = voiceStore.isDeafened;
@@ -515,6 +522,66 @@ export class MainView {
         }
       }),
     );
+  }
+
+  /** One fixed button per sidebar in the corner of the center column: it folds the sidebar and, once folded, brings it back (see theme.css). */
+  private sidebarToggleState(sidebar: 'navigation' | 'members', hidden: boolean): { label: string; icon: string } {
+    const nav = sidebar === 'navigation';
+    const key = nav ? 'NavigationSidebar' : 'MembersSidebar';
+    return {
+      label: `${t(hidden ? `main.show${key}` : `main.hide${key}`)} (${nav ? 'Ctrl+Alt+←' : 'Ctrl+Alt+→'})`,
+      icon: `${nav ? 'left' : 'right'}_panel_${hidden ? 'open' : 'close'}`,
+    };
+  }
+
+  private sidebarToggleButton(sidebar: 'navigation' | 'members'): SafeHtml {
+    const { label, icon } = this.sidebarToggleState(
+      sidebar, sidebar === 'navigation' ? settingsStore.navigationSidebarHidden : settingsStore.membersSidebarHidden);
+    return html`<button type="button" class="sidebar-toggle sidebar-toggle--show" data-sidebar-toggle="${sidebar}" aria-label="${label}" title="${label}"><span class="material-symbols-outlined md-18" aria-hidden="true">${icon}</span></button>`;
+  }
+
+  /** Open: the toggle is a handle that appears when the pointer (or focus) reaches the divider. Folded: the same handle appears at the edge of the center column. */
+  private sidebarEdgeTab(sidebar: 'navigation' | 'members', folded = false): SafeHtml {
+    const nav = sidebar === 'navigation';
+    const { label } = this.sidebarToggleState(
+      sidebar, nav ? settingsStore.navigationSidebarHidden : settingsStore.membersSidebarHidden);
+    const icon = nav === folded ? 'chevron_right' : 'chevron_left';
+    const placement = folded ? `sidebar-edge--folded sidebar-edge--folded-${sidebar}` : `sidebar-edge--${nav ? 'end' : 'start'}`;
+    return html`<div class="sidebar-edge ${placement}"><button type="button" class="sidebar-toggle sidebar-toggle--tab" data-sidebar-toggle="${sidebar}" aria-label="${label}" title="${label}"><span class="material-symbols-outlined md-18" aria-hidden="true">${icon}</span></button></div>`;
+  }
+
+  /** Folding is a layout preference, so it is saved and applied by classes: a re-render of the layout reads it again. */
+  private bindSidebarToggles(): () => void {
+    const toggle = (sidebar: 'navigation' | 'members'): void => {
+      const hidden = !(sidebar === 'navigation' ? settingsStore.navigationSidebarHidden : settingsStore.membersSidebarHidden);
+      settingsStore.setSidebarHidden(sidebar, hidden);
+      this.container.querySelector('.main-layout')?.classList.toggle(`main-layout--${sidebar}-hidden`, hidden);
+      const { label, icon } = this.sidebarToggleState(sidebar, hidden);
+      this.container.querySelectorAll<HTMLElement>(`[data-sidebar-toggle="${sidebar}"]`).forEach((button) => {
+        button.setAttribute('aria-label', label);
+        button.setAttribute('title', label);
+        const glyph = button.classList.contains('sidebar-toggle--show') ? button.querySelector('.material-symbols-outlined') : null;
+        if (glyph) glyph.textContent = icon;
+      });
+    };
+    const onClick = (event: MouseEvent): void => {
+      const sidebar = event.target instanceof Element
+        ? event.target.closest<HTMLElement>('[data-sidebar-toggle]')?.dataset.sidebarToggle
+        : undefined;
+      if (sidebar === 'navigation' || sidebar === 'members') toggle(sidebar);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (!event.ctrlKey || !event.altKey || event.shiftKey || event.metaKey || event.defaultPrevented) return;
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      toggle(event.key === 'ArrowLeft' ? 'navigation' : 'members');
+    };
+    this.container.addEventListener('click', onClick);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      this.container.removeEventListener('click', onClick);
+      document.removeEventListener('keydown', onKeyDown);
+    };
   }
 
   private unbindListeners(): void {
