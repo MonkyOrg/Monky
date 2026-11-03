@@ -397,11 +397,11 @@ export const LIMITS = {
     // it too: PM2 spawns the server with the daemon's Node, which can be older
     // than the one the operator installed (#522).
     MIN_NODE_MAJOR: 22,
-    // Default UDP media port range for SFU (Selective Forwarding Unit) (#515)
+    // SFU (Selective Forwarding Unit) media port range (#515). Every transport
+    // shares its first port, UDP and TCP, so only that one is ever bound (#824).
     SFU_DEFAULT_MIN_PORT: 40000,
-    // Stops one below the coturn relay range (49152-65535). The two allocate UDP
-    // ports independently, so an overlap would let them race for the same port
-    // and fail intermittently once both are enabled.
+    // Stops one below the coturn relay range (49152-65535), which must never
+    // contain the SFU port: the two would race for it once both are enabled.
     SFU_DEFAULT_MAX_PORT: 49151,
     // coturn's listening port and relay range. They live here, and not only in
     // CoturnManager, so the SFU can check its own range against them without
@@ -1005,7 +1005,7 @@ export enum ProtocolErrorCode {
      */
     TURN_UNAVAILABLE = 'TURN_UNAVAILABLE',
     /**
-     * The SFU cannot carry media on this host — typically a UDP range that is
+     * The SFU cannot carry media on this host — typically a media port that is
      * blocked or already taken. Same intent as TURN_UNAVAILABLE: the switch is
      * refused with an actionable reason instead of being accepted and silently
      * degrading to P2P (#515).

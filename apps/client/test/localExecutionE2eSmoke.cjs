@@ -4,6 +4,7 @@ const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
 const dns = require('node:dns');
+const net = require('node:net');
 const { createHash, generateKeyPairSync } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
@@ -181,6 +182,12 @@ function startActor(config, rows) {
   });
   return {
     ready, call, child,
+    /** Ends only this test's own actor process, after it failed to confirm its cleanup. */
+    async terminate() {
+      if (exited) return;
+      child.kill();
+      await closed;
+    },
     async stop() {
       if (confirmed) { await closed; return; }
       if (exited) throw new Error(`${config.role} exited without confirmed native cleanup.\n${output}`);
@@ -359,19 +366,25 @@ async function assertTaskTrace(rows, taskId, frames, startIndex) {
   assert.ok(taskRows.some(row => row.role === 'executor' && row.event === 'ipc.played.end' &&
     row.playedFrames === frames && row.at >= nativeClosed.at && row.status !== 'failed'),
   'The real Main EOF lease must accept the final PLAYED after native/cache closure.');
-  const prepared = rows.findLast(row => row.role === 'executor' && row.event === 'ipc.prepare.end' &&
-    row.status === 'prepared' && row.at <= created.at);
+  const prepared = rows.slice(0, rows.indexOf(created)).findLast(row => row.role === 'executor' &&
+    row.event === 'ipc.prepare.end' && row.status === 'prepared');
   const opened = taskRows.find(row => row.role === 'executor' && row.event === 'private.open');
   const started = taskRows.find(row => row.role === 'executor' && row.event === 'native.start' &&
     row.operation === 'youtube.stream');
+  // Each Chromium process has its own clock source, so timestamps from Main and the renderer are not comparable
+  // to the millisecond; arrival order here follows causality. The actor's createRuntime itself refuses a native
+  // start before the private channel is open, so that order is enforced where it happens.
+  const position = row => rows.indexOf(row);
+  const order = { prepared: position(prepared), created: position(created), opened: position(opened), started: position(started) };
   assert.ok(prepared && created && opened && started &&
-    prepared.at <= created.at && created.at <= opened.at && opened.at <= started.at);
+    order.prepared < order.created && order.created < order.opened,
+  `Preparation, private connection and native startup must all happen, in order: ${JSON.stringify(order)}`);
   const firstRead = taskRows.find(row => row.role === 'executor' && row.event === 'ipc.read.begin');
-  assert.ok(firstRead && wire[ready].at <= firstRead.at, 'Native reads must wait for authoritative ready.');
+  assert.ok(firstRead && rows.indexOf(wire[ready]) < rows.indexOf(firstRead), 'Native reads must wait for authoritative ready.');
 }
 
 for (const mode of ['p2p', 'sfu']) {
-  test(`${musicBotRoot ? 'production MonkyBot commands and mixed requester queue' : 'real protocol20 local executor -> private RTC -> SDK bot voice'} -> decoded renderer PCM (${mode.toUpperCase()})`, {
+  test(`${musicBotRoot ? 'production MonkyBot commands and mixed requester queue' : `real protocol${PROTOCOL_VERSION} local executor -> private RTC -> SDK bot voice`} -> decoded renderer PCM (${mode.toUpperCase()})`, {
     timeout: 180_000, concurrency: false,
   }, t => runMediaSmoke(t, mode));
 }
@@ -380,7 +393,6 @@ async function runMediaSmoke(t, mode) {
   assert.ok(ffmpeg && path.isAbsolute(ffmpeg),
     'Set MONKY_WORKER_TEST_FFMPEG to an existing explicit fixture FFmpeg; this smoke never installs tools.');
   assert.ok((await fs.stat(ffmpeg)).isFile());
-  assert.equal(PROTOCOL_VERSION, 20);
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `monky-local-execution-e2e-${mode}-`));
   const oldHome = process.env.MONKY_HOME;
   process.env.MONKY_HOME = path.join(root, 'monky-home');
@@ -396,14 +408,20 @@ async function runMediaSmoke(t, mode) {
   const lookup = dns.lookup;
   const promiseLookup = dns.promises.lookup;
   const localDnsNames = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+  // An IP literal resolves without any query (WebRTC candidates on the runner's own interfaces).
+  const offline = hostname => localDnsNames.has(hostname) || net.isIP(hostname) !== 0;
+  // The refused name and its caller make a failure on another host diagnosable.
+  const refusedDns = hostname => Object.assign(new Error(`External DNS disabled by isolated E2E: ${hostname}\n`
+    + new Error().stack.split('\n').slice(3, 10).join('\n')), { code: 'ENOTFOUND' });
   dns.lookup = (hostname, options, callback) => {
-    if (localDnsNames.has(hostname)) return lookup(hostname, options, callback);
+    if (offline(hostname)) return lookup(hostname, options, callback);
     const done = typeof options === 'function' ? options : callback;
-    queueMicrotask(() => done(Object.assign(new Error('External DNS disabled by isolated E2E.'), { code: 'ENOTFOUND' })));
+    const error = refusedDns(hostname);
+    queueMicrotask(() => done(error));
   };
   dns.promises.lookup = async (hostname, ...options) => {
-    if (localDnsNames.has(hostname)) return promiseLookup(hostname, ...options);
-    throw Object.assign(new Error('External DNS disabled by isolated E2E.'), { code: 'ENOTFOUND' });
+    if (offline(hostname)) return promiseLookup(hostname, ...options);
+    throw refusedDns(hostname);
   };
   t.after(async () => {
     if (!successful) t.diagnostic(JSON.stringify({
@@ -429,7 +447,12 @@ async function runMediaSmoke(t, mode) {
     if (disposeMusic) try { await disposeMusic(); } catch (error) { clean = false; failures.push(error); }
     if (bot) try { await bot.close(); } catch (error) { clean = false; failures.push(error); }
     for (const actor of actors) {
-      try { await actor.stop(); } catch (error) { clean = false; failures.push(error); }
+      try { await actor.stop(); } catch (error) {
+        clean = false;
+        failures.push(error);
+        // The test still fails, but an unconfirmed actor never outlives it.
+        await actor.terminate();
+      }
     }
     if (server) try { await server.stop(); } catch (error) { clean = false; failures.push(error); }
     if (vite) try { await vite.close(); } catch (error) { clean = false; failures.push(error); }
@@ -440,7 +463,13 @@ async function runMediaSmoke(t, mode) {
     else process.env.MONKY_HOME = oldHome;
     if (clean) await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     else t.diagnostic(`Unconfirmed cleanup: preserving the exact isolated fixture directory ${root}`);
-    if (failures.length) throw new AggregateError(failures, 'E2E cleanup failed.');
+    if (failures.length) {
+      for (const failure of failures) {
+        t.diagnostic(`Cleanup failure: ${failure?.stack ?? failure}`);
+        for (const inner of failure?.errors ?? []) t.diagnostic(`  caused by: ${inner?.stack ?? inner}`);
+      }
+      throw new AggregateError(failures, 'E2E cleanup failed.');
+    }
   });
   if (mode === 'sfu') {
     sfu = await configureRealSfu(t, path.join(repoRoot, 'apps', 'server', 'dist', 'infrastructure', 'sfu', 'SfuManager.js'));

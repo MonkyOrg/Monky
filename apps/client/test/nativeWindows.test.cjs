@@ -42,13 +42,13 @@ function fixture(module = moduleFor()) {
 
 /** The real picker catalog (ipc/desktopSourcesIpc.ts) over `sources`, with Electron and the native capture modeled. */
 function desktopEnumerator(sources, { previewError, platform = 'win32', chromiumSources = [],
-  isScreenShareSource = () => false } = {}) {
-  const calls = [], warnings = [], logs = [], captures = [];
+  isScreenShareSource = () => false, windowOwners = () => [], fileIcon = () => ({ isEmpty: () => true }) } = {}) {
+  const calls = [], warnings = [], logs = [], captures = [], iconPaths = [];
   const { DesktopSourceCatalog } = loadMain('ipc/desktopSourcesIpc', {
     packages: {
       electron: {
         // Windows reads executable icons natively; none exist in this model.
-        app: { getFileIcon: async () => ({ isEmpty: () => true }) },
+        app: { getFileIcon: async filename => { iconPaths.push(filename); return fileIcon(filename); } },
         desktopCapturer: {
           async getSources(options) {
             calls.push(options);
@@ -69,7 +69,8 @@ function desktopEnumerator(sources, { previewError, platform = 'win32', chromium
         loadThumbnailRuntime: () => ({}),
         createMacScreenProvider: () => ({
           listSources: async () => chromiumSources.map(({ id, name }) => ({
-            id, name, type: id.startsWith('window:') ? 'window' : 'screen', thumbnailDataUrl: '', thumbnailState: 'pending',
+            id, name, type: id.startsWith('window:') ? 'window' : 'screen', thumbnailDataUrl: '', appIconDataUrl: null,
+            thumbnailState: 'pending',
           })),
           thumbnail: async id => {
             captures.push(id);
@@ -77,7 +78,7 @@ function desktopEnumerator(sources, { previewError, platform = 'win32', chromium
           },
         }),
       },
-      '@monky/screen-audio': {},
+      '@monky/screen-audio': { listWindowOwners: windowOwners },
     },
     local: { i18n: { mt: key => key }, nativeWindows: moduleFor() },
     globals: { process: { platform, pid: 999 }, console: { ...console, warn: (...args) => warnings.push(args) } },
@@ -85,7 +86,7 @@ function desktopEnumerator(sources, { previewError, platform = 'win32', chromium
   const catalog = new DesktopSourceCatalog({
     nativeSources: sources, isExcluded: isScreenShareSource, logger: { write: entry => logs.push(entry) },
   });
-  return { enumerate: (...args) => catalog.enumerate(...args), calls, warnings, logs, captures };
+  return { enumerate: (...args) => catalog.enumerate(...args), calls, warnings, logs, captures, iconPaths };
 }
 
 test('Windows lists screens and windows and captures native previews without consulting Chromium', async () => {
@@ -173,6 +174,43 @@ for (const platform of ['darwin', 'linux']) {
     }
   });
 }
+
+test('macOS native picker windows show the icon of the app bundle that owns them (#455, #825)', async () => {
+  const hash = 'a'.repeat(64);
+  const chromiumSources = [`window:41:${hash}`, `window:42:${hash}`, `window:43:${hash}`, `native-monitor:${hash}`]
+    .map(id => ({ id, name: 'Window' }));
+  const e = desktopEnumerator(fixture().sources, {
+    platform: 'darwin', chromiumSources,
+    windowOwners: () => [
+      { windowId: 41, pid: 7, bundlePath: '/Applications/Safari.app', appName: 'Safari' },
+      { windowId: 42, pid: 7, bundlePath: '/Applications/Safari.app', appName: 'Safari' },
+      { windowId: 43, pid: 8, bundlePath: '/Applications/Empty.app', appName: 'Empty' },
+    ],
+    fileIcon: filename => filename === '/Applications/Safari.app'
+      ? { isEmpty: () => false, toDataURL: () => 'data:image/png;base64,safari' } : { isEmpty: () => true },
+  });
+  const metadata = await e.enumerate(true);
+  assert.ok(metadata.every(source => source.appIconDataUrl === null), 'Metadata alone reads no bundle from disk');
+  assert.deepEqual(e.iconPaths, []);
+  const previews = await e.enumerate(false);
+  assert.deepEqual(previews.map(source => source.appIconDataUrl),
+    ['data:image/png;base64,safari', 'data:image/png;base64,safari', null, null]);
+  assert.deepEqual(e.iconPaths, ['/Applications/Safari.app', '/Applications/Empty.app'],
+    'Each bundle icon is read once, and monitors have no owner to look up');
+  await e.enumerate(false);
+  assert.equal(e.iconPaths.length, 2, 'Bundle icons stay cached between picker openings');
+});
+
+test('macOS native picker still lists windows when their owners cannot be read', async () => {
+  const e = desktopEnumerator(fixture().sources, {
+    platform: 'darwin', chromiumSources: [{ id: `window:41:${'b'.repeat(64)}`, name: 'Window' }],
+    windowOwners: () => { throw new Error('modeled native load failure'); },
+  });
+  const [source] = await e.enumerate(false);
+  assert.equal(source.appIconDataUrl, null);
+  assert.equal(source.thumbnailState, 'ready');
+  assert.equal(e.warnings.length, 1);
+});
 
 test('native identity enumeration failure cannot masquerade as an empty successful Screens tab', async () => {
   const f = fixture(), e = desktopEnumerator(f.sources);

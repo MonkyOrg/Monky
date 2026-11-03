@@ -239,7 +239,8 @@ server. When the relay is enabled:
 
 1. Monky generates a random **shared secret** and persists it in the database
 2. On boot, it detects the VPS **public IP** (via ipify.org) and the **local
-   IP** of the NIC
+   IP** of the interface the default route uses (Docker bridges and VPN
+   tunnels do not count)
 3. Generates `turnserver.conf` with the `external-ip=PUBLIC/PRIVATE` directive —
    without this, on NAT-based VPS (Oracle, AWS, etc.), coturn advertises the
    private IP and relay candidates become unreachable
@@ -248,3 +249,23 @@ server. When the relay is enabled:
 6. At each client login, generates **ephemeral credentials** (TURN REST API)
    valid for 12 hours
 7. The client's WebRTC tries the direct route and only uses the relay if needed
+
+### What the relay refuses
+
+The relay only forwards **UDP** (`no-tcp-relay`) and only towards the public
+internet: loopback, private networks (10/8, 172.16/12, 192.168/16), carrier-grade
+NAT (100.64/10, Tailscale's range) and the other reserved ranges are denied.
+That keeps anyone with credentials from using the relay to reach services of
+your internal network.
+
+**Exception behind NAT.** When the server is behind NAT (the
+`external-ip=PUBLIC/PRIVATE` mapping above), Monky also writes
+`allowed-peer-ip=PRIVATE`. When both members of a call need the relay, media
+goes client → TURN → TURN → client, and coturn sees that second leg at the
+host's private address; without the exception those calls do not connect.
+The side effect: the relay can deliver UDP to **any service of the host itself**
+that listens on that private address (or on all addresses, `0.0.0.0`). TCP stays
+closed, and the rest of the internal network stays denied. If the host runs a
+UDP service that should not be reachable by members, bind it to `127.0.0.1` or
+block it in the firewall. A host with the public IP on its own interface gets
+no mapping and no exception.

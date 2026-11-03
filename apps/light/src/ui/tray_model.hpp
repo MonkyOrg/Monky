@@ -125,7 +125,7 @@ class TrayModel final {
     }
     if (name == "session-error" || name == "fatal-error" || name == "transport-error" ||
         name == "command-error") {
-      alert_ = detail(event);
+      alert_ = serverKeyAlert(event).value_or(detail(event));
       return true;
     }
     return false;
@@ -193,6 +193,16 @@ class TrayModel final {
   std::string detail(const Json& event) const {
     auto result = stringAt(event, "detail");
     return result.empty() ? std::string(text_.disconnected) : result;
+  }
+
+  // A sign-in the core refused over the server's identity key, explained in the interface language (#821).
+  std::optional<std::string> serverKeyAlert(const Json& event) const {
+    const auto code = stringAt(event, "code");
+    if (code == "SERVER_KEY_CHANGED") return std::string(text_.serverKeyChanged);
+    if (code == "SERVER_KEY_MISSING") return std::string(text_.serverKeyMissing);
+    if (code == "SERVER_KEY_OF_OTHER_SERVER") return std::string(text_.serverKeyOfOtherServer);
+    if (code == "SERVER_KEY_INVALID") return std::string(text_.serverKeyInvalid);
+    return std::nullopt;
   }
 
   bool relink(Link link) {

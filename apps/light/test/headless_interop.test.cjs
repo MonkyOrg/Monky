@@ -2,9 +2,10 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { once } = require('node:events');
+const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
-const { MessageType, Permission, ProtocolErrorCode, rtcSignalSchema } = require('@monky/shared');
+const { MessageType, Permission, ProtocolErrorCode, createServerInviteLink, rtcSignalSchema } = require('@monky/shared');
 const { NativeClient } = require('./native_client.cjs');
 const { nativeExecutable } = require('./native_test_paths.cjs');
 const { createServerFixture } = require('./server_fixture.cjs');
@@ -52,7 +53,17 @@ test('native app supports Unicode password/profile, idle heartbeat and stable id
   await first.close();
   await admin.peer.wait(message => message.type === MessageType.USER_LEFT && message.payload.userId === auth.userId,
     0, 1000);
-  const second = new NativeClient(fixture, options);
+  // The first protected sign-in pinned the server's key in the profile; the next one is bound to it (#821).
+  const pins = JSON.parse(fs.readFileSync(path.join(options.profile, 'monky-light-servers.json'), 'utf8'));
+  assert.equal(pins.format, 'monky-light-servers');
+  const serverKey = pins.servers[fixture.url];
+  assert.match(serverKey ?? '', /^302a300506032b6570032100[0-9a-f]{64}$/);
+  // An invitation link stands for the address, and its password is used when none is set (#821).
+  const { port } = new URL(fixture.url);
+  const second = new NativeClient(fixture, {
+    ...options, password: undefined,
+    server: createServerInviteLink({ v: 1, host: '127.0.0.1', port: Number(port), password, serverKey }),
+  });
   const again = await second.wait('authenticated');
   assert.equal(again.userId, auth.userId);
   assert.equal(again.sessionId, auth.sessionId);
@@ -748,7 +759,9 @@ test('a microphone the native SFU call cannot receive, or that the server refuse
   await charlie.close();
 });
 
-test('a native SFU call recovers from transport drops in a row, each recovery starting over', { timeout: 60_000 }, async t => {
+// The SFU shares one media port (#824): closing a transport no longer closes a socket, so the client
+// learns of it from unanswered ICE checks rather than at once; slow runners take close to 30 s.
+test('a native SFU call recovers from transport drops in a row, each recovery starting over', { timeout: 180_000 }, async t => {
   const fixture = await createServerFixture(t, { voiceMode: 'sfu' });
   const alice = new NativeClient(fixture, { nickname: 'Light Alice' });
   const bob = new NativeClient(fixture, { nickname: 'Light Bob' });
@@ -762,10 +775,10 @@ test('a native SFU call recovers from transport drops in a row, each recovery st
     const since = alice.events.length;
     // The server loses the call's receiving transport, as on a network change.
     fixture.server.sfuManager.closeTransportsFor(auth.sessionId, channelId, 'recv');
-    const retry = await alice.wait(event => event.event === 'media-reconnecting', since, 30_000);
+    const retry = await alice.wait(event => event.event === 'media-reconnecting', since, 60_000);
     // Each drop after a recovery is a first attempt again, not the next step down.
     assert.equal(retry.detail, 'Retrying SFU transport in 1 seconds', `Drop ${drop} continued an earlier recovery`);
-    await alice.wait(event => event.event === 'media-connected', since, 30_000);
+    await alice.wait(event => event.event === 'media-connected', since, 60_000);
     await alice.decodedFrom(bobAuth.sessionId);
   }
   assert.equal((await alice.state()).phase, 'admitted');
@@ -827,8 +840,8 @@ test('broadcasts the native core never reads stay out of its queue, and one that
   await light.close();
 });
 
-test('a native core whose events nobody reads leaves the call and logs out', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
-  // macOS ends the process with SIGPIPE before any of this can run (D7).
+test('a native core whose events nobody reads leaves the call and logs out', { timeout: 30_000 }, async t => {
+  // Outside Windows the lost stdout raises SIGPIPE, which must not end the process first (#825).
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');
   const light = new NativeClient(fixture, { nickname: 'Unread Light' });
@@ -845,6 +858,29 @@ test('a native core whose events nobody reads leaves the call and logs out', { s
     false, 'The core dropped its connection instead of logging out');
   assert.deepEqual(await light.closed, { code: 1, signal: null });
 });
+
+test('closing the Terminal, which hangs up the native core, logs out instead of leaving a ghost (#825)',
+  { skip: process.platform === 'win32', timeout: 30_000 }, async t => {
+    const fixture = await createServerFixture(t);
+    const admin = await fixture.connectHuman('Fixture admin');
+    for (const tray of [false, true]) {
+      const light = new NativeClient(fixture, { nickname: tray ? 'Hung up tray' : 'Hung up Light', tray });
+      const auth = await light.wait('authenticated');
+      await light.join(auth.channels.find(channel => channel.type === 'VOICE').id);
+      const since = admin.peer.messages.length;
+      light.child.kill('SIGHUP');
+      await admin.peer.wait(message => message.type === MessageType.USER_LEFT && message.payload.userId === auth.userId,
+        since, 10_000);
+      assert.equal(admin.peer.messages.slice(since).some(message => message.type === MessageType.USER_CONNECTION_STATE),
+        false, 'The core dropped its connection instead of logging out');
+      assert.deepEqual(await light.closed, { code: 0, signal: null }, 'SIGHUP ended the process before main');
+      assert.ok(light.events.some(event => event.event === 'stopped'));
+      if (tray) {
+        assert.ok(light.events.some(event => event.event === 'fixture-interface-stopped'),
+          'The interface never heard that the core stopped, so the tray icon would stay behind');
+      }
+    }
+  });
 
 test('closing the native console logs out at once and ends the process through main, also under an interface',
   { skip: process.platform !== 'win32', timeout: 45_000 }, async t => {

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "O app agora entra em servidores atrás de proxy reverso com TLS: digite o endereço com o prefixo wss e a porta do proxy, ou use um convite com TLS. Avatares, anexos e ícones desse servidor também vêm criptografados.",
+  "en": "The app can now join servers behind a TLS reverse proxy: type the address with the wss prefix and the proxy's port, or use a TLS invitation. That server's avatars, attachments and icons also arrive encrypted."
+}

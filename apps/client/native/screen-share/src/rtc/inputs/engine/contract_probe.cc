@@ -25,6 +25,10 @@
 #if defined(_WIN32)
 #include "adapter_policy_probe.h"
 #endif
+#if defined(__APPLE__)
+#include "mac_cpu_upload_checks.h"
+#include "mac_decoder_diagnostic_checks.h"
+#endif
 #ifdef GetObject
 #undef GetObject
 #endif
@@ -285,6 +289,10 @@ int main() {
     group("surfaceRecycler", [] { monky::screen_video::RunSurfaceRecyclerChecks(Check); });
 #if defined(_WIN32)
     group("adapterPolicies", [] { monky::native_rtc::VerifyDeviceFreeAdapterPolicies(Check); });
+#endif
+#if defined(__APPLE__)
+    group("macCpuUpload", [] { monky::native_rtc::mac::RunCpuUploadChecks(Check); });
+    group("macDecoderDiagnostics", [] { monky::native_rtc::mac::RunDecoderDiagnosticChecks(Check); });
 #endif
     group("binaryLayout", [] {
       Check(MONKY_ENGINE_ABI_VERSION == 2 && MONKY_ENGINE_CONTRACT_REVISION == 8,

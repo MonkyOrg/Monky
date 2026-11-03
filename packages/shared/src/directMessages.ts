@@ -32,6 +32,7 @@ export const DM_IPC = {
   unblock: 'dm:unblock',
   sendMessage: 'dm:send',
   editMessage: 'dm:edit',
+  resendMessage: 'dm:resend',
   deleteMessage: 'dm:delete',
   react: 'dm:react',
   markRead: 'dm:mark-read',
@@ -296,6 +297,7 @@ export interface DmInvokeChannels {
   'dm:unblock': { args: [peer: string]; returnType: DmResult<DmDispatch> };
   'dm:send': { args: [input: DmSendMessageInput]; returnType: DmResult<DmDispatch> };
   'dm:edit': { args: [peer: string, messageId: string, content: string]; returnType: DmResult<DmDispatch> };
+  'dm:resend': { args: [peer: string, messageId: string]; returnType: DmResult<DmDispatch> };
   'dm:delete': { args: [peer: string, messageId: string]; returnType: DmResult<DmDispatch> };
   'dm:react': { args: [peer: string, messageId: string, emoji: string, add: boolean]; returnType: DmResult<DmDispatch> };
   'dm:mark-read': { args: [peer: string]; returnType: DmResult<DmDispatch> };
@@ -331,6 +333,7 @@ export interface DmApi {
   unblock: IpcInvoker<'dm:unblock'>;
   sendMessage: IpcInvoker<'dm:send'>;
   editMessage: IpcInvoker<'dm:edit'>;
+  resendMessage: IpcInvoker<'dm:resend'>;
   deleteMessage: IpcInvoker<'dm:delete'>;
   react: IpcInvoker<'dm:react'>;
   markRead: IpcInvoker<'dm:mark-read'>;

@@ -28,6 +28,10 @@ test('native profile identity preserves device IDs and refuses inconsistent stat
   run('monky-light-profile-test', [buildDirectory]);
 });
 
+test('native invitation links decode like the shared parser', () => {
+  run('monky-light-invite-test', []);
+});
+
 test('native application loop waits for events and enforces deadlines and queue bounds', () => {
   run('monky-light-loop-test', []);
 });

@@ -76,6 +76,8 @@ export class DmFiles {
   private readonly stallTimers = new Map<string, { timer: NodeJS.Timeout | null; retries: number }>();
   /** File requests answered lately, by envelope id, oldest first (see {@link repeatedRequest}). */
   private readonly answeredRequests = new Map<string, number>();
+  /** Which own message holds each file asked for lately (null: none), so every window does not search the history. */
+  private readonly ownedLookups = new Map<string, { messageId: string | null; at: number }>();
 
   constructor(
     private readonly ledger: DmLedger,
@@ -186,12 +188,7 @@ export class DmFiles {
     const fileId = data.fileId;
     const offset = data.offset;
     if (!isDmId(fileId) || typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0) return [];
-    let owned: StoredAttachment | undefined;
-    for (const message of this.ledger.conversation(record.publicKey).messages) {
-      if (message.author !== this.ledger.me || message.deleted) continue;
-      owned = message.attachments.find((file) => file.fileId === fileId);
-      if (owned) break;
-    }
+    const owned = this.ownedAttachment(record.publicKey, fileId);
     const content = owned ? this.servedFile(fileId, owned.size) : null;
     if (content === 'busy') return [this.outbox.envelopeItem(record, 'file-wait', { fileId })];
     if (!content) {
@@ -440,6 +437,35 @@ export class DmFiles {
     if (items.length > 0) this.ledger.emit({ type: 'dispatch', dispatch: { everywhere: { [peer]: items } } });
   }
 
+  /** The file as a message of this identity to `peer` holds it; the newest months are searched first. */
+  private ownedAttachment(peer: string, fileId: string): StoredAttachment | null {
+    const now = this.ledger.now();
+    const key = `${peer}:${fileId}`;
+    const known = this.ownedLookups.get(key);
+    if (known && now - known.at < FILE_CACHE_TTL_MS) {
+      if (known.messageId === null) return null;
+      const message = this.ledger.findMessage(peer, known.messageId);
+      const file = message && !message.deleted ? message.attachments.find((entry) => entry.fileId === fileId) : undefined;
+      if (file) return file;
+    }
+    let found: { messageId: string; file: StoredAttachment } | null = null;
+    for (const message of this.ledger.history.newestFirst(peer)) {
+      if (message.author !== this.ledger.me || message.deleted) continue;
+      const file = message.attachments.find((entry) => entry.fileId === fileId);
+      if (file) {
+        found = { messageId: message.id, file };
+        break;
+      }
+    }
+    for (const [seen, entry] of this.ownedLookups) {
+      if (now - entry.at < FILE_CACHE_TTL_MS && this.ownedLookups.size < MAX_REMEMBERED_REQUESTS) break;
+      this.ownedLookups.delete(seen);
+    }
+    this.ownedLookups.delete(key);
+    this.ownedLookups.set(key, { messageId: found?.messageId ?? null, at: now });
+    return found?.file ?? null;
+  }
+
   private attachmentRef(peer: string, messageId: string, fileId: string): { message: StoredMessage; file: StoredAttachment } | null {
     const message = this.ledger.findMessage(peer, messageId);
     const file = message?.attachments.find((entry) => entry.fileId === fileId);
@@ -462,13 +488,13 @@ export class DmFiles {
       live.savedAt = now;
       live.shownAt = now;
       live.shownBytes = total;
-      this.ledger.saveConversation(download.peer);
+      this.ledger.saveConversation(download.peer, [ref.message]);
       this.ledger.emitMessages(download.peer, [ref.message]);
       return;
     }
     if (now - live.savedAt >= PROGRESS_SAVE_MS) {
       live.savedAt = now;
-      this.ledger.saveConversation(download.peer);
+      this.ledger.saveConversation(download.peer, [ref.message]);
     }
     if (now - live.shownAt >= PROGRESS_EVENT_MS || total - live.shownBytes >= download.size / 100) {
       live.shownAt = now;
@@ -510,7 +536,7 @@ export class DmFiles {
     if (ref) {
       ref.file.state = state;
       ref.file.receivedBytes = state === 'ready' ? ref.file.size : 0;
-      this.ledger.saveConversation(download.peer);
+      this.ledger.saveConversation(download.peer, [ref.message]);
       this.ledger.emitMessages(download.peer, [ref.message]);
     }
     this.ledger.saveState();
@@ -530,6 +556,7 @@ export class DmFiles {
     if (ref.file.state !== 'failed' && ref.file.state !== 'unavailable' && ref.file.state !== 'too-large') return false;
     if (ref.file.size > this.ledger.state.settings.maxFileBytes) {
       ref.file.state = 'too-large';
+      this.ledger.saveConversation(peer, [ref.message]);
       this.ledger.emitMessages(peer, [ref.message]);
       return false;
     }
@@ -544,7 +571,7 @@ export class DmFiles {
     });
     ref.file.state = 'pending';
     ref.file.receivedBytes = 0;
-    this.ledger.changed(peer);
+    this.ledger.changed(peer, [ref.message]);
     this.ledger.emitMessages(peer, [ref.message]);
     return true;
   }

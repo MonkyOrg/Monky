@@ -64,6 +64,12 @@ adiante. `--channel` aceita o ID de um canal de voz;
 exigir senha, forneça `MONKY_LIGHT_PASSWORD` no ambiente do processo, não na
 linha de comando. Ela não é salva no perfil.
 
+`--server` também aceita um link de convite do Monky (`https://monkyorg.github.io/Monky/convite/#~…`
+ou `monky://#~…`), lido como o app desktop o lê: o Light entra no endereço do
+convite, usa a senha do convite quando `MONKY_LIGHT_PASSWORD` não está definida
+e, se o convite trouxer a chave de identidade do servidor, espera essa chave.
+É assim que o Light volta a entrar num servidor cuja chave mudou (veja abaixo).
+
 A saída contém eventos JSON, incluindo `authenticated` com o nome do servidor
 e a lista de canais, e `channels-changed` quando essa lista muda.
 Digite um objeto JSON por linha no terminal, usando o ID recebido:
@@ -225,6 +231,22 @@ substituído de forma atômica sob o lock do perfil. Configurações inválidas 
 ilegíveis geram `warning`, usam os padrões e são substituídas no próximo
 salvamento; uma gravação interrompida das configurações não exige recuperação.
 
+`monky-light-servers.json` guarda a chave de identidade de cada servidor (por
+endereço `--server`), fixada no primeiro login protegido. A assinatura do login
+fica vinculada a essa chave, e o Light se recusa a entrar, sem tentar de novo,
+num servidor que apresente outra chave, nenhuma chave depois de já ter
+apresentado uma, ou a chave fixada para outro endereço do perfil (veja
+[a assinatura vale para um servidor só](https://monkyorg.github.io/Monky/arquitetura.html#a-assinatura-vale-para-um-servidor-so)).
+Um arquivo de chaves ilegível nunca é recriado: ele exige recuperação explícita,
+para não reabrir a confiança do primeiro contato em silêncio.
+
+Como no app desktop, só um convite troca uma chave fixada: passar em `--server`
+um convite novo que traga a chave nova faz o Light aceitá-la e fixá-la no lugar
+da antiga. Um convite que traga a chave fixada para **outro** endereço do perfil
+é recusado, como no desktop, porque um servidor pode estar repassando o login
+daquele. O Light não tem "Adicionar endereço": um mesmo servidor alcançado por
+dois endereços precisa de um perfil para cada um.
+
 `IdentityStore` requer um diretório de perfil absoluto e já existente. Mantém um
 lock exclusivo durante sua vida e armazena uma seed Ed25519 de 32 bytes com
 DPAPI por usuário no Windows ou Keychain no macOS. Os métodos devem ser chamados
@@ -327,8 +349,8 @@ SFU vale o mesmo para um microfone que não pode ser recebido: o consumer criado
 no servidor é encerrado e a chamada continua. Se o servidor recusar o microfone,
 a chamada segue só recebendo até a próxima mudança de política. A recuperação dos
 transportes SFU volta ao início sempre que a chamada se restabelece.
-O áudio de tela não é confundido com microfone, e áudio de outra sessão do mesmo
-usuário não é reproduzido.
+Telas e o áudio delas nunca passam pela conexão da chamada, e áudio de outra
+sessão do mesmo usuário não é reproduzido.
 
 Ofertas do cliente completo podem conter vídeo mesmo quando o Light só quer voz.
 O SDK fixado exige capacidades de vídeo não vazias durante essa negociação:

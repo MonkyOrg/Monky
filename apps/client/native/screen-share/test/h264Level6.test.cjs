@@ -21,7 +21,7 @@ test('the maintained WebRTC Level6 overlay differs from its pinned upstream only
       '// This is from ITU-T H.264 (02/2016) Table A-1 \u2013 Level limits.')
     .replace('    {4177920, 139264, H264Level::kLevel6},\n', '')
     .replace('    case H264Level::kLevel6:\n', '')), pins.files[1].sha256);
-  const build = fs.readFileSync(path.join(root, 'scripts', 'buildRtc.cjs'), 'utf8');
+  const build = fs.readFileSync(path.join(root, 'scripts', 'rtcBuildCommon.cjs'), 'utf8');
   assert.match(build, /level6-upstream\.json/u);
   assert.match(build, /digest\(fs\.readFileSync\(path\.join\(sdk, \.\.\.file\.path\.split\('\/'\)\)\)\), file\.sha256/u);
   assert.match(build, /const overlayHash = digest\(JSON\.stringify\(overlayFiles\)/u);

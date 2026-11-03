@@ -5,7 +5,8 @@ import { SqliteServerRepository } from '../../infrastructure/database/SqliteRepo
 import { ANSI, color, DEFAULT_SERVER_NAME, SERVER_DB_NAME } from '../constants';
 import { formatBotCompatibilityWarnings, printBotCompatibility, printBotCompatibilityWarning, waitForLocalServerPreview } from '../botCompatibility';
 import { GlobalArgs, readLocalConfig, withContext } from '../context';
-import { describeTurnPortProblem, describeTurnUnavailability, formatBool, formatProcessStatus, parseOption, parsePort, parsePositiveInt, pad } from '../formatters';
+import { describeTurnPortProblem, describeTurnUnavailability, formatBool, formatProcessStatus, formatSfuMediaPort, parseOption, parsePort, parsePositiveInt, pad } from '../formatters';
+import { expectedSfuMediaPort } from '../../infrastructure/sfu/sfuPortRecord';
 import {
   ensurePm2,
   deletePm2Process,
@@ -514,6 +515,9 @@ async function printTurnStatusAsync(dataDir: string): Promise<void> {
     await withContext(dataDir, async (ctx) => {
       const server = await ctx.serverRepo.getLifecycleSettings();
       if (!server) return;
+      if (server.voiceMode === 'sfu') {
+        console.log(`${t('label.sfuMediaPort')}: ${formatSfuMediaPort(expectedSfuMediaPort(dataDir))}`);
+      }
       const turnEnabled = Boolean(server.turnEnabled);
       console.log();
       console.log(color(t('lifecycle.turnTitle'), ANSI.bold));
@@ -565,6 +569,8 @@ function formatUptime(startedAtMs: number): string {
  */
 interface TurnCache {
   enabled: boolean | null;
+  /** In SFU mode, the media port to open in the firewall; null otherwise or before the first read. */
+  sfuMediaPort: number | null;
   coturnOk: boolean;
   coturnProblem: string | null;
   portProblem: string | null;
@@ -583,7 +589,8 @@ const DASHBOARD_TURN_REFRESH = { settingsMs: 30_000, probeMs: 60_000 };
  * checked every `probeMs`, or as soon as TURN gets enabled.
  */
 export class DashboardTurnStatus {
-  public readonly state: TurnCache = { enabled: null, coturnOk: false, coturnProblem: null, portProblem: null };
+  public readonly state: TurnCache = { enabled: null, sfuMediaPort: null, coturnOk: false, coturnProblem: null, portProblem: null };
+  private sfuMode = false;
   /** Modification time of the database read last; undefined before the first read. */
   private databaseMtimeMs: number | null | undefined;
   private settingsReadAt = -Infinity;
@@ -598,12 +605,15 @@ export class DashboardTurnStatus {
       try {
         const server = await withContext(this.dataDir, async (ctx) => ctx.serverRepo.getLifecycleSettings(), false, { readOnly: true });
         this.state.enabled = server ? Boolean(server.turnEnabled) : null;
+        this.sfuMode = server?.voiceMode === 'sfu';
         this.databaseMtimeMs = databaseMtimeMs;
         this.settingsReadAt = now;
       } catch {
         // Unreadable right now: keep the last state and try again on the next redraw.
       }
     }
+    // A tiny file the server rewrites when it binds another port: cheap to read every redraw.
+    this.state.sfuMediaPort = this.sfuMode ? expectedSfuMediaPort(this.dataDir) : null;
     if (!this.state.enabled) return;
     if (wasEnabled === true && now - this.probedAt < DASHBOARD_TURN_REFRESH.probeMs) return;
     this.probedAt = now;
@@ -671,6 +681,7 @@ function renderDashboard(
   push(`    ${t('config.askName')}: ${server.name || 'Monky Server'}`);
   push(`    ${t('label.status')}: ${statusLabel(status)}`);
   push(`    ${t('config.askPort')}: ${port}`);
+  if (turnCache.sfuMediaPort !== null) push(`    ${t('label.sfuMediaPort')}: ${formatSfuMediaPort(turnCache.sfuMediaPort)}`);
   push(`    ${t('label.dataDir')}: ${server.dataDir}`);
   push(`    ${t('label.pm2Process')}: ${getPm2ProcessName(server.dataDir)}`);
   for (const warning of botWarnings) push(`    ${warning}`);

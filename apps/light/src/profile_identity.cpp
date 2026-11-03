@@ -9,11 +9,14 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <new>
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <system_error>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -45,6 +48,12 @@ constexpr char kSettingsPendingFile[] = "monky-light-settings.json.pending";
 constexpr char kSettingsFormat[] = "monky-light-settings";
 constexpr std::size_t kMaxSettingsBytes = 16 * 1024;
 constexpr std::size_t kMaxDeviceIdBytes = 1024;
+// server-key-auth (#821): the identity key pinned for each server this profile signed in to.
+constexpr char kServerKeysFile[] = "monky-light-servers.json";
+constexpr char kServerKeysPendingFile[] = "monky-light-servers.json.pending";
+constexpr char kServerKeysFormat[] = "monky-light-servers";
+constexpr std::size_t kMaxServerKeysBytes = 256 * 1024;
+constexpr std::size_t kMaxServerUrlBytes = 2048;
 
 [[noreturn]] void requireRecovery(const char* reason) {
   throw std::runtime_error(std::string(reason) + "; explicit profile recovery is required");
@@ -62,7 +71,8 @@ void inspectProfile(const fs::path& profile) {
   for (const auto& entry : fs::directory_iterator(profile)) {
     const auto name = entry.path().filename();
     bool owned = name == ".identity.lock" || name == kMetadataFile || name == kPendingFile ||
-                 name == kSettingsFile || name == kSettingsPendingFile;
+                 name == kSettingsFile || name == kSettingsPendingFile ||
+                 name == kServerKeysFile || name == kServerKeysPendingFile;
 #ifdef _WIN32
     owned = owned || name == "identity.dpapi" || name == "identity.dpapi.pending";
 #endif
@@ -206,59 +216,59 @@ class PendingMetadata final {
   File file_;
 };
 
-std::optional<std::string> readSettings(const fs::path& profile) {
-  File file(CreateFileW((profile / kSettingsFile).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+std::optional<std::string> readProfileFile(const fs::path& profile, const char* name, std::size_t maxBytes) {
+  File file(CreateFileW((profile / name).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
   if (file.get() == INVALID_HANDLE_VALUE) {
     const DWORD error = GetLastError();
     if (error == ERROR_FILE_NOT_FOUND) return std::nullopt;
-    failIo("Open profile settings", error);
+    failIo("Open profile file", error);
   }
   BY_HANDLE_FILE_INFORMATION info{};
-  if (!GetFileInformationByHandle(file.get(), &info)) failIo("Inspect profile settings file");
+  if (!GetFileInformationByHandle(file.get(), &info)) failIo("Inspect profile file file");
   if ((info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
       info.nNumberOfLinks != 1 || GetFileType(file.get()) != FILE_TYPE_DISK) {
-    throw std::runtime_error("Profile settings must be an ordinary file with a single hard link");
+    throw std::runtime_error("Profile file must be an ordinary file with a single hard link");
   }
   LARGE_INTEGER length{};
-  if (!GetFileSizeEx(file.get(), &length)) failIo("Read profile settings size");
-  if (length.QuadPart <= 0 || length.QuadPart > kMaxSettingsBytes) {
-    throw std::runtime_error("Profile settings size is invalid");
+  if (!GetFileSizeEx(file.get(), &length)) failIo("Read profile file size");
+  if (length.QuadPart <= 0 || length.QuadPart > static_cast<LONGLONG>(maxBytes)) {
+    throw std::runtime_error("Profile file size is invalid");
   }
   std::string contents(static_cast<std::size_t>(length.QuadPart), '\0');
   DWORD bytes = 0;
   if (!ReadFile(file.get(), contents.data(), static_cast<DWORD>(contents.size()), &bytes, nullptr)) {
-    failIo("Read profile settings");
+    failIo("Read profile file");
   }
-  if (bytes != contents.size()) throw std::runtime_error("Profile settings were truncated");
+  if (bytes != contents.size()) throw std::runtime_error("Profile file were truncated");
   file.close();
   return contents;
 }
 
-void writeSettings(const fs::path& profile, const std::string& contents) {
-  const auto pending = profile / kSettingsPendingFile;
+void writeProfileFile(const fs::path& profile, const char* name, const char* pendingName, const std::string& contents) {
+  const auto pending = profile / pendingName;
   // A leftover marker holds no identity state; DeleteFileW removes links, not targets.
   if (!DeleteFileW(pending.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) {
-    failIo("Remove interrupted profile settings write");
+    failIo("Remove interrupted profile file write");
   }
   File file(CreateFileW(pending.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-  if (file.get() == INVALID_HANDLE_VALUE) failIo("Create profile settings write");
+  if (file.get() == INVALID_HANDLE_VALUE) failIo("Create profile file write");
   DWORD bytes = 0;
   if (!WriteFile(file.get(), contents.data(), static_cast<DWORD>(contents.size()), &bytes, nullptr) ||
       bytes != contents.size() || !FlushFileBuffers(file.get())) {
-    failIo("Write profile settings");
+    failIo("Write profile file");
   }
-  const auto name = (profile / kSettingsFile).native();
-  const auto nameBytes = static_cast<DWORD>(name.size() * sizeof(wchar_t));
+  const auto destination = (profile / name).native();
+  const auto nameBytes = static_cast<DWORD>(destination.size() * sizeof(wchar_t));
   const auto bufferBytes = static_cast<DWORD>(sizeof(FILE_RENAME_INFO) + nameBytes);
   const auto buffer = std::make_unique<std::byte[]>(bufferBytes);
   auto* rename = new (buffer.get()) FILE_RENAME_INFO{};
   rename->ReplaceIfExists = TRUE;
   rename->FileNameLength = nameBytes;
-  std::memcpy(rename->FileName, name.data(), nameBytes);
+  std::memcpy(rename->FileName, destination.data(), nameBytes);
   if (!SetFileInformationByHandle(file.get(), FileRenameInfo, rename, bufferBytes)) {
-    failIo("Publish profile settings");
+    failIo("Publish profile file");
   }
   file.close();
 }
@@ -382,21 +392,21 @@ class PendingMetadata final {
   File file_;
 };
 
-std::optional<std::string> readSettings(const fs::path& profile) {
+std::optional<std::string> readProfileFile(const fs::path& profile, const char* name, std::size_t maxBytes) {
   File directory(open(profile.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-  if (directory.get() == -1) failIo("Open profile settings directory");
-  File file(openat(directory.get(), kSettingsFile, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+  if (directory.get() == -1) failIo("Open profile file directory");
+  File file(openat(directory.get(), name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
   if (file.get() == -1) {
     if (errno == ENOENT) return std::nullopt;
-    failIo("Open profile settings");
+    failIo("Open profile file");
   }
   struct stat info{};
-  if (fstat(file.get(), &info) == -1) failIo("Inspect profile settings file");
+  if (fstat(file.get(), &info) == -1) failIo("Inspect profile file file");
   if (!S_ISREG(info.st_mode) || info.st_nlink != 1) {
-    throw std::runtime_error("Profile settings must be an ordinary file with a single hard link");
+    throw std::runtime_error("Profile file must be an ordinary file with a single hard link");
   }
-  if (info.st_size <= 0 || static_cast<std::uintmax_t>(info.st_size) > kMaxSettingsBytes) {
-    throw std::runtime_error("Profile settings size is invalid");
+  if (info.st_size <= 0 || static_cast<std::uintmax_t>(info.st_size) > maxBytes) {
+    throw std::runtime_error("Profile file size is invalid");
   }
   std::string contents(static_cast<std::size_t>(info.st_size), '\0');
   std::size_t offset = 0;
@@ -404,9 +414,9 @@ std::optional<std::string> readSettings(const fs::path& profile) {
     const auto count = read(file.get(), contents.data() + offset, contents.size() - offset);
     if (count == -1) {
       if (errno == EINTR) continue;
-      failIo("Read profile settings");
+      failIo("Read profile file");
     }
-    if (count == 0) throw std::runtime_error("Profile settings were truncated");
+    if (count == 0) throw std::runtime_error("Profile file were truncated");
     offset += static_cast<std::size_t>(count);
   }
   file.close();
@@ -414,31 +424,31 @@ std::optional<std::string> readSettings(const fs::path& profile) {
   return contents;
 }
 
-void writeSettings(const fs::path& profile, const std::string& contents) {
+void writeProfileFile(const fs::path& profile, const char* name, const char* pendingName, const std::string& contents) {
   File directory(open(profile.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-  if (directory.get() == -1) failIo("Open profile settings directory");
+  if (directory.get() == -1) failIo("Open profile file directory");
   // A leftover marker holds no identity state; unlinkat removes links, not targets.
-  if (unlinkat(directory.get(), kSettingsPendingFile, 0) == -1 && errno != ENOENT) {
-    failIo("Remove interrupted profile settings write");
+  if (unlinkat(directory.get(), pendingName, 0) == -1 && errno != ENOENT) {
+    failIo("Remove interrupted profile file write");
   }
-  File file(openat(directory.get(), kSettingsPendingFile,
+  File file(openat(directory.get(), pendingName,
                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
-  if (file.get() == -1) failIo("Create profile settings write");
+  if (file.get() == -1) failIo("Create profile file write");
   std::size_t offset = 0;
   while (offset < contents.size()) {
     const auto count = write(file.get(), contents.data() + offset, contents.size() - offset);
     if (count == -1) {
       if (errno == EINTR) continue;
-      failIo("Write profile settings");
+      failIo("Write profile file");
     }
-    if (count == 0) throw std::runtime_error("Profile settings write was incomplete");
+    if (count == 0) throw std::runtime_error("Profile file write was incomplete");
     offset += static_cast<std::size_t>(count);
   }
-  if (fsync(file.get()) == -1) failIo("Flush profile settings");
-  if (renameat(directory.get(), kSettingsPendingFile, directory.get(), kSettingsFile) == -1) {
-    failIo("Publish profile settings");
+  if (fsync(file.get()) == -1) failIo("Flush profile file");
+  if (renameat(directory.get(), pendingName, directory.get(), name) == -1) {
+    failIo("Publish profile file");
   }
-  if (fsync(directory.get()) == -1) failIo("Flush profile settings directory");
+  if (fsync(directory.get()) == -1) failIo("Flush profile file directory");
   file.close();
   directory.close();
 }
@@ -564,6 +574,49 @@ std::string encodeSettings(const ProfileSettings& settings) {
   return result;
 }
 
+using ServerKeys = std::map<std::string, std::string>;
+
+// Pins are never reset by a damaged file: an unreadable one stops the profile from signing in,
+// so the first-contact trust it recorded cannot be silently replaced.
+ServerKeys parseServerKeys(const std::string& contents) {
+  Json data;
+  try {
+    data = Json::parse(contents);
+  } catch (const Json::exception&) {
+    requireRecovery("Profile server keys are malformed JSON");
+  }
+  if (!data.is_object() || data.value("format", "") != kServerKeysFormat || !data.contains("version") ||
+      !data["version"].is_number_integer() || data["version"] != 1 || !data.contains("servers") ||
+      !data["servers"].is_object()) {
+    requireRecovery("Profile server keys have an unsupported format or version");
+  }
+  ServerKeys result;
+  const auto& servers = data["servers"];
+  for (auto entry = servers.begin(); entry != servers.end(); ++entry) {
+    const auto& server = entry.key();
+    const auto& key = entry.value();
+    if (server.empty() || server.size() > kMaxServerUrlBytes || !key.is_string() ||
+        !isServerKeyHex(key.get_ref<const std::string&>())) {
+      requireRecovery("Profile server keys contain an invalid entry");
+    }
+    result.emplace(server, key.get<std::string>());
+  }
+  return result;
+}
+
+std::string encodeServerKeys(const ServerKeys& keys) {
+  Json servers = Json::object();
+  for (const auto& [server, key] : keys) servers[server] = key;
+  std::string result;
+  try {
+    result = Json{{"format", kServerKeysFormat}, {"version", 1}, {"servers", std::move(servers)}}.dump(2) + "\n";
+  } catch (const Json::exception&) {
+    throw std::invalid_argument("Server address must be valid UTF-8");
+  }
+  if (result.size() > kMaxServerKeysBytes) throw std::invalid_argument("Profile server keys exceed their size limit");
+  return result;
+}
+
 }  // namespace
 
 struct ProfileIdentity::Impl final {
@@ -618,12 +671,12 @@ const std::string& ProfileIdentity::deviceId() const noexcept {
 }
 
 ProfileSettings ProfileIdentity::loadSettings() const {
-  const auto contents = readSettings(impl_->profile);
+  const auto contents = readProfileFile(impl_->profile, kSettingsFile, kMaxSettingsBytes);
   return contents ? parseSettings(*contents) : ProfileSettings{};
 }
 
 void ProfileIdentity::saveSettings(const ProfileSettings& settings) const {
-  writeSettings(impl_->profile, encodeSettings(settings));
+  writeProfileFile(impl_->profile, kSettingsFile, kSettingsPendingFile, encodeSettings(settings));
 }
 
 std::string ProfileIdentity::signChallenge(std::string_view nonceHex) const {
@@ -632,6 +685,41 @@ std::string ProfileIdentity::signChallenge(std::string_view nonceHex) const {
 
 std::string ProfileIdentity::signChallenge(const std::array<std::uint8_t, 32>& nonce) const {
   return impl_->key->signChallenge(nonce);
+}
+
+std::string ProfileIdentity::signServerChallenge(const std::array<std::uint8_t, 32>& nonce,
+                                                 std::string_view serverKeyHex) const {
+  return impl_->key->signServerChallenge(nonce, serverKeyHex);
+}
+
+std::optional<std::string> ProfileIdentity::serverKey(const std::string& server) const {
+  const auto contents = readProfileFile(impl_->profile, kServerKeysFile, kMaxServerKeysBytes);
+  if (!contents) return std::nullopt;
+  const auto keys = parseServerKeys(*contents);
+  const auto found = keys.find(server);
+  return found == keys.end() ? std::nullopt : std::optional<std::string>(found->second);
+}
+
+std::vector<std::string> ProfileIdentity::serverKeysExcept(const std::string& server) const {
+  const auto contents = readProfileFile(impl_->profile, kServerKeysFile, kMaxServerKeysBytes);
+  std::vector<std::string> result;
+  if (!contents) return result;
+  for (const auto& [other, key] : parseServerKeys(*contents)) {
+    if (other != server) result.push_back(key);
+  }
+  return result;
+}
+
+void ProfileIdentity::pinServerKey(const std::string& server, const std::string& key) const {
+  if (server.empty() || server.size() > kMaxServerUrlBytes || !isServerKeyHex(key)) {
+    throw std::invalid_argument("Server key pins need a server address and a lowercase Ed25519 SPKI key");
+  }
+  const auto contents = readProfileFile(impl_->profile, kServerKeysFile, kMaxServerKeysBytes);
+  auto keys = contents ? parseServerKeys(*contents) : ServerKeys{};
+  const auto found = keys.find(server);
+  if (found != keys.end() && found->second == key) return;
+  keys[server] = key;
+  writeProfileFile(impl_->profile, kServerKeysFile, kServerKeysPendingFile, encodeServerKeys(keys));
 }
 
 }  // namespace monky::light

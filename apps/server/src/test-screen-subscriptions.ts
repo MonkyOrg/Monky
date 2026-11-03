@@ -5,7 +5,7 @@ import WebSocket from 'ws';
 import type { types as SfuTypes } from 'mediasoup';
 import { MessageType, ProtocolErrorCode, SCREEN_SHARE_LIMITS, nativeScreenSignalSchema,
   screenViewersRequestSchema, screenViewersResultSchema,
-  type RtcTransportPurpose, type ScreenWatchSignalPayload, type VoiceParticipantState,
+  type RtcTransportPurpose, type VoiceParticipantState,
   type ServerMessage, type VoiceStateChangedPayload } from '@monky/shared';
 import { SignalingService } from './application/services/SignalingService';
 import type { ChannelRecord } from './domain/entities';
@@ -16,6 +16,18 @@ function gate() {
   let release = () => {};
   const promise = new Promise<void>(resolve => { release = resolve; });
   return { promise, release };
+}
+
+// Every screen is a native source (#830): the fixture's shares carry fixed instances.
+const SCREEN_VIDEO = { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 };
+const SOURCE_IDS = { one: '5b0c7f43-7c7e-4b2f-9c0e-2d6f1f0b9a11', two: '9e3d2a6b-1f4c-4d8e-8a7b-6c5d4e3f2a10' } as const;
+const PIPELINE_ID = '3c2b1a09-8f7e-4d6c-9b5a-4e3d2c1b0a99';
+type FixtureShare = keyof typeof SOURCE_IDS;
+function rendition(shareId: FixtureShare, pipelineId: string = PIPELINE_ID) {
+  return { sourceInstanceId: SOURCE_IDS[shareId], pipelineId, video: SCREEN_VIDEO };
+}
+function publicSource(shareId: FixtureShare, audio = false) {
+  return { shareId, instanceId: SOURCE_IDS[shareId], audio, video: SCREEN_VIDEO };
 }
 
 function sfuFixture() {
@@ -29,9 +41,9 @@ function sfuFixture() {
   const router: Partial<SfuTypes.Router> = { canConsume: () => true };
   manager['getOrCreateRouter'] = async () => router as SfuTypes.Router;
   for (const [producerId, kind, appData] of [
-    ['video-one', 'video', { mediaType: 'screen_video', shareId: 'one' }],
-    ['video-two', 'video', { mediaType: 'screen_video', shareId: 'two' }],
-    ['system-audio', 'audio', { mediaType: 'screen_audio', shareId: 'default' }],
+    ['video-one', 'video', { mediaType: 'screen_video', shareId: 'one', nativeScreen: rendition('one') }],
+    ['video-two', 'video', { mediaType: 'screen_video', shareId: 'two', nativeScreen: rendition('two') }],
+    ['system-audio', 'audio', { mediaType: 'screen_audio', shareId: 'one', nativeScreen: rendition('one') }],
     ['mic', 'audio', { mediaType: 'mic' }],
     ['camera', 'video', { mediaType: 'camera' }],
   ] as const) {
@@ -132,7 +144,8 @@ function transportCreationFixture(manager = new SfuManager()) {
     await beforeRouter();
     return router as SfuTypes.Router;
   };
-  manager['getListenInfos'] = () => [{ protocol: 'udp', ip: '127.0.0.1' }];
+  const webRtcServer: Partial<SfuTypes.WebRtcServer> = { closed: false };
+  manager['webRtcServer'] = webRtcServer as SfuTypes.WebRtcServer;
   return {
     manager, created,
     delayRouter: (callback: () => Promise<void>) => { beforeRouter = callback; },
@@ -257,13 +270,13 @@ for (const purpose of ['call', 'screen'] as const) {
   test(`native SFU replacing the ${purpose} sender preserves the other purpose and all receivers`, async () => {
     const f = sfuFixture();
     const call = f.addSender('publisher');
-    const screen = f.addSender('publisher', 'screen');
+    const screen = f.addSender('publisher', 'screen', PIPELINE_ID);
     const other = f.addSender('other-publisher', purpose);
     for (const [id, record] of f.manager['producers']) {
       record.transportId = id === 'mic' || id === 'camera' ? call : screen;
     }
     const consumer = await f.consume(purpose === 'screen' ? 'mic' : 'video-one');
-    const closed = f.manager.closeTransportsFor('publisher', 'room', 'send', purpose);
+    const closed = f.manager.closeTransportsFor('publisher', 'room', 'send', purpose, purpose === 'screen' ? PIPELINE_ID : undefined);
     assert.deepEqual(closed.closedProducerIds.sort(),
       purpose === 'screen' ? ['system-audio', 'video-one', 'video-two'] : ['camera', 'mic']);
     assert.equal(f.manager['transports'].has(purpose === 'screen' ? call : screen), true);
@@ -295,17 +308,22 @@ test('native SFU replacing the screen receiver preserves browser consumers and o
 
 test('native SFU dedicated screen transports reject mic/camera before worker I/O and retain Watch gating', async () => {
   const f = sfuFixture();
-  const sender = f.addSender('publisher', 'screen');
+  const sender = f.addSender('publisher', 'screen', PIPELINE_ID);
   const receiver = f.addReceiver('viewer-a', 'screen');
   for (const [mediaType, kind] of [['mic', 'audio'], ['camera', 'video']] as const) {
     await assert.rejects(f.manager.produce('publisher', 'room', sender, kind, { codecs: [] }, { mediaType }),
       /only accepts screen/u);
     await assert.rejects(f.manager.consume('viewer-a', 'room', receiver, mediaType, {}), /only receives screen/u);
   }
+  // A screen never travels on the call transport or on another rendition's transport (#830).
+  const screenVideo = { mediaType: 'screen_video', shareId: 'one', nativeScreen: rendition('one') } as const;
+  await assert.rejects(f.manager.produce('publisher', 'room', f.addSender('publisher'), 'video', { codecs: [] }, screenVideo),
+    /own rendition transport/u);
+  await assert.rejects(f.manager.produce('publisher', 'room', sender, 'video', { codecs: [] },
+    { ...screenVideo, nativeScreen: rendition('one', crypto.randomUUID()) }), /own rendition transport/u);
   assert.equal(f.produced.length, 0);
   assert.equal(f.created.length, 0);
-  const producer = await f.manager.produce('publisher', 'room', sender, 'video', { codecs: [] },
-    { mediaType: 'screen_video', shareId: 'one' });
+  const producer = await f.manager.produce('publisher', 'room', sender, 'video', { codecs: [] }, screenVideo);
   assert.equal(f.manager['producers'].get(producer.id)?.transportId, sender);
   await f.manager.consume('viewer-a', 'room', receiver, 'video-one', {});
   await f.manager.consume('viewer-a', 'room', receiver, 'system-audio', {});
@@ -316,8 +334,8 @@ test('native SFU dedicated screen transports reject mic/camera before worker I/O
 test('a session keeps at most one live producer per slot of a transport, and a bounded total', async () => {
   const f = sfuFixture();
   const call = f.addSender('publisher');
-  // The fixture already publishes this session's microphone, camera and screen "one" here.
-  for (const appData of [{ mediaType: 'mic' }, { mediaType: 'camera' }, { mediaType: 'screen_video', shareId: 'one' }] as const) {
+  // The fixture already publishes this session's microphone and camera here.
+  for (const appData of [{ mediaType: 'mic' }, { mediaType: 'camera' }] as const) {
     await assert.rejects(f.manager.produce('publisher', 'room', call, appData.mediaType === 'mic' ? 'audio' : 'video',
       { codecs: [] }, appData), SfuProducerLimitError);
   }
@@ -326,14 +344,16 @@ test('a session keeps at most one live producer per slot of a transport, and a b
   f.manager.closeProducer('mic');
   await f.manager.produce('publisher', 'room', call, 'audio', { codecs: [] }, { mediaType: 'mic' });
   await f.manager.produce('viewer-a', 'room', f.addSender('viewer-a'), 'audio', { codecs: [] }, { mediaType: 'mic' });
-  const rendition = f.addSender('publisher', 'screen', 'rendition-1');
-  await f.manager.produce('publisher', 'room', rendition, 'video', { codecs: [] }, { mediaType: 'screen_video', shareId: 'one' });
+  const screen = f.addSender('publisher', 'screen', PIPELINE_ID);
+  const nativeScreen = rendition('one');
+  await f.manager.produce('publisher', 'room', screen, 'video', { codecs: [] }, { mediaType: 'screen_video', shareId: 'one', nativeScreen });
 
   // A duplicate racing the first one is caught once the worker answers, and closed.
   const started = gate(), release = gate();
   f.delayCreate(async () => { started.release(); await release.promise; });
-  const first = f.manager.produce('publisher', 'room', rendition, 'audio', { codecs: [] }, { mediaType: 'screen_audio', shareId: 'one' });
-  const duplicate = f.manager.produce('publisher', 'room', rendition, 'audio', { codecs: [] }, { mediaType: 'screen_audio', shareId: 'one' });
+  const screenAudio = { mediaType: 'screen_audio', shareId: 'one', nativeScreen } as const;
+  const first = f.manager.produce('publisher', 'room', screen, 'audio', { codecs: [] }, screenAudio);
+  const duplicate = f.manager.produce('publisher', 'room', screen, 'audio', { codecs: [] }, screenAudio);
   await started.promise;
   release.release();
   await first;
@@ -345,8 +365,9 @@ test('a session keeps at most one live producer per slot of a transport, and a b
     .filter(record => record.sessionId === 'publisher' && record.channelId === 'room').length;
   let refused = false;
   for (let share = 0; share < 100 && !refused; share++) {
-    await f.manager.produce('publisher', 'room', call, 'video', { codecs: [] },
-      { mediaType: 'screen_video', shareId: `share-${share}` }).catch((error: unknown) => {
+    const pipelineId = crypto.randomUUID();
+    await f.manager.produce('publisher', 'room', f.addSender('publisher', 'screen', pipelineId), 'video', { codecs: [] },
+      { mediaType: 'screen_video', shareId: `share-${share}`, nativeScreen: rendition('one', pipelineId) }).catch((error: unknown) => {
       assert.ok(error instanceof SfuProducerLimitError);
       refused = true;
     });
@@ -360,13 +381,13 @@ for (const replaced of ['call', 'screen'] as const) {
   test(`native SFU pending screen production survives only replacement of the other purpose (${replaced})`, async () => {
     const f = sfuFixture();
     f.addSender('publisher');
-    const screen = f.addSender('publisher', 'screen');
+    const screen = f.addSender('publisher', 'screen', PIPELINE_ID);
     const started = gate(), pending = gate();
     f.delayCreate(async () => { started.release(); await pending.promise; });
     const producing = f.manager.produce('publisher', 'room', screen, 'video', { codecs: [] },
-      { mediaType: 'screen_video', shareId: 'one' });
+      { mediaType: 'screen_video', shareId: 'one', nativeScreen: rendition('one') });
     await started.promise;
-    f.manager.closeTransportsFor('publisher', 'room', 'send', replaced);
+    f.manager.closeTransportsFor('publisher', 'room', 'send', replaced, replaced === 'screen' ? PIPELINE_ID : undefined);
     pending.release();
     if (replaced === 'screen') {
       await assert.rejects(producing, /closed during setup/u);
@@ -514,9 +535,9 @@ test('native SFU closing an exact screen transport preserves a replacement and t
 
 test('native SFU a failed transport close preserves ownership for a retry', async () => {
   const f = sfuFixture();
-  const id = f.addSender('publisher', 'screen');
+  const id = f.addSender('publisher', 'screen', PIPELINE_ID);
   const produced = await f.manager.produce('publisher', 'room', id, 'video', { codecs: [] },
-    { mediaType: 'screen_video', shareId: 'one' });
+    { mediaType: 'screen_video', shareId: 'one', nativeScreen: rendition('one') });
   const transport = f.manager['transports'].get(id)!.transport;
   const close = transport.close.bind(transport);
   transport.close = () => { throw new Error('Close failed'); };
@@ -531,9 +552,9 @@ test('native SFU a failed transport close preserves ownership for a retry', asyn
 
 test('native SFU producer pause controls are limited to owned screen media', async () => {
   const f = sfuFixture();
-  const screen = f.addSender('publisher', 'screen'), call = f.addSender('publisher');
+  const screen = f.addSender('publisher', 'screen', PIPELINE_ID), call = f.addSender('publisher');
   const video = await f.manager.produce('publisher', 'room', screen, 'video', { codecs: [] },
-    { mediaType: 'screen_video', shareId: 'one' });
+    { mediaType: 'screen_video', shareId: 'one', nativeScreen: rendition('one') });
   // Like a real client, the fixture's camera is closed before another is made.
   f.manager.closeProducer('camera');
   const camera = await f.manager.produce('publisher', 'room', call, 'video', { codecs: [] }, { mediaType: 'camera' });
@@ -551,9 +572,9 @@ test('native SFU producer pause controls are limited to owned screen media', asy
 
 test('native SFU a late producer resume cannot revive a closed screen transport', async () => {
   const f = sfuFixture();
-  const screen = f.addSender('publisher', 'screen');
+  const screen = f.addSender('publisher', 'screen', PIPELINE_ID);
   const video = await f.manager.produce('publisher', 'room', screen, 'video', { codecs: [] },
-    { mediaType: 'screen_video', shareId: 'one' });
+    { mediaType: 'screen_video', shareId: 'one', nativeScreen: rendition('one') });
   const pending = gate(), started = gate();
   f.delayResume(async () => { started.release(); await pending.promise; });
   const resuming = f.manager.setProducerPaused('publisher', 'room', video.id, false);
@@ -598,8 +619,11 @@ async function signalingFixture() {
   server['sessionSockets'] = new Map(clients.map(client => [client.sessionId!, client.ws]));
   server['sessions'] = new Map(clients.map(client => [client.ws, client]));
   for (const client of clients) await service.joinVoiceChannel(client.sessionId!, client.user!.id, 'room');
-  service.updateVoiceState('publisher', { screenShareIds: ['one', 'two'] });
-  return { ...f, server, service, sent, clients };
+  const sourceTwo = publicSource('two');
+  service.updateVoiceState('publisher', {
+    screenShareIds: ['one', 'two'], nativeScreenShares: [publicSource('one', true), sourceTwo], isSharingScreenAudio: true,
+  });
+  return { ...f, server, service, sent, clients, sourceTwo };
 }
 
 async function privateScreenFixture() {
@@ -613,7 +637,7 @@ async function privateScreenFixture() {
     video: { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 },
     audience: { userIds: [], roleIds: ['viewers'] },
   };
-  f.service.updateVoiceState('publisher', { nativeScreenShares: [source], isSharingScreenAudio: true });
+  f.service.updateVoiceState('publisher', { nativeScreenShares: [source, f.sourceTwo], isSharingScreenAudio: true });
   for (const id of ['video-one', 'system-audio']) {
     f.manager['producers'].get(id)!.appData = {
       mediaType: id === 'video-one' ? 'screen_video' : 'screen_audio', shareId: 'one',
@@ -679,101 +703,50 @@ for(const backend of ['native','browser'] as const) test(`native ${backend} view
   f.manager.close();
 });
 
-test('legacy P2P viewers follow authenticated peer epochs, revisions, source retirement and departure',async () => {
-  const f=await signalingFixture();
-  const [viewer,,publisher]=f.clients;
-  const route=(client: typeof viewer,payload: object) => f.server['rtcSignals'].handleRtcSignal(client,payload);
-  route(publisher,{ fromSessionId: 'spoofed',targetSessionId: 'viewer-a',signalType: 'offer',subscriptionId: 'pub',sdp: { type: 'offer' } });
-  route(viewer,{ fromSessionId: 'viewer-a',targetSessionId: 'publisher',signalType: 'answer',subscriptionId: 'view',sdp: { type: 'answer' } });
-  const watch={
-    fromSessionId: 'spoofed',targetSessionId: 'publisher',signalType: 'screen-watch',streamId: 'one',
-    subscriptionId: 'pub',watcherSubscriptionId: 'view',subscriptionRevision: 1,watching: true
-  };
-  const read=() => {
-    f.server['screens'].handleScreenViewers(viewer,{
-      channelId: 'room',publisherSessionId: 'publisher',shareId: 'one',sourceInstanceId: null,
-    });
-    return screenViewersResultSchema.parse(f.sent.at(-1)?.payload).viewerSessionIds;
-  };
-  route(viewer,watch);
-  assert.deepEqual(read(),['viewer-a']);
-  assert.deepEqual(f.service.getLegacyScreenViewers('publisher','two'),[]);
-  route(viewer,{ ...watch,subscriptionRevision: 2,watching: false });
-  route(viewer,watch);
-  assert.deepEqual(read(),[],'late watch cannot undo a newer stop');
-  route(viewer,{ ...watch,subscriptionRevision: 3 });
-  route(publisher,{ targetSessionId: 'viewer-a',signalType: 'offer',subscriptionId: 'pub-new',sdp: { type: 'offer' } });
-  assert.deepEqual(read(),[]);
-  route(viewer,{ ...watch,subscriptionRevision: 4 });
-  assert.deepEqual(read(),[],'old publisher epoch is not authoritative');
-  route(viewer,{ ...watch,subscriptionId: 'pub-new' });
-  assert.deepEqual(read(),['viewer-a']);
-  await f.service.joinVoiceChannel('viewer-a','viewer-a','other-room');
-  assert.deepEqual(f.service.getLegacyScreenViewers('publisher','one'),[]);
-  f.manager.close();
-});
-
-test('SFU viewer lists count active video consumers, deduplicate renditions, and retire on pause/close',async () => {
-  const f=await signalingFixture();
-  const one=await f.consume('video-one');
-  await f.consume('system-audio');
-  await f.consume('camera');
-  assert.deepEqual(f.manager.getScreenViewers('publisher','room','one'),[]);
-  await f.manager.setConsumerPaused('viewer-a','room',one.id,false);
-  assert.deepEqual(f.manager.getScreenViewers('publisher','room','one'),['viewer-a']);
-  assert.deepEqual(f.manager.getScreenViewers('publisher','room','two'),[]);
-  f.server['screens'].handleScreenViewers(f.clients[1],{
-    channelId: 'room',publisherSessionId: 'publisher',shareId: 'one',sourceInstanceId: null,
+for (const signalType of ['screen-watch', 'screen-video-meta', 'screen-audio-meta'] as const) {
+  test(`RTC_SIGNAL refuses the retired Chromium screen signal ${signalType} and never forwards it`, async () => {
+    const f = await signalingFixture();
+    const [viewer, , publisher] = f.clients;
+    const [from, target] = signalType === 'screen-watch' ? [viewer, publisher] : [publisher, viewer];
+    f.server['rtcSignals'].handleRtcSignal(from, {
+      fromSessionId: from.sessionId, targetSessionId: target.sessionId, signalType, streamId: 'one',
+      subscriptionId: 'epoch', watcherSubscriptionId: 'viewer-epoch', subscriptionRevision: 1, watching: true,
+    }, 'legacy');
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0].socket, from.ws);
+    assert.equal(f.sent[0].type, MessageType.SERVER_ERROR);
+    assert.equal(f.sent[0].requestId, 'legacy');
+    assert.equal((f.sent[0].payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.BAD_REQUEST);
+    f.manager.close();
   });
-  assert.deepEqual(screenViewersResultSchema.parse(f.sent.at(-1)?.payload).viewerSessionIds,['viewer-a']);
-  await f.manager.setConsumerPaused('viewer-a','room',one.id,true);
-  assert.deepEqual(f.manager.getScreenViewers('publisher','room','one'),[]);
-  await f.manager.setConsumerPaused('viewer-a','room',one.id,false);
-  f.manager.closeConsumer('viewer-a','room',one.id);
-  assert.deepEqual(f.manager.getScreenViewers('publisher','room','one'),[]);
-  f.manager.close();
-});
-test('legacy screen audio metadata uses its own stream ID but requires an advertised legacy share', async () => {
+}
+
+test('RTC_SIGNAL still relays the call negotiation with its connection epoch', async () => {
   const f = await signalingFixture();
   const [viewer, , publisher] = f.clients;
-  const metadata = {
-    fromSessionId: 'publisher', targetSessionId: 'viewer-a', signalType: 'screen-audio-meta',
-    streamId: 'separate-audio-stream', subscriptionId: 'publisher-epoch',
-  };
-  f.server['rtcSignals'].handleRtcSignal(publisher, metadata);
-  assert.deepEqual(f.sent.at(-1), {
-    socket: viewer.ws, type: MessageType.RTC_SIGNAL, requestId: undefined, payload: metadata,
-  });
-  f.service.updateVoiceState('publisher', { screenShareIds: [] });
-  f.server['rtcSignals'].handleRtcSignal(publisher, metadata);
+  const offer = { fromSessionId: 'publisher', targetSessionId: 'viewer-a', signalType: 'offer',
+    subscriptionId: 'publisher-epoch', sdp: { type: 'offer', sdp: 'v=0' } };
+  f.server['rtcSignals'].handleRtcSignal(publisher, { ...offer, fromSessionId: 'spoofed' });
+  assert.deepEqual(f.sent.at(-1), { socket: viewer.ws, type: MessageType.RTC_SIGNAL, requestId: undefined, payload: offer });
+  f.server['rtcSignals'].handleRtcSignal(publisher, { ...offer, subscriptionId: undefined });
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR, 'an offer without its epoch is refused');
+  f.manager.close();
+});
+
+test('a share without a native source can be neither watched nor listed', async () => {
+  const f = await signalingFixture();
+  const [viewer] = f.clients;
+  f.service.updateVoiceState('publisher', { screenShareIds: ['one', 'two', 'three'] });
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-a', 'three'), false);
+  f.server['screens'].handleScreenViewers(viewer, {
+    channelId: 'room', publisherSessionId: 'publisher', shareId: 'three', sourceInstanceId: null,
+  }, 'unbacked');
   assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
-  assert.equal(f.sent.at(-1)?.socket, publisher.ws);
+  assert.equal((f.sent.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.PERMISSION_DENIED);
   f.manager.close();
 });
 
-test('private sources cannot announce shared legacy audio, even to authorized viewers or beside a public share', async () => {
-  const f = await privateScreenFixture();
-  const [viewer, outsider, publisher] = f.clients;
-  for (const target of [viewer, outsider]) {
-    for (const streamId of ['one', 'separate-audio-stream']) {
-      f.server['rtcSignals'].handleRtcSignal(publisher, {
-        fromSessionId: 'publisher', targetSessionId: target.sessionId, signalType: 'screen-audio-meta',
-        streamId, subscriptionId: 'publisher-epoch',
-      });
-      assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
-      assert.equal(f.sent.at(-1)?.socket, publisher.ws);
-    }
-    f.server['rtcSignals'].handleRtcSignal(publisher, {
-      fromSessionId: 'publisher', targetSessionId: target.sessionId, signalType: 'screen-video-meta',
-      streamId: 'two', subscriptionId: 'publisher-epoch',
-    });
-    assert.equal(f.sent.at(-1)?.type, MessageType.RTC_SIGNAL, 'public legacy video remains visible');
-    assert.equal(f.sent.at(-1)?.socket, target.ws);
-  }
-  f.manager.close();
-});
-
-test('private SFU projection hides producers and close events; guessed native/legacy video and audio are denied', async () => {
+test('private SFU projection hides producers and close events; guessed video and audio are denied', async () => {
   const f = await privateScreenFixture();
   const [viewer, outsider] = f.clients;
   const hiddenVoice = f.service.projectVoiceState(f.service.getVoiceState('publisher')!, 'viewer-b');
@@ -800,8 +773,6 @@ test('private SFU projection hides producers and close events; guessed native/le
     assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
   }
   assert.equal(f.created.length, 0, 'guessed IDs never allocate consumers');
-  f.manager['producers'].get('video-one')!.appData = { mediaType: 'screen_video', shareId: 'one' };
-  assert.equal(f.server['screens'].canReceiveProducer(viewer, 'room', 'video-one'), false, 'private native shares cannot use legacy producers');
   f.manager.close();
 });
 
@@ -848,10 +819,10 @@ test('users OR roles grant access; replacement metadata cannot downgrade a priva
   assert.equal(f.service.canSeeScreenSource(publisher, { ...f.source, audience }, 'viewer-b'), true);
   const { audience: _audience, ...replacement } = f.source;
   const updated = f.service.updateVoiceState('publisher', {
-    nativeScreenShares: [{ ...replacement, instanceId: crypto.randomUUID(), video: { ...replacement.video, fps: 120 } }],
+    nativeScreenShares: [{ ...replacement, instanceId: crypto.randomUUID(), video: { ...replacement.video, fps: 120 } }, f.sourceTwo],
   })!;
   assert.deepEqual(updated.nativeScreenShares?.[0].audience, f.source.audience);
-  const withdrawn = f.service.updateVoiceState('publisher', { nativeScreenShares: [] })!;
+  const withdrawn = f.service.updateVoiceState('publisher', { nativeScreenShares: [f.sourceTwo] })!;
   assert.deepEqual(withdrawn.screenShareIds, ['two']);
   assert.equal(f.service.projectVoiceState(withdrawn, 'viewer-b').isSharingScreenAudio, false);
   assert.equal(f.service.canWatchScreen('publisher', 'viewer-b', 'one'), false);
@@ -869,7 +840,7 @@ test('private SFU close delivery uses prior advertisements after the producer an
     type: MessageType.SFU_PRODUCED, payload: { channelId: 'room', id: producer.producerId },
   });
   f.manager.closeProducer(producer.producerId);
-  f.service.updateVoiceState('publisher', { screenShareIds: ['two'], nativeScreenShares: [] });
+  f.service.updateVoiceState('publisher', { screenShareIds: ['two'], nativeScreenShares: [f.sourceTwo] });
   assert.equal(f.manager.getProducersInChannel('room').some(value => value.producerId === producer.producerId), false);
   const consume = { channelId: 'room', producerId: producer.producerId, transportId: f.recv, rtpCapabilities: {} };
   await f.server['sfuSignaling']['handleSfuConsume'](viewer, consume, 'before-close-broadcast');
@@ -1047,7 +1018,7 @@ test('source withdrawal closes native SFU consumers without closing the voice re
   const f = await privateScreenFixture();
   const native = await f.manager.consume('viewer-a', 'room', f.recv, 'video-one', {});
   const mic = await f.consume('mic');
-  f.service.updateVoiceState('publisher', { screenShareIds: ['two'], nativeScreenShares: [] });
+  f.service.updateVoiceState('publisher', { screenShareIds: ['two'], nativeScreenShares: [f.sourceTwo] });
   f.server['screens'].reconcileScreenAccess();
   assert.equal(f.manager['consumers'].has(native.id), false);
   assert.equal(f.manager['consumers'].has(mic.id), true);
@@ -1071,7 +1042,7 @@ test('voice updates that leave screens alone skip the screen reconciliation, and
   await f.server['voiceSessions']['handleVoiceStateUpdate'](publisher, { isCameraOn: true, isSpeaking: true });
   assert.equal(reconciles, 0, 'a mute, a speaking flag or a camera leave every screen grant as it was');
   assert.equal(f.manager['consumers'].has(native.id), true);
-  await f.server['voiceSessions']['handleVoiceStateUpdate'](publisher, { screenShareIds: ['two'], nativeScreenShares: [] });
+  await f.server['voiceSessions']['handleVoiceStateUpdate'](publisher, { screenShareIds: ['two'], nativeScreenShares: [f.sourceTwo] });
   assert.equal(reconciles, 1);
   assert.equal(f.manager['consumers'].has(native.id), false, 'the withdrawn screen is revoked by the update itself');
   f.manager.close();
@@ -1146,9 +1117,9 @@ test('native SFU departure during worker initialization cannot start an already-
 test('native SFU exact transport close acknowledges its request and only notifies affected producers', async () => {
   const f = await signalingFixture();
   const publisher = f.clients[2];
-  const screen = f.addSender('publisher', 'screen'), call = f.addSender('publisher');
+  const screen = f.addSender('publisher', 'screen', PIPELINE_ID), call = f.addSender('publisher');
   const video = await f.manager.produce('publisher', 'room', screen, 'video', { codecs: [] },
-    { mediaType: 'screen_video', shareId: 'one' });
+    { mediaType: 'screen_video', shareId: 'one', nativeScreen: rendition('one') });
   const broadcasts: unknown[] = [];
   f.server['broadcast'] = message => { broadcasts.push(message.payload); };
   await f.server['handleMessage'](publisher, { type: MessageType.SFU_CLOSE_WEBRTC_TRANSPORT,
@@ -1181,9 +1152,9 @@ test('native SFU exact transport close acknowledges its request and only notifie
 test('native SFU producer pause/resume and close replies settle their exact request IDs', async () => {
   const f = await signalingFixture();
   const publisher = f.clients[2];
-  const screen = f.addSender('publisher', 'screen');
+  const screen = f.addSender('publisher', 'screen', PIPELINE_ID);
   const video = await f.manager.produce('publisher', 'room', screen, 'video', { codecs: [] },
-    { mediaType: 'screen_video', shareId: 'one' });
+    { mediaType: 'screen_video', shareId: 'one', nativeScreen: rendition('one') });
   f.server['broadcast'] = () => {};
   await f.server['handleMessage'](publisher, { type: MessageType.SFU_PRODUCER_SET_PAUSED, requestId: 'pause-producer',
     payload: { channelId: 'room', producerId: video.id, paused: true, purpose: 'screen' } });
@@ -1263,9 +1234,9 @@ test('native SFU worker errors return a terminal correlated response instead of 
   assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
   assert.equal(f.sent.at(-1)?.requestId, 'failed-consumer');
   assert.equal((f.sent.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.INTERNAL_ERROR);
-  const sender = f.addSender('publisher', 'screen');
+  const sender = f.addSender('publisher', 'screen', PIPELINE_ID);
   const video = await f.manager.produce('publisher', 'room', sender, 'video', { codecs: [] },
-    { mediaType: 'screen_video', shareId: 'one' });
+    { mediaType: 'screen_video', shareId: 'one', nativeScreen: rendition('one') });
   await f.server['handleMessage'](f.clients[2], { type: MessageType.SFU_PRODUCER_SET_PAUSED,
     requestId: 'failed-producer', payload: { channelId: 'room', producerId: video.id, paused: false, purpose: 'screen' } });
   assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
@@ -1277,35 +1248,6 @@ test('native SFU worker errors return a terminal correlated response instead of 
   assert.equal(f.sent.at(-1)?.requestId, 'failed-transport');
   assert.equal(f.manager['transports'].has(sender), true);
   f.manager['transports'].get(sender)!.transport.close = () => {};
-  f.manager.close();
-});
-
-test('screen Watch signaling is typed, bounded, authenticated and restricted to an available source in the same call', async () => {
-  const f = await signalingFixture();
-  const [viewer, other, publisher] = f.clients;
-  const watch: ScreenWatchSignalPayload = {
-    fromSessionId: 'forged', targetSessionId: 'publisher', signalType: 'screen-watch',
-    streamId: 'one', subscriptionId: 'publisher-epoch', subscriptionRevision: 1, watching: true,
-    watcherSubscriptionId: 'viewer-epoch',
-  };
-  await f.server['handleMessage'](viewer, { type: MessageType.RTC_SIGNAL, payload: watch });
-  assert.equal(f.sent.length, 1);
-  assert.equal(f.sent[0].socket, publisher.ws);
-  assert.equal((f.sent[0].payload as ScreenWatchSignalPayload).fromSessionId, 'viewer-a');
-  for (const value of [
-    { ...watch, watching: 'true' }, { ...watch, subscriptionId: 'x'.repeat(65) },
-    { ...watch, subscriptionRevision: -1 }, { ...watch, streamId: '<script>' },
-    { ...watch, streamId: 'ended' }, { ...watch, extra: 'unbounded-field' },
-  ]) {
-    const before = f.sent.filter(message => message.socket === publisher.ws).length;
-    await f.server['handleMessage'](viewer, { type: MessageType.RTC_SIGNAL, payload: value });
-    assert.equal(f.sent.filter(message => message.socket === publisher.ws).length, before);
-    assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
-  }
-  await f.service.joinVoiceChannel('viewer-b', 'viewer-b', 'another-room');
-  const before = f.sent.length;
-  await f.server['handleMessage'](other, { type: MessageType.RTC_SIGNAL, payload: watch });
-  assert.equal(f.sent.length, before, 'a different room never receives or controls this source');
   f.manager.close();
 });
 

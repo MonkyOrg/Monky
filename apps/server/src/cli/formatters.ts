@@ -25,11 +25,20 @@ export function describeSfuPortProblem(problem: SfuPortProblem): string {
       turnMaxPort: String(problem.turnMaxPort),
     });
   }
-  return t('sfu.portBindFailed', {
-    port: String(problem.port),
-    minPort: String(problem.minPort),
-    maxPort: String(problem.maxPort),
-  });
+  return t('sfu.portRangeBusy', { minPort: String(problem.minPort), maxPort: String(problem.maxPort) });
+}
+
+/** The SFU media port as the operator must open it. */
+export function formatSfuMediaPort(port: number): string {
+  return t('sfu.mediaPort', { port: String(port) });
+}
+
+/** Tells which port to open, and why it is not the first of the range when it moved. */
+export function printSfuPortToOpen(port: number): void {
+  console.log(color(t('config.sfuPortOk', { port: String(port) }), ANSI.green));
+  if (port !== LIMITS.SFU_DEFAULT_MIN_PORT) {
+    console.log(color(t('sfu.portMoved', { port: String(port), first: String(LIMITS.SFU_DEFAULT_MIN_PORT) }), ANSI.yellow));
+  }
 }
 
 /**

@@ -37,6 +37,11 @@ struct Strings {
   const char* participant;
   const char* participants;
   const char* kicked;
+  // The sign-in was refused because the server's identity key does not match (server-key-auth, #821).
+  const char* serverKeyChanged;
+  const char* serverKeyMissing;
+  const char* serverKeyOfOtherServer;
+  const char* serverKeyInvalid;
 };
 
 inline constexpr Strings kEnglish{
@@ -67,6 +72,10 @@ inline constexpr Strings kEnglish{
     "participant",
     "participants",
     "Removed from the channel",
+    "This server's identity key changed since you last joined. Monky Light did not join, so your sign-in is not handed to another server. If the owner changed it, start Monky Light with a new invitation link from them.",
+    "This server presented an identity key before and now presented none. Monky Light did not join, so your sign-in is not handed to another server.",
+    "This server presented the identity key of another server of this profile. Monky Light did not join, because a server may be relaying that one's sign-in.",
+    "The server did not prove it holds the identity key it presented. Monky Light did not join.",
 };
 
 inline constexpr Strings kPortuguese{
@@ -97,6 +106,10 @@ inline constexpr Strings kPortuguese{
     "participante",
     "participantes",
     "Removido do canal",
+    "A chave de identidade deste servidor mudou desde a última vez que você entrou. O Monky Light não entrou para não entregar o seu login a outro servidor. Se o dono a trocou, abra o Monky Light com um link de convite novo dele.",
+    "Este servidor já apresentou uma chave de identidade e agora não apresentou nenhuma. O Monky Light não entrou para não entregar o seu login a outro servidor.",
+    "Este servidor apresentou a chave de identidade de outro servidor deste perfil. O Monky Light não entrou, porque um servidor pode estar repassando o login daquele.",
+    "O servidor não provou ter a chave de identidade que apresentou. O Monky Light não entrou.",
 };
 
 inline constexpr const Strings& textFor(Language language) {

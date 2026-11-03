@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Conversas privadas longas ficaram leves: o histórico é guardado por mês, então cada mensagem grava só o mês dela e a conversa abre sem carregar tudo. Na primeira abertura depois da atualização, cada conversa é convertida uma única vez.",
+  "en": "Long private conversations got light: history is kept by month, so each message saves only its own month and the conversation opens without loading everything. The first time each conversation is opened after the update, it is converted once."
+}

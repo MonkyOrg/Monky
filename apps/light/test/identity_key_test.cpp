@@ -1,11 +1,15 @@
 #include "identity_key.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <iostream>
 #include <regex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace {
 
@@ -52,6 +56,26 @@ void checkKey() {
     }
     require(rejected, "Malformed nonce was accepted");
   }
+  // server-key-auth (#821): a bound signature is never the bare-nonce one, and names its server.
+  IdentityKey server(SeedScope{}.value);
+  require(monky::light::isServerKeyHex(server.publicKeyHex()), "A server key is not recognized");
+  require(!monky::light::isServerKeyHex(std::string(88, 'a')) &&
+              !monky::light::isServerKeyHex("302A300506032B6570032100" + std::string(64, 'a')),
+          "A malformed or uppercase server key was recognized");
+  const auto bound = key.signServerChallenge(rawNonce, server.publicKeyHex());
+  require(bound.size() == 128 && bound != key.signChallenge(rawNonce), "A bound signature equals the bare one");
+  require(bound != key.signServerChallenge(rawNonce, key.publicKeyHex()), "A bound signature ignored its server");
+  bool rejectedKey = false;
+  try {
+    (void)key.signServerChallenge(rawNonce, "not-a-key");
+  } catch (const std::invalid_argument&) {
+    rejectedKey = true;
+  }
+  require(rejectedKey, "A malformed server key was signed for");
+  require(!monky::light::verifyServerChallenge(rawNonce, server.publicKeyHex(), bound),
+          "A member signature passed as the server's proof");
+  require(!monky::light::verifyServerChallenge(rawNonce, server.publicKeyHex(), std::string(128, 'z')),
+          "A non-hexadecimal proof was accepted");
   const std::regex uuid("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}");
   const auto first = monky::light::randomUuid();
   require(std::regex_match(first, uuid), "Installation identifier is not UUID v4");
@@ -65,9 +89,30 @@ void signingFixture() {
   SeedScope seed;
   IdentityKey key(seed.value);
   std::cout << key.publicKeyHex() << std::endl;
-  std::string nonce;
-  while (std::getline(std::cin, nonce)) {
-    std::cout << key.signChallenge(nonce) << std::endl;
+  // "<nonce>" signs the bare nonce, "<nonce> <serverKey>" a sign-in bound to that server (#821),
+  // and "verify <nonce> <serverKey> <signature>" checks a server's proof of its key.
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    std::istringstream words(line);
+    std::vector<std::string> parts;
+    for (std::string word; words >> word;) parts.push_back(word);
+    if (parts.size() == 1) {
+      std::cout << key.signChallenge(parts[0]) << std::endl;
+      continue;
+    }
+    const bool verifying = parts.size() == 4 && parts[0] == "verify";
+    require(parts.size() == 2 || verifying, "Unknown fixture command");
+    const auto& nonceHex = verifying ? parts[1] : parts[0];
+    require(nonceHex.size() == 64, "Fixture nonce must be 64 hexadecimal characters");
+    std::array<std::uint8_t, 32> nonce{};
+    for (std::size_t index = 0; index < nonce.size(); ++index) {
+      nonce[index] = static_cast<std::uint8_t>(std::stoul(nonceHex.substr(index * 2, 2), nullptr, 16));
+    }
+    if (verifying) {
+      std::cout << (monky::light::verifyServerChallenge(nonce, parts[2], parts[3]) ? "1" : "0") << std::endl;
+    } else {
+      std::cout << key.signServerChallenge(nonce, parts[1]) << std::endl;
+    }
   }
   require(std::cin.eof(), "Fixture input failed");
 }

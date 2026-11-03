@@ -361,7 +361,7 @@ export class SfuSignalingHandler {
         session.sessionId,
         channelId,
         direction,
-        session.requestHost,
+        { host: session.requestHost, loopback: session.loopbackPeer },
         purpose,
         screenSessionId
       );
@@ -474,8 +474,7 @@ export class SfuSignalingHandler {
     const nativeScreen = 'nativeScreen' in appData.data ? appData.data.nativeScreen : undefined;
     const shareId = 'shareId' in appData.data ? appData.data.shareId : undefined;
     const sourceIsCurrent = () => {
-      if (!nativeScreen) return !this.host.signaling.getVoiceState(sessionId)?.nativeScreenShares
-        ?.some(source => source.shareId === shareId);
+      if (!nativeScreen) return true;
       const source = this.host.signaling.getVoiceState(sessionId)
         ?.nativeScreenShares?.find(value => value.shareId === shareId && value.instanceId === nativeScreen.sourceInstanceId);
       return !!source && (payload.kind !== 'audio' || source.audio)

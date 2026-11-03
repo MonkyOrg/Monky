@@ -803,7 +803,7 @@ function runTests() {
   assert(customProfile.screenFps === 60, 'CUSTOM preset aceita 60 fps');
   assert(customProfile.screenBitrateKbps === 48000, 'CUSTOM preset aceita 48000 kbps de bitrate');
 
-  // Priorização de Codecs de Vídeo WebRTC (AV1 > VP9 > VP8 > H264)
+  // Priorização de codecs da câmera por transporte (#835)
   console.log('\n--- Testando priorização de codecs de vídeo WebRTC ---');
   const { sortVideoCodecs } = require('../src/renderer/core/webrtc/codecPreferences');
 
@@ -815,37 +815,52 @@ function runTests() {
     { mimeType: 'video/VP9', clockRate: 90000 },
     { mimeType: 'video/ulpfec', clockRate: 90000 },
   ];
+  const primaryOrder = (codecs: Array<{ mimeType: string }>) => codecs.map(c => c.mimeType)
+    .filter(mime => !/\/(rtx|ulpfec)$/.test(mime)).join(',');
 
-  const sorted = sortVideoCodecs(mockCodecs);
-  const mimeOrder = sorted.map((c: any) => c.mimeType);
-
-  assert(mimeOrder[0] === 'video/AV1', 'AV1 é o codec de maior prioridade');
-  assert(mimeOrder[1] === 'video/VP9', 'VP9 é o segundo codec prioritário');
-  assert(mimeOrder[2] === 'video/VP8', 'VP8 é o terceiro codec prioritário');
-  assert(mimeOrder[3] === 'video/H264', 'H.264 é o quarto codec prioritário');
-  assert(mimeOrder.includes('video/rtx') && mimeOrder.includes('video/ulpfec'), 'Codecs auxiliares são preservados na lista');
-  assert(sorted.length === mockCodecs.length, 'Nenhum codec é perdido na ordenação');
+  const sfuOrder = sortVideoCodecs(mockCodecs, 'sfu');
+  assert(primaryOrder(sfuOrder) === 'video/AV1,video/VP9,video/VP8,video/H264',
+    'No SFU, a câmera prefere AV1 > VP9 > VP8 > H.264');
+  const p2pOrder = sortVideoCodecs(mockCodecs, 'p2p');
+  assert(primaryOrder(p2pOrder) === 'video/H264,video/AV1,video/VP9,video/VP8',
+    'No P2P, a câmera prefere H.264 > AV1 > VP9 > VP8');
+  for (const sorted of [sfuOrder, p2pOrder]) {
+    const mimeOrder = sorted.map((c: any) => c.mimeType);
+    assert(mimeOrder.includes('video/rtx') && mimeOrder.includes('video/ulpfec'), 'Codecs auxiliares são preservados na lista');
+    assert(sorted.length === mockCodecs.length, 'Nenhum codec é perdido na ordenação');
+  }
 
   // Testar subconjunto sem AV1
   const subset = sortVideoCodecs([
     { mimeType: 'video/H264' },
     { mimeType: 'video/VP8' },
-  ]);
-  assert(subset[0].mimeType === 'video/VP8', 'VP8 supera H264 quando AV1 e VP9 não estão presentes');
-  assert(subset[1].mimeType === 'video/H264', 'H264 fica como fallback');
+  ], 'sfu');
+  assert(subset[0].mimeType === 'video/VP8', 'No SFU, VP8 supera H264 quando AV1 e VP9 não estão presentes');
+  assert(subset[1].mimeType === 'video/H264', 'H264 fica como fallback no SFU');
 
-  // 60+ FPS presets put the hardware-friendly codec first (#526)
-  const hardwareFirst = sortVideoCodecs(mockCodecs, true);
-  assert(hardwareFirst[0].mimeType === 'video/H264', 'H.264 passa a ser o primeiro nos presets de movimento');
-  assert(hardwareFirst[1].mimeType === 'video/AV1', 'AV1 permanece como segundo fallback quando o hardware é preferido');
+  // No P2P, o H.264 que o hardware do Windows atende (42001f, packetization-mode=1) vem na frente
+  const h264Profiles = [
+    { mimeType: 'video/AV1', sdpFmtpLine: 'level-idx=5;profile=0;tier=0' },
+    { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f' },
+    { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
+    { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f' },
+    { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f' },
+  ];
+  const p2pProfiles = sortVideoCodecs(h264Profiles, 'p2p').map((c: any) => c.sdpFmtpLine);
+  assert(p2pProfiles[0] === 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f',
+    'No P2P, o H.264 Baseline 42001f com packetization-mode=1 é o primeiro');
+  assert(p2pProfiles.slice(1, 3).every((fmtp: string) => fmtp.includes('packetization-mode=1')),
+    'Os demais perfis H.264 com packetization-mode=1 mantêm a ordem do runtime antes do single NAL');
+  assert(p2pProfiles[3].includes('packetization-mode=0') && p2pProfiles[4].startsWith('level-idx'),
+    'O H.264 single NAL vem por último entre os H.264, antes do AV1');
 
-  // R-VOICE-10: a escolha de codec da câmera salva antes do #717 não decide mais nada
+  // R-VOICE-10: a escolha de codec da câmera salva antes do #717 não decide mais nada;
+  // nem o preset de qualidade (#835): a ordem depende só do transporte
   storageMap.set('monky_settings', JSON.stringify({ preferredVideoCodec: 'vp9', qualityPreset: 'NORMAL' }));
   const legacyCodecStore = new SettingsStore();
   legacyCodecStore.save();
   assert(!('preferredVideoCodec' in JSON.parse(storageMap.get('monky_settings')!)),
     'A preferência de codec da câmera sem UI some das configurações salvas');
-  globalSettingsStore.qualityPreset = 'NORMAL';
   const { getPrioritizedVideoCodecs } = require('../src/renderer/core/webrtc/codecPreferences');
   const fakeCapabilities = { codecs: mockCodecs.map(codec => ({ ...codec })) };
   const runtime = ['RTCRtpSender', 'RTCRtpReceiver'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
@@ -853,9 +868,13 @@ function runTests() {
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: { getCapabilities: () => fakeCapabilities } });
   }
   try {
-    assert(getPrioritizedVideoCodecs()[0].mimeType === 'video/AV1',
-      'Uma preferência VP9 salva antes do #717 não decide mais o codec da câmera');
+    for (const preset of ['NORMAL', 'GAMING'] as const) {
+      globalSettingsStore.qualityPreset = preset;
+      assert(getPrioritizedVideoCodecs()[0].mimeType === 'video/H264',
+        `No P2P, a câmera começa em H.264 no preset ${preset}, sem herdar a preferência VP9 salva antes do #717`);
+    }
   } finally {
+    globalSettingsStore.qualityPreset = 'NORMAL';
     for (const [name, descriptor] of runtime) {
       if (descriptor) Object.defineProperty(globalThis, name, descriptor);
       else Reflect.deleteProperty(globalThis, name);

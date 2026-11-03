@@ -214,8 +214,18 @@ export class CameraGpuCompositor {
     mask: ImageData | null,
     background: ImageBitmap | null,
   ): ImageBitmap {
+    return this.renderCanvas(bitmap, settings, mask, background).transferToImageBitmap();
+  }
+
+  /** Draws the composite and returns the WebGL canvas holding it, valid until the next draw. */
+  public renderCanvas(
+    bitmap: ImageBitmap,
+    settings: CameraEffectSettings,
+    mask: ImageData | null,
+    background: ImageBitmap | null,
+  ): OffscreenCanvas {
     this.draw(bitmap, settings, mask, background);
-    return this.canvas.transferToImageBitmap();
+    return this.canvas;
   }
 
   public async renderMatting(

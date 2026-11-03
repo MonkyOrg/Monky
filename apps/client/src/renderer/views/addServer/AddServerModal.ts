@@ -14,6 +14,7 @@ import { clientLog } from '../../core/ClientLogService';
 import { assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, updateSessionAvatar } from '../../core/serverConnection';
 import { ensureHostedServerStarted, findOwnedServer } from '../../core/hostedServerStart';
 import { checkServerOnline } from '../../utils/serverStatus';
+import { parseServerHostInput, setServerTransport } from '../../utils/serverAddress';
 import { showConfirm } from '../Dialog';
 import { joinInviteModal } from '../JoinInviteModal';
 import { onboardingWizard, type WizardExit } from '../OnboardingWizard';
@@ -217,7 +218,7 @@ class AddServerModal {
           </div>
           <div class="form-group small-col">
             <label for="add-server-port">${t('connection.portLabel')}</label>
-            <input id="add-server-port" type="number" placeholder="3000" value="3000" required min="1024" max="65535">
+            <input id="add-server-port" type="number" placeholder="3000" value="3000" required min="1" max="65535">
           </div>
         </div>
         <div class="form-group">
@@ -437,10 +438,11 @@ class AddServerModal {
       await this.reviewInviteLink(invitation);
       return;
     }
-    const host = this.modalEl.querySelector<HTMLInputElement>('#add-server-host')?.value.trim() ?? '';
+    // `wss://` or `https://` before the host connects over TLS; without a scheme it stays plain.
+    const { host, secure } = parseServerHostInput(this.modalEl.querySelector<HTMLInputElement>('#add-server-host')?.value ?? '');
     const port = Number(this.modalEl.querySelector<HTMLInputElement>('#add-server-port')?.value ?? 0);
     const password = this.modalEl.querySelector<HTMLInputElement>('#add-server-password')?.value || undefined;
-    await this.openAndSaveServer(host, port, password);
+    await this.openAndSaveServer(host, port, password, secure ?? false);
   }
 
   private async submitCreate(): Promise<void> {
@@ -495,7 +497,7 @@ class AddServerModal {
     }
   }
 
-  private async openAndSaveServer(host: string, port: number, password?: string): Promise<void> {
+  private async openAndSaveServer(host: string, port: number, password?: string, secure = false): Promise<void> {
     if (!this.modalEl || this.connectionPending && this.screen === 'join') return;
     const nickname = normalizeNickname(connectionStore.savedNickname);
     const nicknameProblem = nicknameError(nickname);
@@ -524,6 +526,7 @@ class AddServerModal {
         : await window.api.getIdentity();
       if (!isCurrent()) return;
       connectionStore.setIdentity(identity);
+      setServerTransport({ host, port }, secure);
       const result = await openServerSession(host, port, identity, nickname, password);
       const savedServer: SavedServer = {
         host,
@@ -532,6 +535,7 @@ class AddServerModal {
         serverId: result.server.id,
         password: password || undefined,
         lastConnected: Date.now(),
+        secure,
       };
       connectionStore.addSavedServer(savedServer);
       const avatar = connectionStore.savedAvatarBase64;

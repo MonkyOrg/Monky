@@ -124,7 +124,7 @@ async function settingsSidebarSmoke() {
   window.api = {
     getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => identity,
-    signChallenge: async nonce => `fixture-signature:${nonce}`,
+    signChallenge: async nonce => ({ signature: `fixture-signature:${nonce}` }),
     getClientLogConfig: async () => ({ enabled: false }),
     writeClientLog: async () => {},
     setPttConfig: async config => { ptt.push(config); return true; },
@@ -234,7 +234,7 @@ async function settingsSidebarSmoke() {
     }
     send(raw) {
       const message = JSON.parse(raw);
-      if (message.type === MessageType.AUTH_CONNECT) this.reply(MessageType.AUTH_CHALLENGE, message.requestId, { nonce: 'nonce' });
+      if (message.type === MessageType.AUTH_CONNECT) this.reply(MessageType.AUTH_CHALLENGE, message.requestId, { nonce: 'ab'.repeat(32) });
       else if (message.type === MessageType.AUTH_CHALLENGE_RESPONSE) this.reply(MessageType.AUTH_SUCCESS, message.requestId, payload);
       else if (message.type === MessageType.PING) this.reply(MessageType.PONG, message.requestId, {});
       else if (message.type === MessageType.CHAT_LOAD_HISTORY) {

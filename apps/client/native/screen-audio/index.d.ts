@@ -128,7 +128,7 @@ export function createPacketCapture(
 ): PacketCaptureSession;
 
 export interface WindowOwner {
-  /** CGWindowID, matching the numeric part of Electron's `window:<id>:<n>` source id. */
+  /** CGWindowID, matching the numeric part of the native picker's `window:<id>:<hash>` source id. */
   windowId: number;
   pid: number;
   /** Absolute path to the owning `.app` bundle. */
@@ -137,9 +137,10 @@ export interface WindowOwner {
 }
 
 /**
- * Lists visible windows with the application that owns them. Only implemented on
- * macOS, where Electron leaves `desktopCapturer`'s `appIcon` empty (#455); other
- * platforms return an empty array. Throws on macOS when the module did not load.
+ * Lists windows, on screen or not, with the application that owns them. Only
+ * implemented on macOS, where ScreenCaptureKit gives the picker no app icon
+ * (#455, #825); other platforms return an empty array. Throws on macOS when the
+ * module did not load.
  */
 export function listWindowOwners(): WindowOwner[];
 

@@ -10,6 +10,7 @@ import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadRes
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 import type { ServerInviteResult } from './serverInvites.js';
+import type { ServerChallengeBinding, SignChallengeResult } from './serverAuth.js';
 import type { EventCalendarExport, EventCalendarSaveResult } from './serverEventCalendar.js';
 import type { HostingSkillId, HostingSkillSaveResult } from './hostingSkills.js';
 import type { FileBatchDownloadRequest, FileBatchDownloadResult } from './fileDownloads.js';
@@ -552,6 +553,11 @@ export interface HostServerOptions {
    * Voice mode ('p2p' | 'sfu') chosen when the server was created (#515).
    */
   voiceMode?: 'p2p' | 'sfu';
+  /**
+   * Reverse proxies whose forwarding headers name the client (#829). Read on
+   * every start; absent or empty means no proxy is trusted.
+   */
+  trustedProxies?: string[];
 }
 
 /** One server hosted by this app. The port identifies it while it runs. */
@@ -583,6 +589,12 @@ export interface ServerStats {
   members: number;
   channels: number;
   messages: number;
+  /**
+   * In SFU mode, the one port (UDP and TCP) to open in the firewall for media:
+   * the one in use, else the one the next start tries first. Null otherwise.
+   * Local only: the remote monitor does not carry it.
+   */
+  sfuMediaPort?: number | null;
 }
 
 export interface AppIdentityResult {
@@ -998,7 +1010,7 @@ export interface IpcInvokeChannels extends DmInvokeChannels {
   'identity:create': { args: []; returnType: AppIdentityResult };
   'identity:get': { args: []; returnType: AppIdentityResult };
   'identity:get-client-id': { args: []; returnType: string };
-  'identity:sign-challenge': { args: [nonceHex: string]; returnType: string };
+  'identity:sign-challenge': { args: [nonceHex: string, binding?: ServerChallengeBinding]; returnType: SignChallengeResult };
   'identity:export': { args: [password: string, extras?: string, dmMode?: DmExportMode]; returnType: string };
   'identity:import': {
     args: [exportedIdentity: string, password: string, replace?: string];

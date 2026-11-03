@@ -1,4 +1,15 @@
+import { getMessageTexts, type ChatMessage, type MentionMatcher } from '@monky/shared';
 import type { ResolvedChatSoundMode } from '../stores/settingsStore';
+
+/**
+ * Whether a message names the member, by the rule the server records the mention with (#14):
+ * a bot post counts in any of its languages, whatever language the reader shows (#843), so
+ * the cue and the @ badge live match the badge after reconnecting. The feed highlight follows
+ * the text on screen.
+ */
+export function mentionsMember(message: ChatMessage, matcher: MentionMatcher, nickname: string): boolean {
+  return getMessageTexts(message).some(text => matcher.mentions(text, nickname));
+}
 
 /** How a message from someone else calls attention to itself. */
 export interface ChatMessageNotice {

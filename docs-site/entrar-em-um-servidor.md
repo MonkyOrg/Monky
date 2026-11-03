@@ -73,7 +73,10 @@ como favorito ou definir **Entrar ao abrir o Monky**.
 
 Preencha **IP / Host do Servidor**, **Porta** (normalmente `3000`) e **Senha do
 Servidor** se existir. O Monky usa o nickname global salvo em **Meu Perfil**.
-Depois clique em **Entrar**.
+Depois clique em **Entrar**. Para um servidor atrás de proxy reverso com TLS,
+digite o host com `wss://` na frente e a porta do proxy, normalmente `443`; sem
+o esquema, a conexão é sem TLS. Veja
+[Atrás de um proxy reverso](/hospedar-em-vps#atras-de-um-proxy-reverso).
 
 ## Vários servidores ao mesmo tempo
 

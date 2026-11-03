@@ -1,10 +1,11 @@
-import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'crypto';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'crypto';
 import { app, safeStorage } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import {
-  SecretEnvelopeError, deriveClientIdFromPublicKey, normalizePublicKeyHex, openIdentityExport, sealIdentityExport,
-  type AppIdentityStatus, type IdentityUnreadableReason,
+  SecretEnvelopeError, deriveClientIdFromPublicKey, memberAuthChallenge, normalizePublicKeyHex, openIdentityExport,
+  sealIdentityExport, serverAuthChallenge, serverChallengeBindingSchema,
+  type AppIdentityStatus, type IdentityUnreadableReason, type ServerChallengeBinding, type SignChallengeResult,
 } from '@monky/shared';
 import { fileErrorCode, renameFileSync, writeFileAtomicSync } from './atomicFile';
 import { secretEnvelopeError } from './secretEnvelope';
@@ -290,8 +291,15 @@ export function getClientId(): string {
   return requireIdentity().clientId;
 }
 
-export function signChallenge(nonceHex: string): string {
-  if (!/^[a-fA-F0-9]{64}$/.test(nonceHex)) {
+/**
+ * Signs a server's sign-in challenge. With a binding (server-key-auth, #821)
+ * the server's proof of its key is checked first, and the signature names that
+ * key; the renderer decided beforehand, from its pins, that this key is the one
+ * expected at this address. Without one, the bare nonce of a server that never
+ * presented a key.
+ */
+export function signChallenge(nonceHex: string, binding?: ServerChallengeBinding): SignChallengeResult {
+  if (typeof nonceHex !== 'string' || !/^[a-fA-F0-9]{64}$/.test(nonceHex)) {
     throw new Error('Nonce inválido.');
   }
 
@@ -302,7 +310,17 @@ export function signChallenge(nonceHex: string): string {
     type: 'pkcs8',
   });
 
-  return sign(null, Buffer.from(nonceHex, 'hex'), privateKey).toString('hex');
+  if (binding === undefined) return { signature: sign(null, Buffer.from(nonceHex, 'hex'), privateKey).toString('hex') };
+  const { serverKey, serverSignature } = serverChallengeBindingSchema.parse(binding);
+  let proven = false;
+  try {
+    proven = verify(null, Buffer.from(serverAuthChallenge(nonceHex, serverKey), 'utf8'),
+      createPublicKey({ key: Buffer.from(serverKey, 'hex'), format: 'der', type: 'spki' }), Buffer.from(serverSignature, 'hex'));
+  } catch {
+    proven = false;
+  }
+  if (!proven) return { refused: 'server-signature' };
+  return { signature: sign(null, Buffer.from(memberAuthChallenge(nonceHex, serverKey), 'utf8'), privateKey).toString('hex') };
 }
 
 /**

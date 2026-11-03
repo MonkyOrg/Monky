@@ -78,16 +78,12 @@ export class ScreenAccessCoordinator {
     if (session.isBot) return false;
     const publisher = this.host.signaling.getVoiceState(producer.sessionId);
     const parsed = sfuMediaAppDataSchema.safeParse(appData);
-    if (!publisher || !parsed.success || !('shareId' in parsed.data)) return false;
-    const native = 'nativeScreen' in parsed.data ? parsed.data.nativeScreen : undefined;
-    const shareId = parsed.data.shareId;
+    if (!publisher || !parsed.success || !('nativeScreen' in parsed.data)) return false;
+    const { shareId, nativeScreen } = parsed.data;
     const source = publisher.nativeScreenShares?.find(value => value.shareId === shareId);
-    if (native) return this.host.signaling.canWatchScreen(
-      publisher.sessionId, session.sessionId, parsed.data.shareId, native.sourceInstanceId,
+    return this.host.signaling.canWatchScreen(
+      publisher.sessionId, session.sessionId, shareId, nativeScreen.sourceInstanceId,
     ) && (appData.mediaType !== 'screen_audio' || source?.audio === true);
-    // A native source can never be fetched through the unrestricted legacy call transport.
-    if (source || (appData.mediaType === 'screen_audio' && publisher.nativeScreenShares?.some(value => value.audience))) return false;
-    return publisher.channelId === this.host.signaling.getVoiceState(session.sessionId)?.channelId;
   }
 
   public reconcileScreenAccess(): void {
@@ -250,20 +246,17 @@ export class ScreenAccessCoordinator {
     const query = parsed.data;
     const publisher = this.host.signaling.getVoiceState(query.publisherSessionId);
     const source = publisher?.nativeScreenShares?.find(entry => entry.shareId === query.shareId);
-    if (!publisher || publisher.channelId !== query.channelId || !publisher.screenShareIds?.includes(query.shareId)
-      || (source?.instanceId ?? null) !== query.sourceInstanceId
-      || !this.host.signaling.canWatchScreen(query.publisherSessionId, session.sessionId, query.shareId, source?.instanceId)) {
+    if (!publisher || !source || publisher.channelId !== query.channelId || !publisher.screenShareIds?.includes(query.shareId)
+      || source.instanceId !== query.sourceInstanceId
+      || !this.host.signaling.canWatchScreen(query.publisherSessionId, session.sessionId, query.shareId, source.instanceId)) {
       this.host.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'A transmissão não está disponível para esta sessão.', requestId);
       return;
     }
-    const viewers = source
-      ? this.host.signaling.getNativeScreenViewers(query.publisherSessionId, query.shareId, source.instanceId)
-      : [...this.host.sfu.getScreenViewers(query.publisherSessionId, query.channelId, query.shareId),
-        ...this.host.signaling.getLegacyScreenViewers(query.publisherSessionId, query.shareId)];
+    const viewers = this.host.signaling.getNativeScreenViewers(query.publisherSessionId, query.shareId, source.instanceId);
     const viewerSessionIds = [...new Set(viewers)].filter(id => {
       const viewer = this.host.findSession(id);
       return id !== query.publisherSessionId && viewer?.ws.readyState === WebSocket.OPEN
-        && this.host.signaling.canWatchScreen(query.publisherSessionId, id, query.shareId, source?.instanceId);
+        && this.host.signaling.canWatchScreen(query.publisherSessionId, id, query.shareId, source.instanceId);
     });
     this.host.send(session.ws, {
       type: MessageType.SCREEN_VIEWERS_RESULT, requestId,

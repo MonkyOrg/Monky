@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocket } from 'ws';
-import { BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type CustomStatus, type ProtocolOffer, type UserSummary } from '@monky/shared';
+import { BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, memberAuthChallenge, type BotCapability, type CustomStatus, type ProtocolOffer, type UserSummary } from '@monky/shared';
 import { AttachmentService } from '../application/services/AttachmentService';
 import { AuthService } from '../application/services/AuthService';
 import { BotService } from '../application/services/BotService';
@@ -48,6 +48,7 @@ import {
 import { AttachmentStorageService } from '../infrastructure/security/AttachmentStorageService';
 import { AvatarStorageService } from '../infrastructure/security/AvatarStorageService';
 import { RateLimiter } from '../infrastructure/security/RateLimiter';
+import { ServerIdentity } from '../infrastructure/security/ServerIdentity';
 import { SfuManager } from '../infrastructure/sfu/SfuManager';
 import { CoturnManager } from '../infrastructure/turn/CoturnManager';
 import { WebSocketServer } from '../infrastructure/websocket/WebSocketServer';
@@ -95,6 +96,14 @@ export function identity() {
     privateKey: pair.privateKey,
     publicKey: pair.publicKey.export({ format: 'der', type: 'spki' }).toString('hex'),
   };
+}
+
+/** What a current app signs for this challenge: bound to the server's key when it presented one (#821). */
+export function challengeBytes(payload: Record<string, unknown>): Buffer {
+  const nonce = text(payload.nonce);
+  return typeof payload.serverKey === 'string'
+    ? Buffer.from(memberAuthChallenge(nonce, payload.serverKey), 'utf8')
+    : Buffer.from(nonce, 'hex');
 }
 
 export class Peer {
@@ -170,6 +179,7 @@ export async function createFixture(options: {
   approvedBotCapabilities?: BotCapability[];
   webSocketHeaders?: Record<string, string>;
   webSocketPath?: string;
+  trustedProxies?: readonly string[];
 } = {}) {
   const dataDir = path.join(__dirname, '..', '..', `.bot-test-data-${process.pid}-${randomUUID()}`);
   const database = await DatabaseConnection.create(path.join(dataDir, 'server.db'));
@@ -227,7 +237,8 @@ export async function createFixture(options: {
   );
   const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
   const coturnManager = new CoturnManager(dataDir);
-  const authService = new AuthService(serverRepo, userRepo, channelRepo, mentionRepo, avatars, () => online(), attachmentService, permissions, roleService, channelRepo.categories);
+  const authService = new AuthService(serverRepo, userRepo, channelRepo, mentionRepo, avatars, () => online(), attachmentService, permissions, roleService,
+    await ServerIdentity.load(serverRepo), channelRepo.categories);
   const selectorService = new BotSelectorService(new SqliteBotSelectorRepository(db));
   communityService = new CommunityService(
     new SqliteCommunityRepository(db), channelService, permissions, avatars, selectorService,
@@ -268,6 +279,7 @@ export async function createFixture(options: {
     forumService,
     pollService,
     botStorageService: botStorage,
+    trustedProxies: options.trustedProxies,
   });
   online = () => wsServer.getOnlineUsersMap();
   httpServer.listen(0, '127.0.0.1');
@@ -276,9 +288,9 @@ export async function createFixture(options: {
   assert.ok(address && typeof address === 'object');
   const url = `ws://127.0.0.1:${address.port}`;
   const peers: Peer[] = [];
-  const connect = async () => {
+  const connect = async (headers?: Record<string, string>) => {
     const peer = new Peer(new WebSocket(`${url}${options.webSocketPath ?? ''}`, {
-      headers: options.webSocketHeaders,
+      headers: { ...options.webSocketHeaders, ...headers },
     }), options.approvedBotCapabilities);
     peers.push(peer);
     await once(peer.ws, 'open');
@@ -299,7 +311,7 @@ export async function createFixture(options: {
       protocolVersion, protocolOffer, nickname, publicKey: keys.publicKey, deviceId, appearOffline, brb, customStatus,
     });
     assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
-    const signature = sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');
+    const signature = sign(null, challengeBytes(challenge.payload), keys.privateKey).toString('hex');
     const auth = await peer.request(MessageType.AUTH_CHALLENGE_RESPONSE, { signature });
     assert.equal(auth.type, MessageType.AUTH_SUCCESS);
     return { peer, keys, deviceId, id: text(record(auth.payload.currentUser).id), auth };

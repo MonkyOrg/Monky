@@ -24,13 +24,13 @@ import type { IpcRegistry } from './registry';
 const appIconCache = new Map<string, string | null>();
 
 /**
- * No macOS o Electron devolve `appIcon` vazio para janelas, mesmo com
- * `fetchWindowIcons: true` (#455). Descobrimos o app dono de cada janela pelo
- * modulo nativo e lemos o icone do proprio bundle.
+ * O ScreenCaptureKit nao entrega o icone do app dono da janela (#455, #825).
+ * Descobrimos o app de cada janela pelo modulo nativo e lemos o icone do
+ * proprio bundle.
  */
 async function resolveMacAppIcons(sourceIds: string[]): Promise<Map<string, string>> {
   const iconsBySourceId = new Map<string, string>();
-  if (process.platform !== 'darwin') return iconsBySourceId;
+  if (process.platform !== 'darwin' || sourceIds.length === 0) return iconsBySourceId;
 
   let owners: WindowOwner[];
   try {
@@ -256,6 +256,9 @@ export class DesktopSourceCatalog {
         (!type || source.type === type) && !isExcluded(source.id));
       if (metadataOnly) return sources;
       if (sourceIds) sources = sources.filter(source => sourceIds.includes(source.id));
+      const icons = await resolveMacAppIcons(sources.filter(source => source.type === 'window').map(source => source.id));
+      if (signal?.aborted) throw new DOMException('Desktop preview icons were cancelled.', 'AbortError');
+      for (const source of sources) source.appIconDataUrl = icons.get(source.id) ?? null;
       for (let offset = 0; offset < sources.length; offset += 4) {
         await Promise.all(sources.slice(offset, offset + 4).map(async source => {
           try {
@@ -357,18 +360,14 @@ export class DesktopSourceCatalog {
       thumbnailSize: metadataOnly ? { width: 0, height: 0 } : { width: 320, height: 180 },
       fetchWindowIcons: !metadataOnly,
     })).filter(source => !isExcluded(source.id));
-    const macIcons = metadataOnly ? new Map<string, string>() : await resolveMacAppIcons(sources.map((s) => s.id));
-    return sources.map((s) => {
-      const electronIcon = s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null;
-      return {
-        id: s.id,
-        name: s.name,
-        type: s.id.startsWith('screen:') ? 'screen' : 'window',
-        thumbnailDataUrl: metadataOnly || s.thumbnail.isEmpty() ? '' : s.thumbnail.toDataURL(),
-        appIconDataUrl: electronIcon ?? macIcons.get(s.id) ?? null,
-        thumbnailState: metadataOnly ? 'pending' : s.thumbnail.isEmpty() ? 'unavailable' : 'ready',
-      };
-    });
+    return sources.map((s) => ({
+      id: s.id,
+      name: s.name,
+      type: s.id.startsWith('screen:') ? 'screen' : 'window',
+      thumbnailDataUrl: metadataOnly || s.thumbnail.isEmpty() ? '' : s.thumbnail.toDataURL(),
+      appIconDataUrl: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null,
+      thumbnailState: metadataOnly ? 'pending' : s.thumbnail.isEmpty() ? 'unavailable' : 'ready',
+    }));
   }
 
   /** Quitting: nothing new is listed and pending previews are dropped. */

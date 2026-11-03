@@ -1,16 +1,20 @@
 import type { QualityProfile } from '@monky/shared';
 import type { CameraEffectsSnapshot } from '../../stores/cameraEffectsStore';
 import {
-  CAMERA_EFFECT_LIMITS, CameraEffectError, cameraEffectFrameRate, cameraOperationCancelled, fitCameraEffectSize,
-  isCameraOperationCancelled,
+  CAMERA_EFFECT_LIMITS, CameraEffectError, CameraFrameAdmission, cameraEffectFrameRate, cameraOperationCancelled,
+  fitCameraEffectSize, isCameraOperationCancelled,
 } from '../../utils/cameraEffects';
-import type { CameraEffectRequest, CameraEffectResponse } from './cameraEffectProtocol';
+import type { CameraEffectOutputLimits, CameraEffectRequest, CameraEffectResponse } from './cameraEffectProtocol';
 
 // Cold Metal shader compilation can exceed 30s; steady-state frames keep their 8s deadline.
 const STARTUP_TIMEOUT_MS = 60000;
 
 declare const MediaStreamTrackProcessor: {
   new(options: { track: MediaStreamTrack; maxBufferSize: number }): { readable: ReadableStream<VideoFrame> };
+} | undefined;
+
+declare const MediaStreamTrackGenerator: {
+  new(options: { kind: 'video' }): MediaStreamTrack & { readonly writable: WritableStream<VideoFrame> };
 } | undefined;
 
 interface PendingConfiguration {
@@ -60,7 +64,12 @@ export class CameraEffectProcessor {
   private canvas: HTMLCanvasElement | null = null;
   private context: CanvasRenderingContext2D | null = null;
   private output: MediaStream | null = null;
-  private outputTrack: CanvasCaptureMediaStreamTrack | null = null;
+  private outputTrack: MediaStreamTrack | null = null;
+  private canvasTrack: CanvasCaptureMediaStreamTrack | null = null;
+  /** The worker reads camera frames and writes the output track itself, off the main thread. */
+  private pipeline = false;
+  private outputWidth = 0;
+  private outputHeight = 0;
   private readonly abort = new AbortController();
   private revision = 0;
   private pending: PendingConfiguration | null = null;
@@ -72,7 +81,7 @@ export class CameraEffectProcessor {
   private animationFrame: number | null = null;
   private configurationTimeout: ReturnType<typeof setTimeout> | undefined;
   private frameTimeout: ReturnType<typeof setTimeout> | undefined;
-  private nextFrameAt = -Infinity;
+  private readonly admission = new CameraFrameAdmission();
   private lastVideoTime = -1;
   private limitQuality = false;
   private targetFps: number;
@@ -103,6 +112,42 @@ export class CameraEffectProcessor {
       this.fail(new CameraEffectError('processing', { cause: event.message }));
     };
     this.worker.onmessageerror = () => this.fail(new CameraEffectError('processing'));
+    const sourceTrack = this.source.getVideoTracks()[0];
+    if (!sourceTrack) throw new CameraEffectError('camera');
+    if (!this.startWorkerPipeline(this.worker, sourceTrack)) await this.startMainThreadCapture(sourceTrack);
+    if (this.stopped) throw cameraOperationCancelled();
+    const stream = await this.update(snapshot);
+    if (this.stopped) throw cameraOperationCancelled();
+    this.started = true;
+    return stream;
+  }
+
+  /** Hands camera frames and the output track to the worker, so main-thread stalls never freeze the call. */
+  private startWorkerPipeline(worker: Worker, sourceTrack: MediaStreamTrack): boolean {
+    if (typeof MediaStreamTrackProcessor !== 'function' || typeof MediaStreamTrackGenerator !== 'function'
+      || typeof VideoFrame !== 'function') return false;
+    const generator = new MediaStreamTrackGenerator({ kind: 'video' });
+    generator.enabled = false;
+    generator.contentHint = 'motion';
+    let readable: ReadableStream<VideoFrame> | null = null;
+    try {
+      readable = new MediaStreamTrackProcessor({ track: sourceTrack, maxBufferSize: 1 }).readable;
+      const { writable } = generator;
+      const message: CameraEffectRequest = { type: 'pipeline', readable, writable, limits: this.outputLimits() };
+      worker.postMessage(message, [readable, writable]);
+    } catch (error) {
+      generator.stop();
+      if (readable && !readable.locked) void readable.cancel().catch(() => undefined);
+      console.warn('[CameraEffects] Worker camera pipeline unavailable; processing frames on the main thread.', error);
+      return false;
+    }
+    this.pipeline = true;
+    this.outputTrack = generator;
+    this.output = new MediaStream([generator]);
+    return true;
+  }
+
+  private async startMainThreadCapture(sourceTrack: MediaStreamTrack): Promise<void> {
     this.canvas = document.createElement('canvas');
     this.canvas.width = 2;
     this.canvas.height = 2;
@@ -114,10 +159,9 @@ export class CameraEffectProcessor {
     const track = this.output.getVideoTracks()[0];
     if (!isCanvasTrack(track)) throw new CameraEffectError('unsupported');
     this.outputTrack = track;
+    this.canvasTrack = track;
     track.enabled = false;
     track.contentHint = 'motion';
-    const sourceTrack = this.source.getVideoTracks()[0];
-    if (!sourceTrack) throw new CameraEffectError('camera');
     if (typeof MediaStreamTrackProcessor === 'function') {
       // Read capture frames directly: a hidden video's compositor callbacks can throttle to 1 FPS.
       this.reader = new MediaStreamTrackProcessor({ track: sourceTrack, maxBufferSize: 1 }).readable.getReader();
@@ -131,11 +175,6 @@ export class CameraEffectProcessor {
       this.video.srcObject = this.source;
       await Promise.all([this.video.play(), waitForVideo(this.video, this.abort.signal)]);
     }
-    if (this.stopped) throw cameraOperationCancelled();
-    const stream = await this.update(snapshot);
-    if (this.stopped) throw cameraOperationCancelled();
-    this.started = true;
-    return stream;
   }
 
   public update(snapshot: CameraEffectsSnapshot): Promise<MediaStream> {
@@ -149,6 +188,7 @@ export class CameraEffectProcessor {
       this.pending = { revision, resolve, reject };
       this.configurationTimeout = setTimeout(() => this.fail(new CameraEffectError('model')), STARTUP_TIMEOUT_MS);
       try {
+        if (this.pipeline) this.send({ type: 'limits', limits: this.outputLimits() });
         this.send({
           type: 'configure', revision, settings: { ...snapshot.settings },
           image: snapshot.image,
@@ -163,7 +203,14 @@ export class CameraEffectProcessor {
   public setProfile(profile: QualityProfile): void {
     this.targetFps = cameraEffectFrameRate(profile.cameraFps, this.limitQuality);
     this.profile = profile;
-    this.nextFrameAt = -Infinity;
+    this.admission.reset();
+    if (this.pipeline && !this.stopped) {
+      try {
+        this.send({ type: 'limits', limits: this.outputLimits() });
+      } catch (error) {
+        this.fail(new CameraEffectError('processing', { cause: error }));
+      }
+    }
   }
 
   /** Stop exposing frames synchronously, before an asynchronous settings/image operation. */
@@ -178,7 +225,12 @@ export class CameraEffectProcessor {
     if (this.context && this.canvas) {
       this.context.fillStyle = '#000000';
       this.context.fillRect(0, 0, this.canvas.width, this.canvas.height);
-      this.outputTrack?.requestFrame();
+      this.canvasTrack?.requestFrame();
+    }
+    if (this.pipeline && this.worker && !this.stopped) {
+      clearTimeout(this.frameTimeout);
+      // The output is already disabled; this only stops the worker from spending effort on stale frames.
+      this.worker.postMessage({ type: 'suspend', revision: this.revision } satisfies CameraEffectRequest);
     }
   }
 
@@ -191,6 +243,7 @@ export class CameraEffectProcessor {
     this.output?.getTracks().forEach((track) => track.stop());
     this.output = null;
     this.outputTrack = null;
+    this.canvasTrack = null;
     const reader = this.reader;
     this.reader = null;
     if (reader) {
@@ -254,22 +307,25 @@ export class CameraEffectProcessor {
       if (message.revision === this.revision && !this.stopped) this.fail(new CameraEffectError(message.code));
       return;
     }
+    if (message.type === 'presented') {
+      this.present(message.revision, message.width, message.height);
+      return;
+    }
+    if (message.type === 'resizing') {
+      if (message.revision === this.revision && this.active && !this.stopped) this.armFrameTimeout(true);
+      return;
+    }
     if (message.type === 'frame') {
       try {
         if (!this.stopped && this.active && message.revision === this.revision
-          && this.canvas && this.context && this.outputTrack && this.output) {
+          && this.canvas && this.context && this.canvasTrack && this.output) {
           if (this.canvas.width !== message.bitmap.width || this.canvas.height !== message.bitmap.height) {
             this.canvas.width = message.bitmap.width;
             this.canvas.height = message.bitmap.height;
           }
           this.context.drawImage(message.bitmap, 0, 0);
-          this.outputTrack.enabled = true;
-          this.outputTrack.requestFrame();
-          if (this.pending?.revision === message.revision) {
-            clearTimeout(this.configurationTimeout);
-            this.pending.resolve(this.output);
-            this.pending = null;
-          }
+          this.present(message.revision, message.bitmap.width, message.bitmap.height);
+          this.canvasTrack.requestFrame();
         }
       } catch (error) {
         this.fail(new CameraEffectError('processing', { cause: error }));
@@ -279,10 +335,33 @@ export class CameraEffectProcessor {
       }
     } else if (message.revision === this.revision && !this.stopped) {
       this.active = true;
-      this.nextFrameAt = -Infinity;
+      this.admission.reset();
       this.lastVideoTime = -1;
-      this.scheduleFrame();
+      if (this.pipeline) this.armFrameTimeout(this.pending?.revision === message.revision);
+      else this.scheduleFrame();
     }
+  }
+
+  /** A processed frame of the current configuration reached the output track: expose it. */
+  private present(revision: number, width: number, height: number): void {
+    if (this.stopped || !this.active || revision !== this.revision || !this.outputTrack || !this.output) return;
+    this.outputWidth = width;
+    this.outputHeight = height;
+    this.outputTrack.enabled = true;
+    if (this.pipeline) this.armFrameTimeout(false);
+    if (this.pending?.revision === revision) {
+      clearTimeout(this.configurationTimeout);
+      this.pending.resolve(this.output);
+      this.pending = null;
+    }
+  }
+
+  private outputLimits(): CameraEffectOutputLimits {
+    return {
+      fps: this.targetFps,
+      width: this.limitQuality ? Math.min(this.profile.cameraWidth, CAMERA_EFFECT_LIMITS.maxWidth) : this.profile.cameraWidth,
+      height: this.limitQuality ? Math.min(this.profile.cameraHeight, CAMERA_EFFECT_LIMITS.maxHeight) : this.profile.cameraHeight,
+    };
   }
 
   private scheduleFrame(): void {
@@ -328,12 +407,7 @@ export class CameraEffectProcessor {
   }
 
   private admitFrame(now: number): boolean {
-    const interval = 1000 / this.targetFps;
-    if (now + Math.min(1, interval / 10) < this.nextFrameAt) return false;
-    this.nextFrameAt = Number.isFinite(this.nextFrameAt)
-      ? this.nextFrameAt + (Math.floor(Math.max(0, now - this.nextFrameAt) / interval) + 1) * interval
-      : now + interval;
-    return true;
+    return this.admission.admit(now, this.targetFps);
   }
 
   private armFrameTimeout(initializing: boolean): void {
@@ -369,11 +443,8 @@ export class CameraEffectProcessor {
   private async captureBitmap(
     source: HTMLVideoElement | VideoFrame, width: number, height: number, revision: number, timestamp: number,
   ): Promise<void> {
-    const size = fitCameraEffectSize(
-      width, height,
-      this.limitQuality ? Math.min(this.profile.cameraWidth, CAMERA_EFFECT_LIMITS.maxWidth) : this.profile.cameraWidth,
-      this.limitQuality ? Math.min(this.profile.cameraHeight, CAMERA_EFFECT_LIMITS.maxHeight) : this.profile.cameraHeight,
-    );
+    const limits = this.outputLimits();
+    const size = fitCameraEffectSize(width, height, limits.width, limits.height);
     // A new tensor shape also needs cold shaders when the capture/profile resizes.
     if (this.canvas && (size.width !== this.canvas.width || size.height !== this.canvas.height)) {
       this.armFrameTimeout(true);

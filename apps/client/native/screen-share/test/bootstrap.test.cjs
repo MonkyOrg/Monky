@@ -118,7 +118,17 @@ class Fixture {
       get: (target, property) => {
         const value = target[property];
         if (!mutators.has(property)) return value;
-        return (...args) => { this.writes.push({ method: property, args }); return value(...args); };
+        return (...args) => {
+          this.writes.push({ method: property, args });
+          const result = value(...args);
+          // A pinned checkout is acquired in a temporary directory and renamed into place.
+          if (property === 'renameSync' && this.repos.has(args[0])) {
+            const repo = this.repos.get(args[0]);
+            this.repos.delete(args[0]);
+            this.repos.set(args[1], Object.assign(repo, { directory: args[1] }));
+          }
+          return result;
+        };
       },
     });
     this.context = createContext({
@@ -264,6 +274,7 @@ class Fixture {
     const repo = this.repos.get(directory);
     assert.ok(repo, `Unknown fixture checkout: ${directory}`);
     if (command === 'remote') {
+      if (rest[0] === 'get-url') return this.answer(`${repo.url}\n`);
       assert.deepEqual(rest.slice(0, 2), ['add', 'origin']);
       repo.url = rest[2];
       repo.config['remote.origin.url'] = rest[2];
@@ -279,10 +290,10 @@ class Fixture {
       return this.answer();
     }
     if (command === 'checkout') {
-      assert.equal(rest[0], '--detach');
-      assert.equal(rest[1], repo.fetched);
-      repo.commit = rest[1];
-      if (directory.endsWith(`${path.sep}depot_tools`)) {
+      assert.deepEqual(rest.slice(0, 2), ['--quiet', '--detach']);
+      assert.equal(rest[2], repo.fetched);
+      repo.commit = rest[2];
+      if (/(?:^|\.)depot_tools(?:\.partial-.+)?$/u.test(path.basename(directory))) {
         put(path.join(directory, 'gclient.py'), '# --unmanaged --cache-dir --revision --no-history --nohooks --noprehooks');
       }
       return this.answer();
@@ -566,7 +577,9 @@ test('child environment freezes tools and isolates caches without mutating the c
     assert.equal(call.env.GCLIENT_FILE, undefined);
     assert.equal(call.env.GIT_CONFIG_GLOBAL, path.join(fixture.workspace, 'cache', 'empty-gitconfig'),
       'Git for Windows 2.56 rejects NUL; an owned empty file isolates every Git version.');
-    assert.equal(call.env.GIT_CONFIG_COUNT, '5');
+    assert.equal(call.env.GIT_CONFIG_COUNT, '6');
+    assert.equal(call.env.GIT_CONFIG_KEY_5, 'protocol.file.allow');
+    assert.equal(call.env.GIT_CONFIG_VALUE_5, 'never');
     assert.equal(call.env.GIT_TERMINAL_PROMPT, '0');
     assert.equal(call.env.HOME, path.join(fixture.workspace, 'cache', 'home'));
     const firstDirectory = call.env.VIRTUAL_ENV ? path.dirname(fixture.gclientPython) : fixture.toolDir;

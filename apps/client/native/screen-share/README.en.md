@@ -785,6 +785,19 @@ build `screen-audio`**. It does not use experimental directories or execute
 `gclient` build hooks. Modified or incomplete source checkouts stop preparation;
 they are not silently reset or replaced.
 
+Windows and macOS acquire pinned Git sources through the same module,
+`scripts/pinnedGit.cjs` (OBS in `fetchObs.cjs`, the macOS SDK in
+`prepareMacRtc.cjs` and the Windows bootstrap): Git runs without system and
+user configuration, hooks, credentials or `file://` remotes; it fetches only the
+exact SHA, retrying transient network failures, into a temporary directory that
+is renamed to its final name only after it is verified. A failure leaves no
+half-made checkout. On macOS, gclient, CIPD and pip also keep home, temporary
+files and caches inside `.native-screen/mac-rtc`, as on Windows. An existing
+checkout at another revision is refused: delete it to acquire the pinned
+revision again. The WebRTC build shares inputs, overlay, GN arguments, checks
+and manifest between both platforms (`scripts/rtcBuildCommon.cjs`);
+`binding.gyp`, signing and the MSVC job stay in `buildRtc.cjs` and `buildMacRtc.cjs`.
+
 The venv gets httplib2 and six only from the wheels pinned in
 `scripts/native-rtc/pins.json`, on Windows and on macOS (`prepareMacRtc.cjs`):
 pip refuses a file whose SHA-256 differs. On Windows, if that install fails,

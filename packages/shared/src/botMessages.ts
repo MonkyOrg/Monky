@@ -31,6 +31,16 @@ export function getMessageText(
   return (message.isBot ? message.localizations?.[resolveBotLocale(requestedLocale)] : undefined) ?? message.content;
 }
 
+/**
+ * Every text a message may be shown with: its content and, from a bot, each language variant.
+ * A mention in any of them counts for every reader, whatever language each one shows.
+ */
+export function getMessageTexts(message: BotLocalizedMessage & { isBot?: boolean; deletedAt?: number | null }): string[] {
+  if (message.deletedAt) return [];
+  const variants = message.isBot ? Object.values(message.localizations ?? {}) : [];
+  return [message.content, ...variants.filter((text): text is string => text !== undefined)];
+}
+
 export function botMessagePreviewLocalizations(localizations?: BotMessageLocalizations): BotMessageLocalizations | undefined {
   if (!localizations) return undefined;
   return {

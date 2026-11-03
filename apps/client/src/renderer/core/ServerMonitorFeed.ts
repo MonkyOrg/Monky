@@ -17,8 +17,11 @@ export class ServerMonitorError extends Error {
   }
 }
 
+/** What the monitor shows: the hosted server also reports the SFU port to open in its firewall. */
+export type MonitorStats = ServerMonitorStats & Pick<ServerStats, 'sfuMediaPort'>;
+
 export interface MonitorUpdate {
-  stats: ServerMonitorStats;
+  stats: MonitorStats;
   entries: ServerMonitorLogLine[];
   replaceLogs: boolean;
   dropped: number;

@@ -154,7 +154,7 @@ async function shellNavigationSmoke() {
   window.api = {
     getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => identity,
-    signChallenge: async nonce => `fixture-signature:${nonce}`,
+    signChallenge: async nonce => ({ signature: `fixture-signature:${nonce}` }),
     getClientLogConfig: async () => ({ enabled: false }),
     writeClientLog: async () => {},
     onAppBeforeQuit: unsubscribe,
@@ -264,7 +264,7 @@ async function shellNavigationSmoke() {
           this.close();
           return;
         }
-        this.reply(MessageType.AUTH_CHALLENGE, message.requestId, { nonce: `nonce-${this.port}` });
+        this.reply(MessageType.AUTH_CHALLENGE, message.requestId, { nonce: String(this.port).padStart(64, '0') });
       } else if (message.type === MessageType.AUTH_CHALLENGE_RESPONSE) {
         this.reply(MessageType.AUTH_SUCCESS, message.requestId, payloadFor(this.port));
       } else if (message.type === MessageType.PING) {
@@ -500,7 +500,7 @@ async function automaticConnectionSmoke() {
   window.api = {
     getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => identity,
-    signChallenge: async nonce => `fixture-signature:${nonce}`,
+    signChallenge: async nonce => ({ signature: `fixture-signature:${nonce}` }),
     getClientLogConfig: async () => ({ enabled: false }),
     writeClientLog: async () => {},
     onAppBeforeQuit: unsubscribe,
@@ -613,7 +613,7 @@ async function automaticConnectionSmoke() {
     send(raw) {
       const message = JSON.parse(raw);
       if (message.type === MessageType.AUTH_CONNECT) {
-        const challenge = () => this.reply(MessageType.AUTH_CHALLENGE, message.requestId, { nonce: `nonce-${this.port}` });
+        const challenge = () => this.reply(MessageType.AUTH_CHALLENGE, message.requestId, { nonce: String(this.port).padStart(64, '0') });
         if (this.port === 5501 && !releaseStartup) releaseStartup = challenge;
         else if (this.port === 5502 && message.payload.password !== 'senha nova') {
           this.reply(MessageType.SERVER_ERROR, message.requestId, { code: 'AUTH_INVALID_PASSWORD', message: 'Senha do servidor incorreta.' });

@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Faxina nas transmissões de tela: o servidor deixou de aceitar o jeito antigo de transmitir, que nenhuma versão atual do Monky usa mais. Toda tela passa pelo caminho nativo, com menos código por onde algo poderia escapar.",
+  "en": "Screen sharing spring cleaning: the server no longer accepts the old way of broadcasting, which no current Monky version uses anymore. Every screen goes through the native path, with less code for anything to slip through."
+}

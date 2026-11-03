@@ -6,7 +6,7 @@ import { partialUpdate } from './partialUpdate';
 import { indexMessageMentions } from './messageSearchMentions';
 import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema, botMessageLocalizationsSchema } from '@monky/shared';
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, NewServerRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
-import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
+import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerIdentityRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 import { SERVER_SETTING_DEFAULTS } from '../../domain/serverSettings';
 
 /**
@@ -112,23 +112,25 @@ const BOT_COLUMNS: { readonly [K in keyof BotRecord]?: string } = {
   keyProofRequired: 'key_proof_required',
 };
 
-export class SqliteServerRepository implements IServerRepository {
+export class SqliteServerRepository implements IServerRepository, IServerIdentityRepository {
   constructor(private db: IDatabaseDriver) {}
 
-  async getLifecycleSettings(): Promise<Pick<ServerRecord, 'name' | 'turnEnabled'> | null> {
+  async getLifecycleSettings(): Promise<Pick<ServerRecord, 'name' | 'turnEnabled' | 'voiceMode'> | null> {
     const columns: unknown[] = this.db.prepare('PRAGMA table_info(server_meta)').all();
     if (columns.length === 0) return null;
-    const hasTurn = columns.some((column) =>
-      column !== null && typeof column === 'object' && 'name' in column && column.name === 'turn_enabled');
+    const has = (name: string) => columns.some((column) =>
+      column !== null && typeof column === 'object' && 'name' in column && column.name === name);
     // Lifecycle reads must also work before the running server applies newer migrations.
     const row: unknown = this.db.prepare(
-      `SELECT name, ${hasTurn ? 'turn_enabled' : '0'} AS turnEnabled FROM server_meta LIMIT 1`
+      `SELECT name, ${has('turn_enabled') ? 'turn_enabled' : '0'} AS turnEnabled, ` +
+      `${has('voice_mode') ? 'voice_mode' : "'p2p'"} AS voiceMode FROM server_meta LIMIT 1`
     ).get();
     if (row === undefined) return null;
-    if (!row || typeof row !== 'object' || !('name' in row) || typeof row.name !== 'string' || !('turnEnabled' in row)) {
+    if (!row || typeof row !== 'object' || !('name' in row) || typeof row.name !== 'string' || !('turnEnabled' in row)
+      || !('voiceMode' in row)) {
       throw new Error('Invalid stored server lifecycle settings.');
     }
-    return { name: row.name, turnEnabled: Boolean(row.turnEnabled) };
+    return { name: row.name, turnEnabled: Boolean(row.turnEnabled), voiceMode: row.voiceMode === 'sfu' ? 'sfu' : 'p2p' };
   }
 
   async getServer(): Promise<ServerRecord | null> {
@@ -192,6 +194,18 @@ export class SqliteServerRepository implements IServerRepository {
     this.db.prepare(
       `UPDATE server_meta SET ${update.set} WHERE id = (SELECT id FROM server_meta LIMIT 1)`
     ).run(...update.values);
+  }
+
+  async getIdentityKey(): Promise<string | null> {
+    const row: unknown = this.db.prepare('SELECT private_key AS privateKey FROM server_identity WHERE id = 1').get();
+    return row && typeof row === 'object' && 'privateKey' in row && typeof row.privateKey === 'string' ? row.privateKey : null;
+  }
+
+  async createIdentityKey(privateKeyHex: string, createdAt: number): Promise<string> {
+    this.db.prepare('INSERT OR IGNORE INTO server_identity (id, private_key, created_at) VALUES (1, ?, ?)').run(privateKeyHex, createdAt);
+    const stored = await this.getIdentityKey();
+    if (!stored) throw new Error('The server identity was not stored.');
+    return stored;
   }
 }
 
@@ -259,6 +273,15 @@ export class SqliteUserRepository implements IUserRepository {
   async count(): Promise<number> {
     const row = this.db.prepare('SELECT COUNT(*) as total FROM users').get() as { total: number } | undefined;
     return row?.total ?? 0;
+  }
+
+  async requiresServerKey(id: string): Promise<boolean> {
+    const row: unknown = this.db.prepare('SELECT server_key_required AS required FROM users WHERE id = ?').get(id);
+    return Boolean(row && typeof row === 'object' && 'required' in row && row.required);
+  }
+
+  async requireServerKey(id: string): Promise<void> {
+    this.db.prepare('UPDATE users SET server_key_required = 1 WHERE id = ? AND server_key_required = 0').run(id);
   }
 
   async findByIds(ids: string[]): Promise<UserRecord[]> {

@@ -2,9 +2,13 @@
 #include "protocol.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 using namespace monky::light;
 using namespace std::chrono_literals;
@@ -75,20 +79,31 @@ struct Fixture {
   std::vector<SessionEvent> events;
   unsigned signedCount = 0;
   ProtocolSession::Nonce signedNonce{};
+  std::optional<ProtocolSession::ServerProof> signedProof;
   std::function<void(const Json&)> onSend;
   std::function<void(const SessionEvent&)> onEvent;
   ProtocolSession session;
 
-  explicit Fixture(std::size_t maxIncomingMessageBytes = ProtocolSession::defaultMaxIncomingMessageBytes)
-      : session({"302a300506032b6570032100" + std::string(64, 'a'), "independent-device", "Human", "secret"},
+  static ProtocolSession::Identity identity() {
+    return {"302a300506032b6570032100" + std::string(64, 'a'), "independent-device", "Human", "secret",
+            std::nullopt, {}, std::nullopt};
+  }
+
+  explicit Fixture(std::size_t maxIncomingMessageBytes = ProtocolSession::defaultMaxIncomingMessageBytes,
+                   ProtocolSession::Identity who = identity())
+      : session(std::move(who),
                 {[this](const std::string& frame) {
                    const auto value = Json::parse(frame);
                    sent.push_back(value);
                    if (onSend) onSend(value);
                  },
-                 [this](const ProtocolSession::Nonce& nonce) {
+                 [this](const ProtocolSession::Nonce& nonce, const std::optional<ProtocolSession::ServerProof>& proof)
+                     -> std::optional<std::string> {
                    ++signedCount;
                    signedNonce = nonce;
+                   signedProof = proof;
+                   // A proof of all zeros stands for one that does not verify.
+                   if (proof && proof->signature == std::string(128, '0')) return std::nullopt;
                    return std::string(128, 'b');
                  },
                  [] { return "test-id"; },
@@ -773,17 +788,13 @@ void toleratesServerGrowth() {
   auto future = offer();
   future["signalType"] = "a future signal";
   f.receive(message::RTC_SIGNAL, future);
-  check(f.count(SessionEventKind::failure) == refused && f.count(SessionEventKind::rtcSignal) == routed,
-        "A signal this client does not use was reported or routed");
   auto screenAudio = offer();
   screenAudio["signalType"] = "screen-audio-meta";
   screenAudio.erase("sdp");
   screenAudio["streamId"] = "screen";
   f.receive(message::RTC_SIGNAL, screenAudio);
-  check(f.count(SessionEventKind::rtcSignal) == routed + 1, "Screen audio metadata no longer reaches the engine");
-  screenAudio.erase("streamId");
-  f.receive(message::RTC_SIGNAL, screenAudio);
-  check(f.count(SessionEventKind::failure) == refused + 1, "A signal the engine reads was accepted malformed");
+  check(f.count(SessionEventKind::failure) == refused && f.count(SessionEventKind::rtcSignal) == routed,
+        "A signal this client does not use was reported or routed");
 }
 
 // Speak is granted or denied per room. Denied, the microphone stays closed
@@ -1008,6 +1019,113 @@ void unreadFramesAreDroppedUnparsed() {
                             R"({"type":{"name":"SOUNDBOARD_PLAYED"}})", R"({"type":["SOUNDBOARD_PLAYED"]})"})
     check(!discardable(frame), "A frame without a readable type was dropped instead of reported");
 }
+
+// server-key-auth (#821): the Light follows the desktop app's rule for the server's identity key.
+void serverKeyBinding() {
+  const auto key = [](char digit) { return "302a300506032b6570032100" + std::string(64, digit); };
+  const auto challenge = [](std::string serverKey, std::string signature = std::string(128, 'c')) {
+    return Json{{"nonce", std::string(64, '1')}, {"serverKey", std::move(serverKey)},
+                {"serverSignature", std::move(signature)}};
+  };
+  const auto refusal = [](const Fixture& f) {
+    for (auto event = f.events.rbegin(); event != f.events.rend(); ++event)
+      if (event->kind == SessionEventKind::failure && event->failure) return event->failure->code;
+    return std::string();
+  };
+  const auto pinned = [](std::optional<std::string> serverKey, std::vector<std::string> elsewhere = {}) {
+    auto who = Fixture::identity();
+    who.serverKey = std::move(serverKey);
+    who.keysPinnedElsewhere = std::move(elsewhere);
+    return who;
+  };
+
+  {
+    // A server seen for the first time: the explicit offer asks for the feature, and the key it proves is pinned.
+    Fixture f;
+    f.open();
+    const auto& offer = f.sent.front().at("payload").at("protocolOffer");
+    const auto& features = offer.at("features");
+    check(offer.at("minimumVersion") == monky::protocol::MIN_CLIENT_VERSION &&
+              std::find(features.begin(), features.end(), "server-key-auth") != features.end(),
+          "The Light did not ask for server-key-auth explicitly");
+    const auto id = f.lastId();
+    auto upper = key('a');
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) {
+      return static_cast<char>(std::toupper(c));
+    });
+    f.receive(message::AUTH_CHALLENGE, challenge(upper), id);
+    check(f.signedCount == 1 && f.signedProof && f.signedProof->key == key('a'),
+          "The signature was not bound to the presented key");
+    f.receive(message::AUTH_SUCCESS, authenticated(), id);
+    check(f.session.authentication() && f.session.authentication()->serverKey == key('a'),
+          "The bound key was not reported for pinning");
+  }
+  {
+    // A server that never presented a key keeps the bare nonce.
+    Fixture f;
+    f.auth();
+    check(f.signedCount == 1 && !f.signedProof && !f.session.authentication()->serverKey,
+          "A server without a key must keep the bare nonce");
+  }
+  for (const auto& [who, presented, code] : std::vector<std::tuple<ProtocolSession::Identity, Json, std::string>>{
+           {pinned(key('a')), Json{{"nonce", std::string(64, '1')}}, "SERVER_KEY_MISSING"},
+           {pinned(key('a')), challenge(key('b')), "SERVER_KEY_CHANGED"},
+           {pinned(std::nullopt, {key('a')}), challenge(key('a')), "SERVER_KEY_OF_OTHER_SERVER"},
+       }) {
+    Fixture f(ProtocolSession::defaultMaxIncomingMessageBytes, who);
+    f.open();
+    f.receive(message::AUTH_CHALLENGE, presented, f.lastId());
+    check(f.signedCount == 0 && f.sentCount(message::AUTH_CHALLENGE_RESPONSE) == 0, "A refused key was signed for");
+    check(refusal(f) == code, "The refusal was not named");
+    check(f.session.phase() == SessionPhase::stopped, "A refused key must not be retried");
+  }
+  {
+    // The pinned key, presented with a proof that does not verify: nothing is sent.
+    Fixture f(ProtocolSession::defaultMaxIncomingMessageBytes, pinned(key('a')));
+    f.open();
+    f.receive(message::AUTH_CHALLENGE, challenge(key('a'), std::string(128, '0')), f.lastId());
+    check(f.sentCount(message::AUTH_CHALLENGE_RESPONSE) == 0 && refusal(f) == "SERVER_KEY_INVALID",
+          "An unproven key must not be signed for");
+  }
+  {
+    // The pinned key, proven: signed, and incomplete proofs are malformed.
+    Fixture f(ProtocolSession::defaultMaxIncomingMessageBytes, pinned(key('a')));
+    f.open();
+    const auto id = f.lastId();
+    f.receive(message::AUTH_CHALLENGE, Json{{"nonce", std::string(64, '1')}, {"serverKey", key('a')}}, id);
+    check(f.signedCount == 0 && f.count(SessionEventKind::failure) == 1, "An incomplete proof was accepted");
+    f.receive(message::AUTH_CHALLENGE, challenge(key('a')), id);
+    check(f.signedCount == 1 && f.sentCount(message::AUTH_CHALLENGE_RESPONSE) == 1, "The pinned key was refused");
+  }
+  const auto invited = [&](std::optional<std::string> serverKey, std::vector<std::string> elsewhere, std::string invitation) {
+    auto who = pinned(std::move(serverKey), std::move(elsewhere));
+    who.invitedServerKey = std::move(invitation);
+    return who;
+  };
+  {
+    // An invitation naming the new key unblocks a server whose key changed, and is spent once it binds.
+    Fixture f(ProtocolSession::defaultMaxIncomingMessageBytes, invited(key('a'), {}, key('b')));
+    f.open();
+    const auto id = f.lastId();
+    f.receive(message::AUTH_CHALLENGE, challenge(key('b')), id);
+    check(f.signedProof && f.signedProof->key == key('b'), "The invited key was not signed for");
+    f.receive(message::AUTH_SUCCESS, authenticated(), id);
+    check(f.session.authentication()->serverKey == key('b'), "The invited key was not reported for pinning");
+  }
+  for (const auto& [who, presented, code] : std::vector<std::tuple<ProtocolSession::Identity, Json, std::string>>{
+           // The invitation names the new key: the old one is now the one refused.
+           {invited(key('a'), {}, key('b')), challenge(key('a')), "SERVER_KEY_CHANGED"},
+           {invited(std::nullopt, {}, key('b')), Json{{"nonce", std::string(64, '1')}}, "SERVER_KEY_MISSING"},
+           // An invitation never vouches for another server's key.
+           {invited(std::nullopt, {key('c')}, key('c')), challenge(key('c')), "SERVER_KEY_OF_OTHER_SERVER"},
+           {invited(key('a'), {key('c')}, key('c')), challenge(key('c')), "SERVER_KEY_OF_OTHER_SERVER"},
+       }) {
+    Fixture f(ProtocolSession::defaultMaxIncomingMessageBytes, who);
+    f.open();
+    f.receive(message::AUTH_CHALLENGE, presented, f.lastId());
+    check(f.signedCount == 0 && refusal(f) == code, "An invitation bypassed the server key rule");
+  }
+}
 } // namespace
 
 int main() {
@@ -1029,7 +1147,8 @@ int main() {
     admittedRetiredJoinsLeave();
     rejoinsOutlastTheirOwnDeparture();
     unreadFramesAreDroppedUnparsed();
-    std::cout << "Protocol session: 17 focused native test groups passed\n";
+    serverKeyBinding();
+    std::cout << "Protocol session: 18 focused native test groups passed\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "Protocol session test failure: " << error.what() << '\n';

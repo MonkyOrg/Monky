@@ -78,4 +78,18 @@ function loadPreload() {
   return { api, requested, rendererCalls, marks, invoked, sent };
 }
 
-module.exports = { loadPreload };
+/** Calls every member of the preload API once and returns the preload with what it invoked. */
+async function exercisePreload() {
+  const preload = loadPreload();
+  const noop = () => {};
+  for (const [name, value] of Object.entries(preload.api)) {
+    if (name === 'dm' || name === 'botStorage') {
+      for (const [member, method] of Object.entries(value)) await method(member.startsWith('on') ? noop : 'fixture');
+    } else if (typeof value === 'function') {
+      await value(name.startsWith('on') ? noop : undefined);
+    }
+  }
+  return { ...preload, channels: new Set(preload.invoked.map(([channel]) => channel)) };
+}
+
+module.exports = { loadPreload, exercisePreload };

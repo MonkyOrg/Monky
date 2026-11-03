@@ -1,7 +1,7 @@
 import { createPublicKey, randomBytes, verify } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import {
-  DEFAULT_PERMISSIONS, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, authConnectSchema, botAuthChallenge,
+  DEFAULT_PERMISSIONS, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, SERVER_KEY_AUTH_FEATURE, authConnectSchema, botAuthChallenge,
   botAuthSignatureSchema, botIdentitySchema, canAccessChannel, localBotIdentitySchema, negotiateProtocol, roleModelFor, rolesForModel,
   type AuthChallengePayload, type AuthConnectPayload, type AuthFailedPayload, type AuthSuccessPayload, type RolesListPayload,
   type ServerMessage, type UserConnectionStatePayload, type UserJoinedPayload, type UserSummary,
@@ -153,7 +153,11 @@ export class AuthHandler {
       return;
     }
 
-    const result = await this.host.auth.createChallenge(session.ws, payload);
+    // Only an explicit offer counts, as for bot-key-proof: an app that sends none at
+    // the current version is implicitly granted every feature, but signs the bare nonce.
+    const bound = Boolean(session.protocol?.features.includes(SERVER_KEY_AUTH_FEATURE)
+      && payload.protocolOffer?.features.includes(SERVER_KEY_AUTH_FEATURE));
+    const result = await this.host.auth.createChallenge(session.ws, payload, bound);
     if (!this.host.isLive(session)) return;
 
     if (!result.success || !result.nonce) {
@@ -177,7 +181,11 @@ export class AuthHandler {
     this.host.send(session.ws, {
       type: MessageType.AUTH_CHALLENGE,
       requestId,
-      payload: { nonce: result.nonce } satisfies AuthChallengePayload,
+      payload: {
+        nonce: result.nonce,
+        ...(result.serverKey && result.serverSignature
+          ? { serverKey: result.serverKey, serverSignature: result.serverSignature } : {}),
+      } satisfies AuthChallengePayload,
     });
   }
 

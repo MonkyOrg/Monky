@@ -135,7 +135,7 @@ async function setupHomeDiscordSmoke() {
   window.api = {
     getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => identity,
-    signChallenge: async nonce => { signatures.push(nonce); return `fixture-signature:${nonce}`; },
+    signChallenge: async nonce => { signatures.push(nonce); return { signature: `fixture-signature:${nonce}` }; },
     getClientLogConfig: async () => ({ enabled: false }),
     writeClientLog: async () => {},
     onAppBeforeQuit: () => () => {},
@@ -230,7 +230,7 @@ async function setupHomeDiscordSmoke() {
       const message = JSON.parse(raw);
       sent.push({ ...message, port: this.port });
       if (message.type === MessageType.AUTH_CONNECT) {
-        this.reply(MessageType.AUTH_CHALLENGE, message.requestId, { nonce: `nonce-${this.port}` });
+        this.reply(MessageType.AUTH_CHALLENGE, message.requestId, { nonce: String(this.port).padStart(64, '0') });
       } else if (message.type === MessageType.AUTH_CHALLENGE_RESPONSE) {
         this.reply(MessageType.AUTH_SUCCESS, message.requestId, payloadFor(this.port));
       } else if (message.type === MessageType.USER_UPDATE_AVATAR || message.type === MessageType.PING) {
@@ -416,7 +416,7 @@ async function setupFirstLaunchGuideSmoke() {
   window.api = {
     getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => ({ clientId: 'fixture-client', publicKey: 'fixture-public-key' }),
-    signChallenge: async nonce => `fixture-signature:${nonce}`,
+    signChallenge: async nonce => ({ signature: `fixture-signature:${nonce}` }),
     getClientLogConfig: async () => ({ enabled: false }),
     writeClientLog: async () => {},
     onAppBeforeQuit: unsubscribe,
@@ -529,7 +529,7 @@ async function setupDirectMessagesAfterHomeSmoke() {
   window.api = {
     getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => ({ clientId: 'fixture-client', publicKey: 'fixture-public-key' }),
-    signChallenge: async nonce => `fixture-signature:${nonce}`,
+    signChallenge: async nonce => ({ signature: `fixture-signature:${nonce}` }),
     getClientLogConfig: async () => ({ enabled: false }),
     writeClientLog: async () => {},
     onAppBeforeQuit: unsubscribe,

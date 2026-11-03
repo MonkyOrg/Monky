@@ -19,7 +19,7 @@ import {
 } from '../context';
 import { DecryptedIdentity, decryptIdentityExport } from '../identity';
 import { t } from '../i18n/index';
-import { describeSfuPortProblem, parseOption, parseMemberLimit, parsePort, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable } from '../formatters';
+import { describeSfuPortProblem, parseOption, parseMemberLimit, parsePort, parseVoiceMode, printSfuPortToOpen, printSfuPreflight, printVoiceModeComparisonTable } from '../formatters';
 import { estimateHostCapacity, printCapacityEstimate } from '../capacity';
 import { hasServerDatabase, registerServer } from '../registry';
 import { setConfig } from './config';
@@ -195,14 +195,15 @@ export async function createCommand(globalArgs: GlobalArgs, args: string[]): Pro
 
   if (voiceMode === 'sfu') {
     const { SfuManager } = await import('../../infrastructure/sfu/SfuManager');
-    const portProblem = await new SfuManager().checkPortAvailability();
-    if (portProblem) {
+    const sfu = new SfuManager();
+    const availability = await sfu.checkPortAvailability();
+    if ('problem' in availability) {
       // A warning rather than a hard stop: the server does not exist yet, so
-      // the operator can still open the range before starting it (#515).
+      // the operator can still free ports before starting it (#515).
       console.log();
-      console.log(color('⚠ ' + describeSfuPortProblem(portProblem), ANSI.yellow));
+      console.log(color('⚠ ' + describeSfuPortProblem(availability.problem), ANSI.yellow));
     } else {
-      console.log(color(t('config.sfuPortOk'), ANSI.green));
+      printSfuPortToOpen(availability.port);
     }
 
     const report = await estimateHostCapacity();

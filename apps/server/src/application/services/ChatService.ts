@@ -24,6 +24,7 @@ import {
   type MessageReply,
   botMessageLocalizationsSchema,
   botMessagePreviewLocalizations,
+  getMessageTexts,
   type BotMessageLocalizations,
   MESSAGE_FORWARD_SOURCE_MAX_LENGTH,
   type MessageForward,
@@ -136,7 +137,7 @@ export class ChatService {
     // Posts arrive as CHAT_MESSAGE, which the client announces to whoever they mention, so
     // they record those mentions too, once. Command responses are shown without a cue.
     const mentioned = existing || botCommand ? [] : await this.mentionedMembers(bot.id, channelId,
-      [parsed.data, ...Object.values(variants.data ?? {}).filter((text): text is string => text !== undefined)],
+      getMessageTexts({ content: parsed.data, localizations: variants.data, isBot: true }),
       server?.allowEveryoneMention !== false);
     if (!await this.canUserAccessChannel(accessUserId, channelId, Permission.SEND_MESSAGES)) {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Publicação não permitida neste canal.' };
