@@ -13,7 +13,12 @@ const { NativeSfuBroker } = require('../runtime/nativeSfuBroker.cjs');
 const CHANNEL = 'channel-one';
 const OWNER = 'publisher-local';
 const SYNC = 'opaque-sync-group-not-a-share-id';
-const localGroup = sourceId => `${SYNC}-${sourceId}`;
+// A local group is its source instance, so its rendition can name it (#830).
+const localGroup = sourceId => `5ca1ab1e-0000-4000-8000-${String(sourceId).padStart(12, '0')}`;
+const PIPELINE = 'dc901be6-7a05-408d-8d20-b58bcecb7b0c';
+const RENDITION_VIDEO = Object.freeze({ width: 1920, height: 1080, fps: 120, maxBitrateKbps: 12000 });
+const REMOTE_RENDITION = Object.freeze({ pipelineId: '0b5e7c1a-2d3f-4a6b-8c9d-1e2f3a4b5c6d',
+  sourceInstanceId: '7f6e5d4c-3b2a-4190-8f7e-6d5c4b3a2918', video: RENDITION_VIDEO });
 const remoteGroup = producerId => `opaque-remote-group-${producerId}`;
 const ENCODING = Object.freeze({ maxBitrateBps: 12000000, maxFramerate: 120 });
 const VIDEO_CAPS = Object.freeze({
@@ -327,7 +332,7 @@ function fixture(overrides = {}) {
       routed.delete(id);
     },
   };
-  const options = { engine, commands, rpc, channelId: CHANNEL, publisherSessionId: OWNER,
+  const options = { engine, commands, rpc, channelId: CHANNEL, publisherSessionId: OWNER, screenSessionId: PIPELINE,
     isCurrent: () => scope.current, isWatchCurrent: (publisher, share, version) => watched.get(key(publisher, share)) === version,
     routes, onError: error => errors.push(error), ...overrides };
   broker = new NativeSfuBroker(options);
@@ -344,13 +349,14 @@ function fixture(overrides = {}) {
       await broker.finishAfterEngineClose(commands.closeEngine());
     },
     callback, defaultNative, defaultRpc,
-    register(sourceId = 1000, shareId = 'local-one', syncGroup = localGroup(sourceId), nativeScreen) {
-      broker.registerSource({ sourceId, shareId, syncGroup, ...(nativeScreen ? { nativeScreen } : {}) });
+    register(sourceId = 1000, shareId = 'local-one', syncGroup = localGroup(sourceId),
+      nativeScreen = { pipelineId: options.screenSessionId, sourceInstanceId: syncGroup, video: RENDITION_VIDEO }) {
+      broker.registerSource({ sourceId, shareId, syncGroup, nativeScreen });
       externalSources.set(sourceId, { kind: 'video', syncGroup, enabled: false });
     },
     remote(producerId = 'remote-video-one', publisherSessionId = 'publisher-remote', shareId = 'remote-one') {
       const metadata = { channelId: CHANNEL, producerId, producerSessionId: publisherSessionId,
-        kind: 'video', appData: { mediaType: 'screen_video', shareId } };
+        kind: 'video', appData: { mediaType: 'screen_video', shareId, nativeScreen: REMOTE_RENDITION } };
       remotes.set(producerId, metadata);
       broker.registerRemoteProducer(metadata, remoteGroup(producerId));
       return metadata;
@@ -384,6 +390,15 @@ test('native SFU rendition registration carries its own transport identity and e
     error => hasCode(error, 'SOURCE'));
   await f.broker.close();
   assert.equal(f.server.size, 0);
+});
+
+test('a screen without its native rendition is refused before any RPC (#830)', async () => {
+  const f = fixture();
+  assert.throws(() => f.broker.registerSource({ sourceId: 1000, shareId: 'local-one', syncGroup: localGroup(1000) }),
+    error => hasCode(error, 'SOURCE'));
+  assert.equal(f.rpcCalls.length, 0);
+  assert.equal(f.nativeCalls.length, 0);
+  await f.broker.close();
 });
 
 test('a replaced SFU screen-engine identity in CREATE is rejected and the exact late allocation is retired', async () => {
@@ -544,8 +559,10 @@ test('two opaque source groups map to their authenticated shareIds rather than b
   assert.equal(one, f.broker.publish(1000, ENCODING));
   const [first, second] = await Promise.all([one, f.broker.publish(1001, ENCODING)]);
   assert.notEqual(first.producerId, second.producerId);
+  const rendition = sourceId => ({ pipelineId: PIPELINE, sourceInstanceId: localGroup(sourceId), video: RENDITION_VIDEO });
   assert.deepEqual(f.calls(MessageType.SFU_PRODUCE).map(call => call.payload.appData), [
-    { mediaType: 'screen_video', shareId: 'local-one' }, { mediaType: 'screen_video', shareId: 'local-two' },
+    { mediaType: 'screen_video', shareId: 'local-one', nativeScreen: rendition(1000) },
+    { mediaType: 'screen_video', shareId: 'local-two', nativeScreen: rendition(1001) },
   ]);
   for (const command of f.nativeFor('sfu.produce')) {
     assert.equal(command.data.enabled, false);
@@ -2424,14 +2441,15 @@ test('kind/group rejection retains failed native/server retirement obligations r
 
 test('contract3 local video groups are unique and opaque, independently of authenticated share IDs', async () => {
   const f = fixture();
-  f.register(1000, 'local-one', 'local-two');
-  assert.throws(() => f.register(1001, 'local-two', 'local-two'), error => hasCode(error, 'SOURCE'));
-  f.register(1001, 'local-two', 'local-one');
+  const [groupOne, groupTwo] = [localGroup(2), localGroup(1)];
+  f.register(1000, 'local-one', groupOne);
+  assert.throws(() => f.register(1001, 'local-two', groupOne), error => hasCode(error, 'SOURCE'));
+  f.register(1001, 'local-two', groupTwo);
   const [first, second] = await Promise.all([f.broker.publish(1000, ENCODING), f.broker.publish(1001, ENCODING)]);
   assert.equal(first.shareId, 'local-one');
-  assert.equal(first.syncGroup, 'local-two');
+  assert.equal(first.syncGroup, groupOne);
   assert.equal(second.shareId, 'local-two');
-  assert.equal(second.syncGroup, 'local-one');
+  assert.equal(second.syncGroup, groupTwo);
   assert.deepEqual(f.calls(MessageType.SFU_PRODUCE).map(call => call.payload.appData.shareId), ['local-one', 'local-two']);
   await f.broker.close();
   assertEmpty(f);

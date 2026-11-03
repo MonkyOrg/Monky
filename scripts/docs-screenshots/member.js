@@ -31,7 +31,10 @@ export class Member {
       this.ws.addEventListener('message', event => {
         const message = JSON.parse(event.data);
         if (message.type === MessageType.AUTH_CHALLENGE && message.requestId === requestId) {
-          const signature = sign(null, Buffer.from(message.payload.nonce, 'hex'), this.privateKey).toString('hex');
+          // A current app binds its signature to the key the server presents (#821).
+          const { nonce, serverKey } = message.payload;
+          const signed = serverKey ? Buffer.from(shared.memberAuthChallenge(nonce, serverKey), 'utf8') : Buffer.from(nonce, 'hex');
+          const signature = sign(null, signed, this.privateKey).toString('hex');
           this.ws.send(JSON.stringify({ type: MessageType.AUTH_CHALLENGE_RESPONSE, requestId, payload: { signature } }));
         } else if (message.type === MessageType.AUTH_SUCCESS && message.requestId === requestId) {
           resolve(message.payload);

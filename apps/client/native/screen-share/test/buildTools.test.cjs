@@ -70,16 +70,6 @@ test('network retries back off on transient failures and stop immediately on rea
   assert.deepEqual(sleeps, []);
 });
 
-test('pinned source fetches on Windows and macOS go through the bounded network retry', () => {
-  const scripts = path.join(__dirname, '..', 'scripts');
-  const obs = fs.readFileSync(path.join(scripts, 'fetchObs.cjs'), 'utf8');
-  assert.match(obs, /withNetworkRetries\(\(\) => git\(directory, \['fetch', '--quiet', '--depth=1', 'origin', revision\]\)/u);
-  assert.match(obs, /withNetworkRetries\(\(\) => git\(directory, \['submodule', 'update'/u);
-  const mac = fs.readFileSync(path.join(scripts, 'prepareMacRtc.cjs'), 'utf8');
-  // capture: true puts git's stderr into the error so its transport failure can be classified.
-  assert.match(mac, /withNetworkRetries\(\(\) => execute\('git', \['-C', directory, 'fetch'[\s\S]{0,120}capture: true/u);
-});
-
 test('a build lock records its owner and replaces only a lock whose build is gone', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-screen-lock-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -116,9 +106,9 @@ test('a build lock records its owner and replaces only a lock whose build is gon
 
 test('every native build and preparation takes its lock through withBuildLock', () => {
   const scripts = path.join(__dirname, '..', 'scripts');
-  // buildMac and buildMacRtc keep their old lock: each built runtime pins their exact bytes (sourceRecipe), so
-  // editing them invalidates installed and cached runtimes. Move them with the next rebuild.
-  for (const name of ['buildRtc.cjs', 'buildCapture.cjs', 'buildThumbnails.cjs', 'prepareMacRtc.cjs']) {
+  // buildMac keeps its old lock: each built runtime pins its exact bytes (sourceRecipe), so editing it
+  // invalidates installed and cached runtimes. Move it with the next rebuild.
+  for (const name of ['buildRtc.cjs', 'buildMacRtc.cjs', 'buildCapture.cjs', 'buildThumbnails.cjs', 'prepareMacRtc.cjs']) {
     const script = fs.readFileSync(path.join(scripts, name), 'utf8');
     assert.match(script, /return withBuildLock\(path\.join\([^)]+\.lock'\), \(\) => \{/u, name);
     assert.doesNotMatch(script, /openSync\(/u, name);

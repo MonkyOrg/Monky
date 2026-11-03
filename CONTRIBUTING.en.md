@@ -420,10 +420,11 @@ allow merging: update the branch and wait for the new CI. This does not erase
 the green history or update your branch automatically. Another reviewer's approval
 is still required; an administrator merge is an exception, not the normal flow.
 
-### Run CI locally before opening the PR
+### Local CI (optional)
 
 `npm run ci:local` runs on this machine the CI commands that make sense outside
-a disposable runner. It reads the steps from `.github/workflows/ci.yml` and the
+a disposable runner. Running it before the PR is optional: GitHub CI validates
+the PR. It reads the steps from `.github/workflows/ci.yml` and the
 DOM suite from `scripts/test-client-dom.cjs`, keeps going after each failure
 and ends by listing what failed, with the log path of each step. The default
 base is `git merge-base origin/main HEAD`. Pass options after `--`:
@@ -433,16 +434,16 @@ base is `git merge-base origin/main HEAD`. Pass options after `--`:
   `npm run ci:local -- --only dom`;
 - `--package` includes `electron-builder --dir`.
 
-Run only what the change requires. The full run takes tens of minutes and is
-meant for broad changes and changes to the protocol, shared contracts, the
-build or CI itself. For everything else, use `--only` with the steps that cover
-the changed files; a documentation-only change needs just `--only docs`.
+The full run takes tens of minutes. To reproduce a CI failure, use `--only`
+with the steps that cover the changed files.
 
 Steps that only run on a disposable runner, such as the real clipboard and the
 artifact export, show as **PULADO (só CI)**. If the branch only changes
 documentation, every stage except `docs` shows as skipped, as in CI. Without
 `npm run prepare:native-screen`, native tests are also reported as skipped,
-not failed. At the end it checks that the steps left no new files in the
+not failed. The local execution E2E (`local-e2e` stage) is skipped until the
+pinned test FFmpeg exists (`node scripts/fixture-ffmpeg.cjs ensure`) or
+`MONKY_WORKER_TEST_FFMPEG` is set. At the end it checks that the steps left no new files in the
 checkout, because CI only exports builds from a clean checkout; this check runs
 even with `--only`. In CI, each DOM shard also runs everything and lists **every**
 failure at the end (`FALHAS: ...`): fix them all before the next push.

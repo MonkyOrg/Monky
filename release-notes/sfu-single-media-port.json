@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "No modo SFU, toda a mídia passa por uma porta só: 40000, em UDP e TCP. Já liberou a faixa 40000-49151? Nada muda. Se a 40000 estiver ocupada, o servidor usa a próxima livre e mostra no app e no monky status qual liberar.",
+  "en": "In SFU mode all media goes through a single port: 40000, over UDP and TCP. Already opened the 40000-49151 range? Nothing changes. If 40000 is taken, the server picks the next free one and shows in the app and monky status which to open."
+}

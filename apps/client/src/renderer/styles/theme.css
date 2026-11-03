@@ -14804,6 +14804,30 @@ button:hover .role-option-check:not(.checked) {
   .image-carousel-track { transition: none; }
 }
 
+/* Trusted reverse proxies of a hosted server (#829). */
+.trusted-proxies-modal {
+  width: 92%;
+  max-width: 520px;
+}
+
+.trusted-proxies-intro {
+  margin: 0 0 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.trusted-proxies-form textarea {
+  min-height: 72px;
+  max-height: 220px;
+  resize: vertical;
+  font-family: var(--font-mono);
+}
+
+.trusted-proxies-form textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
 /* Folder settings (rail folders): name plus a Discord-like colour grid. */
 .folder-settings-modal {
   width: 92%;

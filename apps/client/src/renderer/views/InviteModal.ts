@@ -2,6 +2,7 @@ import { createServerInviteLink, MessageType, PUBLIC_IP_INTERFACE_NAME, ServerIn
 import { v4 as uuidv4 } from 'uuid';
 import { getActiveNetworkClient, networkClient, type NetworkClient } from '../core/NetworkClient';
 import { serverStore } from '../stores/serverStore';
+import { connectionStore } from '../stores/connectionStore';
 import { sessionManager } from '../core/SessionManager';
 import { findOwnedServer } from '../core/hostedServerStart';
 import { escapeHtml } from '../utils/html';
@@ -10,6 +11,10 @@ import { openModal, type ModalShell } from '../utils/modalShell';
 import { copyText, reportError } from '../utils/feedback';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
+import { parseServerUrl } from '../utils/serverAddress';
+
+/** The select value of the TLS address of this connection. */
+const TLS_OPTION = '__tls__';
 
 function isNetworkInterface(value: unknown): value is ServerNetworkInterface {
   return !!value && typeof value === 'object'
@@ -73,19 +78,28 @@ export class InviteModal {
   private requestAbort: AbortController | null = null;
   private pendingRequest: { client: NetworkClient; id: string } | null = null;
   private knownPassword: string | undefined;
+  /** The address of this connection when it runs over TLS: the proxy's, which the server's own interfaces are not. */
+  private tlsAddress: { host: string; port: number } | null = null;
+  /** The port the server listens on, for the invitations that skip the proxy. */
+  private serverPort = 3000;
+  /** The key the active server signed in with here, so the invited sign in bound to it (#821). */
+  private serverKey: string | undefined;
 
   public async open(): Promise<void> {
     this.close();
 
     this.serverName = serverStore.serverDetails?.name || 'Monky';
     this.selectedPort = this.getFallbackPort();
+    this.serverPort = this.selectedPort;
     this.selectedIp = this.getFallbackHost();
+    this.tlsAddress = InviteModal.tlsAddressOf(getActiveNetworkClient().getCurrentServerUrl());
     this.isLoading = true;
     this.networkInterfaces = [];
 
     const active = sessionManager.getActive();
     this.knownPassword = active?.password
       || (active ? findOwnedServer(active.host, active.port)?.password : undefined);
+    this.serverKey = active ? connectionStore.serverKeyExpectation(active).pinned : undefined;
 
     const shell = openModal({
       card: `
@@ -241,7 +255,7 @@ export class InviteModal {
       if (!isCurrent()) return;
       if (info && info.networkInterfaces && info.networkInterfaces.length > 0) {
         this.networkInterfaces = info.networkInterfaces.map((iface) => ({ ...iface, description: describeServerInterface(iface) }));
-        if (info.port) this.selectedPort = info.port;
+        if (info.port) this.selectedPort = this.serverPort = info.port;
         if (info.serverName) this.serverName = info.serverName;
         this.renderInterfaceOptions();
         return;
@@ -307,6 +321,14 @@ export class InviteModal {
 
     let firstIp = '';
 
+    if (this.tlsAddress) {
+      firstIp = TLS_OPTION;
+      const opt = document.createElement('option');
+      opt.value = TLS_OPTION;
+      opt.textContent = `🔐 wss://${this.tlsAddress.host} — ${t('invite.ifaceTls')}`;
+      selectEl.appendChild(opt);
+    }
+
     for (const iface of this.networkInterfaces) {
       if (!firstIp) firstIp = iface.address;
       const opt = document.createElement('option');
@@ -328,7 +350,22 @@ export class InviteModal {
     selectEl.value = this.selectedIp;
     const custom = this.modalEl.querySelector<HTMLElement>('#custom-ip-container');
     if (custom) setSurfaceVisible(custom, false);
+    this.showPort();
     this.updateTip(this.selectedIp);
+  }
+
+  /** Behind the proxy the invitation carries the proxy's port; the server's own interfaces, the server's. */
+  private showPort(): void {
+    const tls = this.selectedIp === TLS_OPTION ? this.tlsAddress : null;
+    this.selectedPort = tls?.port ?? this.serverPort;
+    const portEl = this.modalEl?.querySelector<HTMLElement>('#invite-port');
+    if (portEl) portEl.textContent = String(this.selectedPort);
+  }
+
+  private static tlsAddressOf(url: string): { host: string; port: number } | null {
+    if (!url.startsWith('wss://')) return null;
+    const address = parseServerUrl(url);
+    return address ? { host: address.host.replace(/^\[(.+)\]$/, '$1'), port: address.port } : null;
   }
 
   private updateTip(selectedAddress: string): void {
@@ -336,6 +373,10 @@ export class InviteModal {
 
     const tipText = this.modalEl.querySelector('#invite-tip-text') as HTMLElement | null;
     if (!tipText) return;
+    if (selectedAddress === TLS_OPTION) {
+      tipText.innerHTML = t('invite.tipTls');
+      return;
+    }
 
     const iface = this.networkInterfaces.find((i) => i.address === selectedAddress);
     const type = iface ? iface.type : 'custom';
@@ -380,6 +421,7 @@ export class InviteModal {
         if (customContainer) setSurfaceVisible(customContainer, false);
         this.selectedIp = selectIp.value;
       }
+      this.showPort();
       this.updateTip(this.selectedIp);
     }, options);
 
@@ -392,9 +434,12 @@ export class InviteModal {
       if (this.isLoading || shell.closed) return;
       let link: string;
       try {
+        const tls = selectIp?.value === TLS_OPTION ? this.tlsAddress : null;
         link = createServerInviteLink({
-          v: 1, name: this.serverName, host: this.selectedIp, port: this.selectedPort,
+          v: 1, name: this.serverName, host: tls?.host ?? this.selectedIp, port: tls?.port ?? this.selectedPort,
+          ...(tls ? { tls: true as const } : {}),
           ...(chkPassword?.checked && this.knownPassword ? { password: this.knownPassword } : {}),
+          ...(this.serverKey ? { serverKey: this.serverKey } : {}),
         }, getLanguage());
       } catch (error: unknown) {
         reportError(t('invite.copyFailed'), { log: 'APP', error });
@@ -411,6 +456,7 @@ export class InviteModal {
   private teardown(shell: ModalShell): void {
     if (this.shell !== shell) return;
     this.knownPassword = undefined;
+    this.serverKey = undefined;
     this.requestAbort?.abort();
     this.requestAbort = null;
     if (this.pendingRequest) this.pendingRequest.client.cancelRequest(this.pendingRequest.id);

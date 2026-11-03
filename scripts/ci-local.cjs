@@ -12,6 +12,7 @@ const { parseArgs } = require('node:util');
 const { load } = require('js-yaml');
 const dom = require('./test-client-dom.cjs');
 const { docsOnly: isDocsOnly } = require('./ci-changes.cjs');
+const { verifiedExecutable } = require('./fixture-ffmpeg.cjs');
 
 const root = path.resolve(__dirname, '..');
 const ciOnly = 'PULADO (só CI)';
@@ -53,7 +54,8 @@ function checkClean(before, after = gitStatus()) {
 
 function plan({ base, head, title = '', packageApp = false, platform = process.platform, docsOnly = false,
   ci = load(fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8')),
-  nativeReady = nativeRuntimeReady(platform), before = gitStatus() } = {}) {
+  nativeReady = nativeRuntimeReady(platform), fixtureFfmpeg = process.env.MONKY_WORKER_TEST_FFMPEG || verifiedExecutable(),
+  before = gitStatus() } = {}) {
   const shell = (stage, command, extra = {}) => ({ stage, label: command, command, ...extra });
   const bots = ci.jobs['bot-tests'];
   const packaging = ci.jobs[platform === 'darwin' ? 'package-mac' : 'package-win'];
@@ -82,6 +84,10 @@ function plan({ base, head, title = '', packageApp = false, platform = process.p
     ...packageApp ? [] : [shell('package', 'npm exec --no -- node-gyp rebuild --directory=apps/client/native/screen-audio')],
     ...lines(packaging, 'Exercise shortcut capture and worker recovery').map(command => shell('package', command)),
     shell('package', 'node scripts/ci-build-artifact.js collect', { skip: ciOnly }),
+    // Local execution end to end in P2P and SFU, with the pinned FFmpeg CI caches.
+    ...lines(ci.jobs['local-execution-e2e'], 'Exercise local execution end to end').map(command => shell('local-e2e', command,
+      fixtureFfmpeg ? { env: { MONKY_WORKER_TEST_FFMPEG: fixtureFfmpeg } }
+        : { skip: 'PULADO (sem FFmpeg de fixture: rode node scripts/fixture-ffmpeg.cjs ensure ou defina MONKY_WORKER_TEST_FFMPEG)' })),
     ...dom.commands.map(command => shell('dom', command.join(' '),
       command.includes('--system-clipboard') ? { skip: ciOnly } : {})),
     { stage: 'clean', label: 'checkout sem arquivos novos (exigido pela exportação do build no CI)', fn: () => checkClean(before) },

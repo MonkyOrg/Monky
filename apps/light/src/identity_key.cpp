@@ -9,6 +9,8 @@
 #include <array>
 #include <cstddef>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 
 namespace monky::light {
 namespace {
@@ -28,6 +30,18 @@ unsigned hexDigit(char value) {
   if (value >= 'a' && value <= 'f') return static_cast<unsigned>(value - 'a') + 10;
   if (value >= 'A' && value <= 'F') return static_cast<unsigned>(value - 'A') + 10;
   throw std::invalid_argument("Authentication nonce contains a non-hexadecimal character");
+}
+
+constexpr std::string_view kSpkiPrefix = "302a300506032b6570032100";
+
+// "<prefix><serverKey>:<nonce hex>", the bytes server-key-auth signatures cover (#821).
+std::string boundMessage(std::string_view prefix, std::string_view serverKeyHex,
+                         const std::array<std::uint8_t, 32>& nonce) {
+  std::string message(prefix);
+  message.append(serverKeyHex);
+  message.push_back(':');
+  message.append(hex(nonce.data(), nonce.size()));
+  return message;
 }
 
 struct PrivateKey final {
@@ -126,6 +140,50 @@ std::string IdentityKey::signChallenge(const std::array<std::uint8_t, 32>& nonce
     throw std::runtime_error("Native authentication signing failed");
   }
   return hex(signature.data(), signature.size());
+}
+
+std::string IdentityKey::signServerChallenge(const std::array<std::uint8_t, 32>& nonce,
+                                             std::string_view serverKeyHex) const {
+  if (!isServerKeyHex(serverKeyHex)) throw std::invalid_argument("Server key must be a lowercase Ed25519 SPKI key");
+  const auto message = boundMessage("monky-auth:v2:", serverKeyHex, nonce);
+  std::array<std::uint8_t, ED25519_SIGNATURE_LEN> signature{};
+  if (ED25519_sign(signature.data(), reinterpret_cast<const std::uint8_t*>(message.data()), message.size(),
+                   impl_->privateKey.bytes.data()) != 1) {
+    throw std::runtime_error("Native authentication signing failed");
+  }
+  return hex(signature.data(), signature.size());
+}
+
+bool isServerKeyHex(std::string_view value) {
+  if (value.size() != kSpkiPrefix.size() + ED25519_PUBLIC_KEY_LEN * 2 || value.substr(0, kSpkiPrefix.size()) != kSpkiPrefix) {
+    return false;
+  }
+  for (const char digit : value) {
+    if (!((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f'))) return false;
+  }
+  return true;
+}
+
+bool verifyServerChallenge(const std::array<std::uint8_t, 32>& nonce, std::string_view serverKeyHex,
+                           std::string_view signatureHex) {
+  if (!isServerKeyHex(serverKeyHex) || signatureHex.size() != ED25519_SIGNATURE_LEN * 2) return false;
+  std::array<std::uint8_t, ED25519_PUBLIC_KEY_LEN> publicKey{};
+  std::array<std::uint8_t, ED25519_SIGNATURE_LEN> signature{};
+  try {
+    const auto raw = serverKeyHex.substr(kSpkiPrefix.size());
+    for (std::size_t index = 0; index < publicKey.size(); ++index) {
+      publicKey[index] = static_cast<std::uint8_t>(hexDigit(raw[index * 2]) * 16 + hexDigit(raw[index * 2 + 1]));
+    }
+    for (std::size_t index = 0; index < signature.size(); ++index) {
+      signature[index] = static_cast<std::uint8_t>(
+          hexDigit(signatureHex[index * 2]) * 16 + hexDigit(signatureHex[index * 2 + 1]));
+    }
+  } catch (const std::invalid_argument&) {
+    return false;
+  }
+  const auto message = boundMessage("monky-server-auth:v1:", serverKeyHex, nonce);
+  return ED25519_verify(reinterpret_cast<const std::uint8_t*>(message.data()), message.size(),
+                        signature.data(), publicKey.data()) == 1;
 }
 
 }  // namespace monky::light

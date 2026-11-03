@@ -190,9 +190,6 @@ bool signal(const Json& payload) {
       require(candidate.at("sdpMLineIndex").is_null() ||
               (candidate.at("sdpMLineIndex").is_number_integer() &&
                candidate.at("sdpMLineIndex") >= 0), "Invalid ICE m-line");
-  } else if (type == "screen-audio-meta") {
-    // Read to keep a screen's sound out of the microphone it may share a peer with.
-    text(payload, "streamId");
   } else {
     return false;
   }

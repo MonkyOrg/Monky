@@ -316,6 +316,10 @@ export class DmStore {
     return this.run((api) => api.editMessage(peer, messageId, content));
   }
 
+  resendMessage(peer: string, messageId: string): Promise<DmFailure | null> {
+    return this.run((api) => api.resendMessage(peer, messageId));
+  }
+
   deleteMessage(peer: string, messageId: string): Promise<DmFailure | null> {
     return this.run((api) => api.deleteMessage(peer, messageId));
   }

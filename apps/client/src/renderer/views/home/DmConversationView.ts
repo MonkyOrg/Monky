@@ -591,6 +591,7 @@ export class DmConversationView {
         ${failed ? html`<div class="chat-delivery chat-delivery--failed dm-delivery-failed" role="status">
           <span class="material-symbols-outlined md-14" aria-hidden="true">error_outline</span>
           <span>${t('dm.deliveryFailed')}</span>
+          ${writable ? html`<button type="button" data-dm-resend>${t('dm.deliveryRetry')}</button>` : ''}
         </div>` : ''}`,
       reactions: renderReactionButtons(this.reactionViews(message), !writable),
     });
@@ -886,6 +887,10 @@ export class DmConversationView {
     const jump = target.closest<HTMLButtonElement>('[data-reply-target]');
     if (jump && row) {
       if (!jump.disabled) this.jumpToMessage(jump.dataset.replyTarget!);
+      return;
+    }
+    if (target.closest('[data-dm-resend]') && messageId) {
+      void this.report(dmStore.resendMessage(this.peer, messageId));
       return;
     }
     const fileHolder = target.closest<HTMLElement>('[data-dm-file]');

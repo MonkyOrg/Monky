@@ -3,14 +3,17 @@ import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import {
   MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, ProtocolErrorCode,
-  type AuthConnectPayload, type ClientMessage, type ProtocolMessage,
+  type AuthConnectPayload, type ClientMessage, type ProtocolMessage, type ServerChallengeBinding, type SignChallengeResult,
 } from '@monky/shared';
 import { NetworkClient, ProtocolRequestError, type ConnectionStatus, type NetworkDisconnectedPayload, type ServerShutdownNotice } from '../src/renderer/core/NetworkClient';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { setForegroundContext, setSessionEventRouter } from '../src/renderer/core/sessionRouting';
 import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
+import { t } from '../src/renderer/i18n';
+import { connectionStore } from '../src/renderer/stores/connectionStore';
 
 const identity = { clientId: 'fixture-client', publicKey: 'fixture-public-key' };
+const NONCE = 'ab'.repeat(32);
 
 function authPayload(message: ClientMessage | undefined): AuthConnectPayload {
   if (message?.type !== MessageType.AUTH_CONNECT) throw new Error(`Expected AUTH_CONNECT, got ${message?.type}`);
@@ -60,14 +63,18 @@ function fixture(context: TestContext) {
     receive(message: ProtocolMessage) {
       this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(message) }));
     }
-    auth(type = MessageType.AUTH_SUCCESS) {
+    auth(type = MessageType.AUTH_SUCCESS,
+      payload: Record<string, unknown> = type === MessageType.AUTH_CHALLENGE ? { nonce: NONCE } : {}) {
       const request = this.sent.find(message => message.type === MessageType.AUTH_CONNECT);
       assert.ok(request?.requestId);
-      this.receive({ type, requestId: request.requestId, payload: {} });
+      this.receive({ type, requestId: request.requestId, payload });
     }
   }
   const browser = Object.assign(new EventTarget(), {
-    api: { signChallenge: async (_nonce: string) => 'fixture-signature' },
+    api: {
+      signChallenge: async (_nonce: string, _binding?: ServerChallengeBinding): Promise<SignChallengeResult> =>
+        ({ signature: 'fixture-signature' }),
+    },
   });
   const originalSocket = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -374,7 +381,7 @@ test('late challenge signatures and failures cannot affect a replacement connect
   for (const fail of [false, true]) {
     await context.test(fail ? 'failed signature' : 'successful signature', async nested => {
       const f = fixture(nested);
-      let resolveSignature!: (value: string) => void;
+      let resolveSignature!: (value: SignChallengeResult) => void;
       let rejectSignature!: (error: Error) => void;
       f.browser.api.signChallenge = () => new Promise((resolve, reject) => {
         resolveSignature = resolve;
@@ -389,7 +396,7 @@ test('late challenge signatures and failures cannot affect a replacement connect
       f.lastSocket().auth();
       await replacement;
       if (fail) rejectSignature(new Error('Obsolete signing failed'));
-      else resolveSignature('obsolete-signature');
+      else resolveSignature({ signature: 'obsolete-signature' });
       await setImmediate();
       assert.equal(f.client.getStatus(), 'CONNECTED');
       assert.equal(f.lastSocket().sent.some(message => message.type === MessageType.AUTH_CHALLENGE_RESPONSE), false);
@@ -605,4 +612,96 @@ test('a background server update notice reaches global UI and keeps reconnecting
   context.mock.timers.tick(60_000);
   await setImmediate();
   assert.equal(f.sockets.length, 2, 'An update restart reconnects on its own, like any dropped socket');
+});
+
+const SERVER_KEY = `302a300506032b6570032100${'1'.repeat(64)}`;
+const OTHER_KEY = `302a300506032b6570032100${'2'.repeat(64)}`;
+const bound = (serverKey: string) => ({ nonce: NONCE, serverKey, serverSignature: 'c'.repeat(128) });
+
+/** One sign-in at `host`: the server presents `challenge`, and admits whatever answer comes back. */
+async function signIn(f: ReturnType<typeof fixture>, host: string, challenge: Record<string, unknown>) {
+  const signed: { binding?: ServerChallengeBinding }[] = [];
+  f.browser.api.signChallenge = async (_nonce, binding) => {
+    signed.push({ binding });
+    return { signature: 'fixture-signature' };
+  };
+  const pending = f.client.connect(host, 3000, identity, 'Fixture')
+    .then(() => 'joined', (error: unknown) => error instanceof Error ? error.message : String(error));
+  const socket = f.lastSocket();
+  socket.open();
+  socket.auth(MessageType.AUTH_CHALLENGE, challenge);
+  await setImmediate();
+  const answered = socket.sent.some(message => message.type === MessageType.AUTH_CHALLENGE_RESPONSE);
+  if (answered) socket.auth();
+  const outcome = await pending;
+  f.client.disconnect();
+  return { outcome, answered, signed };
+}
+
+test('the first protected sign-in pins the server key, and later ones are bound to it (#821)', async context => {
+  const f = fixture(context);
+  const first = await signIn(f, 'pin.test', bound(SERVER_KEY));
+  assert.equal(first.outcome, 'joined');
+  assert.deepEqual(first.signed, [{ binding: { serverKey: SERVER_KEY, serverSignature: 'c'.repeat(128) } }]);
+  assert.equal(connectionStore.serverKeyExpectation({ host: 'pin.test', port: 3000 }).pinned, SERVER_KEY);
+  // Saving the server afterwards (as the invitation and add-server flows do) keeps the pin.
+  connectionStore.addSavedServer({ host: 'pin.test', port: 3000, name: 'Pinned', lastConnected: 1 });
+  assert.equal(connectionStore.findSavedServer({ host: 'pin.test', port: 3000 })?.serverKey, SERVER_KEY);
+  assert.equal((await signIn(f, 'pin.test', bound(SERVER_KEY))).outcome, 'joined');
+
+  // No other key, and no downgrade to the bare nonce, at that address: nothing is signed.
+  for (const [challenge, message] of [
+    [bound(OTHER_KEY), t('network.serverKeyChanged')],
+    [{ nonce: NONCE }, t('network.serverKeyMissing')],
+  ] as const) {
+    const refused = await signIn(f, 'pin.test', challenge);
+    assert.deepEqual([refused.outcome, refused.answered, refused.signed.length], [message, false, 0]);
+  }
+  // A server that never presented a key keeps the bare nonce.
+  const legacy = await signIn(f, 'legacy.test', { nonce: NONCE });
+  assert.deepEqual([legacy.outcome, legacy.signed], ['joined', [{ binding: undefined }]]);
+  assert.equal(connectionStore.serverKeyExpectation({ host: 'legacy.test', port: 3000 }).pinned, undefined);
+});
+
+test('a new address presenting a pinned key is refused, even through an invitation, unless added to that server (#821)', async context => {
+  const f = fixture(context);
+  connectionStore.addSavedServer({ host: 'home.test', port: 3000, name: 'Home', lastConnected: 1 });
+  connectionStore.pinServerKey({ host: 'home.test', port: 3000 }, SERVER_KEY);
+
+  const relay = await signIn(f, 'relay.test', bound(SERVER_KEY));
+  assert.deepEqual([relay.outcome, relay.answered], [t('network.serverKeyOfOtherServer'), false]);
+  const forget = connectionStore.expectInvitedServerKey({ host: 'relay.test', port: 3000 }, SERVER_KEY);
+  const invited = await signIn(f, 'relay.test', bound(SERVER_KEY));
+  forget();
+  assert.deepEqual([invited.outcome, invited.answered], [t('network.serverKeyOfOtherServer'), false]);
+
+  const home = connectionStore.findSavedServer({ host: 'home.test', port: 3000 });
+  assert.ok(home);
+  assert.ok(connectionStore.addServerAddress(home, { host: 'lan.test', port: 3000 }));
+  assert.equal(connectionStore.addServerAddress(home, { host: 'lan.test', port: 3000 }), null, 'An address is saved once');
+  assert.equal((await signIn(f, 'lan.test', bound(SERVER_KEY))).outcome, 'joined');
+  assert.equal(connectionStore.findSavedServer({ host: 'lan.test', port: 3000 })?.serverKey, SERVER_KEY);
+});
+
+test('only an invitation naming the new key replaces a pinned one, and the server must prove it (#821)', async context => {
+  const f = fixture(context);
+  connectionStore.addSavedServer({ host: 'moved.test', port: 3000, name: 'Moved', lastConnected: 1 });
+  connectionStore.pinServerKey({ host: 'moved.test', port: 3000 }, SERVER_KEY);
+  const address = { host: 'moved.test', port: 3000 };
+
+  const forget = connectionStore.expectInvitedServerKey(address, OTHER_KEY);
+  // The invitation names OTHER_KEY: the old key is now the one refused.
+  assert.equal((await signIn(f, 'moved.test', bound(SERVER_KEY))).outcome, t('network.serverKeyChanged'));
+  f.browser.api.signChallenge = async () => ({ refused: 'server-signature' });
+  const pending = assert.rejects(f.client.connect('moved.test', 3000, identity, 'Fixture'), { message: t('network.serverKeyInvalid') });
+  f.lastSocket().open();
+  f.lastSocket().auth(MessageType.AUTH_CHALLENGE, bound(OTHER_KEY));
+  await pending;
+  f.client.disconnect();
+  assert.equal(connectionStore.findSavedServer(address)?.serverKey, SERVER_KEY, 'A refused sign-in pins nothing');
+
+  assert.equal((await signIn(f, 'moved.test', bound(OTHER_KEY))).outcome, 'joined');
+  forget();
+  assert.equal(connectionStore.findSavedServer(address)?.serverKey, OTHER_KEY);
+  assert.deepEqual(connectionStore.serverKeyExpectation(address), { pinned: OTHER_KEY, invited: undefined });
 });

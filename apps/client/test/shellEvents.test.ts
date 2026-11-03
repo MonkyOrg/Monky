@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { MessageType, Permission, type ServerDetails, type ServerSettingsUpdatedPayload, type UserSummary } from '@monky/shared';
+import {
+  MessageType, Permission, getMessageText, type ChatMessage, type ServerDetails, type ServerSettingsUpdatedPayload, type UserSummary,
+} from '@monky/shared';
 import { appEvents } from '../src/renderer/core/EventBus';
-import { chatMessageNotice } from '../src/renderer/core/chatNotificationPolicy';
+import { chatMessageNotice, mentionsMember } from '../src/renderer/core/chatNotificationPolicy';
 import { syncSavedServer } from '../src/renderer/core/savedServerSync';
 import { bindServerStateEvents, reconcileChannelAccess } from '../src/renderer/core/serverStateEvents';
 import { sessionManager } from '../src/renderer/core/SessionManager';
 import { routeSessionEvent } from '../src/renderer/core/sessionRouting';
+import { serverMentionMatcher } from '../src/renderer/utils/mentions';
 import { connectionStore } from '../src/renderer/stores/connectionStore';
 import { settingsStore, type ResolvedChatSoundMode } from '../src/renderer/stores/settingsStore';
 import { voiceStore } from '../src/renderer/stores/voiceStore';
@@ -53,6 +56,29 @@ test('a chat message calls attention by the channel settings, the screen and whe
     'a mention seen live is read on the server at once (#14)');
   assert.deepEqual(notice('none', true, true, false), { sound: false, unread: false, mention: 'badge' },
     'a silenced channel still shows that it mentions the member');
+});
+
+// The server records a mention named in any language of a bot post, and the @ badge is
+// back from it after reconnecting (test-message-composition.ts); live, the app agrees.
+test('a bot post mentions whoever any of its languages names, whatever language the reader uses (#843)', (context) => {
+  const { visible } = servers(context);
+  const ana: UserSummary = { ...user, id: 'ana', clientId: 'ana-key', nickname: 'Ana' };
+  visible.serverStore.setServerDetails({ ...details('Visible', ['general']), members: [ana] }, ana);
+  const matcher = serverMentionMatcher(visible.serverStore);
+  const post = (en: string): ChatMessage => ({
+    id: 'post', channelId: 'general', userId: 'bot', userNickname: 'Announcer', isBot: true, createdAt: 1,
+    content: 'Meeting now', localizations: { 'pt-BR': 'Reunião agora', en },
+  });
+  const live = (message: ChatMessage) => chatMessageNotice({
+    soundMode: 'mentions', isMention: mentionsMember(message, matcher, 'Ana'), foreground: true, viewing: false,
+  });
+
+  assert.deepEqual(live(post('Meeting now')), { sound: false, unread: false, mention: null }, 'no language names Ana');
+  assert.equal(getMessageText(post('Meeting now, @Ana'), 'pt-BR'), 'Reunião agora', 'Ana reads the Portuguese text');
+  assert.deepEqual(live(post('Meeting now, @Ana')), { sound: true, unread: true, mention: 'badge' },
+    'only the English text names Ana, who reads in Portuguese: she still gets the cue and the @ badge');
+  assert.deepEqual(live({ ...post('Meeting now, @Ana'), isBot: false }), { sound: false, unread: false, mention: null },
+    'only a bot writes language variants');
 });
 
 test('an access change drops unreadable channels from the chat and finishes commands where the member can no longer act', (context) => {

@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { LIMITS } from '@monky/shared';
+import { LIMITS, parseTrustedProxies, type TrustedProxyProblem } from '@monky/shared';
 import type { ServerRecord } from '../../domain/entities';
 import {
   normalizeServerName,
@@ -17,7 +17,8 @@ import {
 } from '../constants';
 import { CliContext, GlobalArgs, readLocalConfig, withWritableContext, writeLocalConfig } from '../context';
 import { estimateHostCapacity, printCapacityEstimate } from '../capacity';
-import { configKeyLabel, describeSfuPortProblem, describeTurnPortProblem, describeTurnUnavailability, formatBool, formatDate, parseBoolean, parseMemberLimit, parsePort, parsePositiveInt, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
+import { configKeyLabel, describeSfuPortProblem, describeTurnPortProblem, describeTurnUnavailability, formatBool, formatDate, formatSfuMediaPort, parseBoolean, parseMemberLimit, parsePort, parsePositiveInt, parseVoiceMode, printSfuPortToOpen, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
+import { expectedSfuMediaPort } from '../../infrastructure/sfu/sfuPortRecord';
 import { t } from '../i18n/index';
 import { RegisteredServer, registerServer } from '../registry';
 import { ask, askChoice, confirm, promptPassword } from '../prompts';
@@ -29,10 +30,10 @@ import { CoturnManager } from '../../infrastructure/turn/CoturnManager';
 import { checkSfuPreflight } from '../../infrastructure/sfu/SfuPreflight';
 
 /** Settings kept outside `server.db`, so changing them never conflicts with a running server. */
-type DatabaseConfigKey = Exclude<ConfigKey, 'port' | 'autoUpdate'>;
+type DatabaseConfigKey = Exclude<ConfigKey, 'port' | 'autoUpdate' | 'trustedProxies'>;
 
 function isDatabaseConfigKey(key: ConfigKey): key is DatabaseConfigKey {
-  return key !== 'port' && key !== 'autoUpdate';
+  return key !== 'port' && key !== 'autoUpdate' && key !== 'trustedProxies';
 }
 
 function parseConfigKey(value: string): ConfigKey {
@@ -107,11 +108,13 @@ export async function showConfig(ctx: CliContext): Promise<void> {
   console.log(`${configKeyLabel('allowEveryoneMention')}: ${formatBool(server.allowEveryoneMention)}`);
   console.log(`${configKeyLabel('showRoleBadgesToEveryone')}: ${formatBool(server.showRoleBadgesToEveryone)}`);
   console.log(`${configKeyLabel('voiceMode')}: ${server.voiceMode}${voiceModeStatusSuffix(server.voiceMode)}`);
+  if (server.voiceMode === 'sfu') console.log(`${t('label.sfuMediaPort')}: ${formatSfuMediaPort(expectedSfuMediaPort(ctx.dataDir))}`);
   console.log(`${configKeyLabel('turn')}: ${formatBool(server.turnEnabled)}${turnStatusSuffix()}`);
   console.log(`${t('label.iconPath')}: ${server.iconPath ?? '-'}`);
   console.log(`${configKeyLabel('maxAttachmentFileBytes')}: ${server.maxAttachmentFileBytes ?? '-'}`);
   console.log(`${configKeyLabel('maxAttachmentStorageBytes')}: ${server.maxAttachmentStorageBytes ?? '-'}`);
   console.log(`${configKeyLabel('autoUpdate')}: ${formatBool(isAutoUpdateEnabled())}`);
+  console.log(`${configKeyLabel('trustedProxies')}: ${localConfig.trustedProxies?.length ? localConfig.trustedProxies.join(', ') : t('config.trustedProxiesOff')}`);
   console.log(`${t('label.createdAt')}: ${formatDate(server.createdAt)}`);
 }
 
@@ -145,6 +148,10 @@ export async function setConfigCommand(globalArgs: GlobalArgs, rawKey: string, v
     await setPortCommand(target, value);
     return;
   }
+  if (key === 'trustedProxies') {
+    await setTrustedProxiesCommand(target, value);
+    return;
+  }
   await withWritableContext(target.dataDir, (ctx) => setConfig(ctx, key, value));
 }
 
@@ -174,6 +181,40 @@ async function setPortCommand(target: RegisteredServer, value?: string): Promise
     return;
   }
   console.log(color(t('config.portNextStartOrRestart'), ANSI.dim));
+}
+
+/** The CLI's words for a list `parseTrustedProxies` refuses. */
+function describeTrustedProxyProblem(problem: TrustedProxyProblem): string {
+  switch (problem.code) {
+    case 'invalid': return t('config.invalidTrustedProxy', { entry: problem.entry });
+    case 'everyone': return t('config.trustedProxyEveryone', { entry: problem.entry });
+    case 'too-many': return t('config.tooManyTrustedProxies', { max: problem.max });
+  }
+}
+
+/**
+ * Off by default (#829). Read by the server when it starts, like the port, so
+ * a running server is offered the regular restart.
+ */
+async function setTrustedProxiesCommand(target: RegisteredServer, value?: string): Promise<void> {
+  const config = readLocalConfig(target.dataDir);
+  const answer = value ?? (await ask(t('config.askTrustedProxies'), config.trustedProxies?.join(', ') ?? ''));
+  const off = ['', 'none', 'off', 'clear', 'remove', 'false'].includes(answer.trim().toLowerCase());
+  const parsed = parseTrustedProxies(off ? '' : answer);
+  if (!parsed.ok) throw new Error(describeTrustedProxyProblem(parsed.problem));
+  const { trustedProxies: _previous, ...rest } = config;
+  writeLocalConfig(target.dataDir, parsed.entries.length ? { ...rest, trustedProxies: parsed.entries } : rest);
+  console.log(color(t('config.updated', { key: 'trustedProxies' }), ANSI.green));
+
+  if (!findOnlinePm2Process(target.dataDir)) {
+    console.log(color(t('config.trustedProxiesNextStart'), ANSI.dim));
+    return;
+  }
+  if (await confirm(t('config.restartForTrustedProxies'), true) &&
+      await restartServerCommand({ args: [], dataDir: target.dataDir, dataDirSpecified: true })) {
+    return;
+  }
+  console.log(color(t('config.trustedProxiesNextStartOrRestart'), ANSI.dim));
 }
 
 async function setAutoUpdateCommand(value?: string): Promise<void> {
@@ -340,14 +381,18 @@ export async function setConfig(
 
       if (mode === 'sfu' && !options.skipSfuDiagnostics) {
         // Refuse before persisting: the desktop path already blocks the switch
-        // when the range is unusable, and the CLI accepting it would be the
-        // only way left to end up with a mode the host cannot serve (#515).
+        // when no port is usable, and the CLI accepting it would be the only
+        // way left to end up with a mode the host cannot serve (#515).
+        // Already in SFU mode, a running server holds its port itself.
         const { SfuManager } = await import('../../infrastructure/sfu/SfuManager');
-        const portProblem = await new SfuManager().checkPortAvailability();
-        if (portProblem) {
-          throw new Error(describeSfuPortProblem(portProblem));
+        const sfu = new SfuManager({ dataDir: ctx.dataDir });
+        const availability = server.voiceMode === 'sfu'
+          ? { port: sfu.getFirewallPort() }
+          : await sfu.checkPortAvailability();
+        if ('problem' in availability) {
+          throw new Error(describeSfuPortProblem(availability.problem));
         }
-        console.log(color(t('config.sfuPortOk'), ANSI.green));
+        printSfuPortToOpen(availability.port);
       }
 
       // The SFU is the relay in this mode, so coturn is turned off rather than

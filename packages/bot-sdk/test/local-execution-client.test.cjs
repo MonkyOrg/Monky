@@ -733,6 +733,36 @@ test('a post-drain peer close without server completion still expires rather tha
     assert.equal(peer.stream.signal.aborted, true);
   });
 
+test('a private channel lost just before the server cancellation reports the cancellation, not a transport failure',
+  { timeout: 15000 }, async t => {
+    const f = await fixture(t);
+    const { stream, offer, pc, channel } = await pairedStream(t, f);
+    const read = observe(stream.frames[Symbol.asyncIterator]().next());
+    // A requester leaving voice closes the channel; the server's verdict arrives on the WebSocket afterwards.
+    channel.close();
+    await until(() => channel.readyState === 'closed');
+    await pc.close();
+    await remainsPending(stream.closed);
+    await remainsPending(read);
+    f.send(MessageType.BOT_LOCAL_TASK_EVENT, { state: 'cancelled', taskId: offer.taskId, cause: 'requester_left_voice' });
+    await assert.rejects(within(stream.closed), isTerminal('cancelled', 'requester_left_voice'));
+    await assert.rejects(within(read), isTerminal('cancelled', 'requester_left_voice'));
+    assert.equal(f.allFrames.some(message => message.type === MessageType.BOT_LOCAL_TASK_EVENT &&
+      message.payload.state === 'failed'), false, 'The bot must not report a failure the server did not see.');
+  });
+
+test('a private channel lost without any server verdict still fails as a transport failure',
+  { timeout: 15000 }, async t => {
+    const f = await fixture(t);
+    const { stream, pc, channel } = await pairedStream(t, f);
+    const read = observe(stream.frames[Symbol.asyncIterator]().next());
+    channel.close();
+    await until(() => channel.readyState === 'closed');
+    await pc.close();
+    await assert.rejects(within(stream.closed, 10000), isTerminal('failed', 'transport_failed'));
+    await assert.rejects(within(read), isTerminal('failed', 'transport_failed'));
+  });
+
 test('paused streams expose requester cancellation immediately through closed, signal, pending reads and controls',
   { timeout: 30000 }, async t => {
     const f = await fixture(t);

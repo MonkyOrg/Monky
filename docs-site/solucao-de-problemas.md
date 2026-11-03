@@ -13,6 +13,7 @@ voz e vídeo estejam passando; TURN não corrige o endereço de login.
 | macOS diz que o app "está danificado e não pode ser aberto" | Confira origem e checksum antes de alterar a quarentena. Veja [Download](/download#macos-o-aplicativo-esta-danificado-e-nao-pode-ser-aberto) |
 | Não consigo conectar no servidor do meu amigo | Confirme processo, endereço, porta TCP e firewall. Em CGNAT, use uma rede VPN acessível aos participantes ou uma hospedagem publicamente alcançável. TURN só ajuda a mídia depois de conectar |
 | Nickname já em uso | Nicknames são únicos por servidor — escolha outro |
+| "A chave de identidade deste servidor mudou" ou "apresentou a chave de identidade de outro servidor" | O app recusou entrar para não entregar o seu login a outro servidor. Se o dono trocou a chave (ou recriou o servidor), peça a ele um convite novo e entre por ele. Se for o mesmo servidor em outro endereço, adicione o endereço pelo menu do servidor salvo, em **Adicionar endereço**. Veja [A assinatura vale para um servidor só](/arquitetura#a-assinatura-vale-para-um-servidor-so) |
 | Entrei, mas ninguém me ouve | Confira Configurações › Voz e Vídeo, o medidor, o limite de detecção, PTT, mute pessoal e eventual bloqueio administrativo |
 | Ouço uma pessoa, mas o avatar não indica sua fala | Atualize o cliente. O indicador acompanha o áudio decodificado de cada microfone em P2P e SFU, mesmo quando as estatísticas RTP informam nível zero. Ele fica oculto enquanto você está ensurdecido; áudio de tela não deve acioná-lo |
 | Ouço todo mundo cortando | Use o perfil Leve, peça o mesmo a quem transmite e prefira cabo a Wi-Fi |
@@ -20,7 +21,7 @@ voz e vídeo estejam passando; TURN não corrige o endereço de login.
 | Nada em Servidores na Rede | A descoberta só funciona na mesma LAN; clique em Buscar de novo e verifique UDP `41234` no firewall |
 | Um participante ficou mudo só para mim | Clique com o botão direito nele e volte o volume individual para 100% |
 | Só não consigo falar com **uma** pessoa específica (com o resto funciona) | Aparece um ícone vermelho `link_off` ao lado dela. Os dois provavelmente estão atrás de CGNAT e não há rota direta. Quem hospeda pode ligar o [relay TURN](/turn); a alternativa é os dois entrarem numa VPN. Só acontece no modo P2P Mesh |
-| No **modo SFU**, ninguém ouve ninguém e a chamada nunca conecta | O range `40000-49151` precisa estar aberto em **UDP e TCP** no firewall e no roteador. A sinalização usa outra porta, então o servidor parece funcionar enquanto a mídia não passa. Veja [Abrindo as portas do Modo SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu) |
+| No **modo SFU**, ninguém ouve ninguém e a chamada nunca conecta | A porta `40000` precisa estar aberta em **UDP e TCP** no firewall e no roteador. A sinalização usa outra porta, então o servidor parece funcionar enquanto a mídia não passa. Veja [Abrindo as portas do Modo SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu) |
 | No **modo SFU**, a chamada cai e o app fica avisando que está reconectando | Pode ser falha do processo ou do trajeto de mídia. Criar transportes e produtores pela sinalização não comprova conectividade ICE/DTLS. Confira nos logs os endereços e portas anunciados, o firewall da VM e as regras do provedor; conseguir reservar uma porta localmente não comprova acesso externo |
 | O Avast (ou outro antivírus) apita ao instalar/atualizar | Confira a detecção, a origem e a integridade; não presuma falso positivo. Veja [Antivírus: Avast e similares](#antivirus-avast-e-similares) |
 | O botão do **relay TURN** está esmaecido e não deixa clicar | Confira o motivo exibido: plataforma não suportada, modo SFU, versão antiga ou falta de privilégio para instalar coturn. Para este último caso, siga a [instalação manual](/turn#instalacao-manual-do-coturn), respeitando os outros serviços do host |
@@ -141,8 +142,8 @@ WireGuard). A VPN cria uma rede virtual que contorna o CGNAT.
 No [modo SFU](/criar-seu-servidor#modos-de-voz-e-midia-p2p-mesh-vs-sfu) ninguém
 se conecta diretamente aos outros participantes: cada pessoa fala com o
 servidor. Isso evita depender do caminho direto entre os dois, mas ainda exige
-uma rota acessível até o host, IP anunciado correto e portas `40000-49151`
-liberadas. A mídia passa pelo host, que precisa da banda correspondente.
+uma rota acessível até o host, IP anunciado correto e porta `40000`
+liberada (UDP e TCP). A mídia passa pelo host, que precisa da banda correspondente.
 
 ### Como saber se estou atrás de CGNAT?
 

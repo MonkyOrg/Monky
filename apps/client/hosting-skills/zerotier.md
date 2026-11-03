@@ -39,7 +39,7 @@ Follow "Hosting from the Monky app" above. Check `http://127.0.0.1:3000/health` 
   New-NetFirewallRule -DisplayName "Monky server (ZeroTier)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3000 -RemoteAddress 10.147.17.0/24
   ```
 
-  In SFU mode add a second rule with `-Protocol UDP -LocalPort 40000-49151`. Undo with `Remove-NetFirewallRule -DisplayName "Monky server (ZeroTier)"`.
+  In SFU mode add a second rule with `-Protocol UDP -LocalPort 40000` and a third with `-Protocol TCP -LocalPort 40000` (for networks that block UDP). Undo with `Remove-NetFirewallRule -DisplayName "Monky server (ZeroTier)"`.
 - **macOS**: allow Monky to accept incoming connections (System Settings → Network → Firewall).
 - **Linux with ufw**: `sudo ufw allow from <network-range> to any port 3000 proto tcp`.
 

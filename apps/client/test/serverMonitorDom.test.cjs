@@ -180,6 +180,7 @@ async function runRegression(config) {
   await newOpening;
   check(document.querySelector('#stat-online').textContent === '2', 'current remote metrics render');
   check(document.querySelector('#stat-members').textContent === '3/10', 'online and registered members stay distinct');
+  check(document.querySelector('#stat-sfu-port').closest('.server-monitor-stat').hidden, 'a remote server never shows a firewall port');
   check(document.querySelector('#monitor-source').textContent.includes('server-b'), 'remote source is explicitly identified');
   check(localReads === 0 && logListeners.size === 0, 'remote monitoring never opens local IPC stats or logs');
   check(document.querySelector('[role="dialog"]').getAttribute('aria-modal') === 'true', 'monitor is an accessible modal dialog');
@@ -275,9 +276,12 @@ async function runRegression(config) {
   await localOpening;
   check(!document.querySelector('.modal-backdrop:not([data-ui-closing]) [role="dialog"]') && scheduled.size === 0,
     'late local response cannot reopen or retain a timer');
-  localStatsRead = async () => ({ ...baseStats, dataDir: 'local-host' });
+  localStatsRead = async () => ({ ...baseStats, dataDir: 'local-host', sfuMediaPort: 40001 });
   opener.focus();
   await modal.openLocal(3000);
+  const sfuPort = document.querySelector('#stat-sfu-port');
+  check(!sfuPort.closest('.server-monitor-stat').hidden && sfuPort.textContent === t('serverMonitor.sfuPortValue', { port: 40001 }),
+    'the hosted SFU server shows the media port to open in the firewall');
   check(document.querySelector('#monitor-source').textContent.trim() === t('serverMonitor.localSource'), 'local monitoring works without a connected session');
   document.querySelector('#btn-clear-logs').click();
   check(localClears === 0, 'local clear is also display-only');

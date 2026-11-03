@@ -314,7 +314,7 @@ async function setupFixture(language) {
   window.api = {
     getIdentityStatus: async () => ({ state: 'ready' }),
     getIdentity: async () => ({ clientId: 'onboarding-shots', publicKey: key('f6') }),
-    signChallenge: async (nonce) => `fixture:${nonce}`,
+    signChallenge: async (nonce) => ({ signature: `fixture:${nonce}` }),
     getClientLogConfig: async () => ({ enabled: false }),
     writeClientLog: noop,
     onAppBeforeQuit: unsubscribe,

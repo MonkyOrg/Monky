@@ -487,6 +487,8 @@ if (!process.versions.electron) {
       }
       await rootRequest(['category', 'voice', 'destination', 'loose', 'tail'], 'A channel did not leave its category into the slot between categories');
       await treeLayout(false);
+      // The slots fold back with a transition; drag only once the tree is at rest.
+      await browser.webContents.executeJavaScript('Promise.allSettled(document.getAnimations().map(animation => animation.finished))');
       await drag(await rootPoint('[data-category-id="destination"] > .category-title'),
         await rootPoint('.channel-item[data-channel-id="loose"]', 0.2));
       await rootRequest(['category', 'destination', 'loose', 'tail'], 'A category did not move above a loose channel');

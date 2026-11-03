@@ -367,8 +367,7 @@ export class P2pMeshTransport implements VoiceTransport {
     // connection" on a person sitting in a different voice channel, where there
     // is no link to fail in the first place (#466).
     if (!this.host.isPeerInCall(fromSessionId)) return;
-    // The protocol keeps the `screen-*` signals, but no client sends them since #689:
-    // native screens publish and negotiate through their own owner.
+    // Native screens publish and negotiate through their own owner (#689, #830).
     if (signalType !== 'offer' && signalType !== 'answer' && signalType !== 'candidate') return;
 
     let link = this.peers.get(fromSessionId);

@@ -142,17 +142,21 @@ npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\p
 
 ---
 
-## ✅ Validação local obrigatória antes de abrir PR
+## ⚡ Checagem rápida antes de cada push
 
-- **Nunca abra um PR sem executar antes as validações locais correspondentes ao CI, proporcionais à mudança.** Leia `.github/workflows/ci.yml`, os scripts chamados pelos jobs e os testes dos arquivos alterados; não use o CI como primeira rodada de testes.
-- `npm run ci:local` executa os passos do `ci.yml` aplicáveis à máquina, continua após falhas e lista todas no fim com o log de cada uma; passos exclusivos de runner descartável aparecem como `PULADO (só CI)`. A execução completa leva dezenas de minutos: rode-a só quando necessário, em mudanças amplas, de protocolo, de contratos compartilhados, de build ou do próprio CI, e complete com o que ele não cobre (por exemplo, macOS e `--package`). Nas demais mudanças, rode só os passos que cobrem os arquivos alterados (`--only <regex>`). Mudança só de documentação não exige a suíte: basta `npm run ci:local -- --only docs`.
-- Rode o build e as suítes afetadas sobre a revisão que será enviada. Mudanças em contratos compartilhados, protocolo ou compatibilidade exigem conferir **shared, servidor, cliente e SDK**, inclusive testes com versões fixadas, negociação e fallback. Para alterações de interface, rode também os testes DOM e de teclado/pointer relevantes; somente type-check ou inspeção visual não substituem esses testes.
-- **Falha local bloqueia a abertura do PR.** Corrija a causa, acrescente a regressão aplicável e repita os testes antes de publicar. A mesma regra vale para enviar correções a um PR já aberto.
-- Verifique diferenças de Windows/macOS e caminhos de falha, como downloads interrompidos, quando a alteração os afetar. Registre no PR os comandos executados e os cenários que dependem de outro sistema operacional; testes locais reduzem falhas evitáveis, mas não garantem disponibilidade de serviços externos nem substituem o CI multiplataforma.
-- Preserve a máquina do desenvolvedor: use perfis e servidores descartáveis. Variantes reservadas a runners descartáveis, como testes do clipboard real, continuam exclusivas do CI; nunca altere `GITHUB_ACTIONS` para contornar essa proteção.
+Antes de todo push, rode as duas checagens abaixo (cerca de 1 minuto e meio). Elas pegam erros bobos que derrubariam o CI longo; a validação completa continua sendo o CI do GitHub.
+
+```powershell
+npm run build
+npm run ci:local -- --only "^docs "
+```
+
+- `npm run build` pega erro de tipo e de compilação em todos os pacotes.
+- `--only "^docs "` confere a nota de release, o bump do protocolo, os pares PT/EN e se sobrou arquivo fora do commit.
+
+Se alguma falhar, corrija antes do push.
 
 ---
-
 ## 🚢 Publicação de Releases: Somente por Merge de PR
 
 - **Inclua o changelog do aplicativo no mesmo PR.** Mudanças de aplicação/dependências exigem um arquivo novo `release-notes/*.json` com `group`, `pt-BR` e `en`, conforme o `CONTRIBUTING.md`. O changelog técnico dos commits não substitui essas notas. Rode `node scripts/test-changelog.js` e, após os commits, `node scripts/check-client-release-notes.js --base origin/main --head HEAD --merge-base`; CI e release bloqueiam a ausência de notas.

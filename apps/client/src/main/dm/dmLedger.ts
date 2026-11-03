@@ -9,7 +9,8 @@ import {
   type DmSnapshot,
 } from '@monky/shared';
 import { isIdentityPublicKey, normalizeIdentityKey } from './dmCrypto';
-import { DmError, type ConversationMeta, type DmState, type PeerRecord, type StoredConversation, type StoredMessage } from './dmModel';
+import { DmHistory } from './dmHistory';
+import { DmError, type ConversationMeta, type DmState, type PeerRecord, type StoredMessage } from './dmModel';
 import { DmPersistence } from './dmPersistence';
 import { clampMaxFileBytes, emptyProfile, isRecord, sanitizeNickname, sanitizeSelfProfile } from './dmWire';
 
@@ -26,19 +27,17 @@ function previewOf(message: StoredMessage): string {
 
 /**
  * What every part of the DM engine works on (#743): the state file (friends,
- * outbox, downloads, settings, profile), the conversations, each loaded on
- * first use, the clock of the operations this device creates, and what the
- * renderer is shown of all of it. Changes reach the disk with a short
+ * outbox, downloads, settings, profile), the conversations (see
+ * {@link DmHistory}), the clock of the operations this device creates, and
+ * what the renderer is shown of all of it. Changes reach the disk with a short
  * debounce (see {@link DmPersistence}).
  */
 export class DmLedger {
   readonly state: DmState;
-  private readonly conversations = new Map<string, StoredConversation>();
+  readonly history: DmHistory;
   private lastStamp = 0;
   private snapshotTimer: NodeJS.Timeout | null = null;
   private selfNickname = '';
-  /** Told when a conversation is saved after a change, for what is derived from its messages. */
-  onConversationChanged: ((peer: string) => void) | null = null;
 
   constructor(
     readonly me: string,
@@ -47,6 +46,7 @@ export class DmLedger {
     readonly emit: (event: DmEvent) => void,
   ) {
     this.state = this.loadState();
+    this.history = new DmHistory(store, me);
   }
 
   private loadState(): DmState {
@@ -96,27 +96,20 @@ export class DmLedger {
     if (ts > this.lastStamp) this.lastStamp = ts;
   }
 
-  conversation(peer: string): StoredConversation {
-    const cached = this.conversations.get(peer);
-    if (cached) return cached;
-    // Throws while the file cannot be read (it stays on disk for the next try); a damaged one is set aside.
-    const loaded = this.store.readJson(
-      DmPersistence.peerFileName(peer),
-      (value): value is StoredConversation => isRecord(value) && value.peer === peer && Array.isArray(value.messages),
-    );
-    const conversation: StoredConversation = loaded ?? { version: 1, peer, messages: [] };
-    this.conversations.set(peer, conversation);
-    return conversation;
-  }
-
-  saveConversation(peer: string): void {
-    this.onConversationChanged?.(peer);
-    this.store.writeJsonSoon(DmPersistence.peerFileName(peer), () => this.conversation(peer));
-  }
-
-  changed(peer?: string): void {
+  /**
+   * Saves `messages`, inserted or changed in place, with their month, and
+   * what the conversation list shows of the conversation. Without messages,
+   * only the latter (a tombstone saves itself).
+   */
+  saveConversation(peer: string, messages: Iterable<StoredMessage> = []): void {
+    this.history.touch(peer, messages);
+    this.refreshMeta(peer);
     this.saveState();
-    if (peer) this.saveConversation(peer);
+  }
+
+  changed(peer?: string, messages?: Iterable<StoredMessage>): void {
+    this.saveState();
+    if (peer) this.saveConversation(peer, messages);
     this.scheduleSnapshot();
   }
 
@@ -189,21 +182,21 @@ export class DmLedger {
     return meta;
   }
 
+  /** What the conversation list shows of a conversation, from its day index and at most two of its months. */
   refreshMeta(peer: string): void {
     const meta = this.meta(peer);
-    const messages = this.conversation(peer).messages;
-    const visible = messages.filter((message) => !message.deleted);
-    const last = visible[visible.length - 1];
-    meta.messageCount = visible.length;
+    const { count, last, unread } = this.history.summary(peer, meta.lastReadAt);
+    meta.messageCount = count;
     meta.lastMessageAt = Math.max(meta.lastMessageAt, last?.createdAt ?? 0);
     meta.lastMessagePreview = last ? previewOf(last) : '';
     meta.lastMessageAuthor = last?.author ?? null;
-    meta.unread = visible.filter((message) => message.author !== this.me && message.createdAt > meta.lastReadAt).length;
+    meta.unread = unread;
   }
 
-  findMessage(peer: string, id: unknown): StoredMessage | null {
+  /** `createdAt`, when known, limits the search to the month of the message. */
+  findMessage(peer: string, id: unknown, createdAt?: number): StoredMessage | null {
     if (typeof id !== 'string') return null;
-    return this.conversation(peer).messages.find((message) => message.id === id) ?? null;
+    return this.history.find(peer, id, createdAt);
   }
 
   private peerView(record: PeerRecord): DmPeerView {
@@ -283,17 +276,11 @@ export class DmLedger {
 
   getConversation(peerKey: string, before?: string | null, limit = PAGE_SIZE): DmConversationPage {
     const peer = this.requirePeerKey(peerKey);
-    const messages = this.conversation(peer).messages;
-    let end = messages.length;
-    if (before) {
-      const index = messages.findIndex((message) => message.id === before);
-      if (index >= 0) end = index;
-    }
-    const start = Math.max(0, end - Math.max(1, Math.min(limit, 500)));
+    const page = this.history.page(peer, before ?? null, Math.max(1, Math.min(limit, 500)));
     return {
       peer,
-      messages: messages.slice(start, end).map((message) => this.messageView(peer, message)),
-      hasMore: start > 0,
+      messages: page.messages.map((message) => this.messageView(peer, message)),
+      hasMore: page.hasMore,
       peerReadAt: this.state.conversations[peer]?.peerReadAt ?? 0,
     };
   }
@@ -322,6 +309,6 @@ export class DmLedger {
     if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
     this.snapshotTimer = null;
     this.store.discardPending();
-    this.conversations.clear();
+    this.history.discard();
   }
 }

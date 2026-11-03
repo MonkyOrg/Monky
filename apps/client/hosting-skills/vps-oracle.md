@@ -33,8 +33,8 @@ Instance page → the virtual cloud network → **Security** tab → **Default S
 | Source CIDR | IP protocol | Destination port | When |
 |---|---|---|---|
 | `0.0.0.0/0` | TCP | `3000` | always |
-| `0.0.0.0/0` | UDP | `40000-49151` | SFU mode |
-| `0.0.0.0/0` | TCP | `40000-49151` | SFU mode, for clients whose network blocks UDP |
+| `0.0.0.0/0` | UDP | `40000` | SFU mode |
+| `0.0.0.0/0` | TCP | `40000` | SFU mode, for clients whose network blocks UDP |
 | `0.0.0.0/0` | TCP | `7780-7781` | only when hosting MonkyBot (manifest and games) |
 
 If the instance uses a Network Security Group instead, add the same rules there. Keep the existing SSH (22) rule. Other bots declare their own ports: run the bot's `requirements` command (for example `monkybot requirements`) before opening them.
@@ -47,14 +47,14 @@ Oracle's Ubuntu images ship iptables rules that reject everything except SSH. Ad
 
 ```bash
 sudo iptables -I INPUT -p tcp --dport 3000 -j ACCEPT
-sudo iptables -I INPUT -p udp --dport 40000:49151 -j ACCEPT
-sudo iptables -I INPUT -p tcp --dport 40000:49151 -j ACCEPT
+sudo iptables -I INPUT -p udp --dport 40000 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 40000 -j ACCEPT
 sudo netfilter-persistent save
 ```
 
-Don't switch these images to ufw: keep working with the existing iptables rules. On **Oracle Linux** (firewalld): `sudo firewall-cmd --permanent --add-port=3000/tcp --add-port=40000-49151/udp --add-port=40000-49151/tcp && sudo firewall-cmd --reload`.
+Don't switch these images to ufw: keep working with the existing iptables rules. On **Oracle Linux** (firewalld): `sudo firewall-cmd --permanent --add-port=3000/tcp --add-port=40000/udp --add-port=40000/tcp && sudo firewall-cmd --reload`.
 
-Skip the two 40000-49151 lines if the server will use P2P mode.
+Skip the two 40000 lines if the server will use P2P mode.
 
 <!-- include: shared/linux-cli.md -->
 

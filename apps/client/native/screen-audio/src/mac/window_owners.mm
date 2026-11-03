@@ -7,7 +7,9 @@
 // O Electron nao popula `appIcon` das janelas no macOS, entao o seletor de
 // compartilhamento de tela fica sem icone nenhum (#455). Aqui devolvemos o dono
 // de cada janela para que o processo principal consiga buscar o icone do bundle
-// com `app.getFileIcon()`.
+// com `app.getFileIcon()`. Lista tambem as janelas fora da tela (minimizadas,
+// em outro Space), que o seletor oferece pela enumeracao do ScreenCaptureKit
+// (#825).
 //
 // Usamos CGWindowListCopyWindowInfo em vez do ScreenCaptureKit de proposito: ele
 // e sincrono (nao bloqueia o processo principal esperando um completion handler)
@@ -18,7 +20,7 @@ Napi::Value platform_list_window_owners(Napi::Env env) {
   Napi::Array result = Napi::Array::New(env);
 
   CFArrayRef windowInfo = CGWindowListCopyWindowInfo(
-      kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+      kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements,
       kCGNullWindowID);
   if (windowInfo == NULL) {
     return result;

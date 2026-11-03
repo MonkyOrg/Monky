@@ -320,11 +320,9 @@ export interface VoiceParticipantState extends VoiceRestrictions {
   /** SFU transport health, measured by the server rather than signaling presence. */
   connectionHealth?: VoiceConnectionHealth;
   /**
-   * IDs of the screen shares this participant is currently broadcasting (#253).
-   * Each entry is the MediaStream id announced over `screen-video-meta`, so
-   * receivers can key tiles and streams per share instead of per user.
-   * `isScreenSharing` stays as the derived flag (`length > 0`) and remains the
-   * source of truth for clients that predate this field.
+   * IDs of the screen shares this participant is currently broadcasting (#253),
+   * so receivers can key tiles and streams per share instead of per user.
+   * `isScreenSharing` stays as the derived flag (`length > 0`).
    */
   screenShareIds?: string[];
   /** Descriptors only: native capture starts when an authenticated viewer watches. */
@@ -535,24 +533,9 @@ export interface WebRtcSignalPayload {
   /** Peers are addressed per connection, not per person (#309). */
   targetSessionId: string;
   fromSessionId: string;
-  signalType: 'offer' | 'answer' | 'candidate' | 'user-left' | 'screen-audio-meta' | 'screen-video-meta' | 'screen-watch';
+  signalType: 'offer' | 'answer' | 'candidate' | 'user-left';
   sdp?: RtcSignalDescription;
   candidate?: RtcSignalCandidate;
-  streamId?: string; // For screen-audio-meta/screen-video-meta: the MediaStream ID of the screen track
-  /** Sender's epoch for SDP/metadata; publisher's epoch for a Watch command. */
+  /** The sender's epoch of this P2P connection; required on offer and answer. */
   subscriptionId?: string;
-  /** Prevents a previous call on the same device/session ID from authorizing reception. */
-  watcherSubscriptionId?: string;
-  watching?: boolean;
-  /** Monotonic per share and subscriptionId, including Stop commands. */
-  subscriptionRevision?: number;
-}
-
-export interface ScreenWatchSignalPayload extends WebRtcSignalPayload {
-  signalType: 'screen-watch';
-  streamId: string;
-  subscriptionId: string;
-  watcherSubscriptionId: string;
-  subscriptionRevision: number;
-  watching: boolean;
 }

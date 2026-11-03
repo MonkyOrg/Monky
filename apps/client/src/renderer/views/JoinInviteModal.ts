@@ -8,6 +8,7 @@ import { openModal, type ModalCloseReason } from '../utils/modalShell';
 import { escapeHtml } from '../utils/html';
 import { errorMessage, reportError, validateForm } from '../utils/feedback';
 import { nicknameError } from '../utils/nickname';
+import { setServerTransport } from '../utils/serverAddress';
 
 export class JoinInviteModal {
   private completion: Promise<boolean> | null = null;
@@ -37,7 +38,7 @@ export class JoinInviteModal {
         <p>${escapeHtml(t('invite.review', { name: invite.name ?? 'Monky' }))}</p>
         ${invite.eventId ? `<p>${escapeHtml(t('community.invitedEventHint'))}</p>` : ''}
         <dl style="display: grid; grid-template-columns: auto 1fr; gap: 8px; margin: 0;">
-          <dt>${t('connection.hostLabel')}</dt><dd style="overflow-wrap: anywhere; margin: 0;" data-invite-host>${escapeHtml(invite.host)}</dd>
+          <dt>${t('connection.hostLabel')}</dt><dd style="overflow-wrap: anywhere; margin: 0;" data-invite-host>${escapeHtml(invite.tls ? `wss://${invite.host}` : invite.host)}</dd>
           <dt>${t('connection.portLabel')}</dt><dd style="margin: 0;" data-invite-port>${invite.port}</dd>
         </dl>
         <p style="font-size: 12px; color: var(--text-muted);">${t('invite.reviewNotice')}</p>
@@ -121,7 +122,16 @@ export class JoinInviteModal {
         if (shell.closed) return;
         connectionStore.setIdentity(identity);
         const reused = getServerSessionForAddress(invite.host, invite.port)?.client.getStatus() === 'CONNECTED';
-        const result = await openServerSession(invite.host, invite.port, identity, name, serverPassword);
+        // The invitation says how the server is reached; one without TLS stays plain.
+        if (!reused) setServerTransport(invite, invite.tls === true);
+        // The key the invitation names is expected at this address, whatever was pinned there (#821).
+        const forgetInvitedKey = invite.serverKey ? connectionStore.expectInvitedServerKey(invite, invite.serverKey) : null;
+        let result: Awaited<ReturnType<typeof openServerSession>>;
+        try {
+          result = await openServerSession(invite.host, invite.port, identity, name, serverPassword);
+        } finally {
+          forgetInvitedKey?.();
+        }
         if (shell.closed) return;
         if (!reused) {
           if (identityNickname === null && connectionStore.savedNickname === previousNickname) {

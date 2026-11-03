@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  botLocalizedMessageSchema, botMessageLocalizationsSchema, botMessagePreviewLocalizations, getMessageText,
+  botLocalizedMessageSchema, botMessageLocalizationsSchema, botMessagePreviewLocalizations, getMessageText, getMessageTexts,
   normalizeBotMessageContent,
 } from '../src/botMessages';
 import { commandResponseSchema } from '../src/botInteractions';
@@ -19,6 +19,13 @@ test('each reader selects a bot-authored variant without modifying the original'
   assert.equal(getMessageText({ ...message, deletedAt: 1 }, 'en'), '');
   assert.equal(getMessageText({ content: 'Legacy', isBot: true }, 'en'), 'Legacy');
   assert.equal(getMessageText({ content: 'Fallback', isBot: true, localizations: { en: 'English' } }, 'pt-BR'), 'Fallback');
+});
+
+test('every text a message may be shown with: the variants count only from a bot (#843)', () => {
+  assert.deepEqual(getMessageTexts({ ...translated, isBot: true }), ['Default', 'Olá, **pessoa**!', 'Hello, **reader**!']);
+  assert.deepEqual(getMessageTexts({ content: 'Fallback', isBot: true, localizations: { en: 'English' } }), ['Fallback', 'English']);
+  assert.deepEqual(getMessageTexts({ ...translated, isBot: false }), ['Default']);
+  assert.deepEqual(getMessageTexts({ ...translated, isBot: true, deletedAt: 1 }), []);
 });
 
 test('plain text remains supported; variants and fallback are individually bounded and strict', () => {

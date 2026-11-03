@@ -142,12 +142,17 @@ Usar o computador do solicitante não garante que o provedor aceite uma requisi�
 
 O modal e a indicação de busca têm regressões próprias em `npm run test:local-execution --workspace=@monky/client`. Para exercitar só apresentação, decisões, progresso e cancelamento do modal, use `npm run test:local-preparation --workspace=@monky/client`. Seu preload é um bundle isolado, gerado também pelo build normal, para manter `sandbox: true` sem expor uma API genérica ao documento.
 
-Depois do build do Monky, o teste abaixo inicia servidor, SDK e dois clientes Electron isolados, em salas P2P e SFU reais. Ele mede áudio decodificado no ouvinte e verifica consentimento, mute/PTT, pausa, saída da voz, drenagem final e encerramento dos recursos. Não reutiliza perfis ou servidores pessoais.
+Depois do build do Monky, o teste abaixo inicia servidor, SDK e dois clientes Electron isolados, em salas P2P e SFU reais. Ele mede áudio decodificado no ouvinte e verifica consentimento, mute/PTT, pausa, saída da voz, drenagem final e encerramento dos recursos. Não reutiliza perfis ou servidores pessoais. O CI roda esse teste no Windows a cada PR, e `npm run ci:local` também.
+
+O FFmpeg do teste é um build fixo do Windows, conferido pelo hash do pacote e do executável. `node scripts/fixture-ffmpeg.cjs ensure` baixa esse build uma vez para `%LOCALAPPDATA%\Monky-test-fixtures` e mostra o caminho; sem ele, o `ci:local` mostra o passo como `PULADO`. Em outro sistema, aponte `MONKY_WORKER_TEST_FFMPEG` para um FFmpeg com `libopus`.
 
 ```powershell
+node scripts/fixture-ffmpeg.cjs ensure
 $env:MONKY_WORKER_TEST_FFMPEG = 'C:\caminho\ffmpeg.exe'
 npm run test:local-execution:e2e --workspace=@monky/client
 ```
+
+O ator Electron monta o mesmo registro de IPC do aplicativo (`setupIpcHandlers`), trocando só as ferramentas locais, os diálogos e o atalho global por versões de teste. Se o preload passar a chamar um canal que o ator não responde, o teste falha logo na inicialização e diz qual é.
 
 Para exercitar também o **registro de comandos de produção do MonkyBot**, faça o build do bot com o SDK compatível instalado e, na raiz do Monky, defina o checkout dele:
 

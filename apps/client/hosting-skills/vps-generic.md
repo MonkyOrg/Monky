@@ -27,14 +27,14 @@ Optionally update the system first (ask): `sudo apt-get update && sudo apt-get -
 
 ### 3. Open the provider's firewall
 
-Some providers filter traffic before it reaches the VM (cloud firewalls, security groups). If one is attached to the VPS, allow inbound **TCP 3000** and, for SFU, **UDP 40000-49151**, from anywhere. Keep the existing SSH rule.
+Some providers filter traffic before it reaches the VM (cloud firewalls, security groups). If one is attached to the VPS, allow inbound **TCP 3000** and, for SFU, **UDP and TCP 40000**, from anywhere. Keep the existing SSH rule.
 
 ### 4. Open the VM firewall
 
 Check `sudo ufw status`:
 
-- **Active** → `sudo ufw allow 3000/tcp` and, for SFU, `sudo ufw allow 40000:49151/udp`.
+- **Active** → `sudo ufw allow 3000/tcp` and, for SFU, `sudo ufw allow 40000/udp` and `sudo ufw allow 40000/tcp`.
 - **Inactive** → nothing is blocking. If the user wants it on, allow SSH **before** enabling it, or they'll be locked out: `sudo ufw allow OpenSSH`, the rules above, then `sudo ufw enable`.
-- **firewalld** (Rocky, Alma, Fedora): `sudo firewall-cmd --permanent --add-port=3000/tcp --add-port=40000-49151/udp && sudo firewall-cmd --reload`.
+- **firewalld** (Rocky, Alma, Fedora): `sudo firewall-cmd --permanent --add-port=3000/tcp --add-port=40000/udp --add-port=40000/tcp && sudo firewall-cmd --reload`.
 
 <!-- include: shared/linux-cli.md -->

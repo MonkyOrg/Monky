@@ -29,7 +29,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
    monky create --name "Friends" --port 3000 --voice-mode sfu
    ```
 
-   Use `--voice-mode sfu` only if the UDP range 40000-49151 is open in every firewall; otherwise use `p2p`. A VPS has the bandwidth to relay media, so SFU is usually the better choice there.
+   Use `--voice-mode sfu` only if port 40000 (UDP and TCP) is open in every firewall; otherwise use `p2p`. A VPS has the bandwidth to relay media, so SFU is usually the better choice there.
 4. Accept the offer to start it. The CLI keeps the server running in the background with PM2.
 
 ### Verify and connect
@@ -42,6 +42,6 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ### Troubleshooting
 
 - **Timeout from outside, works on the server** → the TCP port is closed in the provider's firewall or in the VM firewall.
-- **Joins, but voice never connects in SFU mode** → UDP 40000-49151 is closed somewhere. Open it, or switch to P2P with `monky config set voiceMode p2p` and `monky restart`.
+- **Joins, but voice never connects in SFU mode** → port 40000 (UDP/TCP) is closed somewhere. Open it, or switch to P2P with `monky config set voiceMode p2p` and `monky restart`.
 - **`npm install -g` fails with EACCES** → Node.js came from the system packages. Install Node.js with nvm as described above instead of running the installer with `sudo`.
 - **`monky` not found after logging in again** → open a new shell or run `source ~/.bashrc` so nvm loads.

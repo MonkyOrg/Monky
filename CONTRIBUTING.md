@@ -415,10 +415,11 @@ merge: atualize a branch e aguarde o novo CI. Isso não apaga o histórico verde
 nem atualiza sua branch automaticamente. A aprovação de outro revisor continua
 obrigatória; um merge administrativo é uma exceção, não o fluxo normal.
 
-### Rode o CI localmente antes de abrir o PR
+### CI local (opcional)
 
 `npm run ci:local` executa nesta máquina os comandos do CI que fazem sentido
-fora de um runner descartável. Ele lê os passos de `.github/workflows/ci.yml`
+fora de um runner descartável. Usá-lo antes do PR é opcional: quem valida o PR
+é o CI do GitHub. Ele lê os passos de `.github/workflows/ci.yml`
 e a suíte DOM de `scripts/test-client-dom.cjs`, continua depois de cada falha e
 termina listando o que falhou, com o caminho do log de cada passo. A base padrão
 é `git merge-base origin/main HEAD`. Passe opções depois de `--`:
@@ -428,15 +429,15 @@ termina listando o que falhou, com o caminho do log de cada passo. A base padrã
   `npm run ci:local -- --only dom`;
 - `--package` inclui o `electron-builder --dir`.
 
-Rode só o que a mudança exige. A execução completa leva dezenas de minutos e
-vale para mudanças amplas, de protocolo, de contratos compartilhados, de build
-ou do próprio CI. Nas demais, use `--only` com os passos que cobrem os arquivos
-alterados; mudança só de documentação precisa apenas de `--only docs`.
+A execução completa leva dezenas de minutos. Para reproduzir uma falha do CI,
+use `--only` com os passos que cobrem os arquivos alterados.
 
 Passos que só rodam num runner descartável, como o clipboard real e a exportação
 do artefato, aparecem como **PULADO (só CI)**. Se a branch só muda documentação,
 todos os estágios menos `docs` aparecem como pulados, como no CI. Sem `npm run prepare:native-screen`,
-os testes nativos também aparecem como pulados, não como falha. No fim, ele
+os testes nativos também aparecem como pulados, não como falha. O E2E de execução local
+(estágio `local-e2e`) aparece como pulado até existir o FFmpeg fixado de teste
+(`node scripts/fixture-ffmpeg.cjs ensure`) ou `MONKY_WORKER_TEST_FFMPEG`. No fim, ele
 confere que os passos não deixaram arquivos novos no checkout, porque o CI só
 exporta o build de um checkout limpo; essa conferência roda mesmo com `--only`. No CI, cada
 parte da suíte DOM também executa tudo e lista **todas** as falhas no fim

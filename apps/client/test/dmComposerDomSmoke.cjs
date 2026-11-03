@@ -179,6 +179,13 @@ async function runSmoke(window, setPhase) {
   setPhase('incremental feed');
   checks += await fixture('testIncrementalFeed()');
 
+  setPhase('resend');
+  checks += await fixture('showUndelivered()');
+  await click('.chat-message-row[data-message-id="undelivered"] [data-dm-resend]');
+  check(JSON.stringify(await fixture('resendCalls()')) === JSON.stringify([{ peer: 'a'.repeat(64), id: 'undelivered' }]),
+    'Clicking Resend sends that message again');
+  checks += await fixture('deliverUndelivered()');
+
   setPhase('reply jump');
   const motion = value => cdp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
   await motion('no-preference');
@@ -322,7 +329,7 @@ async function installFixture() {
       mime: 'image/png', state: 'ready', receivedBytes: png.length }] }),
   ];
   const ok = value => Promise.resolve({ ok: true, value });
-  const calls = { send: [], edit: [] };
+  const calls = { send: [], edit: [], resend: [] };
   // Another friend, to open a second conversation.
   const otherPeer = 'b'.repeat(64);
   /** What the main process tells the renderer; set once the DM store subscribes. */
@@ -338,6 +345,7 @@ async function installFixture() {
     readAttachment: () => ok({ data: png, mime: 'image/png' }),
     sendMessage: input => { calls.send.push(input); return ok({}); },
     editMessage: (_peer, id, content) => { calls.edit.push({ id, content }); return ok({}); },
+    resendMessage: (key, id) => { calls.resend.push({ peer: key, id }); return ok({}); },
     pendingPeers: () => ok([]),
     onEvent: callback => { storeEvent = callback; return () => {}; },
   };
@@ -683,6 +691,31 @@ async function installFixture() {
       friend.maxFileBytes = savedLimit;
       document.querySelector('.chat-copy-toast--danger:not([data-ui-closing]) .chat-copy-toast-close')?.click();
       await settle();
+      return checks;
+    },
+    resendCalls: () => calls.resend,
+    async showUndelivered() {
+      let checks = 0;
+      const expect = (condition, message) => { check(condition, message); checks++; };
+      storeEvent({ type: 'messages', peer, peerReadAt: 0,
+        messages: [message('undelivered', me, 'Você sumiu?', { createdAt: now - 2_000, delivery: 'failed' })] });
+      await settle();
+      const row = find('.chat-message-row[data-message-id="undelivered"]');
+      const notice = row.querySelector('.dm-delivery-failed');
+      expect(notice?.getAttribute('role') === 'status' && notice.textContent.includes('Não entregue'),
+        'A message not delivered says so in the conversation');
+      expect(notice?.querySelector('button[data-dm-resend]')?.textContent.trim() === 'Reenviar', 'It offers to send it again');
+      return checks;
+    },
+    async deliverUndelivered() {
+      let checks = 0;
+      const expect = (condition, message) => { check(condition, message); checks++; };
+      storeEvent({ type: 'messages', peer, peerReadAt: 0,
+        messages: [message('undelivered', me, 'Você sumiu?', { createdAt: now - 2_000, delivery: 'pending' })] });
+      await settle();
+      const row = find('.chat-message-row[data-message-id="undelivered"]');
+      expect(!row.querySelector('.dm-delivery-failed') && row.dataset.delivery === 'pending',
+        'Once queued again, the message waits for delivery without the notice');
       return checks;
     },
     async testIncrementalFeed() {

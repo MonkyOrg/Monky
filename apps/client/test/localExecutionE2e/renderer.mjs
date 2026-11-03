@@ -47,6 +47,11 @@ export async function startRenderer({ port, nickname }) {
     originals.push(() => Object.defineProperty(prototype, name, descriptor));
   };
   // Observe actual native instances; never replace a PC/channel constructor.
+  const recordOpen = entry => {
+    if (entry.opened) return;
+    entry.opened = true;
+    record('private.open', { peer: entry.id, connected: entry.pc.connectionState === 'connected' });
+  };
   wrap(RTCPeerConnection.prototype, 'createDataChannel', original => function(label, options) {
     const dataChannel = Reflect.apply(original, this, [label, options]);
     if (label !== LOCAL_MEDIA_CHANNEL_LABEL) return dataChannel;
@@ -62,7 +67,7 @@ export async function startRenderer({ port, nickname }) {
           !isLocalMediaSdp(this.remoteDescription?.sdp ?? '')) {
         failures.push('The private connection is not exclusively a data channel.');
       }
-      record('private.open', { peer: entry.id, connected: this.connectionState === 'connected' });
+      recordOpen(entry);
     });
     dataChannel.addEventListener('message', event => observeRecord(entry, 'in', event.data));
     dataChannel.addEventListener('close', () => record('private.closed', { peer: entry.id }));
@@ -308,9 +313,14 @@ export async function startRenderer({ port, nickname }) {
       control.click();
       await until(() => voiceStore.currentVoiceChannelId === null, 'actual requester voice departure');
     },
-    privateReady: () => privatePeers.some(({ pc, channel }) =>
-      pc.connectionState === 'connected' && channel.readyState === 'open' &&
-      pc.getSenders().length === 0 && pc.getReceivers().length === 0 && pc.getTransceivers().length === 0),
+    privateReady: () => {
+      const ready = privatePeers.find(({ pc, channel }) =>
+        pc.connectionState === 'connected' && channel.readyState === 'open' &&
+        pc.getSenders().length === 0 && pc.getReceivers().length === 0 && pc.getTransceivers().length === 0);
+      // readyState turns 'open' before the 'open' event is dispatched; record the opening as soon as it is observed.
+      if (ready) recordOpen(ready);
+      return !!ready;
+    },
     privateClosed: () => privatePeers.every(({ pc, channel }) =>
       pc.connectionState === 'closed' && channel.readyState === 'closed'),
     failures: () => [...failures],

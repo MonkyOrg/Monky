@@ -7,7 +7,8 @@ const https = require('node:https');
 const path = require('node:path');
 const { finished, pipeline } = require('node:stream/promises');
 const timers = require('node:timers/promises');
-const { root, execute, write, verify, fingerprint, withNetworkRetries } = require('./buildTools.cjs');
+const { root, execute, write, verify, fingerprint } = require('./buildTools.cjs');
+const pinnedGit = require('./pinnedGit.cjs');
 
 const repository = path.resolve(root, '..', '..', '..', '..');
 const cache = path.join(repository, '.native-screen');
@@ -27,59 +28,15 @@ const recipeFiles = [
   'deps.windows/70-vpl.ps1', 'deps.windows/80-wil.ps1',
 ];
 
-function gitEnvironment() {
-  const configuration = path.join(cache, 'empty-gitconfig');
-  if (!fs.existsSync(configuration)) fs.writeFileSync(configuration, '', { flag: 'wx' });
-  assert.ok(fs.lstatSync(configuration).isFile() && fs.statSync(configuration).size === 0,
-    'Native source Git configuration must remain empty.');
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (/^GIT_/iu.test(key)) delete env[key];
-  return { ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: configuration, GIT_TERMINAL_PROMPT: '0' };
-}
-
-function git(directory, args) {
-  const hooks = path.join(cache, 'empty-git-hooks');
-  if (!fs.existsSync(hooks)) fs.mkdirSync(hooks);
-  assert.ok(fs.lstatSync(hooks).isDirectory() && !fs.lstatSync(hooks).isSymbolicLink() &&
-    fs.readdirSync(hooks).length === 0, 'Native source Git hooks must remain disabled.');
-  return execute('git', ['-c', 'core.longpaths=true', '-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
-    '-c', 'core.hooksPath=' + hooks, '-c', 'core.fsmonitor=false',
-    '-c', 'protocol.file.allow=never', '-C', directory, ...args],
-  { env: gitEnvironment(), capture: true });
-}
-
-function assertPinnedSubmodules(state) {
-  for (const line of state.split(/\r?\n/u).filter(Boolean))
-    assert.match(line, /^ ?[a-f0-9]{40} .+$/u, 'Missing or modified source submodule.');
-}
+// The OBS sources and their pinned file hashes use LF line endings on every platform.
+const LINE_ENDINGS = [['core.autocrlf', 'false'], ['core.eol', 'lf']];
 
 function checkout(url, revision, directory, { submodules = true } = {}) {
-  assert.ok(url.startsWith('https://') && url.endsWith('.git'));
-  assert.match(revision, /^[a-f0-9]{40}$/u);
-  if (!fs.existsSync(directory)) {
-    fs.mkdirSync(directory, { recursive: true });
-    console.log(`Source: ${url} @ ${revision}`);
-    git(directory, ['-c', 'init.templateDir=', 'init', '--quiet']);
-    for (const [name, value] of [['core.autocrlf', 'false'], ['core.eol', 'lf'], ['core.fsmonitor', 'false']])
-      git(directory, ['config', '--local', name, value]);
-    git(directory, ['remote', 'add', 'origin', url]);
-    withNetworkRetries(() => git(directory, ['fetch', '--quiet', '--depth=1', 'origin', revision]),
-      { label: `Source fetch ${url}` });
-    git(directory, ['checkout', '--quiet', '--detach', 'FETCH_HEAD']);
-    if (submodules) withNetworkRetries(() => git(directory, ['submodule', 'update', '--quiet', '--init', '--recursive', '--depth=1']),
-      { label: `Source submodules ${url}` });
-  }
-  assert.ok(fs.lstatSync(directory).isDirectory() && !fs.lstatSync(directory).isSymbolicLink());
-  assert.ok(fs.lstatSync(path.join(directory, '.git')).isDirectory());
-  assert.equal(git(directory, ['remote', 'get-url', 'origin']), url);
-  assert.equal(git(directory, ['rev-parse', 'HEAD']), revision, `Source revision changed: ${directory}`);
-  assert.equal(git(directory, ['status', '--porcelain', '--untracked-files=normal']), '',
-    `Source tree is not clean: ${directory}`);
-  if (submodules) {
-    const state = git(directory, ['submodule', 'status', '--recursive']);
-    assertPinnedSubmodules(state);
-  }
-  return directory;
+  assert.ok(url.endsWith('.git'));
+  const isolation = pinnedGit.prepareIsolation({
+    globalConfig: path.join(cache, 'empty-gitconfig'), hooks: path.join(cache, 'empty-git-hooks') });
+  return pinnedGit.acquireSync({ directory, url, commit: revision, submodules, isolation,
+    localConfig: LINE_ENDINGS, git: pinnedGit.gitCommand(isolation, { config: LINE_ENDINGS }) }).directory;
 }
 
 function readRecipe(directory, relative) {
@@ -240,7 +197,8 @@ async function fetchObs({ sources = true } = {}) {
   return { stock, dependencies, studio, recipes, manifest };
 }
 
-module.exports = { cache, checkout, readRecipe, archiveResponse, download, extract, safeArchiveEntries, assertPinnedSubmodules, fetchObs, recipeFiles };
+module.exports = { cache, checkout, readRecipe, archiveResponse, download, extract, safeArchiveEntries,
+  assertPinnedSubmodules: pinnedGit.assertPinnedSubmodules, fetchObs, recipeFiles };
 if (require.main === module) {
   const args = process.argv.slice(2);
   assert.ok(args.length === 0 || (args.length === 1 && args[0] === '--runtime-only'));

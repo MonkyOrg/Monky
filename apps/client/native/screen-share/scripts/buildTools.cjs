@@ -36,8 +36,9 @@ function transientNetworkFailure(error) {
 }
 
 const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const NETWORK_RETRY = Object.freeze({ attempts: 4, delaysMs: Object.freeze([10_000, 30_000, 60_000]) });
 
-function withNetworkRetries(run, { label, attempts = 4, delaysMs = [10_000, 30_000, 60_000],
+function withNetworkRetries(run, { label, attempts = NETWORK_RETRY.attempts, delaysMs = NETWORK_RETRY.delaysMs,
   sleep = sleepSync, log = console.warn } = {}) {
   assert.ok(Number.isInteger(attempts) && attempts >= 1 && delaysMs.length > 0);
   for (let attempt = 1; ; attempt++) {
@@ -152,4 +153,4 @@ function regularFiles(directory, base = directory) {
 }
 
 module.exports = { root, execute, write, digest, fingerprint, verify, redistributableCrt, regularFiles,
-  transientNetworkFailure, withNetworkRetries, withBuildLock };
+  transientNetworkFailure, withNetworkRetries, withBuildLock, sleepSync, NETWORK_RETRY };

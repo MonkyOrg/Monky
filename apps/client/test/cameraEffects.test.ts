@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  CAMERA_EFFECT_MODES, CameraEffectError, DEFAULT_CAMERA_EFFECT_SETTINGS,
+  CAMERA_EFFECT_MODES, CameraEffectError, CameraFrameAdmission, DEFAULT_CAMERA_EFFECT_SETTINGS,
   applyChromaKey, cameraCaptureError, cameraEffectFrameRate, fitCameraEffectSize, isCameraEffectMode,
   needsBackgroundImage, needsPersonSegmentation, restoreCameraEffectSettings, smoothStep, writePersonMask,
 } from '../src/renderer/utils/cameraEffects';
@@ -154,6 +154,25 @@ test('effect cadence follows the selected profile unless the combined quality li
     assert.throws(() => cameraEffectFrameRate(fps, false), isSettingsError);
     assert.throws(() => cameraEffectFrameRate(fps, true), isSettingsError);
   }
+});
+
+test('frame admission follows capture timestamps, never duplicating frames or drifting with batched delivery', () => {
+  for (const [sourceFps, targetFps, expected] of [[60, 30, 30], [120, 30, 30], [30, 30, 30], [30, 60, 30], [24, 20, 20]]) {
+    const admission = new CameraFrameAdmission();
+    let admitted = 0;
+    for (let frame = 0; frame < sourceFps * 5; frame++) {
+      const jitter = frame % 2 ? -0.1 : 0.1;
+      if (admission.admit(frame * 1000 / sourceFps + jitter, targetFps) && frame >= sourceFps) admitted++;
+    }
+    assert.ok(Math.abs(admitted / 4 - expected) <= 1, `${sourceFps} -> ${targetFps} FPS admitted ${admitted / 4}`);
+  }
+  const admission = new CameraFrameAdmission();
+  assert.equal(admission.admit(0, 30), true);
+  assert.equal(admission.admit(10, 30), false, 'A frame before the next slot is dropped');
+  assert.equal(admission.admit(500, 30), true, 'A late frame after a stall is admitted once');
+  assert.equal(admission.admit(501, 30), false, 'A stall never releases a burst of catch-up frames');
+  admission.reset();
+  assert.equal(admission.admit(502, 30), true, 'A reset cadence admits the next frame immediately');
 });
 
 test('image-size defaults remain bounded while explicit output profiles are not unconditionally capped', () => {

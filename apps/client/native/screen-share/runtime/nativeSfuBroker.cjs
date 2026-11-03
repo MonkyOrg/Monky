@@ -255,7 +255,7 @@ function encoding(value, kind = 'video') {
  * routes implements NativeScreenRoutes.registerConsumer/removeConsumer.
  *
  * Controller API:
- * - registerSource({sourceId, shareId, syncGroup}); publish(sourceId,
+ * - registerSource({sourceId, shareId, syncGroup, nativeScreen}); publish(sourceId,
  *   {maxBitrateBps,maxFramerate}) -> {producerId,serverProducerId,sourceId,
  *   shareId,kind:'video',syncGroup,enabled:false}. At most two live sources
  *   with distinct opaque video groups; 64 never-reused registrations per call.
@@ -436,13 +436,14 @@ class NativeSfuBroker {
       && this.resources.size + this.sources.size < this.maximumResources,
       'LIMIT', 'Native SFU permits at most two bounded local screen sources.');
     requireValue(this.sourceHistory.size < 64, 'LIMIT', 'Native SFU source identity history is full for this call instance.');
+    // The server only accepts a screen as a native rendition on its own transport (#830).
     const nativeScreen = value.nativeScreen === undefined ? null : nativeScreenRenditionSchema.safeParse(json(value.nativeScreen));
-    requireValue(nativeScreen === null || (nativeScreen.success && nativeScreen.data.pipelineId === this.screenSessionId
-      && nativeScreen.data.sourceInstanceId === value.syncGroup),
+    requireValue(nativeScreen?.success === true && nativeScreen.data.pipelineId === this.screenSessionId
+      && nativeScreen.data.sourceInstanceId === value.syncGroup,
     'SOURCE', 'Native SFU rendition metadata must match its registered source and engine.');
     const source = {
       sourceId: value.sourceId, shareId: value.shareId, syncGroup: value.syncGroup, kind: 'video',
-      nativeScreen: nativeScreen?.data,
+      nativeScreen: nativeScreen.data,
       closing: false, publications: new Set(), publication: null,
     };
     this.sources.set(source.sourceId, source);
@@ -651,8 +652,8 @@ class NativeSfuBroker {
       const source = this.sources.get(sourceId);
       const settings = encoding(options, source?.kind);
       requireValue(positiveId(sourceId) && source && !source.closing, 'SOURCE', 'Native SFU publication requires a registered source.');
-      if (source.nativeScreen) requireValue(settings.maxFramerate === source.nativeScreen.video.fps
-        && settings.maxBitrateBps === source.nativeScreen.video.maxBitrateKbps * 1000,
+      requireValue(source.kind === 'audio' || (settings.maxFramerate === source.nativeScreen.video.fps
+        && settings.maxBitrateBps === source.nativeScreen.video.maxBitrateKbps * 1000),
       'SOURCE', 'Native SFU publication must use the advertised rendition settings.');
       if (source.kind === 'audio') this.assertAudioSource(source);
       const previous = source.publication;
@@ -1348,7 +1349,7 @@ class NativeSfuBroker {
           channelId: this.scope.channelId, transportId: transport.serverId, kind: record.source.kind,
           rtpParameters: payload.rtpParameters,
           appData: { mediaType: record.source.kind === 'audio' ? 'screen_audio' : 'screen_video', shareId: record.source.shareId,
-            ...(nativeScreen ? { nativeScreen } : {}) },
+            nativeScreen },
         }, record);
         this.claimServer(record, own(response, 'id'));
         requireValue(own(response, 'channelId') === this.scope.channelId, 'RESPONSE', 'SFU producer response belongs to another channel.');

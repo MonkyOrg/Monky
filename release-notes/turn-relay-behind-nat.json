@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Chamadas em que os dois lados precisam do relay TURN voltam a conectar em servidores atrás de NAT. Para isso, serviços UDP do próprio servidor no IP privado ficam ao alcance do relay; TCP e o resto da rede seguem bloqueados.",
+  "en": "Calls where both sides need the TURN relay connect again on servers behind NAT. To allow it, UDP services of the server itself on its private IP become reachable through the relay; TCP and the rest of the network stay blocked."
+}

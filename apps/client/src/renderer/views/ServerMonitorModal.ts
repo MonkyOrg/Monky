@@ -1,5 +1,5 @@
 import '../styles/serverMonitor.css';
-import { LOG_LEVELS, SERVER_MONITOR_LIMITS, type LogLevel, type ServerMonitorLogLine, type ServerMonitorStats } from '@monky/shared';
+import { LOG_LEVELS, SERVER_MONITOR_LIMITS, type LogLevel, type ServerMonitorLogLine } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { t, type TranslationKey } from '../i18n';
@@ -11,7 +11,7 @@ import { isVisibleSession, watchVisibleSession } from '../core/visibleSession';
 import { smoothScrollTo } from '../utils/scroll';
 import {
   LocalServerMonitorSource, RemoteServerMonitorSource, ServerMonitorError, ServerMonitorFeed,
-  type MonitorUpdate, type ServerMonitorFailure, type ServerMonitorSource,
+  type MonitorStats, type MonitorUpdate, type ServerMonitorFailure, type ServerMonitorSource,
 } from '../core/ServerMonitorFeed';
 
 const FAILURE_KEYS: Record<ServerMonitorFailure, TranslationKey> = {
@@ -171,19 +171,20 @@ export class ServerMonitorModal {
   }
 
   private renderStatsSkeleton(): string {
-    const cards: Array<{ id: string; icon: string; label: string }> = [
+    const cards: Array<{ id: string; icon: string; label: string; hidden?: boolean }> = [
       { id: 'uptime', icon: 'schedule', label: t('serverMonitor.uptime') },
       { id: 'online', icon: 'group', label: t('serverMonitor.online') },
       { id: 'members', icon: 'badge', label: t('serverMonitor.members') },
       { id: 'channels', icon: 'tag', label: t('serverMonitor.channels') },
       { id: 'messages', icon: 'chat', label: t('serverMonitor.messages') },
       { id: 'port', icon: 'lan', label: t('serverMonitor.port') },
+      { id: 'sfu-port', icon: 'router', label: t('serverMonitor.sfuPort'), hidden: true },
     ];
 
     return cards
       .map(
         (card) => `
-          <div class="server-monitor-stat">
+          <div class="server-monitor-stat"${card.hidden ? ' hidden' : ''}>
             <div class="server-monitor-stat-label">
               <span class="material-symbols-outlined md-14">${card.icon}</span>
               ${card.label}
@@ -195,7 +196,7 @@ export class ServerMonitorModal {
       .join('');
   }
 
-  private renderStats(stats: ServerMonitorStats): void {
+  private renderStats(stats: MonitorStats): void {
     this.modalEl?.querySelector('#monitor-stats')?.setAttribute('aria-busy', 'false');
     const set = (id: string, value: string) => {
       const el = this.modalEl?.querySelector<HTMLElement>(`#stat-${id}`);
@@ -210,6 +211,11 @@ export class ServerMonitorModal {
     set('channels', String(stats.channels));
     set('messages', String(stats.messages));
     set('port', String(stats.port));
+    // Only the server this app hosts reports it, and only in SFU mode.
+    const sfuPort = stats.sfuMediaPort ?? null;
+    const sfuCard = this.modalEl?.querySelector<HTMLElement>('#stat-sfu-port')?.closest<HTMLElement>('.server-monitor-stat');
+    if (sfuCard) sfuCard.hidden = sfuPort === null;
+    set('sfu-port', sfuPort === null ? '—' : t('serverMonitor.sfuPortValue', { port: sfuPort }));
   }
 
   private formatUptime(ms: number): string {

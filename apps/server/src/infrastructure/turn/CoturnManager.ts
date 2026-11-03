@@ -58,6 +58,10 @@ const DENIED_PEER_RANGES = [
   'fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
 ] as const;
 
+/** A public address whose route reveals the interface that reaches the internet. */
+const ROUTE_PROBE_ADDRESS = '1.1.1.1';
+/** Container bridges and VPN tunnels: an address there is never the one clients reach. */
+const VIRTUAL_INTERFACE = /^(docker|br-|veth|virbr|cni|flannel|cali|podman|lxc|lxd|vmnet|vboxnet|tun|tap|wg|tailscale|zt|utun|ppp)/i;
 /** Package installs cross the network and can be slow on a cold VPS. */
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const SERVICE_TIMEOUT_MS = 15 * 1000;
@@ -477,7 +481,7 @@ export class CoturnManager {
 
     // Detect the local/private IP that the VPS NIC uses, so we can tell coturn
     // the mapping between external and internal addresses.
-    const localIp = CoturnManager.detectLocalIp();
+    const localIp = await CoturnManager.detectLocalIp();
 
     try {
       // 0600: the file holds the shared secret behind every credential.
@@ -640,13 +644,10 @@ export class CoturnManager {
     // external-ip tells coturn what address to put in relay candidates. Without
     // it a NAT-based VPS (AWS, Oracle, most cloud providers) would advertise
     // its private NIC address, making relay candidates unreachable from clients.
+    const mappedLocal = external && local && local !== external && net.isIP(local) === net.isIP(external) ? local : null;
     if (external) {
-      if (local && local !== external && net.isIP(local) === net.isIP(external)) {
-        // The mapping form tells coturn "advertise externalIp but bind on localIp".
-        lines.push(`external-ip=${external}/${local}`);
-      } else {
-        lines.push(`external-ip=${external}`);
-      }
+      // The mapping form tells coturn "advertise externalIp but bind on localIp".
+      lines.push(mappedLocal ? `external-ip=${external}/${mappedLocal}` : `external-ip=${external}`);
     }
 
     lines.push(
@@ -655,13 +656,20 @@ export class CoturnManager {
       // trust the host's own network.
       'no-tcp-relay',
       // Refuse to relay towards anything but the public internet. The host's
-      // own public address is not added on purpose: a call between two
+      // own public address is not denied on purpose: a call between two
       // members who both need the relay goes client, TURN, TURN, client
-      // through it. (Behind NAT coturn checks the private address instead,
-      // which the private ranges refuse.) With TCP relays off, only UDP
-      // reaches the host.
+      // through it. With TCP relays off, only UDP reaches the host.
       'no-multicast-peers',
       ...DENIED_PEER_RANGES.map((range) => `denied-peer-ip=${range}`),
+    );
+
+    // Behind NAT coturn sees the second relay of a TURN-to-TURN call at the
+    // host's private address, which the ranges above refuse (#827). An address
+    // both allowed and denied counts as allowed, so this reopens that one
+    // address, and with it UDP to any service of the host listening on it.
+    if (mappedLocal) lines.push(`allowed-peer-ip=${mappedLocal}`);
+
+    lines.push(
       // Media is already encrypted end-to-end by DTLS-SRTP, and a TLS listener
       // would need a certificate the operator does not necessarily have.
       'no-tls',
@@ -681,22 +689,62 @@ export class CoturnManager {
   // ────────────────────────────────────────────
 
   /**
-   * Returns the first non-loopback IPv4 address from the server's interfaces.
+   * The IPv4 address of the interface that reaches the internet.
    *
    * On a NAT-based VPS (AWS, Oracle, Hetzner cloud) this is the private
    * address the NIC actually holds, while the public one is mapped by the
    * provider. coturn's `external-ip` directive needs the mapping between the
    * two so it can bind locally while advertising the public address to clients.
+   *
+   * The kernel's route choice decides: connecting a UDP socket sends nothing
+   * but picks the source address of the default route. The first interface
+   * listed is often a Docker bridge or a VPN, whose address no client reaches.
    */
-  private static detectLocalIp(): string | null {
-    const interfaces = os.networkInterfaces();
-    for (const addrs of Object.values(interfaces)) {
-      if (!addrs) continue;
-      for (const addr of addrs) {
-        if (addr.family === 'IPv4' && !addr.internal) return addr.address;
+  private static async detectLocalIp(): Promise<string | null> {
+    return await CoturnManager.routeSourceAddress() ?? CoturnManager.pickInterfaceAddress(os.networkInterfaces());
+  }
+
+  private static routeSourceAddress(): Promise<string | null> {
+    return new Promise((resolve) => {
+      let socket: dgram.Socket;
+      try {
+        socket = dgram.createSocket('udp4');
+      } catch {
+        resolve(null);
+        return;
+      }
+      const finish = (address: string | null) => {
+        try { socket.close(); } catch { /* already closed */ }
+        resolve(address);
+      };
+      socket.once('error', () => finish(null));
+      try {
+        // Any public address will do: only the route towards it matters.
+        socket.connect(53, ROUTE_PROBE_ADDRESS, () => {
+          try {
+            const { address } = socket.address();
+            finish(net.isIPv4(address) && address !== '0.0.0.0' ? address : null);
+          } catch {
+            finish(null);
+          }
+        });
+      } catch {
+        finish(null);
+      }
+    });
+  }
+
+  /** Without a default route: the first IPv4 that is not loopback, a container bridge or a VPN. */
+  private static pickInterfaceAddress(interfaces: NodeJS.Dict<os.NetworkInterfaceInfo[]>): string | null {
+    let virtual: string | null = null;
+    for (const [name, addrs] of Object.entries(interfaces)) {
+      for (const addr of addrs ?? []) {
+        if (addr.family !== 'IPv4' || addr.internal) continue;
+        if (!VIRTUAL_INTERFACE.test(name)) return addr.address;
+        virtual ??= addr.address;
       }
     }
-    return null;
+    return virtual;
   }
 
   /**

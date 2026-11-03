@@ -24,6 +24,7 @@ export const CONFIG_KEYS = [
   'maxAttachmentStorageBytes',
   'autoUpdate',
   'turn',
+  'trustedProxies',
 ] as const;
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number];

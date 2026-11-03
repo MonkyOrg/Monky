@@ -157,7 +157,7 @@ valores como `true`, `false`, `p2p` e `sfu` não são traduzidos.
 | Caminho | Conteúdo |
 |---|---|
 | `server.db` | Banco SQLite: membros, cargos, canais e mensagens. |
-| `monky.json` | Porta do servidor. |
+| `monky.json` | Porta do servidor e proxies confiáveis. |
 | `ecosystem.config.cjs` | Configuração do PM2, regravada a cada `start`/`restart`. |
 | `attachments/`, `avatars/`, `icons/` | Arquivos enviados. |
 | `server.lock` | Existe enquanto o servidor está em execução. Veja [Alterações com o servidor no ar](#alteracoes-com-o-servidor-no-ar). |
@@ -179,7 +179,7 @@ dados exigem o servidor parado:
 
 - `monky admin add` e `monky admin remove`;
 - `monky roles create`, `assign`, `unassign` e `delete`;
-- `monky config set`, exceto as chaves `port` e `autoUpdate`, que ficam fora do banco.
+- `monky config set`, exceto as chaves `port`, `autoUpdate` e `trustedProxies`, que ficam fora do banco.
 
 Com o servidor no ar, seja pelo PM2, hospedado no app ou iniciado à mão, o
 comando é recusado sem gravar nada e explica como seguir:
@@ -622,9 +622,10 @@ monky config set <chave> [valor]    # altera direto
 | `voiceMode` | Modo de voz: `p2p` (mesh direto) ou `sfu` (Selective Forwarding Unit) | `p2p` |
 | `autoUpdate` | Liga a atualização automática da máquina (`true`/`false`). Veja [Atualização automática](#atualizacao-automatica) | `false` |
 | `turn` | Liga o relay de mídia TURN (`true`/`false`). Só em Linux, exige o coturn instalado | `false` |
+| `trustedProxies` | IPs ou redes (CIDR) dos seus proxies reversos, separados por vírgula. `none` desliga. Veja [Atrás de um proxy reverso](/hospedar-em-vps#atras-de-um-proxy-reverso) | desligado |
 
-`port` e `autoUpdate` podem mudar com o servidor no ar. Alterar `port` com o
-servidor no ar oferece reiniciar na hora, pelo mesmo caminho do `monky restart`:
+`port`, `autoUpdate` e `trustedProxies` podem mudar com o servidor no ar. Alterar `port`
+ou `trustedProxies` com o servidor no ar oferece reiniciar na hora, pelo mesmo caminho do `monky restart`:
 avisa quem está em chamada, regrava o registro do PM2 e roda `pm2 save`, para
 que a porta nova sobreviva a um reboot. As demais chaves ficam no banco e
 exigem o servidor parado (veja
@@ -642,6 +643,7 @@ monky config set password clear     # remove a senha
 monky config set maxUsers 50
 monky config set autoUpdate true
 monky config set turn true          # ver "Relay de mídia (TURN)" abaixo
+monky config set trustedProxies 127.0.0.1   # servidor atrás de proxy reverso
 ```
 
 ---
@@ -720,7 +722,7 @@ O CLI calcula e exibe automaticamente uma **estimativa de capacidade** baseada n
 
 | Porta | Protocolo | Função |
 |---|---|---|
-| `40000-49151` | UDP e TCP | Portas de mídia WebRTC do worker mediasoup |
+| `40000` | UDP e TCP | Porta de mídia WebRTC do worker mediasoup, compartilhada por todas as chamadas. Se estiver ocupada, o SFU usa a próxima livre da faixa `40000-49151`; `monky status` e `monky config` mostram qual |
 
 O range precisa estar aberto no firewall do servidor (Oracle Cloud, AWS Security Group, iptables/ufw) — em UDP e também em TCP, que é o caminho de quem está numa rede que bloqueia UDP. Os comandos prontos e como conferir estão em [Abrindo as portas do Modo SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu).
 

@@ -69,33 +69,9 @@ export class RtcSignalRelay {
       Logger.warn('WEBRTC', `Invalid signal routing attempt from ${session.sessionId} to ${payload.targetSessionId}`);
       return;
     }
-    if (payload.signalType === 'screen-watch' && payload.watching
-      && !this.host.signaling.getVoiceState(payload.targetSessionId)?.screenShareIds?.includes(payload.streamId)) {
-      this.host.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Transmissão não está disponível.', requestId);
-      return;
-    }
-    if (payload.signalType === 'screen-watch' || payload.signalType === 'screen-video-meta' || payload.signalType === 'screen-audio-meta') {
-      const publisherId = payload.signalType === 'screen-watch' ? payload.targetSessionId : session.sessionId;
-      const viewerId = payload.signalType === 'screen-watch' ? session.sessionId : payload.targetSessionId;
-      const publisher = this.host.signaling.getVoiceState(publisherId);
-      // Legacy audio has its own MediaStream ID, separate from the advertised video shares.
-      const canRoute = payload.signalType === 'screen-audio-meta'
-        ? !publisher?.nativeScreenShares?.some(source => source.audience)
-          && !!publisher?.screenShareIds?.some(shareId =>
-            !publisher.nativeScreenShares?.some(source => source.shareId === shareId)
-            && this.host.signaling.canWatchScreen(publisherId, viewerId, shareId))
-        : this.host.signaling.canWatchScreen(publisherId, viewerId, payload.streamId);
-      // Native sources use isolated, authorized subscriptions, never the legacy call peer.
-      if (!payload.streamId || publisher?.nativeScreenShares?.some(source => source.shareId === payload.streamId)
-        || !canRoute) {
-        this.host.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transmissão não está disponível.', requestId);
-        return;
-      }
-    }
 
     const targetSocket = target?.ws;
     if (targetSocket && targetSocket.readyState === WebSocket.OPEN) {
-      this.host.signaling.trackScreenSignal(payload);
       this.host.send(targetSocket, {
         type: MessageType.RTC_SIGNAL,
         requestId,

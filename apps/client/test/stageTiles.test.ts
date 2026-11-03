@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { SCREEN_SHARE_LIMITS, type BotScreen, type UserSummary, type VoiceParticipantState } from '@monky/shared';
 import type { ParticipantViewModel } from '../src/renderer/core/ParticipantManager';
 import {
-  LEGACY_SHARE_ID, buildStageTiles, measuredTiles, remoteScreenStream, screenShareIds, stageTileKey, tileDomId,
+  buildStageTiles, measuredTiles, remoteScreenStream, screenShareIds, stageTileKey, tileDomId,
   type OwnStageMedia, type ParticipantStageTile,
 } from '../src/renderer/views/stage/stageTiles';
 
@@ -67,9 +67,9 @@ test('announced share ids are the single choke point for hostile, repeated or ex
   const many = Array.from({ length: SCREEN_SHARE_LIMITS.maximum + 3 }, (_, index) => `share-${index}`);
   assert.equal(screenShareIds(participant('max:pc', { isScreenSharing: true, screenShareIds: many })).length,
     SCREEN_SHARE_LIMITS.maximum);
-  assert.deepEqual(screenShareIds(participant('old:pc', { isScreenSharing: true })), [LEGACY_SHARE_ID],
-    'a peer older than #253 still shows one screen');
-  assert.deepEqual(screenShareIds(participant('bad:pc', { isScreenSharing: true, screenShareIds: ['<b>'] })), [LEGACY_SHARE_ID]);
+  // Every screen is a native source announced by id (#830): a bare flag has nothing to show.
+  assert.deepEqual(screenShareIds(participant('old:pc', { isScreenSharing: true })), []);
+  assert.deepEqual(screenShareIds(participant('bad:pc', { isScreenSharing: true, screenShareIds: ['<b>'] })), []);
   assert.deepEqual(screenShareIds(participant('none:pc')), []);
   assert.deepEqual(screenShareIds(participant('me:pc', { screenShareIds: ['announced'] }), ['own']), ['own']);
 });
@@ -86,12 +86,11 @@ test('telemetry measures cameras, own screens and watched remote screens, with t
   assert.ok(measured.every(tile => tiles.includes(tile)), 'the same tiles the stage renders, not look-alikes');
 });
 
-test('a legacy screen tile plays whichever single screen stream arrived; others play their own share', () => {
+test('a screen tile plays its own share, never another stream that arrived', () => {
   const first = { id: 'stream-a' } as MediaStream;
   const second = { id: 'stream-b' } as MediaStream;
-  const legacy = participant('old:pc', { isScreenSharing: true }, { 'stream-a': first });
-  const [legacyTile] = buildStageTiles([legacy], NOBODY);
-  assert.equal(remoteScreenStream(legacyTile as ParticipantStageTile), first);
+  const flagOnly = participant('old:pc', { isScreenSharing: true }, { 'stream-a': first });
+  assert.deepEqual(buildStageTiles([flagOnly], NOBODY).map(tile => tile.kind), ['voice']);
   const modern = participant('new:pc', { isScreenSharing: true, screenShareIds: ['stream-b'] }, { 'stream-a': first, 'stream-b': second });
   const [modernTile] = buildStageTiles([modern], NOBODY);
   assert.equal(remoteScreenStream(modernTile as ParticipantStageTile), second);

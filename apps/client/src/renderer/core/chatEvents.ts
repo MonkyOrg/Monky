@@ -2,7 +2,6 @@ import {
   MessageType,
   Permission,
   chatReactionEventSchema,
-  getMessageText,
   nativePollSchema,
   type ChatHistoryPayload,
   type ChatMessage,
@@ -12,12 +11,11 @@ import { appEvents } from './EventBus';
 import { networkClient, type ConnectionStatus } from './NetworkClient';
 import { isForegroundEvent } from './sessionRouting';
 import { soundEffects } from './SoundEffects';
-import { chatMessageNotice } from './chatNotificationPolicy';
+import { chatMessageNotice, mentionsMember } from './chatNotificationPolicy';
 import { chatStore } from '../stores/chatStore';
 import { serverStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { serverMentionMatcher } from '../utils/mentions';
-import { getLanguage } from '../i18n';
 
 export interface ChatEventsHost {
   /** Whether the channel's conversation is on screen (#14). */
@@ -45,7 +43,7 @@ export function bindChatEvents(host: ChatEventsHost): () => void {
         || !serverStore.canUserReadChannel(me.id, message.channelId)) return;
       // Mentions follow the rule the server and the feed highlight use (#14);
       // `@todos` counts for everyone in the channel when the server allows it (#464).
-      const isMention = serverMentionMatcher(serverStore).mentions(getMessageText(message, getLanguage()), me.nickname || '');
+      const isMention = mentionsMember(message, serverMentionMatcher(serverStore), me.nickname || '');
       const foreground = isForegroundEvent();
       const notice = chatMessageNotice({
         soundMode: settingsStore.getEffectiveChatSoundMode(serverStore.serverDetails?.id, message.channelId),

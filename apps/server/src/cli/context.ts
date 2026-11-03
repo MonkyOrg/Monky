@@ -35,6 +35,8 @@ export interface GlobalArgs {
 
 export interface LocalConfig {
   port?: number;
+  /** Reverse proxies whose forwarding headers name the client (#829). Read by the server on start. */
+  trustedProxies?: string[];
 }
 
 export function parseGlobalArgs(argv: string[]): GlobalArgs {

@@ -23,9 +23,6 @@ import {
 import { dispatchFor, type DmOutbox } from './dmOutbox';
 import { MAX_EMOJI_LENGTH, isDmId, isRecord, parseWireMessage, sanitizeAttachmentMeta, storedMessage, type ParsedMessage } from './dmWire';
 
-/** Deletes of messages this device never had, remembered per conversation. */
-const MAX_TOMBSTONES = 500;
-
 /**
  * The messages of each conversation (#743): what this device sends, edits,
  * deletes, reacts to and reads, and the same operations coming from the friend
@@ -141,7 +138,6 @@ export class DmConversations {
     message.content = content;
     message.editedAt = editedAt;
     message.contentAt = editedAt;
-    this.ledger.refreshMeta(peer);
     const body = { messageId, content, editedAt };
     const items: Array<DmRelayItem | null> = [];
     const pendingMessage = this.outbox.entries(peer).find((entry) => entry.id === messageId && entry.type === 'msg');
@@ -155,9 +151,26 @@ export class DmConversations {
     // goes out too. Only the newest edit matters (last writer wins), so older queued ones are dropped.
     this.outbox.dropQueued(peer, messageId, ['edit']);
     items.push(this.outbox.queueEnvelope(record, 'edit', body));
-    this.ledger.changed(peer);
+    this.ledger.changed(peer, [message]);
     this.ledger.emitMessages(peer, [message]);
     return dispatchFor(peer, items, [this.outbox.selfCopy(peer, 'edit', newDmId(), editedAt, body)]);
+  }
+
+  /**
+   * A message that was not delivered (its friend did not come back in time,
+   * or stopped being a friend) goes into the outbox again, as it is now.
+   */
+  resendMessage(peerKey: string, messageId: string): DmDispatch {
+    const record = this.ledger.requireFriend(peerKey);
+    const peer = record.publicKey;
+    const message = this.ledger.findMessage(peer, messageId);
+    if (!message || message.author !== this.ledger.me || message.deleted) throw new DmError('not-found', 'Mensagem não encontrada.');
+    if (message.delivery !== 'failed') return {};
+    message.delivery = 'pending';
+    const item = this.outbox.requeueMessage(record, message);
+    this.ledger.changed(peer, [message]);
+    this.ledger.emitMessages(peer, [message]);
+    return dispatchFor(peer, [item]);
   }
 
   deleteMessage(peerKey: string, messageId: string): DmDispatch {
@@ -167,7 +180,6 @@ export class DmConversations {
     if (!record || !message || message.deleted) throw new DmError('not-found', 'Mensagem não encontrada.');
     if (message.author !== this.ledger.me) throw new DmError('forbidden', 'Só é possível apagar as próprias mensagens.');
     this.markDeleted(message);
-    this.ledger.refreshMeta(peer);
     const body = { messageId };
     const items: Array<DmRelayItem | null> = [];
     // A copy still queued never reaches anyone new, and neither do edits of it. But "pending" only means no
@@ -176,7 +188,7 @@ export class DmConversations {
     if (record.relation === 'friend' && !record.blocked && record.cert) {
       items.push(this.outbox.queueEnvelope(record, 'delete', body));
     }
-    this.ledger.changed(peer);
+    this.ledger.changed(peer, [message]);
     this.ledger.emitMessages(peer, [message]);
     return dispatchFor(peer, items, [this.outbox.selfCopy(peer, 'delete', newDmId(), this.ledger.stamp(), body)]);
   }
@@ -192,7 +204,7 @@ export class DmConversations {
     this.applyReaction(message, this.ledger.me, emoji, add !== false, ts);
     const body = { messageId, emoji, add: add !== false, at: ts };
     const item = this.outbox.queueEnvelope(record, 'react', body);
-    this.ledger.changed(peer);
+    this.ledger.changed(peer, [message]);
     this.ledger.emitMessages(peer, [message]);
     return dispatchFor(peer, [item], [this.outbox.selfCopy(peer, 'react', newDmId(), ts, body)]);
   }
@@ -201,9 +213,13 @@ export class DmConversations {
     const peer = this.ledger.requirePeerKey(peerKey);
     const meta = this.ledger.state.conversations[peer];
     if (!meta) return {};
-    const lastIncoming = [...this.ledger.conversation(peer).messages]
-      .reverse()
-      .find((message) => message.author !== this.ledger.me && !message.deleted);
+    let lastIncoming: StoredMessage | null = null;
+    for (const message of this.ledger.history.newestFirst(peer)) {
+      if (message.author !== this.ledger.me && !message.deleted) {
+        lastIncoming = message;
+        break;
+      }
+    }
     const readAt = Math.max(meta.lastReadAt, lastIncoming?.createdAt ?? 0);
     if (meta.unread === 0 && readAt === meta.lastReadAt) return {};
     const advanced = readAt > meta.lastReadAt;
@@ -295,26 +311,21 @@ export class DmConversations {
         if (content !== message.content) {
           message.content = content;
           message.editedAt = editedAt;
-          this.ledger.refreshMeta(peer);
           this.ledger.emitMessages(peer, [message]);
         }
-        this.ledger.changed(peer);
+        this.ledger.changed(peer, [message]);
         return [];
       }
       case 'delete': {
         const message = this.ledger.findMessage(peer, data.messageId);
         if (!message) {
           // Deleted before it got here (or its ack was lost and it is still on the way): keep it out for good.
-          if (isDmId(data.messageId)) {
-            this.addTombstone(peer, data.messageId, author);
-            this.ledger.saveConversation(peer);
-          }
+          if (isDmId(data.messageId)) this.ledger.history.addTombstone(peer, data.messageId, author);
           return [];
         }
         if (message.author !== author || message.deleted) return [];
         this.markDeleted(message);
-        this.ledger.refreshMeta(peer);
-        this.ledger.changed(peer);
+        this.ledger.changed(peer, [message]);
         this.ledger.emitMessages(peer, [message]);
         return [];
       }
@@ -324,7 +335,7 @@ export class DmConversations {
         if (!message || message.deleted || !emoji) return [];
         const at = typeof data.at === 'number' ? Math.min(data.at, now + MAX_CLOCK_SKEW_MS) : ts;
         if (this.applyReaction(message, author, emoji, data.add !== false, at)) {
-          this.ledger.changed(peer);
+          this.ledger.changed(peer, [message]);
           this.ledger.emitMessages(peer, [message]);
         }
         return [];
@@ -342,9 +353,11 @@ export class DmConversations {
         if (readAt > meta.peerReadAt) {
           meta.peerReadAt = readAt;
           this.ledger.changed();
-          const own = this.ledger.conversation(peer).messages.filter(
-            (message) => message.author === this.ledger.me && message.createdAt <= readAt && message.createdAt > readAt - 60 * 60_000
-          );
+          const own: StoredMessage[] = [];
+          for (const message of this.ledger.history.newestFirst(peer)) {
+            if (message.createdAt <= readAt - 60 * 60_000) break;
+            if (message.author === this.ledger.me && message.createdAt <= readAt) own.unshift(message);
+          }
           this.ledger.emitMessages(peer, own);
         }
         return [];
@@ -366,7 +379,7 @@ export class DmConversations {
       const { author, content, editedAt, contentAt } = parsed;
       // A delete that reached this device before the message itself also holds for copies from other devices.
       const deleted = parsed.deleted || this.isTombstoned(peer, parsed.id, author);
-      const existing = this.ledger.findMessage(peer, parsed.id);
+      const existing = this.ledger.findMessage(peer, parsed.id, parsed.createdAt);
       if (!existing) {
         const attachments = deleted ? [] : this.receivedAttachments(parsed, false);
         if (!deleted && !content && attachments.length === 0) continue;
@@ -408,8 +421,7 @@ export class DmConversations {
     }
     if (changedMessages.length > 0) {
       if (inserted) meta.hidden = false;
-      this.ledger.refreshMeta(peer);
-      this.ledger.changed(peer);
+      this.ledger.changed(peer, changedMessages);
       this.ledger.emitMessages(peer, changedMessages);
     }
   }
@@ -426,8 +438,8 @@ export class DmConversations {
       this.insertMessage(peer, storedMessage(parsed, deleted, attachments, this.ledger.me));
     }
     meta.hidden = false;
-    meta.lastReadAt = Math.max(meta.lastReadAt, meta.lastMessageAt);
     this.ledger.refreshMeta(peer);
+    meta.lastReadAt = Math.max(meta.lastReadAt, meta.lastMessageAt);
     this.ledger.saveConversation(peer);
   }
 
@@ -446,35 +458,11 @@ export class DmConversations {
   }
 
   private insertMessage(peer: string, message: StoredMessage): boolean {
-    const conversation = this.ledger.conversation(peer);
-    if (conversation.messages.some((existing) => existing.id === message.id)) return false;
-    let index = conversation.messages.length;
-    // Equal timestamps only happen across authors; the id keeps every device in the same order.
-    while (
-      index > 0 &&
-      (conversation.messages[index - 1].createdAt > message.createdAt ||
-        (conversation.messages[index - 1].createdAt === message.createdAt && conversation.messages[index - 1].id > message.id))
-    ) {
-      index -= 1;
-    }
-    conversation.messages.splice(index, 0, message);
-    this.ledger.refreshMeta(peer);
-    return true;
+    return this.ledger.history.insert(peer, message);
   }
 
   private isTombstoned(peer: string, id: string, author: string): boolean {
-    const tombstones = this.ledger.conversation(peer).tombstones;
-    return Array.isArray(tombstones) && tombstones.some((entry) => entry.id === id && entry.author === author);
-  }
-
-  private addTombstone(peer: string, id: string, author: string): void {
-    const conversation = this.ledger.conversation(peer);
-    if (!Array.isArray(conversation.tombstones)) conversation.tombstones = [];
-    if (this.isTombstoned(peer, id, author)) return;
-    conversation.tombstones.push({ id, author });
-    if (conversation.tombstones.length > MAX_TOMBSTONES) {
-      conversation.tombstones.splice(0, conversation.tombstones.length - MAX_TOMBSTONES);
-    }
+    return this.ledger.history.isTombstoned(peer, id, author);
   }
 
   private markDeleted(message: StoredMessage): void {

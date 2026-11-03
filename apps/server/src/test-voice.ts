@@ -624,19 +624,26 @@ test('permission-muted SFU participants can publish video but not microphone or 
     ({ id: `${appData?.mediaType ?? 'unknown'}-producer` });
   sfu.setMicrophonesMuted = async () => {};
   await service.joinVoiceChannel('self', 'self', 'room', false, false, true);
-  service.updateVoiceState('self', { screenShareIds: ['share'] });
+  const video = { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 };
+  const sourceInstanceId = '0d6f3c1e-2b4a-4c8d-9e7f-1a2b3c4d5e6f';
+  service.updateVoiceState('self', {
+    screenShareIds: ['share'], nativeScreenShares: [{ shareId: 'share', instanceId: sourceInstanceId, audio: true, video }],
+  });
+  const nativeScreen = { sourceInstanceId, pipelineId: '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d', video };
 
   await server['sfuSignaling']['handleSfuProduce'](session, {
     channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'mic' },
   }, 'mic');
   await server['sfuSignaling']['handleSfuProduce'](session, {
-    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'screen_audio', shareId: 'share' },
+    channelId: 'room', transportId: 'send', kind: 'audio', rtpParameters: { codecs: [] },
+    appData: { mediaType: 'screen_audio', shareId: 'share', nativeScreen },
   }, 'screen-audio');
   await server['sfuSignaling']['handleSfuProduce'](session, {
     channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] }, appData: { mediaType: 'camera' },
   }, 'camera');
   await server['sfuSignaling']['handleSfuProduce'](session, {
-    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] }, appData: { mediaType: 'screen_video', shareId: 'share' },
+    channelId: 'room', transportId: 'send', kind: 'video', rtpParameters: { codecs: [] },
+    appData: { mediaType: 'screen_video', shareId: 'share', nativeScreen },
   }, 'screen-video');
 
   assert.equal(messages.find(message => message.requestId === 'mic')?.type, MessageType.SERVER_ERROR);
@@ -645,6 +652,41 @@ test('permission-muted SFU participants can publish video but not microphone or 
   assert.equal((messages.find(message => message.requestId === 'screen-audio')?.payload as ServerErrorPayload).code, ProtocolErrorCode.PERMISSION_DENIED);
   assert.equal(messages.find(message => message.requestId === 'camera')?.type, MessageType.SFU_PRODUCED);
   assert.equal(messages.find(message => message.requestId === 'screen-video')?.type, MessageType.SFU_PRODUCED);
+  sfu.close();
+});
+
+test('SFU refuses a screen producer without its native rendition (#830)', async () => {
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  const sfu = new SfuManager();
+  const service = signaling();
+  server['sfuManager'] = sfu;
+  server['signalingService'] = service;
+  server['closing'] = false;
+  const ws = Object.create(WebSocket.prototype) as WebSocket;
+  Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+  const session: Parameters<WebSocketServer['handleMessage']>[0] = {
+    ws, sessionId: 'self', lastSeenAt: 0, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
+  };
+  server['sessions'] = new Map([[ws, session]]);
+  server['sessionSockets'] = new Map([['self', ws]]);
+  server['isCurrentSession'] = () => true;
+  const messages: Parameters<WebSocketServer['send']>[1][] = [];
+  server['send'] = (_ws, message) => { messages.push(message); };
+  let produced = 0;
+  sfu.produce = async () => ({ id: `producer-${++produced}` });
+  await service.joinVoiceChannel('self', 'self', 'room');
+  service.updateVoiceState('self', { screenShareIds: ['share'] });
+
+  for (const [kind, mediaType] of [['video', 'screen_video'], ['audio', 'screen_audio']] as const) {
+    await server['sfuSignaling']['handleSfuProduce'](session, {
+      channelId: 'room', transportId: 'send', kind, rtpParameters: { codecs: [] }, appData: { mediaType, shareId: 'share' },
+    }, mediaType);
+    const reply = messages.find(message => message.requestId === mediaType);
+    assert.equal(reply?.type, MessageType.SERVER_ERROR);
+    assert.equal((reply?.payload as ServerErrorPayload).code, ProtocolErrorCode.BAD_REQUEST);
+  }
+  assert.equal(produced, 0, 'refused before the worker');
   sfu.close();
 });
 
@@ -662,7 +704,7 @@ test('producer disappearance during worker consume is obsolete work, but transpo
     sfu['producers'].set('producer', {
       producer: { id: 'producer', closed: false, close() {} } as MediasoupTypes.Producer,
       transportId: 'send-peer',
-      sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'screen_video', shareId: 'share' },
+      sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'camera' },
     });
 
     const router: Partial<MediasoupTypes.Router> = { canConsume: () => true };
@@ -1035,6 +1077,8 @@ test('a dead SFU worker marks the calls failed and closes their producers, witho
   const worker = Object.create(EventEmitter.prototype) as MediasoupTypes.Worker;
   Object.defineProperty(worker, 'died', { value: false });
   worker.close = () => {};
+  const webRtcServer: Partial<MediasoupTypes.WebRtcServer> = { closed: false };
+  Object.defineProperty(worker, 'createWebRtcServer', { value: async () => webRtcServer });
   t.mock.method(mediasoup, 'createWorker', () => Promise.resolve(worker));
   t.mock.method(Logger, 'error', () => {});
   const f = await createFixture();
@@ -1076,13 +1120,43 @@ test('a dead SFU worker marks the calls failed and closes their producers, witho
 
 test('the address a client reached the server by is announced to ICE only in a form ICE can dial', (t) => {
   t.mock.method(os, 'networkInterfaces', () => ({}));
-  const announced = (listenIp: string, host: string) => new SfuManager({ listenIp })['getListenInfos'](host)
-    .flatMap((info) => info.protocol === 'udp' && info.announcedAddress ? [info.announcedAddress] : []);
-  assert.deepEqual(announced('0.0.0.0', 'monky.example.com'), ['monky.example.com', '127.0.0.1']);
-  assert.deepEqual(announced('0.0.0.0', '[2001:db8::1]'), ['127.0.0.1'],
+  const announced = (listenIp: string, host: string, loopback = false) =>
+    new SfuManager({ listenIp })['announcedAddresses']({ host, loopback });
+  assert.deepEqual(announced('0.0.0.0', 'monky.example.com'), ['monky.example.com']);
+  assert.deepEqual(announced('0.0.0.0', '[2001:db8::1]'), [],
     'IPv4 sockets cannot be reached on an IPv6 address, bracketed or not');
-  assert.deepEqual(announced('::', '[2001:db8::1]'), ['2001:db8::1', '127.0.0.1'], 'no brackets in a candidate');
-  assert.deepEqual(announced('0.0.0.0', 'localhost'), ['127.0.0.1']);
+  assert.deepEqual(announced('::', '[2001:db8::1]'), ['2001:db8::1'], 'no brackets in a candidate');
+  assert.deepEqual(announced('0.0.0.0', 'localhost', true), ['127.0.0.1']);
+});
+
+test('loopback is offered only to a client on this machine, and internal interfaces never otherwise', (t) => {
+  t.mock.method(os, 'networkInterfaces', () => ({
+    lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true, netmask: '255.0.0.0', mac: '', cidr: null }],
+    eth0: [{ address: '192.168.0.10', family: 'IPv4', internal: false, netmask: '255.255.255.0', mac: '', cidr: null }],
+  }));
+  const sfu = new SfuManager({ announcedIp: '203.0.113.7' });
+  assert.deepEqual(sfu['announcedAddresses']({ host: 'monky.example.com', loopback: false }),
+    ['203.0.113.7', 'monky.example.com', '192.168.0.10']);
+  assert.deepEqual(sfu['announcedAddresses']({ host: '127.0.0.1', loopback: true }),
+    ['203.0.113.7', '127.0.0.1', '192.168.0.10']);
+  assert.deepEqual(sfu['announcedAddresses'](), ['203.0.113.7', '192.168.0.10'], 'an unknown origin is not assumed local');
+});
+
+test('every announced address points at the one shared media port, best first', (t) => {
+  t.mock.method(os, 'networkInterfaces', () => ({}));
+  const sfu = new SfuManager({ announcedIp: '203.0.113.7' });
+  const server = [
+    { foundation: 'udpcandidate', priority: 1076558079, ip: '0.0.0.0', address: '0.0.0.0', protocol: 'udp', port: 40000, type: 'host' },
+    { foundation: 'tcpcandidate', priority: 1076276479, ip: '0.0.0.0', address: '0.0.0.0', protocol: 'tcp', port: 40000, type: 'host', tcpType: 'passive' },
+  ] as const;
+  const candidates = sfu['announceCandidates']([...server], { host: 'monky.example.com' });
+  assert.deepEqual(candidates.map(c => `${c.protocol} ${c.address}:${c.port}`), [
+    'udp 203.0.113.7:40000', 'tcp 203.0.113.7:40000', 'udp monky.example.com:40000', 'tcp monky.example.com:40000',
+  ]);
+  assert.equal(new Set(candidates.map(c => c.foundation)).size, candidates.length);
+  const byPriority = [...candidates].sort((a, b) => b.priority - a.priority).map(c => `${c.protocol} ${c.address}`);
+  assert.deepEqual(byPriority, ['udp 203.0.113.7', 'udp monky.example.com', 'tcp 203.0.113.7', 'tcp monky.example.com'],
+    'the configured address first, and UDP over TCP');
 });
 
 /**

@@ -103,6 +103,7 @@ interface PendingTask {
   timer: ReturnType<typeof setTimeout>;
   expiryTimer?: ReturnType<typeof setTimeout>;
   completionTimer?: ReturnType<typeof setTimeout>;
+  mediaFailureTimer?: ReturnType<typeof setTimeout>;
   unsubscribe(): void;
   offer?: LocalTaskOffer;
   accepted?: Extract<LocalTaskEvent, { state: 'accepted' }>;
@@ -121,6 +122,11 @@ interface PendingTask {
 const RPC_TIMEOUT_MS = 8_000;
 const CONTROL_TIMEOUT_MS = 8_000;
 const COMPLETION_TIMEOUT_MS = 8_000;
+/**
+ * The private channel and the server's verdict travel on different paths: a requester leaving voice closes the
+ * channel while the server's 'cancelled' is still on its way. A lost channel waits this long for that verdict.
+ */
+const MEDIA_FAILURE_GRACE_MS = 1_500;
 const MAX_SOURCE_REQUESTS = 100;
 const LOCAL_MESSAGES = new Set<string>([
   MessageType.BOT_LOCAL_SOURCE_RESULT, MessageType.BOT_LOCAL_TASK_OFFER,
@@ -550,6 +556,7 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
           if (task.terminal) this.transport.reportError(error);
           else this.mediaFailed(task, error);
         },
+        onTransportLost: (error) => this.transportLost(task, error),
       });
       void task.receiver.drained.then(() => {
         if (task.terminal) return;
@@ -787,6 +794,15 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
     } else this.terminate(task, error, false);
   }
 
+  /** A lost private connection waits for the server's verdict; the receiver is aborted with whichever comes first. */
+  private transportLost(task: PendingTask, error: Error): void {
+    if (task.terminal || task.mediaFailureTimer) return;
+    task.mediaFailureTimer = setTimeout(() => {
+      task.mediaFailureTimer = undefined;
+      this.mediaFailed(task, error);
+    }, MEDIA_FAILURE_GRACE_MS);
+  }
+
   private mediaFailed(task: PendingTask, error: Error): void {
     if (task.terminal) return;
     if (!this.transport.isCurrent(task.connection)) { this.disconnectTask(task); return; }
@@ -806,6 +822,7 @@ export class BotLocalExecutionClient implements LocalExecutionClient {
     clearTimeout(task.timer);
     if (task.expiryTimer) clearTimeout(task.expiryTimer);
     if (task.completionTimer) clearTimeout(task.completionTimer);
+    if (task.mediaFailureTimer) clearTimeout(task.mediaFailureTimer);
     task.unsubscribe();
     this.rejectControl(task, new Error('Local execution completed before the control acknowledgement.'));
   }

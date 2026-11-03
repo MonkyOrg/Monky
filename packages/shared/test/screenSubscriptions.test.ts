@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { rtcSignalSchema, screenWatchSignalSchema, sfuConsumeSchema, sfuConsumerClosedSchema,
+import { rtcSignalSchema, sfuConsumeSchema, sfuConsumerClosedSchema,
   sfuConsumerSetPausedSchema, sfuMediaAppDataSchema, sfuCreateWebRtcTransportSchema,
   sfuCloseWebRtcTransportSchema, sfuProducerClosedSchema, sfuProducerSetPausedSchema,
   type SfuCreateWebRtcTransportPayload } from '../src/index.js';
@@ -32,32 +32,32 @@ for (const payload of [null, { ...pauseProducer, purpose: 'call' }, { ...pausePr
   assert.equal(sfuProducerSetPausedSchema.safeParse(payload).success, false);
 }
 
-const watch = {
-  fromSessionId: 'viewer', targetSessionId: 'publisher', signalType: 'screen-watch',
-  streamId: 'stream-one', subscriptionId: 'peer-epoch', subscriptionRevision: 1, watching: true,
-  watcherSubscriptionId: 'viewer-epoch',
+// The Chromium screen path is gone (#830): a call peer only negotiates its own connection.
+const offer = {
+  fromSessionId: 'publisher', targetSessionId: 'viewer', signalType: 'offer', subscriptionId: 'peer-epoch',
+  sdp: { type: 'offer', sdp: 'v=0' },
 };
-assert.equal(screenWatchSignalSchema.safeParse(watch).success, true);
-for (const payload of [null, { ...watch, watching: 1 }, { ...watch, subscriptionId: '' },
-  { ...watch, streamId: 'x'.repeat(65) }, { ...watch, subscriptionRevision: Infinity },
-  { ...watch, subscriptionRevision: 0 }, { ...watch, subscriptionRevision: 1.5 },
-  { ...watch, targetSessionId: 'x'.repeat(129) }, { ...watch, extra: true }]) {
-  assert.equal(screenWatchSignalSchema.safeParse(payload).success, false);
+assert.equal(rtcSignalSchema.safeParse(offer).success, true);
+assert.equal(rtcSignalSchema.safeParse({ ...offer, subscriptionId: undefined }).success, false);
+for (const signalType of ['screen-watch', 'screen-video-meta', 'screen-audio-meta']) {
+  assert.equal(rtcSignalSchema.safeParse({
+    fromSessionId: 'publisher', targetSessionId: 'viewer', signalType, streamId: 'stream-one', subscriptionId: 'epoch',
+    watcherSubscriptionId: 'viewer-epoch', subscriptionRevision: 1, watching: true,
+  }).success, false, signalType);
 }
-assert.equal(rtcSignalSchema.safeParse({ ...watch, watching: false }).success, true);
-assert.equal(rtcSignalSchema.safeParse({
-  fromSessionId: 'publisher', targetSessionId: 'viewer', signalType: 'screen-video-meta',
-  streamId: 'stream-one', subscriptionId: 'epoch',
-}).success, true);
-assert.equal(rtcSignalSchema.safeParse({
-  fromSessionId: 'publisher', targetSessionId: 'viewer', signalType: 'screen-video-meta', streamId: 'stream-one',
-}).success, false);
+assert.equal(rtcSignalSchema.safeParse({ ...offer, streamId: 'stream-one' }).success, false);
 assert.equal(sfuConsumerClosedSchema.safeParse({ channelId: 'room', consumerId: 'consumer' }).success, true);
 assert.equal(sfuConsumerSetPausedSchema.safeParse({ channelId: 'room', consumerId: 'consumer', paused: false }).success, true);
 assert.equal(sfuConsumerSetPausedSchema.safeParse({ channelId: 'room', consumerId: 'consumer', paused: 'false' }).success, false);
-assert.equal(sfuMediaAppDataSchema.safeParse({ mediaType: 'screen_video', shareId: 'one' }).success, true);
-assert.equal(sfuMediaAppDataSchema.safeParse({ mediaType: 'screen_audio', shareId: 'default' }).success, true);
-assert.equal(sfuMediaAppDataSchema.safeParse({ mediaType: 'screen_video', shareId: '<script>' }).success, false);
+const nativeScreen = {
+  sourceInstanceId: 'f1c2d3e4-5a6b-4c7d-8e9f-0a1b2c3d4e5f', pipelineId: screenSessionId,
+  video: { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 },
+};
+assert.equal(sfuMediaAppDataSchema.safeParse({ mediaType: 'screen_video', shareId: 'one', nativeScreen }).success, true);
+assert.equal(sfuMediaAppDataSchema.safeParse({ mediaType: 'screen_audio', shareId: 'one', nativeScreen }).success, true);
+for (const mediaType of ['screen_video', 'screen_audio'])
+  assert.equal(sfuMediaAppDataSchema.safeParse({ mediaType, shareId: 'one' }).success, false, 'screens are always native');
+assert.equal(sfuMediaAppDataSchema.safeParse({ mediaType: 'screen_video', shareId: '<script>', nativeScreen }).success, false);
 assert.equal(sfuMediaAppDataSchema.safeParse({ mediaType: 'camera', shareId: 'one' }).success, false);
 const consume = { channelId: 'room', transportId: 'recv', producerId: 'producer', rtpCapabilities: {} };
 assert.equal(sfuConsumeSchema.safeParse(consume).success, true);
