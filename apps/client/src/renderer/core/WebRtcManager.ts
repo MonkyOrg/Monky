@@ -332,6 +332,12 @@ export class WebRtcManager {
       this.mediaRouter.setPeerVolume(data.sessionId, data.volume);
     });
 
+    appEvents.on('master_volume.changed', ({ direction }) => {
+      if (direction !== 'output') return;
+      this.mediaRouter.applyMasterVolume();
+      void this.nativeScreens.updateAudio().catch(error => this.nativeScreens.report(error));
+    });
+
     appEvents.on('screen_audio_volume.changed', (data: { sessionId: string; volume: number }) => {
       this.mediaRouter.setScreenAudioVolume(data.sessionId, data.volume);
       void this.nativeScreens.updateAudio().catch(error => this.nativeScreens.report(error));

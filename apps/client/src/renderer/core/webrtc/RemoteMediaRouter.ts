@@ -243,7 +243,9 @@ export class RemoteMediaRouter {
     const pipeline = pipelineMap.get(sessionId);
     const state = isScreenAudio ? undefined : this.getVoiceParticipants().get(sessionId)?.voiceState;
     const senderMuted = state?.isMuted || state?.isDeafened || state?.serverMuted || state?.serverDeafened || state?.permissionMuted;
-    if (pipeline) pipeline.gain.gain.value = audioEl.muted || senderMuted ? 0 : clamped / 100;
+    if (pipeline) {
+      pipeline.gain.gain.value = audioEl.muted || senderMuted ? 0 : clamped / 100 * settingsStore.outputVolume / 100;
+    }
   }
 
   private ensurePlaybackPipeline(
@@ -313,6 +315,16 @@ export class RemoteMediaRouter {
       const stream = audioEl.srcObject as MediaStream | null;
       const track = stream?.getAudioTracks()[0];
       this.applyVolumeToElement(audioEl, vol, peerSessionId, this.voicePipelines, track);
+    }
+  }
+
+  /** The master output level moved: every voice and screen source is recomputed from its own volume. */
+  public applyMasterVolume(): void {
+    this.applyUserVolumes();
+    const peers = new Set([...this.screenAudioElements.keys()].map(screenAudioPeer));
+    for (const peerSessionId of peers) {
+      const participant = this.getVoiceParticipants().get(peerSessionId);
+      this.setScreenAudioVolume(peerSessionId, settingsStore.getScreenAudioVolume(peerSessionId, participant?.user.clientId));
     }
   }
 

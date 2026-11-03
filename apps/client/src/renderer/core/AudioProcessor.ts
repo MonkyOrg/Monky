@@ -18,6 +18,8 @@ export class AudioProcessor {
   private noiseSuppressionChanging = false;
   private noiseProcessorFailed = false;
   private destinationNode: MediaStreamAudioDestinationNode | null = null;
+  // Sits before the destination only: the analyser reads the level before it, so voice detection does not depend on the volume setting.
+  private inputGainNode: GainNode | null = null;
 
   private vadInterval: ReturnType<typeof setInterval> | null = null;
   private isSpeaking: boolean = false;
@@ -191,7 +193,7 @@ export class AudioProcessor {
         source = this.audioContext.createMediaStreamSource(next);
         if (this.noiseSuppressorNode) source.connect(this.noiseSuppressorNode);
         else {
-          source.connect(this.destinationNode);
+          source.connect(this.inputGainNode ?? this.destinationNode);
           source.connect(this.analyser);
         }
         this.microphoneSource?.disconnect();
@@ -257,6 +259,10 @@ export class AudioProcessor {
     this.analyser.fftSize = 256;
     this.analyser.smoothingTimeConstant = 0.25;
     this.destinationNode = context.createMediaStreamDestination();
+    const inputGain = context.createGain();
+    inputGain.gain.value = settingsStore.inputVolume / 100;
+    inputGain.connect(this.destinationNode);
+    this.inputGainNode = inputGain;
     this.microphoneSource = context.createMediaStreamSource(rawStream);
     let node: NoiseSuppressorNode | null = null;
     try {
@@ -274,10 +280,10 @@ export class AudioProcessor {
     this.bindNoiseSuppressorError(node);
     if (node) {
       this.microphoneSource.connect(node);
-      node.connect(this.destinationNode);
+      node.connect(inputGain);
       node.connect(this.analyser);
     } else {
-      this.microphoneSource.connect(this.destinationNode);
+      this.microphoneSource.connect(inputGain);
       this.microphoneSource.connect(this.analyser);
     }
     this.localStream = this.destinationNode.stream;
@@ -311,6 +317,9 @@ export class AudioProcessor {
       this.applyTrackEnabled();
     });
     this.unbindPttEvents.push(unbindSettings);
+    this.unbindPttEvents.push(appEvents.on('master_volume.changed', ({ direction, volume }) => {
+      if (direction === 'input' && this.inputGainNode) this.inputGainNode.gain.value = volume / 100;
+    }));
 
     let channelId = voiceStore.currentVoiceChannelId;
     let sessionKey = voiceStore.voiceSessionKey;
@@ -500,7 +509,7 @@ export class AudioProcessor {
     const generation = ++this.noiseSuppressionGeneration;
     const context = this.audioContext;
     const source = this.microphoneSource;
-    const destination = this.destinationNode;
+    const destination = this.inputGainNode;
     const analyser = this.analyser;
     const raw = this.rawMicStream;
     if (!raw) {
@@ -726,6 +735,12 @@ export class AudioProcessor {
         this.analyser.disconnect();
       } catch {}
       this.analyser = null;
+    }
+    if (this.inputGainNode) {
+      try {
+        this.inputGainNode.disconnect();
+      } catch {}
+      this.inputGainNode = null;
     }
     if (this.destinationNode) {
       this.destinationNode.stream.getTracks().forEach((track) => track.stop());

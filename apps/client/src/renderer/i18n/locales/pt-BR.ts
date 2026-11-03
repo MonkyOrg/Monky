@@ -1285,6 +1285,10 @@ export const ptBR = {
 
   // ── Tela principal (MainView.ts) ─────────────────────────────────────────
   'main.resizeHandle': 'Arraste para redimensionar',
+  'main.hideNavigationSidebar': 'Ocultar servidores e canais',
+  'main.showNavigationSidebar': 'Mostrar servidores e canais',
+  'main.hideMembersSidebar': 'Ocultar membros',
+  'main.showMembersSidebar': 'Mostrar membros',
   'main.serverOptions': 'Opções do servidor',
   'main.serverSettingsTitle': 'Configurações do Servidor (Alterar/Remover Senha)',
   'main.inviteTitle': 'Convidar Amigos (Copiar IP)',
@@ -1646,6 +1650,10 @@ export const ptBR = {
   'settings.microphoneTestDisconnected': 'Teste interrompido porque o estado da conexão mudou. Clique para iniciar novamente.',
   'settings.microphoneTestFailed': 'Não foi possível reproduzir o teste do microfone. Verifique o microfone e a saída de áudio e tente novamente.',
   'settings.vadHint': 'Fale para ver o nível. Ajuste o slider (linha) logo acima de onde o nível fica em silêncio. Valores menores ativam com sussurros; maiores evitam ruídos de fundo.',
+  'settings.inputVolume': 'Volume de entrada',
+  'settings.inputVolumeHint': 'Ganho aplicado ao seu microfone antes de ser enviado. 100% mantém o sinal original; acima disso, amplifica.',
+  'settings.outputVolume': 'Volume de saída',
+  'settings.outputVolumeHint': 'Volume geral de tudo o que você ouve na chamada, incluindo o áudio de transmissões. Ele multiplica o volume individual de cada pessoa.',
   'settings.rnnoiseLabel': 'Supressão de Ruído Inteligente (RNNoise)',
   'settings.rnnoiseDesc': 'Utiliza Inteligência Artificial (Rede Neural) para remover ruídos de fundo como teclado mecânico, cliques, batidas e respiração.',
   'settings.outputDevice': 'Dispositivo de Saída (Alto-falante / Fone)',

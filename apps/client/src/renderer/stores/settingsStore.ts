@@ -53,6 +53,10 @@ function savedSettings(store: SettingsStore) {
     screenEncodingStrategy: store.screenEncodingStrategy,
     preferredScreenCodec: store.preferredScreenCodec,
     vadSensitivity: store.vadSensitivity,
+    inputVolume: store.inputVolume,
+    outputVolume: store.outputVolume,
+    navigationSidebarHidden: store.navigationSidebarHidden,
+    membersSidebarHidden: store.membersSidebarHidden,
     selectedMicrophoneId: store.selectedMicrophoneId,
     selectedSpeakerId: store.selectedSpeakerId,
     advancedAudioOutputs: store.advancedAudioOutputs,
@@ -144,6 +148,11 @@ export function settingsChanged(update: SettingsUpdate | undefined, ...keys: Set
 /** `'soon'` groups the writes of a value still moving, such as a dragged slider. */
 export type SaveTiming = 'now' | 'soon';
 
+/** A saved master volume, 0–200%; anything unreadable is the neutral 100%. */
+function restoreMasterVolume(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(200, Math.round(value))) : 100;
+}
+
 /** Each field serialized on its own, so the fields that changed can be told apart. */
 function serializeFields<T extends object>(fields: T): Map<keyof T, string | undefined> {
   const serialized = new Map<keyof T, string | undefined>();
@@ -202,6 +211,14 @@ export class SettingsStore {
   public isMuted: boolean = false; // persistent user mic mute (#358)
   public isDeafened: boolean = false; // persistent user audio deafen (#358)
   public vadSensitivity: number = 25; // 0 - 100
+  /** Gain applied to the microphone before it is sent, 0–200%. */
+  public inputVolume: number = 100;
+  /** Master level over everything the call plays (voices and screen audio), 0–200%. */
+  public outputVolume: number = 100;
+  /** The server rail and the channel list, folded away. */
+  public navigationSidebarHidden: boolean = false;
+  /** The member list, folded away. */
+  public membersSidebarHidden: boolean = false;
   public selectedMicrophoneId: string = '';
   public selectedSpeakerId: string = '';
   public advancedAudioOutputs: boolean = false;
@@ -347,6 +364,10 @@ export class SettingsStore {
         if (!this.userVolumes || typeof this.userVolumes !== 'object') {
           this.userVolumes = {};
         }
+        this.inputVolume = restoreMasterVolume(parsed.inputVolume);
+        this.outputVolume = restoreMasterVolume(parsed.outputVolume);
+        this.navigationSidebarHidden = parsed.navigationSidebarHidden === true;
+        this.membersSidebarHidden = parsed.membersSidebarHidden === true;
         this.noiseSuppressionMode = restoreNoiseSuppressionMode(parsed.noiseSuppressionMode, parsed.noiseSuppressionEnabled);
         this.lastNoiseSuppressionMode = isNoiseSuppressionMode(parsed.lastNoiseSuppressionMode) && parsed.lastNoiseSuppressionMode !== 'off'
           ? parsed.lastNoiseSuppressionMode : this.noiseSuppressionMode === 'off' ? 'rnnoise' : this.noiseSuppressionMode;
@@ -689,6 +710,26 @@ export class SettingsStore {
   public getUserVolume(sessionId: string, legacyClientId?: string): number {
     if (!sessionId) return 100;
     return this.readVolume(this.userVolumes, sessionId, legacyClientId);
+  }
+
+  public setSidebarHidden(sidebar: 'navigation' | 'members', hidden: boolean): void {
+    if (sidebar === 'navigation') this.navigationSidebarHidden = hidden;
+    else this.membersSidebarHidden = hidden;
+    this.persist('now');
+  }
+
+  /** Applies at once; a slider still moving passes `'soon'` and saves when released. */
+  public setInputVolume(volume: number, timing: SaveTiming = 'now'): void {
+    this.inputVolume = restoreMasterVolume(volume);
+    this.persist(timing);
+    appEvents.emit('master_volume.changed', { direction: 'input', volume: this.inputVolume });
+  }
+
+  /** Applies at once; a slider still moving passes `'soon'` and saves when released. */
+  public setOutputVolume(volume: number, timing: SaveTiming = 'now'): void {
+    this.outputVolume = restoreMasterVolume(volume);
+    this.persist(timing);
+    appEvents.emit('master_volume.changed', { direction: 'output', volume: this.outputVolume });
   }
 
   /** Applies at once; a slider still moving passes `'soon'` and saves when released. */

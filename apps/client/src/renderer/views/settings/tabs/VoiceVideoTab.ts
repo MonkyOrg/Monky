@@ -66,6 +66,10 @@ export class VoiceVideoTab {
         <div id="microphone-test-status" class="audio-device-status" role="status"></div>
       </div>
 
+      <div class="form-group" data-settings-section="input-volume" data-settings-label="${escapeHtml(t('settings.inputVolume'))}">
+        ${this.renderVolumeSlider('input', 'mic', settingsStore.inputVolume)}
+      </div>
+
       <!-- Input Mode Selector (#186) -->
       <div data-settings-section="input-mode" data-settings-label="${escapeHtml(t('settings.inputMode'))}" class="form-group" style="margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
@@ -176,6 +180,7 @@ export class VoiceVideoTab {
           <option value="">${t('settings.loadingOutputs')}</option>
         </select></div>
         <div id="speaker-device-status" class="audio-device-status" role="status"></div>
+        <div style="margin-top: 12px;">${this.renderVolumeSlider('output', 'volume_up', settingsStore.outputVolume)}</div>
       </div>
       ${this.audioOutputControls.renderHtml()}
 
@@ -196,9 +201,41 @@ export class VoiceVideoTab {
     `;
   }
 
+  private renderVolumeSlider(direction: 'input' | 'output', icon: string, volume: number): string {
+    const label = t(direction === 'input' ? 'settings.inputVolume' : 'settings.outputVolume');
+    return `
+        <label for="slider-${direction}-volume" style="display: flex; align-items: center; gap: 6px;">
+          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">${icon}</span>
+          ${label}
+        </label>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <input id="slider-${direction}-volume" class="sb-slider" type="range" min="0" max="200" step="1" value="${volume}" data-volume-direction="${direction}" style="--slider-progress: ${volume / 2}%; flex: 1;">
+          <span id="${direction}-volume-value" style="min-width: 40px; text-align: right; font-size: 12px; color: var(--text-muted);">${volume}%</span>
+        </div>
+        <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t(direction === 'input' ? 'settings.inputVolumeHint' : 'settings.outputVolumeHint')}</div>`;
+  }
+
   public attachEvents(container: HTMLElement): void {
     this.unbindInputMode.forEach((off) => off());
     this.unbindInputMode = [bindPttIndicators(container)];
+    for (const slider of container.querySelectorAll<HTMLInputElement>('input[data-volume-direction]')) {
+      const direction = slider.dataset.volumeDirection === 'input' ? 'input' : 'output';
+      const value = container.querySelector<HTMLElement>(`#${direction}-volume-value`);
+      const onInput = () => {
+        const volume = Math.min(200, Math.max(0, parseInt(slider.value, 10) || 0));
+        slider.style.setProperty('--slider-progress', `${volume / 2}%`);
+        if (value) value.textContent = `${volume}%`;
+        if (direction === 'input') settingsStore.setInputVolume(volume, 'soon');
+        else settingsStore.setOutputVolume(volume, 'soon');
+      };
+      const onChange = () => settingsStore.save();
+      slider.addEventListener('input', onInput);
+      slider.addEventListener('change', onChange);
+      this.unbindInputMode.push(() => {
+        slider.removeEventListener('input', onInput);
+        slider.removeEventListener('change', onChange);
+      });
+    }
     const testButton = container.querySelector<HTMLButtonElement>('#btn-microphone-test');
     const testMeter = container.querySelector<HTMLElement>('#microphone-test-meter');
     const testStatus = container.querySelector<HTMLElement>('#microphone-test-status');

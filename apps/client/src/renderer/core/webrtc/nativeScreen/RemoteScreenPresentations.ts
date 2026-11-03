@@ -315,8 +315,8 @@ export class RemoteScreenPresentations {
   private audioPreferences(call: Call, entry: Presentation) {
     return {
       sinkId: entry.sinkId, muted: voiceStore.getEffectiveDeafened() || voiceStore.isScreenAudioMuted(entry.publisherSessionId),
-      volume: settingsStore.getScreenAudioVolume(entry.publisherSessionId,
-        call.context.participants.get(entry.publisherSessionId)?.user.clientId) / 100,
+      volume: Math.min(2, settingsStore.getScreenAudioVolume(entry.publisherSessionId,
+        call.context.participants.get(entry.publisherSessionId)?.user.clientId) / 100 * settingsStore.outputVolume / 100),
     };
   }
 

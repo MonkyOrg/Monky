@@ -107,6 +107,7 @@ export interface AppEvents extends ServerMessageEvents {
   'remote.peer_degraded': { sessionId: string };
   'remote.peer_failed': { sessionId: string };
   'remote.peer_recovered': { sessionId: string };
+  'master_volume.changed': { direction: 'input' | 'output'; volume: number };
   'user_volume.changed': { sessionId: string; volume: number };
   'screen_audio_volume.changed': { sessionId: string; volume: number };
   'miniapp_volume.changed': { botId: string; volume: number };
