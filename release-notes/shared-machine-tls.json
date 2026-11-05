@@ -1,5 +1,5 @@
 {
   "group": "novidades",
-  "pt-BR": "Conexão segura (TLS) compartilhada entre o servidor e os bots da mesma máquina. Com `tls enable` no servidor ou em qualquer bot, o Monky reutiliza o certificado que já existir ou emite um novo, e todos passam a usar o mesmo, com renovação automática. Assim, miniapps de bots também funcionam na versão web.",
-  "en": "Secure connection (TLS) is now shared between the server and the bots on the same machine. Running `tls enable` on the server or any bot reuses the existing certificate or issues a new one, and everything uses the same one with automatic renewal. This lets bot miniapps work on the web version too."
+  "pt-BR": "Servidor e bots da mesma máquina agora compartilham uma única conexão segura (TLS). Ative em qualquer um e o certificado existente é reutilizado, com renovação automática. Assim, os miniapps dos bots também funcionam na versão web.",
+  "en": "The server and the bots on the same machine now share a single secure connection (TLS). Turn it on in any of them and the existing certificate is reused, with automatic renewal. This lets bot miniapps work on the web version too."
 }
