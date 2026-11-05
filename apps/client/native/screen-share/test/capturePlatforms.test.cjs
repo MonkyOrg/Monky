@@ -152,6 +152,47 @@ test('capture scaling is explicit, defaults to stretch and cannot silently chang
     assert.throws(() => protocol.validateVideo({ ...video, scaleMode }));
 });
 
+test('the compatible format encodes Constrained Baseline only on an explicit H.264 encoder, and the host cannot relabel it (#858)', async () => {
+  for (const encoder of ['h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264']) {
+    const baseline = message(windowTarget, encoder);
+    baseline.configuration = protocol.configuration(video, encoder, 'window', 'constrained-baseline');
+    assert.equal(baseline.configuration.profile, 'constrained-baseline');
+    const expected = { source: windowTarget, video, runId, helperProcessId: 42, encoder, h264Profile: 'constrained-baseline' };
+    protocol.validateMessage(baseline, expected);
+    // A host that kept Main, or a Main share the host relabels, is refused.
+    assert.throws(() => protocol.validateMessage(message(windowTarget, encoder), expected));
+    assert.throws(() => protocol.validateMessage(baseline, { ...expected, h264Profile: 'main' }));
+  }
+  for (const encoder of ['av1_texture_amf', 'obs_nvenc_av1_tex', 'monky_aom_av1'])
+    assert.throws(() => protocol.configuration(video, encoder, 'window', 'constrained-baseline'), /Constrained Baseline/);
+  assert.throws(() => protocol.configuration(video, 'obs_x264', 'window', 'high'), /Unknown H.264/);
+  const options = (encoder, h264Profile) => ({
+    host: { kind: 'verified-native-screen-capture-host', executable: path.resolve('host.exe'), sha256: 'a'.repeat(64) },
+    runtime: { kind: 'verified-stock-obs-runtime', version: '32.1.1', stockDirectory: path.resolve('obs'), binaryDirectory: path.resolve('obs') },
+    runId, runDirectory: path.resolve(`monky-screen-capture-${runId}`), video, encoder, h264Profile,
+    onError() {}, onPacket() {}, onNotice() {},
+  });
+  for (const encoder of ['auto', 'monky_aom_av1'])
+    assert.throws(() => new CaptureBridge(options(encoder, 'constrained-baseline')), /explicit H.264 encoder/);
+  let args = null;
+  const child = new EventEmitter();
+  child.pid = 42; child.stdout = new PassThrough(); child.stderr = new PassThrough();
+  child.stdin = new Writable({ write(_bytes, _encoding, done) { done(); } });
+  child.stdio = [child.stdin, child.stdout, child.stderr, new PassThrough(), new Writable({ write(_bytes, _encoding, done) { done(); } })];
+  const bridge = new CaptureBridge(options('obs_x264', 'constrained-baseline'), {
+    spawnProcess(_executable, spawned) {
+      args = spawned;
+      const prepared = message(windowTarget, 'obs_x264');
+      prepared.configuration = protocol.configuration({ ...video, scaleMode: 'stretch' }, 'obs_x264', 'window', 'constrained-baseline');
+      queueMicrotask(() => child.stdout.write(JSON.stringify(prepared) + '\n'));
+      return child;
+    },
+  });
+  await bridge.prepare(windowTarget);
+  assert.ok(args.includes('--h264-profile=constrained-baseline') && args.includes('--encoder=obs_x264'));
+  child.emit('exit', 0, null); child.emit('close', 0, null);
+});
+
 test('a renamed window keeps its share while another window class or executable is rejected', () => {
   for (const target of [windowTarget, gameTarget]) {
     const prepared = message(target, 'h264_texture_amf');

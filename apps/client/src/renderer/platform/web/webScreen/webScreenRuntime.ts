@@ -1,5 +1,5 @@
 import {
-  SCREEN_SHARE_LIMITS, browserScreenCommandSchema, nativeScreenCallSchema, nativeScreenPresentationSchema,
+  SCREEN_SHARE_LIMITS, browserScreenCommandSchema, compatibleScreenProfile, nativeScreenCallSchema, nativeScreenPresentationSchema,
   nativeScreenSignalSchema, nativeScreenSourceSchema,
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommandResult, type NativeScreenEvent,
   type NativeScreenParticipant, type NativeScreenPresentation, type NativeScreenSignalPayload, type NativeScreenSource,
@@ -242,7 +242,7 @@ export class WebScreenRuntime {
     if (command.audio && (!capture.audioTrack || !capabilities.captureAudio))
       throw new Error('The browser did not share sound with this capture.');
     // The compatible format unless the publisher chose a better one this browser encodes; both are H.264.
-    const format = command.browserFormat ?? 'compatible';
+    const format = command.screenFormat ?? 'compatible';
     if (!capabilities.browserFormats?.includes(format)) throw new Error(`This browser cannot share in the ${format} format.`);
     call.admitting.add(command.shareId);
     try {
@@ -251,7 +251,8 @@ export class WebScreenRuntime {
       if (capture.ended) throw sourceLost();
       const source = nativeScreenSourceSchema.parse({
         shareId: command.shareId, instanceId: crypto.randomUUID(),
-        video: browserScreenProfile(command.video, capture.video.getSettings()), audio: command.audio, codec: 'h264',
+        video: format === 'compatible' ? compatibleScreenProfile(browserScreenProfile(command.video, capture.video.getSettings()))
+          : browserScreenProfile(command.video, capture.video.getSettings()), audio: command.audio, codec: 'h264',
       });
       const publisher = new WebScreenPublisher({
         call: call.config, source, format, capture, audioBitrateKbps: command.audioBitrateKbps,

@@ -295,6 +295,17 @@ always watches with the browser's receiver. A browser without the share's
 profile or codec (Firefox facing H.264 Main or AV1) gets a message naming the
 format, not the generic connection failure.
 
+The desktop app offers the same pair of formats in Quality & sharing, with
+Better quality (H.264 Main or AV1) as its default. In Compatible, Main picks
+only H.264 encoders and passes `--h264-profile=constrained-baseline` to the
+capture host: x264, NVENC and AMF use OBS's `baseline` profile, and
+VideoToolbox uses `H264_ConstrainedBaseline_AutoLevel`. The host and the engine
+set `constraint_set1` on a Baseline SPS without slice groups or redundant
+pictures, which is Constrained Baseline (H.264 A.2.1). The engine
+(`videoInput: 'encoded-h264-cb'`) negotiates only that profile and serves
+receivers at any advertised level, since browsers advertise the default
+Level 3.1 and decode up to 5.2; so a compatible source never exceeds Level 5.2.
+
 The picker only uses native capture and explains why when it is unavailable:
 there is no fallback to Chromium capture. Closing the picker cancels pending
 acquisition without ending already published screens. Screen audio belongs to

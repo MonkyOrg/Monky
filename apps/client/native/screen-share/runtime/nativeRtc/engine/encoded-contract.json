@@ -13,7 +13,7 @@
     "peer.configureVideoPlayout": "target=peerId; {minimumDelayMs:integer[0,1000]}, only once before any receivers exist. Applies the public SetJitterBufferMinimumDelay API to video receivers; audio is unchanged. Returns {minimumDelayMs,actualDelayMeasured:false}; a request is not an end-to-end latency measurement."
   },
   "node": {
-    "options": "Revision6 options plus videoInput:'nv12'|'encoded-h264'|'encoded-av1' (default nv12). 'nv12' engines only receive and export decoded NV12; encoded engines publish one source of their own codec. Encoded source and engine modes must match.",
+    "options": "Revision6 options plus videoInput:'nv12'|'encoded-h264'|'encoded-h264-cb'|'encoded-av1' (default nv12; encoded-h264-cb is the compatible format's Constrained Baseline). 'nv12' engines only receive and export decoded NV12; encoded engines publish one source of their own codec. Encoded source and engine modes must match.",
     "submitEncodedFrame": "engine.submitEncodedFrame(sourceId,{frameId,data:Buffer,keyframe,timestampUs,durationUs,ntpTimeMs,pts,dts,timebaseNumerator,timebaseDenominator}) -> {sourceId,frameId,inputBytes,copied:true,networkDeliveryConfirmed:false}; synchronous bounded native copy, not a JS-memory loan, retirement Promise or network delivery proof. PTS/DTS are original canonical signed int64 decimal strings."
   },
   "events": {

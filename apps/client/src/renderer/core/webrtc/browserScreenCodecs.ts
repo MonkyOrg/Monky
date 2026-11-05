@@ -2,7 +2,17 @@ import {
   getScreenH264ProfileLevelId, getScreenAv1MinimumLevelIndex, type NativeScreenVideoProfile, type ScreenCodec,
 } from '@monky/shared';
 
-export class BrowserScreenCodecError extends Error {}
+export class BrowserScreenCodecError extends Error {
+  override name = 'BrowserScreenCodecError';
+}
+
+/**
+ * Why a browser receiver failed (#858): a screen it cannot decode is `unsupported`, so the viewer is told the
+ * format and where to watch it; anything else is the connection. Read by name, as the error crosses modules.
+ */
+export function browserScreenFailureReason(error: unknown): 'unsupported' | 'connection-failed' {
+  return error instanceof Error && error.name === 'BrowserScreenCodecError' ? 'unsupported' : 'connection-failed';
+}
 
 const fmtpParameters = (value: string): Record<string, string> => Object.fromEntries(value.split(';').flatMap(part => {
   const at = part.indexOf('=');
@@ -65,15 +75,14 @@ export function browserReceivesScreenCodec(selected: ScreenCodec = 'h264'): bool
 }
 
 /**
- * What to tell a browser about a screen in `codec` it could not decode: `main`, an H.264 Main share it lacks
- * (Firefox, Safari); `switch`, another codec the publisher can change to the H.264 it receives; `codec`, a format
- * it does not decode with nothing to switch to (Firefox and AV1); `null`, nothing codec-specific.
+ * What to tell a browser about a screen in `codec` it could not decode: `unwatchable`, a format it does not
+ * decode (Firefox and Safari facing H.264 Main or AV1), so it watches elsewhere or asks for the compatible
+ * format; `switch`, another codec the publisher can change to the H.264 it receives; `null`, nothing codec-specific.
  */
-export function browserScreenRefusal(codec: ScreenCodec): 'main' | 'switch' | 'codec' | null {
+export function browserScreenRefusal(codec: ScreenCodec): 'unwatchable' | 'switch' | null {
   const main = browserReceivesH264Main();
-  if (codec === 'h264' && !main && browserReceivesScreenCodec('h264')) return 'main';
   if (codec !== 'h264' && main) return 'switch';
-  if (!browserReceivesScreenCodec(codec) || !main) return 'codec';
+  if (!main || !browserReceivesScreenCodec(codec)) return 'unwatchable';
   return null;
 }
 

@@ -14,6 +14,9 @@ class CaptureBridge extends ObsHostBridge {
     assert.equal(path.basename(runDirectory), `monky-screen-capture-${runId}`);
     const video = Object.freeze(protocol.normalizedVideo(options.video));
     const encoder = protocol.validateEncoder(options.encoder ?? 'auto');
+    const h264Profile = options.h264Profile ?? 'main';
+    assert.ok(h264Profile === 'main' || (h264Profile === 'constrained-baseline' && encoder !== 'auto'
+      && protocol.ENCODERS[encoder].codec === 'h264'), 'Constrained Baseline needs an explicit H.264 encoder.');
     const bitrateCeilingKbps = options.bitrateCeilingKbps ?? 80000;
     assert.ok(Number.isSafeInteger(bitrateCeilingKbps) && bitrateCeilingKbps >= video.bitrateKbps
       && bitrateCeilingKbps <= 80000 && bitrateCeilingKbps % 50 === 0, 'Invalid capture bitrate ceiling.');
@@ -22,7 +25,7 @@ class CaptureBridge extends ObsHostBridge {
     super({
       ...options,
       protocol: { ...protocol, maxLineBytes: protocol.MAX_LINE_BYTES, allowUnpreparedStop: true,
-        validateMessage: (message, expected) => protocol.validateMessage(message, { ...expected, video, encoder }),
+        validateMessage: (message, expected) => protocol.validateMessage(message, { ...expected, video, encoder, h264Profile }),
         errorDetails: message => message.error },
       argumentsForSource: (source, id) => [
         `--runtime=${runtime.stockDirectory}`, `--run-directory=${runDirectory}`, `--run-id=${id}`,
@@ -31,6 +34,7 @@ class CaptureBridge extends ObsHostBridge {
         `--height=${video.height}`, `--fps=${video.fps}`, `--bitrate=${video.bitrateKbps}`,
         `--scale-mode=${video.scaleMode}`,
         ...(encoder === 'obs_nvenc_av1_tex' ? [`--bitrate-ceiling=${bitrateCeilingKbps}`] : []),
+        ...(h264Profile === 'constrained-baseline' ? ['--h264-profile=constrained-baseline'] : []),
       ],
       validateRetirement: bridge => {
         const terminal = bridge.stopped ?? bridge.failure;

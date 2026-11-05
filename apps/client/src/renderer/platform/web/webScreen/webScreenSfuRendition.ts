@@ -1,5 +1,5 @@
 import { Device, type types as SfuTypes } from 'mediasoup-client';
-import { MessageType, type BrowserScreenFormat, type NativeScreenRendition } from '@monky/shared';
+import { MessageType, type ScreenFormat, type NativeScreenRendition } from '@monky/shared';
 import { isScreenCodec } from './browserScreenProfile';
 
 export type WebScreenRpc = (method: MessageType, payload: Record<string, unknown>) => Promise<unknown>;
@@ -7,7 +7,7 @@ export type WebScreenRpc = (method: MessageType, payload: Record<string, unknown
 export interface WebScreenSfuRenditionOptions {
   readonly channelId: string;
   readonly shareId: string;
-  readonly format: BrowserScreenFormat;
+  readonly format: ScreenFormat;
   readonly rendition: NativeScreenRendition;
   readonly video: MediaStreamTrack;
   readonly audio: MediaStreamTrack | null;

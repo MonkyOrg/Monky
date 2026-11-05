@@ -112,8 +112,8 @@ void ValidateEncodedFrame(const MonkyEngineEncodedFrame& frame) {
       "Invalid bounded Annex B input metadata");
 }
 
-EncodedFactoryBundle CreateEncodedVideoFactory(std::uint8_t maximum_level, bool av1) {
-  auto context = std::make_shared<EncodedVideoContext>(maximum_level, av1);
+EncodedFactoryBundle CreateEncodedVideoFactory(std::uint8_t maximum_level, bool av1, bool compatible) {
+  auto context = std::make_shared<EncodedVideoContext>(maximum_level, av1, compatible);
   auto field_trials = webrtc::FieldTrials::Create(
        "WebRTC-Dav1dDecoder-CropToRenderResolution/Enabled/"
       "WebRTC-FrameDropper/Disabled/"
@@ -130,6 +130,7 @@ std::shared_ptr<VideoSource> CreateEncodedVideoSource(Host& host, std::uint64_t 
         item.key() == "syncGroup" || item.key() == "enabled", "Unknown encoded source option");
   auto configuration = ParseConfiguration(options);
   configuration.av1 = context->av1;
+  configuration.compatible = context->compatible;
   const auto group = SyncGroup(options);
   const bool enabled = Boolean(options, "enabled");
   Require(context != nullptr, "The engine has no external-H264 factory");

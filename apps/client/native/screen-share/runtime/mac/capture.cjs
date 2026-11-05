@@ -7,13 +7,14 @@ const { normalizedVideo } = require('../captureProtocol.cjs');
 const { notifyObserver } = require('../asyncTools.cjs');
 
 class MacVideoCapture {
-  constructor({ target, video, mode, codec = 'h264', onPacket, onError, directory }, dependencies = {}) {
+  constructor({ target, video, mode, codec = 'h264', h264Profile = 'main', onPacket, onError, directory }, dependencies = {}) {
     assert.ok(mode === 'hardware' || mode === 'software');
     assert.ok(codec === 'h264' || codec === 'av1' && mode === 'software');
     assert.equal(typeof onPacket, 'function');
     assert.equal(typeof onError, 'function');
     this.target = validateMacTarget(target);
-    this.video = Object.freeze({ ...normalizedVideo(video), mode, codec });
+    assert.ok(h264Profile === 'main' || (h264Profile === 'constrained-baseline' && codec === 'h264'));
+    this.video = Object.freeze({ ...normalizedVideo(video), mode, codec, ...(h264Profile === 'main' ? {} : { h264Profile }) });
     this.errors = [];
     this.onError = onError;
     this.firstFrame = new Promise((resolve, reject) => {

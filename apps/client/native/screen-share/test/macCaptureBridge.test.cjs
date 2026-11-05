@@ -152,3 +152,31 @@ test('macOS retirement proof belongs to the original bridge, not a snapshot, met
   assert.equal(f.owner.exited, false, 'Releasing a lease must not terminate another owner of the helper.');
   await originalClose();
 });
+
+test('the compatible format asks VideoToolbox for Constrained Baseline and refuses anything else (#858)', async () => {
+  for (const profileLevelId of ['42e033', '424033']) {
+    const f = fixture({ probe: { profileLevelId } });
+    const bridge = new MacCaptureBridge({ ...f.options, h264Profile: 'constrained-baseline' }, f.dependencies);
+    await bridge.prepare(target);
+    await bridge.start(target);
+    for (const method of ['media.probe', 'media.start'])
+      assert.equal(f.requests.find(request => request.method === method).data.video.h264Profile, 'constrained-baseline');
+    await bridge.stop();
+  }
+  // A Main or plain Baseline stream is not the compatible format.
+  for (const profileLevelId of ['4d002a', '420033']) {
+    const f = fixture({ probe: { profileLevelId } });
+    const bridge = new MacCaptureBridge({ ...f.options, h264Profile: 'constrained-baseline' }, f.dependencies);
+    await assert.rejects(bridge.prepare(target), /Constrained Baseline/);
+    await bridge.stop();
+  }
+  // Main keeps the original request, without a profile field the host would not know.
+  const main = fixture();
+  const bridge = new MacCaptureBridge(main.options, main.dependencies);
+  await bridge.prepare(target);
+  assert.equal(Object.hasOwn(main.requests.find(request => request.method === 'media.probe').data.video, 'h264Profile'), false);
+  await bridge.stop();
+  const av1 = fixture();
+  assert.throws(() => new MacCaptureBridge({ ...av1.options, encoder: 'monky_aom_av1', h264Profile: 'constrained-baseline' },
+    av1.dependencies), /Only H.264/);
+});

@@ -1,4 +1,8 @@
-import { QUALITY_PRESETS, QualityPresetType, QualityProfile, NATIVE_SCREEN_VIDEO_LIMITS, type NativeScreenVideoProfile } from '@monky/shared';
+import {
+  QUALITY_PRESETS, QualityPresetType, QualityProfile, NATIVE_SCREEN_VIDEO_LIMITS, screenFormatSchema, type NativeScreenVideoProfile,
+} from '@monky/shared';
+import { renderChoiceCards, selectChoiceCard } from '../../../utils/formControls';
+import { screenFormatChoice } from '../../screenShare/screenFormatChoices';
 import { settingsStore } from '../../../stores/settingsStore';
 import { webRtcManager } from '../../../core/WebRtcManager';
 import { t, type TranslationKey } from '../../../i18n';
@@ -12,6 +16,7 @@ import { showInfoToast, showSuccessToast } from '../../CopyToast';
 import { ScreenEncodingControls } from '../../ScreenEncodingControls';
 import { nativeScreenProfile } from '../../../core/webrtc/NativeScreenController';
 import { lockedBlock } from '../../../utils/desktopOnly';
+import { platformSupports } from '../../../platform/capabilities';
 import {
   ASPECT_RATIO_GROUPS,
   AUDIO_BITRATE_OPTIONS,
@@ -157,6 +162,12 @@ export class QualityTab {
     // Reopening while a request is still being verified shows that request, not the old value.
     const preset = this.requestedQuality?.preset ?? settingsStore.qualityPreset;
     return `
+      <div class="form-group" data-settings-section="screen-format" data-settings-label="${escapeHtml(t('screenShare.format'))}">
+        <label>${t('screenShare.format')}</label>
+        ${renderChoiceCards({ id: 'screen-format-choice', label: t('screenShare.format'), attribute: 'data-screen-format',
+          selected: settingsStore.screenFormat, choices: screenFormatSchema.options.map(screenFormatChoice) })}
+        <p id="screen-format-apply" class="audio-device-status">${t('settings.screenFormatApply')}</p>
+      </div>
       ${ScreenEncodingControls.html()}
       ${lockedBlock('nativeScreenAudio', 'screenReceiver', `<div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
         <label>${t('settings.screenReceiverSection')}</label>
@@ -426,6 +437,21 @@ export class QualityTab {
     this.appliedEncoding = this.encodingKey();
     this.encoding.attach(container);
     const options = { signal: this.eventController.signal };
+    const formats = container.querySelector<HTMLElement>('#screen-format-choice');
+    formats?.addEventListener('click', event => {
+      const card = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-screen-format]') : null;
+      const format = screenFormatSchema.safeParse(card?.dataset.screenFormat);
+      if (!format.success || card?.hasAttribute('disabled')) return;
+      settingsStore.setScreenFormat(format.data);
+      selectChoiceCard(formats, 'data-screen-format', format.data);
+    }, options);
+    // A browser offers only the formats it encodes (Firefox and Safari have no H.264 Main); the desktop has both.
+    if (platformSupports('browserScreenPicker')) void webRtcManager.getNativeScreenCapabilities().then(capabilities => {
+      if (this.container !== container || !capabilities.browserFormats) return;
+      formats?.querySelectorAll<HTMLButtonElement>('[data-screen-format]').forEach(card => {
+        card.hidden = !capabilities.browserFormats?.some(format => format === card.dataset.screenFormat);
+      });
+    }, (error: unknown) => console.warn('[QualityTab] Screen capabilities are unavailable:', error));
     const nativeReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-native');
     const chromiumReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-chromium');
     for (const receiver of ['native', 'chromium'] as const) {

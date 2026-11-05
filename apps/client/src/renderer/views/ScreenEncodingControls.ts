@@ -183,15 +183,19 @@ export class ScreenEncodingControls {
     }, { signal: this.events?.signal });
   }
 
+  // The compatible format is always H.264 (#858): the codec choice waits for the better-quality format.
   private savedPreferences(): ScreenEncodingPreferences {
-    return { encodingStrategy: settingsStore.screenEncodingStrategy,
-      encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec };
+    return { encodingStrategy: settingsStore.screenEncodingStrategy, encodingMode: settingsStore.screenEncodingMode,
+      codec: settingsStore.screenFormat === 'compatible' ? 'h264' : settingsStore.preferredScreenCodec };
   }
 
-  private preferences(): ScreenEncodingPreferences { return this.requested ?? this.savedPreferences(); }
+  private preferences(): ScreenEncodingPreferences {
+    const preferences = this.requested ?? this.savedPreferences();
+    return settingsStore.screenFormat === 'compatible' ? { ...preferences, codec: 'h264' } : preferences;
+  }
 
   private key(profile = this.profile(), preferences = this.preferences()): string {
-    return JSON.stringify([profile, preferences.encodingStrategy,
+    return JSON.stringify([profile, settingsStore.screenFormat, preferences.encodingStrategy,
       ...(preferences.encodingStrategy === 'automatic' ? [] : [preferences.encodingMode, preferences.codec])]);
   }
 
@@ -440,7 +444,8 @@ export class ScreenEncodingControls {
     this.render();
     try {
       for (const mode of ['hardware', 'software'] as const) {
-        for (const codec of ['h264', 'av1'] as const) {
+        // The compatible format has no AV1 to check (#858).
+        for (const codec of settingsStore.screenFormat === 'compatible' ? ['h264'] as const : ['h264', 'av1'] as const) {
           if (!current() || defer()) return;
           if (this.choice(mode, codec)) continue;
           let result: CheckedEncoding;
@@ -499,13 +504,15 @@ export class ScreenEncodingControls {
     }
     const codec = this.container?.querySelector<HTMLSelectElement>('#select-video-codec');
     if (codec) {
-      codec.disabled = unavailable || automatic;
-      codec.setAttribute('aria-readonly', String(unavailable || automatic));
+      const compatible = settingsStore.screenFormat === 'compatible';
+      codec.disabled = unavailable || automatic || compatible;
+      codec.setAttribute('aria-readonly', String(unavailable || automatic || compatible));
       for (const value of ['h264', 'av1'] as const) {
         const option = codec.querySelector<HTMLOptionElement>(`option[value="${value}"]`);
         if (!option) continue;
         const choice = this.choice(preferences.encodingMode, value);
-        option.disabled = !automatic && !!choice && !('error' in choice) && !choice.availability.selection;
+        option.disabled = (compatible && value !== 'h264')
+          || (!automatic && !!choice && !('error' in choice) && !choice.availability.selection);
         const label = t(value === 'av1' ? 'settings.codecAv1' : 'settings.codecH264');
         const explanation = automatic ? '' : this.choiceText(preferences.encodingMode, value, choice);
         option.textContent = !automatic && (!choice || 'error' in choice || !choice.availability.selection)
@@ -514,7 +521,7 @@ export class ScreenEncodingControls {
             ? t('settings.screenEncodingRetry') : t('screenShare.unavailable')}` : label;
         option.title = explanation;
       }
-      codec.value = automatic ? selection?.codec ?? '' : preferences.codec;
+      codec.value = compatible ? 'h264' : automatic ? selection?.codec ?? '' : preferences.codec;
       if (!automatic && codec.querySelector<HTMLOptionElement>(`option[value="${preferences.codec}"]`)?.disabled) codec.value = '';
     }
     for (const mode of ['hardware', 'software'] as const) {

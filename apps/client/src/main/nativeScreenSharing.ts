@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
   MessageType, NATIVE_SCREEN_IPC, SCREEN_SHARE_LIMITS, nativeScreenCommandSchema,
-  getScreenShareProfile, nativeScreenFailureReason, nativeScreenProducerSchema, nativeScreenSignalSchema,
+  compatibleScreenProfile, getScreenShareProfile, nativeScreenFailureReason, nativeScreenProducerSchema, nativeScreenSignalSchema,
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommand, type NativeScreenCommandResult,
   type NativeScreenParticipant, type NativeScreenSignalPayload,
   type NativeScreenSource, type NativeScreenAudioPreferences, type NativeScreenCaptureKind, type NativeScreenVideoProfile,
@@ -162,7 +162,8 @@ class NativeScreenSharingService {
     if (command.action === 'probe-encoding') {
       if (this.shutdownRequested || this.disposal) throw cancelled();
       return { kind: 'encoding', availability: await this.discovery.verify(command.probeId, { video: command.video,
-        mode: command.encodingMode, codec: command.codec, strategy: command.encodingStrategy ?? 'automatic', inspectHardware: true }) };
+        mode: command.encodingMode, codec: command.codec, strategy: command.encodingStrategy ?? 'automatic', inspectHardware: true,
+        h264Only: command.screenFormat === 'compatible' }) };
     }
     if (command.action === 'join') {
       if (this.admissionsFrozen || this.shutdownRequested || this.disposal) throw cancelled();
@@ -427,22 +428,26 @@ class NativeScreenSharingService {
       assertCurrent();
       monitor.assertCurrent();
       stage = 'preflight';
-      this.diagnostics.log('preflight-start', diagnostic);
+      // The compatible format is H.264 Constrained Baseline, which Firefox and Safari decode too (#858).
+      const compatible = command.screenFormat === 'compatible';
+      const h264Profile = compatible ? 'constrained-baseline' as const : 'main' as const;
+      this.diagnostics.log('preflight-start', { ...diagnostic, screenFormat: compatible ? 'compatible' : 'main' });
       const discover = (): Promise<ScreenEncodingAvailability> => this.discovery.encoding({ video: command.video,
         mode: command.encodingMode ?? 'hardware', codec: command.codec ?? 'auto',
-        strategy: command.encodingStrategy ?? 'automatic', inspectHardware: false }, selection.abort.signal);
+        strategy: command.encodingStrategy ?? 'automatic', inspectHardware: false, h264Only: compatible }, selection.abort.signal);
       type Preflight = { video: NativeScreenVideoProfile; proof: NativeScreenCaptureCapability };
       // The selected source proves the chosen encoder with the real target, even when discovery was remembered.
       const prepare = async (encoding: ScreenEncodingAvailability): Promise<Preflight> => {
         assertCurrent();
         if (!encoding.selection) throw new Error(encoding.reason ?? 'No compatible screen encoder is available for this codec and profile.');
-        const video = getScreenShareProfile(command.video, 'source', encoding.selection.codec);
+        const sized = getScreenShareProfile(command.video, 'source', encoding.selection.codec);
+        const video = compatible ? compatibleScreenProfile(sized) : sized;
         diagnostic.video = diagnosticProfile(video);
         selection.probe = new SelectedCaptureProbe(this.nativeRuntime(), captureDirectory,
           error => this.diagnostics.logFailure('preflight', error, undefined, { ...diagnostic, stage: 'preflight' }));
         try {
           return { video, proof: await selection.probe.prepare(target, video, selection.abort.signal, encoding.selection,
-            command.preserveAspectRatio) };
+            command.preserveAspectRatio, h264Profile) };
         } catch (error) {
           // An encoder that fails with the real source makes every remembered discovery suspect.
           if (isScreenEncoderFailure(error)) this.discovery.cache.clear();
@@ -543,6 +548,7 @@ class NativeScreenSharingService {
             source: { ...options.source, codec: source.codec ?? 'h264' },
             onState: state => { observe(state); options.onState(state); },
             publisherSessionId: call.config.sessionId, target: captureTarget, captureDirectory, captureEncoder: proof.encoderId,
+            h264Profile,
             preserveAspectRatio: command.preserveAspectRatio ?? true,
             isSourcePaused: () => monitor.paused,
             assertSourceCurrent: () => {

@@ -70,7 +70,8 @@ struct State : std::enable_shared_from_this<State> {
   explicit State(std::uint64_t source, std::string group, bool initially_enabled,
                  std::function<bool(std::string_view, Json)> event, EncodedConfiguration configuration = {})
       : id(source), sync_group(std::move(group)), video(configuration), enabled(initially_enabled), emit(std::move(event)),
-        stream(video.width, video.height, MinimumEncodedLevel(video), sv::H264Profile::Main,
+        stream(video.width, video.height, MinimumEncodedLevel(video),
+               video.compatible ? sv::H264Profile::ConstrainedBaseline : sv::H264Profile::Main,
                sv::H264LevelPolicy::Maximum) {}
 
   bool Event(std::string_view type, Json data) noexcept {
@@ -198,9 +199,9 @@ struct State : std::enable_shared_from_this<State> {
   void Retired(const Token& token) noexcept;
   Json Snapshot() const {
     std::lock_guard lock(mutex);
-    return {{"kind", video.av1 ? "encoded-av1" : "encoded-h264"}, {"width", video.width}, {"height", video.height}, {"requestedFps", video.fps},
+    return {{"kind", video.av1 ? "encoded-av1" : video.compatible ? "encoded-h264-cb" : "encoded-h264"}, {"width", video.width}, {"height", video.height}, {"requestedFps", video.fps},
       {"profileLevelId", stream.Verified() ? Json(stream.Sps().ProfileLevelId()) : Json(nullptr)},
-      {"maximumProfileLevelId", video.av1 ? Json(nullptr) : Json("4d003c")},
+      {"maximumProfileLevelId", video.av1 ? Json(nullptr) : Json(video.compatible ? "42e03c" : "4d003c")},
       {"av1SequenceLevel", video.av1 && admitted ? Json(av1_level) : Json(nullptr)}, {"sourceId", id}, {"syncGroup", sync_group},
       {"enabled", enabled.load()}, {"paused", paused}, {"closed", closed.load()}, {"failed", failed.load()},
       {"admitted", admitted}, {"published", published}, {"released", released},
@@ -362,7 +363,8 @@ class Encoder final : public webrtc::VideoEncoder {
         initial_bitrate = codec->active ? codec->startBitrate * 1000 : 0;
         maximum_bitrate = codec->maxBitrate ? codec->maxBitrate * 1000 : kEncodedBitrateCeiling;
       } else {
-        const auto setup = policy::MakeEncoderSetup(*codec, settings, {sv::H264Profile::Main, negotiated_level_}, 8);
+        const auto setup = policy::MakeEncoderSetup(*codec, settings, {state_->video.compatible
+            ? sv::H264Profile::ConstrainedBaseline : sv::H264Profile::Main, negotiated_level_}, 8);
         initial_bitrate = setup.initial_bitrate;
         maximum_bitrate = setup.maximum_bitrate;
       }
@@ -554,9 +556,11 @@ class Encoder final : public webrtc::VideoEncoder {
 
 class EncodedVideoContext {
  public:
-  explicit EncodedVideoContext(std::uint8_t level, bool is_av1 = false) : maximum_level(level), av1(is_av1) {
+  explicit EncodedVideoContext(std::uint8_t level, bool is_av1 = false, bool is_compatible = false)
+      : maximum_level(level), av1(is_av1), compatible(is_compatible) {
     encoded::Require(level == 51 || level == 52 || level == 60,
-        "External H264 requires a Main5.1, Main5.2 or Main6 ceiling");
+        "External H264 requires a Level 5.1, 5.2 or 6 ceiling");
+    encoded::Require(!av1 || !compatible, "The compatible format is H264, not AV1");
   }
   void ValidateSource(const encoded::EncodedConfiguration& video) const {
     if (!av1 && encoded::MinimumEncodedLevel(video) > maximum_level)
@@ -567,6 +571,7 @@ class EncodedVideoContext {
   bool Admits(std::uint8_t receiver_level) const { return av1 || receiver_level >= maximum_level; }
   const std::uint8_t maximum_level;
   const bool av1;
+  const bool compatible;
   std::mutex mutex;
   std::weak_ptr<encoded::State> source;
 };
@@ -580,10 +585,11 @@ class Factory final : public webrtc::VideoEncoderFactory {
     if (context_->av1) return {policy::ScreenAv1Format()};
     // WebRTC caches these formats before a source exists. Never change them after startup.
     auto formats = policy::SupportedFormats(context_->maximum_level);
-    std::erase_if(formats, [](const auto& format) {
+    const auto profile = context_->compatible ? sv::H264Profile::ConstrainedBaseline : sv::H264Profile::Main;
+    std::erase_if(formats, [profile](const auto& format) {
       const auto parsed = policy::ParseFormat(format, kEncodedH264Level);
       Require(parsed.has_value(), "Internal H264 capability is invalid");
-      return parsed->profile != sv::H264Profile::Main;
+      return parsed->profile != profile;
     });
     return formats;
   }
@@ -591,7 +597,7 @@ class Factory final : public webrtc::VideoEncoderFactory {
                                  std::optional<std::string> scalability) const override {
     std::lock_guard lock(context_->mutex);
     const auto source = context_->source.lock();
-    const auto level = ReceiverLevel(format, context_->av1);
+    const auto level = ReceiverLevel(format, context_->av1, context_->compatible);
     return {level && (source ? source->Serves(*level) : context_->Admits(*level)) &&
         (!scalability || *scalability == "L1T1"), false};
   }
@@ -599,7 +605,7 @@ class Factory final : public webrtc::VideoEncoderFactory {
                                               const webrtc::SdpVideoFormat& format) override {
     std::lock_guard lock(context_->mutex);
     auto source = context_->source.lock();
-    const auto level = ReceiverLevel(format, context_->av1);
+    const auto level = ReceiverLevel(format, context_->av1, context_->compatible);
     if (!source || source->stopping.load() || !level || !source->Serves(*level)) {
       RTC_LOG(LS_ERROR) << "Encoded video requires a live source and a receiver supporting its actual level L1T1";
       return nullptr;
@@ -633,7 +639,7 @@ class Source final : public VideoSource {
   const std::string& SyncGroup() const override { return state_->sync_group; }
   bool Enabled() const override { return state_->enabled.load() && !state_->stopping.load() && !state_->failed.load(); }
   bool AcceptsSendCodec(const webrtc::SdpVideoFormat& format) const override {
-    const auto level = ReceiverLevel(format, state_->video.av1);
+    const auto level = ReceiverLevel(format, state_->video.av1, state_->video.compatible);
     return level && state_->Serves(*level);
   }
   void SetEnabled(bool enabled) override {

@@ -20,12 +20,12 @@ export type ScreenCodec = z.infer<typeof screenCodecSchema>;
 export const screenCodecPreferenceSchema = z.enum(['auto', 'h264', 'av1']);
 export type ScreenCodecPreference = z.infer<typeof screenCodecPreferenceSchema>;
 /**
- * How a browser encodes the screens it shares (#858), always as H.264: `compatible` is Constrained Baseline,
+ * The H.264 a screen is shared in (#858), on the web and on the desktop. `compatible` is Constrained Baseline,
  * which every receiver decodes (Firefox and Safari included); `main` looks better, but only receivers with an
- * H.264 Main decoder (Chromium, the desktop app) can watch it.
+ * H.264 Main decoder (Chromium, the desktop app) can watch it. The desktop's AV1 is a `main` choice.
  */
-export const browserScreenFormatSchema = z.enum(['compatible', 'main']);
-export type BrowserScreenFormat = z.infer<typeof browserScreenFormatSchema>;
+export const screenFormatSchema = z.enum(['compatible', 'main']);
+export type ScreenFormat = z.infer<typeof screenFormatSchema>;
 export const screenEncoderSchema = z.enum([
   'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264',
   'av1_texture_amf', 'obs_nvenc_av1_tex', 'monky_aom_av1',
@@ -73,6 +73,17 @@ export function getScreenH264ProfileLevelId(profile: Readonly<NativeScreenVideoP
   const video = nativeScreenVideoProfileSchema.parse(profile);
   const macroblocksPerSecond = Math.ceil(video.width / 16) * Math.ceil(video.height / 16) * video.fps;
   return macroblocksPerSecond <= 983040 ? '4d0033' : macroblocksPerSecond <= 2073600 ? '4d0034' : '4d003c';
+}
+
+/**
+ * A screen in the compatible format (#858). Firefox's WebRTC decoder probe admits Constrained Baseline up to
+ * Level 5.2 (4K at 60 FPS) and refuses Level 6, so a compatible screen keeps its size and lowers only a frame
+ * rate that would need Level 6.
+ */
+export function compatibleScreenProfile(profile: Readonly<NativeScreenVideoProfile>): Readonly<NativeScreenVideoProfile> {
+  const video = nativeScreenVideoProfileSchema.parse(profile);
+  const macroblocks = Math.ceil(video.width / 16) * Math.ceil(video.height / 16);
+  return Object.freeze({ ...video, fps: Math.min(video.fps, Math.floor(2073600 / macroblocks)) });
 }
 
 /** Annex A lower bound for Main-tier, single-layer video; not proof of an encoder's actual sequence level. */
