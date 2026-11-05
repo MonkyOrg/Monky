@@ -27,6 +27,7 @@ if (!process.versions.electron) {
   });
 } else {
   const { app, BrowserWindow } = require('electron');
+  const { focusTooltipPreview } = require('./tooltipSmoke.cjs');
   app.setPath('userData', process.env.MONKY_DESKTOP_ONLY_PROFILE);
   app.on('window-all-closed', () => {});
   let vite, browser, timeout;
@@ -156,7 +157,9 @@ if (!process.versions.electron) {
           'The block names its own feature');
         await closeOffer();
 
-        // Keyboard: Enter and Space offer the app; Tab moves past.
+        // Keyboard: Enter and Space offer the app; Tab moves past. Focus events only reach a focused page, and an
+        // unshown window on a CI runner is not one: the shared helper shows and focuses it, and waits until it is.
+        await focusTooltipPreview(browser);
         await evaluate('document.querySelector("#before").focus()');
         await key('Tab');
         await check('document.activeElement === window.qa.button', 'Tab reaches the locked control in order');
