@@ -33,9 +33,12 @@ export async function selectScreenEncoding(
   (selection, _error, outcome) => {
     console.warn(`[ScreenShare] Hardware encoder probe failed (${outcome}):`, selection.encoder);
   },
+  h264Only = false,
 ): Promise<ScreenEncodingAvailability> {
-  if (strategy === 'manual' && preference === 'auto') throw new Error('Manual encoding requires an exact codec.');
+  if (strategy === 'manual' && preference === 'auto' && !h264Only) throw new Error('Manual encoding requires an exact codec.');
   if (strategy === 'automatic') { mode = 'hardware'; preference = 'auto'; }
+  // The compatible format is H.264 Constrained Baseline (#858): AV1 is never a candidate.
+  if (h264Only) preference = 'h264';
   let hardware: ScreenEncodingSelection | null = null;
   let hardwareError = false;
   let hardwareFailure: Error | null = null;

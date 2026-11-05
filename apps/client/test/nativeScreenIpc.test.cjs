@@ -75,6 +75,25 @@ test('encoding policy prefers initialized hardware AV1, then H264, then visible 
   }
 });
 
+test('the compatible format tries only H.264 encoders, in either strategy and whatever codec is preferred (#858)', async () => {
+  const compiled = ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264', 'monky_aom_av1'];
+  const unsupported = () => Object.assign(new Error('Unsupported'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+  for (const [strategy, mode] of [['automatic', 'hardware'], ['manual', 'hardware'], ['manual', 'software']]) {
+    const tried = [];
+    const selected = await policy.selectScreenEncoding(strategy, mode, 'av1', compiled, async value => {
+      tried.push(value.encoder);
+      if (value.mode === 'hardware') throw unsupported();
+    }, false, undefined, true);
+    assert.ok(tried.every(encoder => !encoder.includes('av1')), `${strategy}/${mode} tried AV1: ${tried}`);
+    assert.equal(selected.selection?.codec ?? 'h264', 'h264');
+    if (!(strategy === 'manual' && mode === 'hardware')) assert.equal(selected.selection.encoder, 'obs_x264');
+  }
+  // Without the compatible format, Automatic still prefers AV1.
+  const tried = [];
+  await policy.selectScreenEncoding('automatic', 'hardware', 'h264', compiled, async value => { tried.push(value.encoder); });
+  assert.deepEqual(tried, ['av1_texture_amf']);
+});
+
 test('macOS keeps Automatic on hardware H264 and exposes AV1 only as explicit native software', async () => {
   const encoders = ['apple_vt_h264', 'apple_vt_h264_software', 'monky_aom_av1'];
   const tried = [];
@@ -1080,6 +1099,28 @@ for (const encoder of ['h264_texture_amf', 'obs_nvenc_h264_tex']) {
     assert.equal(f.endpoints[0].options.captureEncoder, encoder);
     assert.equal(f.endpoints[0].options.preserveAspectRatio, true);
     assert.equal(f.probes[0].closed, true);
+  });
+}
+
+for (const screenFormat of ['compatible', 'main', undefined]) {
+  test(`the ${screenFormat ?? 'default'} format reaches discovery, the source probe and the publisher (#858)`, async t => {
+    const f = fixture(t, { encoder: 'h264_texture_amf', compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] });
+    await f.join(); await f.participants();
+    const { source } = await f.addSource(undefined, { video: { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 },
+      ...(screenFormat ? { screenFormat } : {}) });
+    const compatible = screenFormat === 'compatible';
+    assert.equal(f.encodingProbes.some(options => options.encoder === 'av1_texture_amf'), !compatible,
+      'Automatic tries AV1 first, except in the compatible format');
+    assert.equal(source.codec, 'h264');
+    // Firefox decodes Constrained Baseline up to Level 5.2: 4K keeps its size and drops to 64 FPS.
+    assert.equal(source.video.fps, compatible ? 64 : 120);
+    assert.equal(f.probes[0].options.h264Profile, compatible ? 'constrained-baseline' : 'main');
+    await f.command({ action: 'signal', signal: {
+      fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+      channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+      subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+    } });
+    assert.equal(f.endpoints[0].options.h264Profile, compatible ? 'constrained-baseline' : 'main');
   });
 }
 

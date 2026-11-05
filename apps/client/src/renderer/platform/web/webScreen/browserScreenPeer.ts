@@ -1,4 +1,4 @@
-import type { BrowserScreenFormat, NativeScreenCall } from '@monky/shared';
+import type { ScreenFormat, NativeScreenCall } from '@monky/shared';
 import { screenSenderCodecs } from './browserScreenProfile';
 import { sentMediaBinding, withScreenStreamId, type ScreenMediaBinding } from './screenSdp';
 import type { ScreenIceCandidate, ScreenMediaKind, ScreenPeerPort } from './screenP2pPublisherPeer';
@@ -6,7 +6,7 @@ import type { ScreenIceCandidate, ScreenMediaKind, ScreenPeerPort } from './scre
 export interface BrowserScreenPeerOptions {
   readonly iceServers: NativeScreenCall['iceServers'];
   /** The only video codecs this connection may send (#858). */
-  readonly format: BrowserScreenFormat;
+  readonly format: ScreenFormat;
   /** The screen's instance: the stream id viewers group its video and sound by. */
   readonly streamId: string;
   readonly video: MediaStreamTrack;

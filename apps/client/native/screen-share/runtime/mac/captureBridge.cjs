@@ -15,9 +15,15 @@ function encoderProfile(encoder) {
   assert.ok(Object.hasOwn(ENCODERS, encoder), 'The macOS backend requires an explicit native encoder.');
   return ENCODERS[encoder];
 }
-async function probe(host, video, encoder, signal) {
+/** The video a macOS capture encodes: the compatible format (#858) names its Constrained Baseline. */
+function encodedVideo(video, mode, codec, h264Profile = 'main') {
+  assert.ok(h264Profile === 'main' || (h264Profile === 'constrained-baseline' && codec === 'h264'),
+    'Only H.264 has a Constrained Baseline.');
+  return { ...normalizedVideo(video), mode, codec, ...(h264Profile === 'main' ? {} : { h264Profile }) };
+}
+async function probe(host, video, encoder, signal, h264Profile = 'main') {
   const { mode, codec } = encoderProfile(encoder);
-  const { value } = await host.request('media.probe', { video: { ...normalizedVideo(video), mode, codec } }, signal);
+  const { value } = await host.request('media.probe', { video: encodedVideo(video, mode, codec, h264Profile) }, signal);
   assert.equal(value.captureStarted, false);
   assert.equal(value.nativeClosed, true);
   assert.equal(value.hardwareExecutionObserved, null);
@@ -27,7 +33,10 @@ async function probe(host, video, encoder, signal) {
   if (codec === 'av1') {
     assert.equal(value.profileLevelId, null);
     assert.equal(value.sequenceVerified, true);
-  } else assert.match(value.profileLevelId, /^4d[0-9a-f]{4}$/u);
+  } else if (h264Profile === 'main') assert.match(value.profileLevelId, /^4d[0-9a-f]{4}$/u);
+  // Constrained Baseline: profile 66 with constraint_set1 (H.264 A.2.1).
+  else assert.ok(/^42[0-9a-f]{4}$/u.test(value.profileLevelId) && (Number.parseInt(value.profileLevelId.slice(2, 4), 16) & 0x40),
+    'The macOS encoder did not produce Constrained Baseline.');
   return Object.freeze({ encoderId: encoder, codec, mode, probe: codec === 'av1' ? 'libaom-session' : 'videotoolbox-session',
     probeVerified: true, textureInput: codec === 'h264', dynamicBitrate: true, hardwareSessionConfirmed: false,
     hardwareQualified: false });
@@ -59,6 +68,8 @@ class MacCaptureBridge {
     this.dependencies = dependencies;
     this.mode = encoderProfile(options.encoder).mode;
     this.codec = encoderProfile(options.encoder).codec;
+    this.h264Profile = options.h264Profile ?? 'main';
+    encodedVideo(options.video, this.mode, this.codec, this.h264Profile);
     this.video = Object.freeze(normalizedVideo(options.video));
     this.ceiling = options.bitrateCeilingKbps ?? 80000;
     this.sequence = 0;
@@ -69,11 +80,11 @@ class MacCaptureBridge {
     assert.ok(!this.#capture && !this.stopping, 'A retired or prepared macOS capture owner cannot be reused.');
     this.target = Object.freeze(structuredClone(validateMacTarget(target)));
     this.#capture = new MacVideoCapture({ target: this.target, video: this.video, mode: this.mode, codec: this.codec,
-      onPacket: this.options.onPacket, onError: this.options.onError },
+      h264Profile: this.h264Profile, onPacket: this.options.onPacket, onError: this.options.onError },
     { ...this.dependencies, runtime: this.options.host });
     const { value } = await this.#capture.host.request('resolve', { target: this.target }, signal);
     assert.deepEqual(value.target, this.target);
-    this.capability = await probe(this.#capture.host, this.video, this.options.encoder, signal);
+    this.capability = await probe(this.#capture.host, this.video, this.options.encoder, signal, this.h264Profile);
     return this.capability;
   }
   async start(target, signal) {
@@ -125,4 +136,4 @@ class MacCaptureBridge {
 }
 
 const assertMacCaptureBridgeClosed = Function.prototype.call.bind(MacCaptureBridge.prototype.assertClosed);
-module.exports = { MacCaptureBridge, probeCaptureCapabilities, encoderProfile, assertMacCaptureBridgeClosed };
+module.exports = { MacCaptureBridge, probeCaptureCapabilities, encoderProfile, encodedVideo, assertMacCaptureBridgeClosed };

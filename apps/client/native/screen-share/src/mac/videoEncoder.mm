@@ -168,8 +168,10 @@ VideoEncoder::VideoEncoder(EncoderOptions options, Output output, Failure failur
       options.bitrate_kbps * 1000);
   self.minimum_level = level;
   self.maximum_bitrate_bps = screen_video::H264LevelMaxBitrate(level);
+  // VideoToolbox names Constrained Baseline only with an automatic level, never above the one required.
   self.bitstream = std::make_unique<screen_video::H264Bitstream>(options.width, options.height, level,
-      screen_video::H264Profile::Main, level > 52 ? screen_video::H264LevelPolicy::Maximum
+      options.constrained_baseline ? screen_video::H264Profile::ConstrainedBaseline : screen_video::H264Profile::Main,
+      level > 52 || options.constrained_baseline ? screen_video::H264LevelPolicy::Maximum
         : screen_video::H264LevelPolicy::Exact);
   NSDictionary* specification = options.hardware
       ? @{(__bridge NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @YES}
@@ -194,7 +196,9 @@ VideoEncoder::VideoEncoder(EncoderOptions options, Output output, Failure failur
     self.Integer(kVTCompressionPropertyKey_ExpectedFrameRate, options.fps);
     self.Integer(kVTCompressionPropertyKey_MaxKeyFrameInterval, options.fps);
     self.Integer(kVTCompressionPropertyKey_AverageBitRate, options.bitrate_kbps * 1000);
-    NSString* profile = level > 52 ? (__bridge NSString*)kVTProfileLevel_H264_Main_AutoLevel
+    // kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel (macOS 12+); older systems answer "not supported".
+    NSString* profile = options.constrained_baseline ? @"H264_ConstrainedBaseline_AutoLevel"
+      : level > 52 ? (__bridge NSString*)kVTProfileLevel_H264_Main_AutoLevel
       : [NSString stringWithFormat:@"H264_Main_%u_%u",
           static_cast<unsigned>(level / 10), static_cast<unsigned>(level % 10)];
     const auto selected = VTSessionSetProperty(self.session, kVTCompressionPropertyKey_ProfileLevel,

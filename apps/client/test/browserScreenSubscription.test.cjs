@@ -608,3 +608,22 @@ test('an SFU screen Firefox cannot consume is refused as its codec, while a Chro
   for (let i = 0; i < 5 && !chromium.states.length; i++) await tick();
   assert.deepEqual(chromium.states, ['connection-failed']);
 });
+
+for (const [label, receive, reason] of [
+  ['Firefox, which lists no H.264 Main, keeps none of an AV1 screen', [...FIREFOX_CODECS, { mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0' }], 'unsupported'],
+  ['Chromium keeps none of an AV1 screen', [...codecs, { mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0' }], 'connection-failed'],
+]) {
+  test(`sfu: ${label} over a working connection: ${reason} (#858)`, async t => {
+    // The desktop's AV1 reached Firefox's connection and never became video: that is its decoder, not the network.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const f = fixture(t, { mode: 'sfu', sourceCodec: 'av1', availableCodecs: receive, negotiatedAv1Level: 23 });
+    f.producer('video');
+    await f.open();
+    f.transports[0].consumers[0].getStats = () => Promise.resolve(new Map([
+      ['pair', { type: 'candidate-pair', state: 'succeeded', bytesReceived: 52000 }],
+    ]));
+    t.mock.timers.tick(30000);
+    for (let i = 0; i < 8 && !f.states.length; i++) await tick();
+    assert.deepEqual(f.states, [reason]);
+  });
+}

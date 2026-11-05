@@ -15,7 +15,8 @@ const { decoderFailureObservations } = require('../runtime/nativeVideoDiagnostic
 function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = false,
   target = { hwnd: 12345, expectedProcessId: 56789 }, captureEncoder = 'auto', captureModule, preserveAspectRatio,
   video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 }, quality = 'source',
-  captureRuntime = {}, captureDirectory = path.resolve(__dirname, 'modeled-capture'), timers, send = async () => {} } = {}) {
+  captureRuntime = {}, captureDirectory = path.resolve(__dirname, 'modeled-capture'), timers, send = async () => {}, h264Profile,
+  codec } = {}) {
   let finish, closeCalls = 0, engineOptions;
   const contract = require('../runtime/nativeRtc/engine/contract.json');
   const capabilities = { abiVersion: contract.abiVersion, contractRevision: contract.contractRevision,
@@ -45,9 +46,9 @@ function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = f
     textures: { importSharedTexture() {}, sendSharedTexture() {} },
     role, mode, sessionId: role === 'publish' ? 'publisher' : 'viewer', publisherSessionId: 'publisher', channelId: 'channel',
     pipelineId: randomUUID(), source: { shareId: 'screen', instanceId: randomUUID(), audio,
-      video },
+      video, ...(codec ? { codec } : {}) },
     quality, destination: { frame, presentationId: randomUUID() },
-    target, captureEncoder, preserveAspectRatio, captureDirectory,
+    target, captureEncoder, preserveAspectRatio, captureDirectory, ...(h264Profile ? { h264Profile } : {}),
     ...(audio ? { audio: { sinkId: '', muted: true, volume: 0, maxBitrateBps: 128000,
       captureModule: captureModule ?? { createPacketCapture() { assert.fail('Preview-only demand cannot capture PCM.'); } },
       output: { webContents, frame, expectedUrl: frame.url,
@@ -78,6 +79,26 @@ test('publisher fixes its H264 ceiling before engine startup and source creation
       }
     }
   }
+});
+
+test('the compatible format starts a Constrained Baseline engine, and only for H.264 (#858)', async () => {
+  for (const mode of ['p2p', 'sfu']) {
+    const f = fixture({ mode, role: 'publish', h264Profile: 'constrained-baseline', captureEncoder: 'obs_x264' });
+    try {
+      assert.equal(f.engineOptions.videoInput, 'encoded-h264-cb');
+      assert.equal(f.endpoint.h264Profile, 'constrained-baseline');
+      await f.endpoint.ready;
+    } finally {
+      f.finish({ closed: true });
+      await f.endpoint.close();
+    }
+    const main = fixture({ mode, role: 'publish', h264Profile: 'main' });
+    try { assert.equal(main.engineOptions.videoInput, 'encoded-h264'); }
+    finally { main.finish({ closed: true }); await main.endpoint.close(); }
+  }
+  assert.throws(() => fixture({ role: 'publish', h264Profile: 'high' }), /Unknown H.264/);
+  assert.throws(() => fixture({ role: 'publish', h264Profile: 'constrained-baseline', codec: 'av1',
+    captureEncoder: 'monky_aom_av1' }), /no H.264 profile/);
 });
 
 test('a lower-quality rendition of a Main6 source starts its own Main5.1 factory', async () => {

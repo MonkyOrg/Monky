@@ -260,9 +260,15 @@ class Host {
         delivered.data = normalizedPacket.bytes.data();
         delivered.size = normalizedPacket.bytes.size();
       }
+      auto baselinePacket = NormalizeConstrainedBaseline({delivered.data, delivered.size}, host.arguments_.video);
+      if (!baselinePacket.empty()) {
+        delivered.data = baselinePacket.data();
+        delivered.size = baselinePacket.size();
+      }
       std::vector<std::uint8_t> independentKeyframe;
       std::vector<std::uint8_t> av1Sequence;
       AmfColorNormalization normalizedParameters;
+      std::vector<std::uint8_t> baselineParameters;
       std::span<const std::uint8_t> parameterSets;
       if (packet->keyframe) {
         std::uint8_t* extra = nullptr;
@@ -274,6 +280,8 @@ class Host {
         normalizedParameters = NormalizeAmfBt709(parameterSets, host.arguments_.video,
             host.capability_.encoder, host.amfColorNormalizationAllowed_);
         if (!normalizedParameters.bytes.empty()) parameterSets = normalizedParameters.bytes;
+        baselineParameters = NormalizeConstrainedBaseline(parameterSets, host.arguments_.video);
+        if (!baselineParameters.empty()) parameterSets = baselineParameters;
         // Preview may have consumed the first headers before a viewer joins.
         if (IsAv1(host.capability_.encoder)) {
           auto keyframe = CompleteAv1Keyframe({delivered.data, delivered.size}, parameterSets,
@@ -693,6 +701,11 @@ class Host {
           ",\"settingsAccepted\":true,\"hardwareApplicationConfirmed\":false,\"fpsApplied\":null}");
     }
   }
+  // OBS lists the same "baseline" for x264, NVENC and AMF; NormalizeConstrainedBaseline declares it Constrained.
+  // AV1 encoders keep their pinned "main" profile.
+  std::string H264EncoderProfile() const {
+    return arguments_.video.constrainedBaseline && !IsAv1(capability_.encoder) ? "baseline" : "main";
+  }
   void EncoderSettings() {
     const auto* codec = api().obs_get_encoder_codec(SelectedEncoder());
     Require(codec || IsSoftware(capability_.encoder), "The selected hardware codec is not registered for this GPU",
@@ -711,7 +724,7 @@ class Host {
     SetInteger(properties.value, encoderSettings_, "keyint_sec", 1);
     if (IsSoftware(capability_.encoder)) {
       if (capability_.encoder == EncoderKind::X264) {
-        SetString(properties.value, encoderSettings_, "profile", "main");
+        SetString(properties.value, encoderSettings_, "profile", H264EncoderProfile());
         SetString(properties.value, encoderSettings_, "preset", "veryfast");
         SetString(properties.value, encoderSettings_, "tune", "zerolatency");
         const auto level = (std::max)(51u, RequiredCaptureH264Level(arguments_.video));
@@ -725,7 +738,7 @@ class Host {
       return;
     }
     if (api().obs_properties_get(properties.value, "profile"))
-      SetString(properties.value, encoderSettings_, "profile", "main");
+      SetString(properties.value, encoderSettings_, "profile", H264EncoderProfile());
     SetString(properties.value, encoderSettings_, "preset", IsNvenc(capability_.encoder) ? "p4" : "balanced");
     if (api().obs_properties_get(properties.value, "bf")) SetInteger(properties.value, encoderSettings_, "bf", 0);
     else Require((IsNvenc(capability_.encoder) || IsAv1(capability_.encoder)) && api().obs_data_get_int(encoderSettings_, "bf") == 0,
@@ -762,7 +775,7 @@ class Host {
           api().obs_data_get_int(settings.value, "keyint_sec") == 1,
           "Encoder changed the selected real-time rate settings", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
       if (capability_.encoder == EncoderKind::X264)
-        Require(BoundedString(api().obs_data_get_string(settings.value, "profile"), 32) == "main" &&
+        Require(BoundedString(api().obs_data_get_string(settings.value, "profile"), 32) == H264EncoderProfile() &&
             BoundedString(api().obs_data_get_string(settings.value, "preset"), 32) == "veryfast" &&
             BoundedString(api().obs_data_get_string(settings.value, "tune"), 32) == "zerolatency",
             "Software H264 changed its selected latency settings", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
@@ -770,7 +783,7 @@ class Host {
     }
     const bool nvenc = IsNvenc(capability_.encoder);
     Require(BoundedString(api().obs_data_get_string(settings.value, "rate_control"), 32) == EncoderRateControl(capability_.encoder) &&
-        BoundedString(api().obs_data_get_string(settings.value, "profile"), 32) == "main" &&
+        BoundedString(api().obs_data_get_string(settings.value, "profile"), 32) == H264EncoderProfile() &&
         BoundedString(api().obs_data_get_string(settings.value, "preset"), 32) == (nvenc ? "p4" : "balanced") &&
         BoundedString(api().obs_data_get_string(settings.value, nvenc ? "opts" : "ffmpeg_opts"), 512) ==
             EncoderProfileOptions(capability_.encoder, arguments_.video, arguments_.bitrateCeilingKbps) &&

@@ -557,7 +557,7 @@ function fixture(language = 'en') {
   const allowed = new Set([
     'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
     'views/ScreenEncodingControls', 'core/screenEncoding', 'core/screenShareStart', 'views/screenShare/captureRules',
-    'views/screenShare/extraScreens',
+    'views/screenShare/extraScreens', 'views/screenShare/screenFormatChoices', 'utils/formControls',
     'views/ResourceAudiencePicker',
     'utils/feedback', 'utils/screenShareFailure', 'core/ClientLogService',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',

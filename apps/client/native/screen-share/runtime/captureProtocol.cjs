@@ -98,11 +98,18 @@ function normalizedVideo(video) {
   return { ...video, scaleMode: video.scaleMode ?? 'stretch' };
 }
 
-function configuration(video, encoder = 'h264_texture_amf', kind = 'window') {
+/** The H.264 profile a capture encodes (#858); AV1 keeps the legacy `main` label. */
+function validateH264Profile(profile, encoder) {
+  assert.ok(profile === 'main' || profile === 'constrained-baseline', 'Unknown H.264 capture profile.');
+  assert.ok(profile === 'main' || ENCODERS[encoder]?.codec === 'h264', 'Only H.264 encoders have a Constrained Baseline.');
+  return profile;
+}
+
+function configuration(video, encoder = 'h264_texture_amf', kind = 'window', h264Profile = 'main') {
   validateVideo(video);
   assert.ok(typeof encoder === 'string' && Object.hasOwn(ENCODERS, encoder));
   assert.ok(['window', 'monitor', 'game'].includes(kind));
-  return { ...CONFIGURATION, codec: ENCODERS[encoder].codec, scaleMode: video.scaleMode ?? 'stretch', encoderId: encoder, rateControl: ENCODERS[encoder].rateControl,
+  return { ...CONFIGURATION, profile: validateH264Profile(h264Profile, encoder), codec: ENCODERS[encoder].codec, scaleMode: video.scaleMode ?? 'stretch', encoderId: encoder, rateControl: ENCODERS[encoder].rateControl,
     method: kind === 'game' ? 'game-hook' : 'wgc', width: video.width, height: video.height,
     fpsNumerator: video.fps, initialBitrateKbps: video.bitrateKbps };
 }
@@ -226,13 +233,14 @@ function validateMessage(message, expected) {
     }
     const encoder = validateEncoder(expected.encoder ?? 'auto');
     if (encoder !== 'auto') assert.equal(message.configuration.encoderId, encoder);
-    assert.deepEqual(message.configuration, configuration(expected.video, message.configuration.encoderId, kind));
+    assert.deepEqual(message.configuration, configuration(expected.video, message.configuration.encoderId, kind,
+      expected.h264Profile ?? 'main'));
   }
   const selected = message.configuration;
   assert.deepEqual(selected, configuration({
     width: selected?.width, height: selected?.height, fps: selected?.fpsNumerator, bitrateKbps: selected?.initialBitrateKbps,
     scaleMode: selected?.scaleMode,
-  }, selected?.encoderId, kind));
+  }, selected?.encoderId, kind, selected?.profile));
   if (!extended) assert.equal(selected.encoderId, CONFIGURATION.encoderId, 'Legacy protocol cannot claim NVENC support.');
   if (extended) {
     if (message.capability === null) assert.ok(message.type === 'error' || message.type === 'stopped');

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import {
+import { screenShareIdSchema,
   browserScreenCommandSchema, nativeScreenCommandSchema, nativeScreenP2pControlSchema,
   type NativeScreenP2pControl,
 } from '@monky/shared';
@@ -14,6 +14,7 @@ import {
 } from '../src/renderer/platform/web/webScreen/screenP2pPublisherPeer';
 import type { ScreenMediaBinding } from '../src/renderer/platform/web/webScreen/screenSdp';
 import { planBrowserAudio, type LiveScreens } from '../src/renderer/views/screenShare/captureRules';
+import { createScreenShareStream } from '../src/renderer/core/screenShareStream';
 import { webScreenCapabilities } from '../src/renderer/platform/web/webScreen/webScreenRuntime';
 import { webCapabilities } from '../src/renderer/platform/web/webPlatform';
 import { browserReceivesH264Main, browserReceivesScreenCodec, browserScreenRefusal } from '../src/renderer/core/webrtc/browserScreenCodecs';
@@ -302,16 +303,16 @@ test('Firefox watches compatible H.264 screens and knows it cannot decode Main (
 test('a browser that cannot decode a screen is told which format and where to watch it (#858)', (t: TestContext) => {
   inBrowser(t, FIREFOX_VIDEO_CODECS, () => {
     // Firefox reaches an H.264 screen only when it is Main: the desktop's or the web's better format.
-    assert.equal(browserScreenRefusal('h264'), 'main');
+    assert.equal(browserScreenRefusal('h264'), 'unwatchable');
     // Firefox lists AV1 but does not decode the screen: named as AV1, never the generic network failure.
-    assert.equal(browserScreenRefusal('av1'), 'codec');
+    assert.equal(browserScreenRefusal('av1'), 'unwatchable');
   });
   inBrowser(t, CHROMIUM_VIDEO_CODECS, () => {
     assert.equal(browserScreenRefusal('h264'), null);
     assert.equal(browserScreenRefusal('av1'), 'switch');
   });
   inBrowser(t, NO_H264_VIDEO_CODECS, () => {
-    assert.equal(browserScreenRefusal('h264'), 'codec');
+    assert.equal(browserScreenRefusal('h264'), 'unwatchable');
   });
 });
 
@@ -353,4 +354,18 @@ test('a share chosen in the browser carries sound only when no other share keeps
     { kind: 'free', handedOver: ['one'] });
   // Sound still being set up for a share belongs to nobody yet.
   assert.deepEqual(planBrowserAudio({ mode: 'replace' }, live([], ['pending'])), { kind: 'blocked', reason: 'system' });
+});
+
+test('a share started in Firefox, whose streams are named {uuid}, gets a share id every side accepts (#858)', (t: TestContext) => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'MediaStream');
+  t.after(() => { if (descriptor) Object.defineProperty(globalThis, 'MediaStream', descriptor); else Reflect.deleteProperty(globalThis, 'MediaStream'); });
+  let next = '';
+  class FakeStream { get id(): string { return next; } }
+  Object.defineProperty(globalThis, 'MediaStream', { value: FakeStream, configurable: true, writable: true });
+  next = '{8e5c3b1a-6f2d-4c1e-9a7b-3d2e1f0a9b8c}';
+  const firefox = createScreenShareStream();
+  assert.equal(screenShareIdSchema.safeParse(firefox.id).success, true);
+  assert.equal(firefox.id, firefox.id, 'the id stays the same every time it is read');
+  next = 'Q2o7mVb1xK0dLr9sTz4wHy3nUe6cGj5pFa8i';
+  assert.equal(createScreenShareStream().id, next, 'an id the rule accepts is kept');
 });

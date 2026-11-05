@@ -170,9 +170,10 @@ export class BrowserScreenSfu {
       if (maxReceiveLevel) codec.parameters = { ...codec.parameters, 'max-recv-level': maxReceiveLevel };
     }
     // A screen nobody here can decode is refused when consuming: by the server (no common profile) or by
-    // the browser's own description. Without an H.264 Main receiver that is the codec, not the network.
+    // the browser's own description. Without an H.264 Main receiver that is the codec, not the network;
+    // only a retirement (AbortError) stays what it is.
     const codecRefusal = (error: unknown): unknown => producer.kind === 'video' && !browserReceivesH264Main()
-      && !(error instanceof DOMException)
+      && !(error instanceof Error && error.name === 'AbortError')
       ? new BrowserScreenCodecError(`This browser cannot consume the ${selectedMime} screen: ${String(error)}`) : error;
     const consumed = await rpc<ConsumerResponse | SfuProducerClosedPayload>(MessageType.SFU_CONSUME, {
       channelId: call.channelId, transportId: transport.id, producerId: producer.producerId,

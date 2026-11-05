@@ -8,7 +8,6 @@ import { emitOutsideRouting } from '../../sessionRouting';
 import { t } from '../../../i18n';
 import { videoService, type NativeScreenCapture } from '../../VideoService';
 import { settingsStore } from '../../../stores/settingsStore';
-import { platformSupports } from '../../../platform/capabilities';
 import { customVideoFpsLimit } from '../../../utils/qualityProfileLimits';
 import { acceptScreenEncoding } from '../../screenEncoding';
 import {
@@ -18,8 +17,6 @@ import {
 /** Why viewers see a frozen picture of a local source: its window is minimized or hidden, or a browser stopped drawing it. */
 export type NativeScreenSourceWarning = 'hidden' | 'covered';
 
-/** The format a browser publisher encodes in (#858); the desktop chooses its codec through its own settings. */
-const browserFormat = () => platformSupports('browserScreenPicker') ? { browserFormat: settingsStore.browserScreenFormat } : {};
 
 export type SourceInput = Omit<NativeScreenCapture, 'source'> & {
   shareId: string; video: NativeScreenVideoProfile; audio: boolean;
@@ -155,7 +152,7 @@ export class LocalScreenSources {
         desktopSourceId: input.desktopSourceId, video: input.video, audio: input.audio, audioBitrateKbps: input.audioBitrateKbps,
         preserveAspectRatio: input.preserveAspectRatio ?? true,
         encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
-        encodingStrategy: settingsStore.screenEncodingStrategy, ...browserFormat(),
+        encodingStrategy: settingsStore.screenEncodingStrategy, screenFormat: settingsStore.screenFormat,
         ...(input.replacesAudioShareIds?.length ? { replacesAudioShareIds: [...input.replacesAudioShareIds] } : {}),
         ...(input.captureKind ? { captureKind: input.captureKind } : {}),
       }).then(result => {
@@ -225,7 +222,7 @@ export class LocalScreenSources {
             preserveAspectRatio: capture.preserveAspectRatio ?? true,
             video, audio, audioBitrateKbps,
             encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
-            encodingStrategy: settingsStore.screenEncodingStrategy, ...browserFormat(),
+            encodingStrategy: settingsStore.screenEncodingStrategy, screenFormat: settingsStore.screenFormat,
           });
           this.calls.current(call);
           if (!isCurrentCapture() || previous.removing || call.sources.get(shareId) !== previous) {

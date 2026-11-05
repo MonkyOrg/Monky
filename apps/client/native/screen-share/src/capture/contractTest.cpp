@@ -22,6 +22,7 @@ struct TestSpsOptions {
   bool vui = false, videoSignal = true, colourDescription = true, richVui = false;
   std::uint8_t fullRange = 0, primaries = 0, transfer = 1, matrix = 1;
   std::uint32_t id = 0, order = 0;
+  std::uint8_t profile = 77, constraints = 0;
 };
 
 static std::vector<std::uint8_t> ParameterSets(const VideoConfiguration& video, TestSpsOptions options = {}) {
@@ -35,7 +36,7 @@ static std::vector<std::uint8_t> ParameterSets(const VideoConfiguration& video, 
     for (auto copy = value; copy; copy >>= 1) ++width;
     number(0, width - 1); number(value, width);
   };
-  number(77, 8); number(0, 8); number((std::max)(51u, RequiredCaptureH264Level(video)), 8);
+  number(options.profile, 8); number(options.constraints, 8); number((std::max)(51u, RequiredCaptureH264Level(video)), 8);
   ue(options.id); ue(0); ue(options.order);
   if (options.order == 0) ue(0);
   else if (options.order == 1) { number(0, 1); ue(0); ue(1); ue(2); ue(0); ue(1); }
@@ -506,6 +507,27 @@ int main(int argc, char** argv) {
     }
     rejects([&] { RequiredCaptureAv1Level({3840, 2160, 60, 5000}, 4950); });
     rejects([&] { RequiredCaptureAv1Level({3840, 2160, 60, 5000}, 80050); });
+    {
+      // A Baseline SPS is declared Constrained Baseline in the compatible format, and only there (#858).
+      VideoConfiguration baseline{1920, 1080, 60, 5000};
+      baseline.constrainedBaseline = true;
+      VideoConfiguration mainVideo = baseline;
+      mainVideo.constrainedBaseline = false;
+      TestSpsOptions plain;
+      plain.profile = 66;
+      const auto plainBaseline = ParameterSets(baseline, plain);
+      const auto marked = NormalizeConstrainedBaseline(plainBaseline, baseline);
+      check(marked.size() == plainBaseline.size() && plainBaseline[5] == 0 && marked[5] == 0x40 &&
+          std::equal(marked.begin() + 6, marked.end(), plainBaseline.begin() + 6));
+      check(InspectAnnexB(marked, baseline).sps && InspectAnnexB(marked, baseline).pps);
+      TestSpsOptions flagged = plain;
+      flagged.constraints = 0xc0;
+      check(NormalizeConstrainedBaseline(ParameterSets(baseline, flagged), baseline).empty());
+      check(NormalizeConstrainedBaseline(plainBaseline, mainVideo).empty());
+      check(NormalizeConstrainedBaseline(ParameterSets(mainVideo), mainVideo).empty());
+      rejects([&] { InspectAnnexB(plainBaseline, mainVideo); });
+      rejects([&] { InspectAnnexB(ParameterSets(mainVideo), baseline); });
+    }
     check(RequiredCaptureH264Level({3840, 2160, 120, 20000}) == 60);
     check(RequiredCaptureH264Level({3840, 2160, 60, 20000}) == 52);
     check(RequiredCaptureH264Level({1920, 1080, 120, 20000}) == 51);
@@ -874,6 +896,31 @@ int main(int argc, char** argv) {
         game.encoder == EncoderKind::Nvenc && game.expectedCreation == 123456789);
     gameArguments.back() = L"--encoder=x264";
     rejects([&] { ParseArguments(gameArguments); });
+    {
+      // The compatible format (#858): Constrained Baseline, only with an explicit H.264 encoder.
+      auto baseline = windowArguments;
+      baseline.insert(baseline.end(), {L"--encoder=obs_x264", L"--h264-profile=constrained-baseline"});
+      const auto parsed = ParseArguments(baseline);
+      check(parsed.video.constrainedBaseline && parsed.encoder == EncoderKind::X264);
+      check(ConfigurationJson(Method::Wgc, parsed.video, EncoderKind::X264).find("\"profile\":\"constrained-baseline\"")
+          != std::string::npos);
+      check(ConfigurationJson(Method::Wgc, ParseArguments(windowArguments).video, EncoderKind::X264)
+          .find("\"profile\":\"main\"") != std::string::npos);
+      baseline.back() = L"--h264-profile=main";
+      check(!ParseArguments(baseline).video.constrainedBaseline);
+      for (const auto profile : {L"--h264-profile=high", L"--h264-profile=", L"--h264-profile=Main"}) {
+        baseline.back() = profile;
+        rejects([&] { ParseArguments(baseline); });
+      }
+      baseline.back() = L"--h264-profile=constrained-baseline";
+      for (const auto encoder : {L"--encoder=auto", L"--encoder=monky_aom_av1", L"--encoder=av1_texture_amf"}) {
+        baseline[baseline.size() - 2] = encoder;
+        rejects([&] { ParseArguments(baseline); });
+      }
+      auto duplicated = windowArguments;
+      duplicated.insert(duplicated.end(), {L"--encoder=obs_x264", L"--h264-profile=main", L"--h264-profile=main"});
+      rejects([&] { ParseArguments(duplicated); });
+    }
     gameArguments.pop_back();
     rejects([&] { ParseArguments(gameArguments); });
     std::vector<std::wstring_view> monitorArguments{

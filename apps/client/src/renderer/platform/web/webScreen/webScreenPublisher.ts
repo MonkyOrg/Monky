@@ -1,7 +1,7 @@
 import {
   getScreenShareProfile, nativeScreenFailureReason, nativeScreenSignalSchema, screenShareProfileKey,
   type NativeScreenCall, type NativeScreenFailure, type NativeScreenSignalPayload, type NativeScreenSource,
-  type NativeScreenVideoProfile, type ScreenShareQuality, type BrowserScreenFormat,
+  type NativeScreenVideoProfile, type ScreenShareQuality, type ScreenFormat,
 } from '@monky/shared';
 import { BrowserScreenPeer } from './browserScreenPeer';
 import type { DisplayCapture } from './displayCaptures';
@@ -49,7 +49,7 @@ export interface WebScreenPublisherOptions {
   readonly call: NativeScreenCall;
   readonly source: NativeScreenSource;
   /** How this screen is encoded; its codec is the source's. */
-  readonly format: BrowserScreenFormat;
+  readonly format: ScreenFormat;
   readonly capture: DisplayCapture;
   readonly audioBitrateKbps: number;
   readonly signal: (signal: NativeScreenSignalPayload) => Promise<void>;

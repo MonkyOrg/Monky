@@ -1,6 +1,6 @@
 import {
-  browserScreenFormatSchema, getScreenShareProfile, nativeScreenVideoProfileSchema,
-  type BrowserScreenFormat, type NativeScreenVideoProfile,
+  screenFormatSchema, getScreenShareProfile, nativeScreenVideoProfileSchema,
+  type ScreenFormat, type NativeScreenVideoProfile,
 } from '@monky/shared';
 
 /** What a captured video track reports of itself (`MediaStreamTrack.getSettings()`). */
@@ -45,7 +45,7 @@ const fmtp = (codec: CodecCapability, key: string): string | undefined =>
  * Whether a sender codec encodes a browser format (#858): H.264 in non-interleaved mode, as Constrained
  * Baseline (42e0..) for `compatible`, which every receiver decodes, or as Main (4d..) for `main`.
  */
-export function isScreenCodec(codec: CodecCapability, format: BrowserScreenFormat): boolean {
+export function isScreenCodec(codec: CodecCapability, format: ScreenFormat): boolean {
   const profile = format === 'main' ? /^4d[0-9a-f]{4}$/i : /^42e0[0-9a-f]{2}$/i;
   return codec.mimeType.toLowerCase() === 'video/h264' && profile.test(fmtp(codec, 'profile-level-id') ?? '')
     && fmtp(codec, 'packetization-mode') === '1';
@@ -55,13 +55,13 @@ export function isScreenCodec(codec: CodecCapability, format: BrowserScreenForma
  * The video codecs a browser screen sender offers for `format`, in order: the format's codec and its
  * retransmission. An empty list means this browser cannot share in that format.
  */
-export function screenSenderCodecs<T extends CodecCapability>(codecs: readonly T[], format: BrowserScreenFormat): T[] {
+export function screenSenderCodecs<T extends CodecCapability>(codecs: readonly T[], format: ScreenFormat): T[] {
   const matching = codecs.filter(codec => isScreenCodec(codec, format));
   if (!matching.length) return [];
   return [...matching, ...codecs.filter(codec => codec.mimeType.toLowerCase() === 'video/rtx')];
 }
 
 /** The formats this browser can share in, the compatible one first. */
-export function browserScreenFormats(codecs: readonly CodecCapability[]): BrowserScreenFormat[] {
-  return browserScreenFormatSchema.options.filter(format => screenSenderCodecs(codecs, format).length > 0);
+export function browserScreenFormats(codecs: readonly CodecCapability[]): ScreenFormat[] {
+  return screenFormatSchema.options.filter(format => screenSenderCodecs(codecs, format).length > 0);
 }

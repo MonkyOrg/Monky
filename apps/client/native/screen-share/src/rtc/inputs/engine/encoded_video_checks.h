@@ -123,6 +123,31 @@ inline void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& 
     check(rejected, "Contradictory colour must retain its exact observed values in the error");
     check(parser.Sps().colorPrimaries == 2, "Rejected colour must not poison the admitted SPS cache");
   }
+  {
+    // The compatible format (#858): a Baseline SPS without constraint_set1 leaves declared Constrained Baseline.
+    std::vector<std::uint8_t> packet{
+      0, 0, 0, 1, 0x67, 0x42, 0x00, 0x33, 0xf4, 0x02, 0x80, 0x2d, 0xd3, 0x50, 0x20, 0x20, 0x20, 0x20,
+      0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80, 0, 0, 0, 1, 0x65, 0xbc,
+    };
+    auto input = frame;
+    input.data = packet.data(); input.data_bytes = static_cast<std::uint32_t>(packet.size());
+    sv::H264Bitstream compatible(1280, 720, kEncodedH264Level, sv::H264Profile::ConstrainedBaseline,
+        sv::H264LevelPolicy::Maximum);
+    const auto admitted = Normalize(compatible, input);
+    auto expected = packet;
+    expected[6] = 0x40;
+    check(admitted.hasPicture && admitted.keyFrame && admitted.data == expected &&
+        compatible.Sps().ProfileLevelId() == "424033",
+        "The compatible format must declare a Baseline stream's Constrained Baseline");
+    sv::H264Bitstream main_parser(1280, 720, kEncodedH264Level, sv::H264Profile::Main, sv::H264LevelPolicy::Maximum);
+    rejects([&] { Normalize(main_parser, input); });
+    auto groups = packet;
+    groups[23] = 0xc4;
+    input.data = groups.data();
+    sv::H264Bitstream sliced(1280, 720, kEncodedH264Level, sv::H264Profile::ConstrainedBaseline,
+        sv::H264LevelPolicy::Maximum);
+    rejects([&] { Normalize(sliced, input); });
+  }
   for (const auto bad : {0u, static_cast<unsigned>(kEncodedMaximumPacket + 1)}) {
     auto copy = frame; copy.data_bytes = bad; rejects([&] { ValidateEncodedFrame(copy); });
   }
@@ -263,6 +288,43 @@ inline void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& 
     }
     context->source.reset();
     check(factory.GetSupportedFormats() == advertised, "Source retirement must not raise cached capabilities to Main6");
+  }
+  {
+    // The compatible format (#858): Constrained Baseline only, served at any level a receiver advertises.
+    auto compatible = CreateEncodedVideoFactory(52, false, true);
+    const auto advertised = compatible.encoder_factory->GetSupportedFormats();
+    check(advertised.size() == 1 && policy::ParseFormat(advertised[0], kEncodedH264Level)->profile ==
+        sv::H264Profile::ConstrainedBaseline && advertised[0].parameters.at("profile-level-id") == "42e034",
+        "The compatible engine must advertise only Constrained Baseline at its ceiling");
+    auto firefox = advertised[0];
+    firefox.parameters["profile-level-id"] = "42e01f";
+    check(compatible.encoder_factory->QueryCodecSupport(firefox, "L1T1").is_supported,
+        "A browser's default Level 3.1 Constrained Baseline receiver must be served");
+    firefox.parameters["max-recv-level"] = "e034";
+    check(ReceiverLevel(firefox, false, true) == kEncodedH264Level,
+        "An extended Constrained Baseline receive level must not refuse the receiver");
+    auto main_format = firefox;
+    main_format.parameters.erase("max-recv-level");
+    main_format.parameters["profile-level-id"] = "4d003c";
+    check(!compatible.encoder_factory->QueryCodecSupport(main_format, "L1T1").is_supported &&
+        !ReceiverLevel(main_format, false, true), "A compatible source must not negotiate Main");
+    auto baseline = main_format;
+    baseline.parameters["profile-level-id"] = "42001f";
+    check(!ReceiverLevel(baseline, false, true), "Plain Baseline is not the compatible format");
+    check(!bundle.encoder_factory->QueryCodecSupport(firefox, "L1T1").is_supported,
+        "A Main engine must still refuse a Constrained Baseline-only receiver");
+    Json router{{"codecs", Json::array({Json{{"mimeType", "video/H264"},
+        {"parameters", {{"profile-level-id", "42001f"}, {"packetization-mode", 1}}}}, Json{{"mimeType", "video/H264"},
+        {"parameters", {{"profile-level-id", "42e01f"}, {"packetization-mode", 1}}}}, Json{{"mimeType", "video/H264"},
+        {"parameters", {{"profile-level-id", "4d003c"}, {"packetization-mode", 1}}}}})}};
+    const auto accepts = [](const auto& format) { return ReceiverLevel(format, false, true).has_value(); };
+    check(peer_detail::SelectScreenSendCodec(router, accepts) == router["codecs"][1],
+        "The SFU must select the router's Constrained Baseline, whose Level 3.1 is only a default");
+    rejects([&] { [[maybe_unused]] EncodedVideoContext invalid(52, true, true); });
+    const EncodedConfiguration video{1920, 1080, 60, false, true};
+    auto state = std::make_shared<State>(1, "compatible-source", false, [](std::string_view, Json) { return true; }, video);
+    check(state->Snapshot().at("kind") == "encoded-h264-cb" && state->Snapshot().at("maximumProfileLevelId") == "42e03c",
+        "The compatible source must describe its Constrained Baseline");
   }
   rejects([&] { CreateEncodedVideoFactory(50); });
   rejects([&] { CreateEncodedVideoFactory(61); });

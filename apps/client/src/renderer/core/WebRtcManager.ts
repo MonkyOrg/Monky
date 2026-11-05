@@ -18,6 +18,7 @@ import { appEvents } from './EventBus';
 import type { NetworkClient } from './NetworkClient';
 import type { ParticipantManager } from './ParticipantManager';
 import { callServerOrClosed, captureCall } from './callScope';
+import { createScreenShareStream } from './screenShareStream';
 import { currentEventOrigin, emitOutsideRouting } from './sessionRouting';
 import { clientLog } from './ClientLogService';
 import { settingsStore } from '../stores/settingsStore';
@@ -258,7 +259,7 @@ export class WebRtcManager {
       throw new ScreenShareUserError(t('screenShare.nativeUnavailable'));
     if (!(capabilities.captureKinds ?? (capabilities.capture ? ['window'] : [])).includes(captureKind))
       throw new ScreenShareUserError(t('screenShare.nativeUnavailable'));
-    const stream = new MediaStream();
+    const stream = createScreenShareStream();
     try {
       const source = await this.nativeScreens.addSource({
         shareId: stream.id, desktopSourceId, captureKind, preserveAspectRatio, video, audio, audience,

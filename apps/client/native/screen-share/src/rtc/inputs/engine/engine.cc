@@ -141,8 +141,10 @@ struct Frame {
 
 class Engine final : public Host, public std::enable_shared_from_this<Engine> {
  public:
-  Engine(MonkyEngineOptions options, MonkyEngineCallbacks callbacks, bool encoded_input = false, bool av1 = false)
-      : options_(options), encoded_input_(encoded_input), av1_(av1), callbacks_(callbacks), resources_(options.max_resources),
+  Engine(MonkyEngineOptions options, MonkyEngineCallbacks callbacks, bool encoded_input = false, bool av1 = false,
+         bool compatible = false)
+      : options_(options), encoded_input_(encoded_input), av1_(av1), compatible_(compatible), callbacks_(callbacks),
+        resources_(options.max_resources),
         receive_routes_(std::size_t(options.max_resources) * receiver_policy::kMaxReceiverHistory) {}
   ~Engine() override {
     if (actor_.joinable()) actor_.join();
@@ -553,7 +555,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
                   {"closed", done_}, {"ready", ready_ && !closing_}, {"resources", resources_.Size()},
                   {"pendingOperations", operations_.size()}, {"pendingServerRequests", replies_.size()},
                   {"contractRevision", MONKY_ENGINE_CONTRACT_REVISION},
-                  {"videoInput", encoded_input_ ? (av1_ ? "encoded-av1" : "encoded-h264") : "nv12"},
+                  {"videoInput", encoded_input_ ? (av1_ ? "encoded-av1" : compatible_ ? "encoded-h264-cb" : "encoded-h264") : "nv12"},
                   {"activeReceiverRoutes", receive_routes_.Size()},
                   {"decodedFrames", frames_.size()}, {"droppedFrames", dropped_frames_.load()},
                   {"rejectedDecodedFrames", received_failures_.Rejected()},
@@ -740,7 +742,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     std::unique_ptr<webrtc::FieldTrialsView> video_field_trials =
         webrtc::FieldTrials::Create("WebRTC-Dav1dDecoder-CropToRenderResolution/Enabled/");
     if (encoded_input_) {
-      auto external = CreateEncodedVideoFactory(options.maximum_h264_level, av1_);
+      auto external = CreateEncodedVideoFactory(options.maximum_h264_level, av1_, compatible_);
       encoded_context_ = std::move(external.context);
       bundle.encoder_factory = std::move(external.encoder_factory);
       video_field_trials = std::move(external.field_trials);
@@ -1231,6 +1233,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
   const MonkyEngineOptions options_;
   const bool encoded_input_;
   const bool av1_;
+  const bool compatible_;
 #if defined(_WIN32)
   CpuFrameUpload cpu_frame_upload_;
 #endif
@@ -1358,7 +1361,7 @@ extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_request(
 }
 static MonkyEngineStatus CreateEncodedEngine(
     const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
-    MonkyRtcEngine** engine, MonkyEngineError* error, bool av1) noexcept {
+    MonkyRtcEngine** engine, MonkyEngineError* error, bool av1, bool compatible = false) noexcept {
   if (engine) *engine = nullptr;
   return Boundary(error, [&] {
     if (!engine || !options || !callbacks || callbacks->struct_size != sizeof(*callbacks) ||
@@ -1370,7 +1373,7 @@ static MonkyEngineStatus CreateEncodedEngine(
           "External H264 engine requires at least Main Level 5.1; its fixed ceiling must cover the source",
           MONKY_ENGINE_UNSUPPORTED);
     auto result = std::make_unique<MonkyRtcEngine>();
-    result->state = std::make_shared<rtc::Engine>(*options, *callbacks, true, av1);
+    result->state = std::make_shared<rtc::Engine>(*options, *callbacks, true, av1, compatible);
     result->state->Start();
     *engine = result.release();
   });
@@ -1384,6 +1387,11 @@ extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_en
     const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
     MonkyRtcEngine** engine, MonkyEngineError* error) noexcept {
   return CreateEncodedEngine(options, callbacks, engine, error, true);
+}
+extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_encoded_compatible(
+    const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
+    MonkyRtcEngine** engine, MonkyEngineError* error) noexcept {
+  return CreateEncodedEngine(options, callbacks, engine, error, false, true);
 }
 extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_respond(
     MonkyRtcEngine* engine, uint64_t id, const char* json, uint32_t bytes, MonkyEngineError* error) noexcept {

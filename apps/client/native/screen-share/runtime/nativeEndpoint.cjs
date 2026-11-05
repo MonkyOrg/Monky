@@ -70,6 +70,10 @@ class NativeScreenEndpoint {
       assert.equal(captureEncoderProfile(options.captureEncoder ?? 'auto', target).codec, source.codec ?? 'h264',
         'The selected capture encoder must match the announced screen codec.');
       if (options.preserveAspectRatio !== undefined) assert.equal(typeof options.preserveAspectRatio, 'boolean');
+      if (options.h264Profile !== undefined) {
+        assert.ok(['main', 'constrained-baseline'].includes(options.h264Profile), 'Unknown H.264 screen profile.');
+        assert.notEqual(source.codec, 'av1', 'An AV1 screen has no H.264 profile.');
+      }
       assert.ok(path.isAbsolute(captureDirectory));
     } else assert.ok(destination && typeof destination.frame?.isDestroyed === 'function');
     Object.assign(this, { runtime, role, mode, sessionId, publisherSessionId, channelId, pipelineId, source, profile,
@@ -81,6 +85,8 @@ class NativeScreenEndpoint {
     this.audioApplied = true;
     this.target = target ? cloneSource(target) : null;
     this.captureEncoder = options.captureEncoder ?? 'auto';
+    // The compatible format's Constrained Baseline (#858): its encoder and its engine negotiate only that profile.
+    this.h264Profile = options.h264Profile ?? 'main';
     this.preserveAspectRatio = options.preserveAspectRatio ?? true;
     this.isSourcePaused = options.isSourcePaused ?? (() => false);
     this.assertSourceCurrent = options.assertSourceCurrent ?? (() => {});
@@ -113,7 +119,8 @@ class NativeScreenEndpoint {
       maxResources: 64, maxDecodedFrames: 16,
       maximumH264Level: role === 'publish' ? Number.parseInt(getScreenH264ProfileLevelId(profile).slice(-2), 16) : 60,
       requireAudio: source.audio,
-      videoInput: role === 'publish' ? (source.codec === 'av1' ? 'encoded-av1' : 'encoded-h264') : 'nv12',
+      videoInput: role !== 'publish' ? 'nv12' : source.codec === 'av1' ? 'encoded-av1'
+        : options.h264Profile === 'constrained-baseline' ? 'encoded-h264-cb' : 'encoded-h264',
     }, event => {
       if (!this.transport) { this.early.push(event); return; }
       this.track(this.dispatch(event));
@@ -498,6 +505,7 @@ class NativeScreenEndpoint {
     this.host = createCaptureBridge({
       host: this.runtime.host, runtime: this.runtime.obs, runId, runDirectory: this.runDirectory,
       encoder: this.captureEncoder,
+      ...(this.source.codec === 'av1' ? {} : { h264Profile: this.h264Profile }),
       bitrateCeilingKbps: maxBitrateKbps,
       video: { width, height, fps, bitrateKbps: Math.min(5000, maxBitrateKbps),
         scaleMode: this.preserveAspectRatio ? 'fit' : 'stretch' },

@@ -4,7 +4,7 @@ import {
   nativeScreenFailureSchema, nativeScreenRenditionSchema, nativeScreenSignalSchema, nativeScreenCaptureModeSchema,
   nativeScreenSourcesSchema, nativeScreenVideoProfileSchema, screenShareIdSchema, screenShareQualitySchema,
   screenEncodingModeSchema, screenEncodingStrategySchema, screenCodecPreferenceSchema, screenCodecSchema,
-  browserScreenFormatSchema, type BrowserScreenFormat,
+  screenFormatSchema, type ScreenFormat,
   SCREEN_SHARE_LIMITS, type NativeScreenSource, type ScreenEncodingAvailability,
 } from './screenSharing.js';
 
@@ -99,6 +99,8 @@ const screenCommandSchema = (sourceId: z.ZodString) => z.discriminatedUnion('act
     action: z.literal('probe-encoding'), video: nativeScreenVideoProfileSchema,
     probeId: uuid, encodingMode: screenEncodingModeSchema, codec: screenCodecPreferenceSchema,
     encodingStrategy: screenEncodingStrategySchema.default('automatic'),
+    /** The compatible format checks only H.264 encoders (#858). */
+    screenFormat: screenFormatSchema.optional(),
   }).strict(),
   z.object({ action: z.literal('cancel-encoding-probe'), probeId: uuid }).strict(),
   nativeScreenCallSchema.extend({ action: z.literal('join') }).strict(),
@@ -120,8 +122,8 @@ const screenCommandSchema = (sourceId: z.ZodString) => z.discriminatedUnion('act
     video: nativeScreenVideoProfileSchema, audio: z.boolean(), audioBitrateKbps: nativeScreenAudioBitrateSchema,
     encodingMode: screenEncodingModeSchema.optional(), codec: screenCodecPreferenceSchema.optional(),
     encodingStrategy: screenEncodingStrategySchema.default('automatic'),
-    /** Only a browser publisher reads it; the desktop chooses its codec through the fields above. */
-    browserFormat: browserScreenFormatSchema.optional(),
+    /** The H.264 the screen is shared in; absent means the platform's default. Compatible is always H.264. */
+    screenFormat: screenFormatSchema.optional(),
   }).strict(),
   callScope.extend({ action: z.literal('source-remove'), shareId: screenShareIdSchema }).strict(),
   callScope.extend({
@@ -171,7 +173,7 @@ export interface NativeScreenCapabilities {
   backend: 'libobs-amf' | 'libobs-nvenc' | 'libobs-software' | 'videotoolbox-hardware' | 'videotoolbox-software' | 'libaom-software' | null;
   reason: 'platform' | 'runtime' | 'encoder' | null;
   /** What a browser publisher can encode, the compatible format first. Absent on the desktop. */
-  browserFormats?: readonly BrowserScreenFormat[];
+  browserFormats?: readonly ScreenFormat[];
 }
 
 const metric = z.number().finite().nonnegative();

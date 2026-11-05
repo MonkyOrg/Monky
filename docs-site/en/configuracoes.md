@@ -187,6 +187,14 @@ Camera keeps its 120 FPS ceiling, or 60 FPS at 4K.
 It uses Chromium capture and the modes offered by the webcam, a different
 path from native screen capture.
 
+The **Video format** decides who can watch the screen. **Better quality**, the
+desktop app's default, uses the chosen codec (H.264 Main or AV1), which Chrome,
+Edge and the desktop app watch. **Compatible**, the web version's default, uses
+H.264 Constrained Baseline, which everyone watches, Firefox and Safari included.
+In Compatible, the screen is always sent in H.264, and 4K above 64 FPS is
+lowered, because Firefox decodes this profile only up to Level 5.2. The choice
+applies from the next share.
+
 Every quality change — preset, resolution, FPS, bitrate, codec, or
 Hardware/Software — validates the combination before applying it. When needed,
 the app finds a lower FPS confirmed by the encoder, preserving resolution,

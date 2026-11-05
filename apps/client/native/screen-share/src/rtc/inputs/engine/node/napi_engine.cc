@@ -148,7 +148,7 @@ uint32_t Option(napi_env env, napi_value options, const char* name, uint32_t fal
                                        "Numeric engine options must be positive uint32 safe integers"));
 }
 
-MonkyEngineOptions Options(napi_env env, napi_value object, bool& encoded, bool& av1) {
+MonkyEngineOptions Options(napi_env env, napi_value object, bool& encoded, bool& av1, bool& compatible) {
   Record(env, object, "options must be an object");
   constexpr std::array<const char*, 7> names{
       "maxResources", "maxPendingOperations", "maxDecodedFrames",
@@ -176,9 +176,10 @@ MonkyEngineOptions Options(napi_env env, napi_value object, bool& encoded, bool&
   options.maximum_h264_level = Option(env, object, "maximumH264Level", 60);
   if (Has(env, object, "videoInput")) {
     const auto input = String(env, Get(env, object, "videoInput"), 1, 16, "Invalid videoInput");
-    if (input != "nv12" && input != "encoded-h264" && input != "encoded-av1")
-      Invalid(env, "videoInput must be nv12, encoded-h264 or encoded-av1");
+    if (input != "nv12" && input != "encoded-h264" && input != "encoded-h264-cb" && input != "encoded-av1")
+      Invalid(env, "videoInput must be nv12, encoded-h264, encoded-h264-cb or encoded-av1");
     av1 = input == "encoded-av1";
+    compatible = input == "encoded-h264-cb";
     encoded = input != "nv12";
   }
   if (options.max_resources > 64 || options.max_pending_operations > 128 ||
@@ -262,8 +263,8 @@ napi_value CreateEngine(napi_env env, napi_callback_info info) {
     Arguments<2> args(env, info);
     // Inert DLL negotiation precedes option getters, async state and creation.
     RequireContract(env);
-    bool encoded = false, av1 = false;
-    const auto options = Options(env, args.values[0], encoded, av1);
+    bool encoded = false, av1 = false, compatible = false;
+    const auto options = Options(env, args.values[0], encoded, av1, compatible);
     if (Type(env, args.values[1]) != napi_function) Invalid(env, "onEvent must be a function");
     auto state = std::make_shared<State>(env, options);
     try {
@@ -276,6 +277,7 @@ napi_value CreateEngine(napi_env env, napi_callback_info info) {
       MonkyEngineError error = EmptyError();
       MonkyRtcEngine* engine = nullptr;
       const auto status = av1 ? monky_rtc_engine_create_encoded_av1(&options, &callbacks, &engine, &error)
+          : compatible ? monky_rtc_engine_create_encoded_compatible(&options, &callbacks, &engine, &error)
           : encoded ? monky_rtc_engine_create_encoded(&options, &callbacks, &engine, &error)
                                   : monky_rtc_engine_create(&options, &callbacks, &engine, &error);
       {

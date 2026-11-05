@@ -96,7 +96,8 @@ async function runQualitySettingsSmoke() {
     encodingRequests.push(command);
     const automatic = command.encodingStrategy === 'automatic';
     const mode = automatic ? hardwareAvailable ? 'hardware' : 'software' : command.encodingMode;
-    const codec = automatic ? mode === 'hardware' ? 'av1' : 'h264' : command.codec;
+    // What Main does: the compatible format (#858) considers only H.264 encoders.
+    const codec = command.screenFormat === 'compatible' ? 'h264' : automatic ? mode === 'hardware' ? 'av1' : 'h264' : command.codec;
     const hardwareSupported = hardwareAvailable && !(limitFourKH264 && codec === 'h264'
       && (command.video.width >= 3840 || command.video.height >= 2160) && command.video.fps > 60);
     const unavailable = !automatic && mode === 'hardware' && !hardwareSupported;
@@ -238,6 +239,24 @@ async function runQualitySettingsSmoke() {
       'Automatic fields must be read-only and show resolved Hardware/AV1 without overwriting manual choices.');
       check(encodingStatus.textContent === language.t('settings.screenEncodingReady', { codec: 'AV1' }),
         'Available encoding must show the concise localized status.');
+      const formatCards = quality.querySelector('#screen-format-choice');
+      const formatCard = value => formatCards.querySelector(`[data-screen-format="${value}"]`);
+      check(formatCard('main').getAttribute('aria-pressed') === 'true' && formatCard('compatible').getAttribute('aria-pressed') === 'false'
+        && formatCard('compatible').textContent.includes(language.t('screenShare.formatCompatible'))
+        && formatCard('main').textContent.includes(language.t('screenShare.formatMainDescription')),
+      'The desktop keeps the better-quality format by default, beside the compatible one (#858).');
+      formatCard('compatible').click();
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false'
+        && encodingRequests.at(-1)?.screenFormat === 'compatible', `${locale}/compatible format`);
+      check(settingsStore.screenFormat === 'compatible' && formatCard('compatible').getAttribute('aria-pressed') === 'true'
+        && screenCodec.disabled && screenCodec.value === 'h264' && screenCodec.querySelector('[value="av1"]').disabled
+        && encodingStatus.textContent === language.t('settings.screenEncodingReady', { codec: 'H264' }),
+      'The compatible format checks and shows only H.264 (#858).');
+      formatCard('main').click();
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false'
+        && encodingRequests.at(-1)?.screenFormat === 'main', `${locale}/main format`);
+      check(settingsStore.screenFormat === 'main' && screenCodec.value === 'av1' && settingsStore.preferredScreenCodec === 'h264',
+        'Back in better quality, Automatic resolves AV1 again without touching the manual codec.');
       automatic.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
       const choicesStatus = quality.querySelector('#screen-encoding-choices');
       const encodingSettled = () => encodingStatus.getAttribute('aria-busy') === 'false'

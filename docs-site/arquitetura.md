@@ -298,6 +298,17 @@ sempre com o receptor do navegador. Um navegador sem o perfil ou o codec da
 transmissão (o Firefox diante do H.264 Main ou do AV1) recebe uma mensagem que
 nomeia o formato, e não a falha genérica de conexão.
 
+O app desktop oferece o mesmo par de formatos em Qualidade e compartilhamento,
+com Melhor qualidade (H.264 Main ou AV1) como padrão. No Compatível, o Main
+escolhe só encoders H.264 e passa `--h264-profile=constrained-baseline` ao host
+de captura: x264, NVENC e AMF usam o perfil `baseline` do OBS, e o VideoToolbox
+usa `H264_ConstrainedBaseline_AutoLevel`. O host e o motor marcam o
+`constraint_set1` de um SPS Baseline sem grupos de slices nem imagens
+redundantes, que é Constrained Baseline (H.264 A.2.1). O motor
+(`videoInput: 'encoded-h264-cb'`) negocia só esse perfil e atende receptores
+em qualquer nível anunciado, porque navegadores anunciam o nível 3.1 padrão e
+decodificam até o 5.2; por isso a fonte compatível não passa do nível 5.2.
+
 O seletor só usa a captura nativa e explica o motivo quando ela não está
 disponível: não existe alternativa pela captura do Chromium. Fechar o seletor
 cancela uma aquisição pendente sem encerrar telas já publicadas. O áudio da

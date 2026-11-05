@@ -272,7 +272,14 @@ std::vector<std::span<const std::uint8_t>> H264Bitstream::Split(std::span<const 
 void H264Bitstream::Remember(std::span<const std::uint8_t> nal) {
   if (nal.size() > maxParameterBytes) throw std::runtime_error("H264 parameter set is too large");
   if (Type(nal) == 7) {
-    auto sps = ParseH264Sps(nal);
+    std::vector<std::uint8_t> stored(nal.begin(), nal.end());
+    // A Baseline stream without slice groups or redundant pictures (checked on its PPS) is Constrained
+    // Baseline even when the encoder leaves constraint_set1 clear (H.264 A.2.1, #858). The compatible format
+    // declares it, so receivers that admit only Constrained Baseline accept it. The byte follows profile_idc
+    // (never zero), so no emulation prevention depends on it.
+    if (profile_ == H264Profile::ConstrainedBaseline && stored.size() > 3 && stored[1] == 66)
+      stored[2] = static_cast<std::uint8_t>(stored[2] | 0x40u);
+    auto sps = ParseH264Sps(stored);
     const bool levelMatches = levelPolicy_ == H264LevelPolicy::Exact
         ? sps.levelIdc == level_
         : sps.levelIdc <= level_ && H264LevelMaxBitrate(sps.levelIdc) > 0;
@@ -281,7 +288,7 @@ void H264Bitstream::Remember(std::span<const std::uint8_t> nal) {
       throw std::runtime_error("SPS profile/level/geometry does not match the requested encoder mode");
     }
     sps_ = sps;
-    spsById_[sps.id] = {nal.begin(), nal.end()};
+    spsById_[sps.id] = std::move(stored);
     verified_ = true;
   } else if (Type(nal) == 8) {
     Bits bits(nal);
@@ -290,6 +297,15 @@ void H264Bitstream::Remember(std::span<const std::uint8_t> nal) {
     if (ppsId > 255 || spsId > 31) throw std::runtime_error("Invalid PPS identifiers");
     if (bits.Read(1) && profile_ != H264Profile::Main && profile_ != H264Profile::AnySupported) {
       throw std::runtime_error("CABAC is not permitted in H264 Baseline");
+    }
+    if (profile_ == H264Profile::ConstrainedBaseline) {
+      bits.Read(1);
+      if (bits.Ue() != 0) throw std::runtime_error("Slice groups are not permitted in H264 Constrained Baseline");
+      bits.Ue(); bits.Ue();
+      if (bits.Read(1) || bits.Read(2)) throw std::runtime_error("Weighted prediction is not permitted in H264 Baseline");
+      bits.Se(); bits.Se(); bits.Se();
+      bits.Read(1); bits.Read(1);
+      if (bits.Read(1)) throw std::runtime_error("Redundant pictures are not permitted in H264 Constrained Baseline");
     }
     ppsById_[ppsId] = {nal.begin(), nal.end()};
   }
@@ -380,7 +396,10 @@ H264AccessUnit H264Bitstream::Convert(std::span<const std::uint8_t> bytes) {
   }
   for (const auto nal : nals) {
     const auto type = Type(nal);
-    if (type != 9 && !(result.keyFrame && (type == 7 || type == 8))) Append(result.data, nal);
+    if (type == 9 || (result.keyFrame && (type == 7 || type == 8))) continue;
+    // An SPS goes out as remembered: the compatible format's declares Constrained Baseline.
+    if (type == 7) Append(result.data, spsById_.at(ParseH264Sps(nal).id));
+    else Append(result.data, nal);
   }
   return result;
 }
