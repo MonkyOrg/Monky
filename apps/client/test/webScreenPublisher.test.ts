@@ -5,7 +5,7 @@ import {
   type NativeScreenP2pControl,
 } from '@monky/shared';
 import {
-  browserScreenProfile, isScreenH264, screenSenderCodecs,
+  browserScreenFormats, browserScreenProfile, isScreenCodec, screenSenderCodecs,
 } from '../src/renderer/platform/web/webScreen/browserScreenProfile';
 import { sameMediaBinding, sentMediaBinding, withScreenStreamId } from '../src/renderer/platform/web/webScreen/screenSdp';
 import {
@@ -16,7 +16,7 @@ import type { ScreenMediaBinding } from '../src/renderer/platform/web/webScreen/
 import { planBrowserAudio, type LiveScreens } from '../src/renderer/views/screenShare/captureRules';
 import { webScreenCapabilities } from '../src/renderer/platform/web/webScreen/webScreenRuntime';
 import { webCapabilities } from '../src/renderer/platform/web/webPlatform';
-import { browserReceivesScreenCodec } from '../src/renderer/core/webrtc/browserScreenCodecs';
+import { browserReceivesH264Main, browserReceivesScreenCodec, browserScreenRefusal } from '../src/renderer/core/webrtc/browserScreenCodecs';
 
 const INSTANCE = '3dfbff6f-6556-49cb-be32-1a6699d242a1';
 const CONNECTION = '74439c45-0865-42d3-9577-d4e451504e8c';
@@ -204,18 +204,26 @@ test('a browser capture announces the chosen quality fitted to what it captured 
   assert.deepEqual({ ...browserScreenProfile(requested, {}) }, requested);
 });
 
-test('a browser screen sender offers only H.264 Main and its retransmission (#858)', () => {
+test('a browser screen sender offers only the H.264 profile of its format and its retransmission (#858)', () => {
   const codecs = [
     { mimeType: 'video/VP8' },
     { mimeType: 'video/rtx' },
+    { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f' },
+    { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f' },
     { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
     { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=4d001f' },
     { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f' },
+    { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f' },
   ];
-  assert.deepEqual(screenSenderCodecs(codecs).map(codec => codec.sdpFmtpLine ?? codec.mimeType),
-    ['level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f', 'video/rtx']);
-  assert.equal(isScreenH264(codecs[2]), false);
-  assert.deepEqual(screenSenderCodecs(codecs.slice(0, 4)), []);
+  const lines = (format: 'compatible' | 'main'): string[] => screenSenderCodecs(codecs, format).map(codec => codec.sdpFmtpLine ?? codec.mimeType);
+  // Compatible is Constrained Baseline, what every receiver decodes, even when the browser lists Main first.
+  assert.deepEqual(lines('compatible'), ['level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f', 'video/rtx']);
+  assert.deepEqual(lines('main'), ['level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f', 'video/rtx']);
+  // Plain Baseline (42 00) and High (64) are neither: not every receiver decodes them.
+  assert.equal(isScreenCodec(codecs[3], 'compatible'), false);
+  assert.equal(isScreenCodec(codecs[7], 'main'), false);
+  assert.deepEqual(screenSenderCodecs(codecs.slice(0, 4), 'compatible'), []);
+  assert.deepEqual(browserScreenFormats(codecs), ['compatible', 'main']);
 });
 
 /** What Firefox's WebRTC lists: H.264 only as Constrained Baseline, through OpenH264. */
@@ -225,10 +233,12 @@ const FIREFOX_VIDEO_CODECS = [
   { mimeType: 'video/AV1' },
 ];
 const CHROMIUM_VIDEO_CODECS = [
+  { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
   { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f' },
   { mimeType: 'video/rtx' },
   { mimeType: 'video/AV1', sdpFmtpLine: 'level-idx=5;profile=0;tier=0' },
 ];
+const NO_H264_VIDEO_CODECS = [{ mimeType: 'video/VP8' }, { mimeType: 'video/AV1' }];
 
 /** Runs `body` as a browser tab with `codecs` in its WebRTC sender and receiver. */
 function inBrowser(t: TestContext, codecs: readonly { mimeType: string; sdpFmtpLine?: string }[], body: () => void): void {
@@ -249,28 +259,59 @@ function inBrowser(t: TestContext, codecs: readonly { mimeType: string; sdpFmtpL
   body();
 }
 
-test('a browser without an H.264 Main encoder shows screen sharing locked, as its runtime refuses it (#858)', (t: TestContext) => {
+test('Firefox, with only Constrained Baseline, shares screens in the compatible format (#858)', (t: TestContext) => {
   inBrowser(t, FIREFOX_VIDEO_CODECS, () => {
-    assert.deepEqual({ capture: webScreenCapabilities().capture, reason: webScreenCapabilities().reason }, { capture: false, reason: 'encoder' });
+    const capabilities = webScreenCapabilities();
+    assert.deepEqual({ capture: capabilities.capture, reason: capabilities.reason, formats: capabilities.browserFormats },
+      { capture: true, reason: null, formats: ['compatible'] });
     // One rule: the button follows what the runtime would do with the click.
-    assert.equal(webCapabilities().screenShare, false);
-  });
-});
-
-test('a Chromium browser with an H.264 Main encoder shares screens (#858)', (t: TestContext) => {
-  inBrowser(t, CHROMIUM_VIDEO_CODECS, () => {
-    assert.equal(webScreenCapabilities().capture, true);
     assert.equal(webCapabilities().screenShare, true);
   });
 });
 
-test('a browser without the H.264 Main receiver is told it cannot watch H.264 screens at all (#858)', (t: TestContext) => {
+test('a Chromium browser offers the compatible format and the better Main (#858)', (t: TestContext) => {
+  inBrowser(t, CHROMIUM_VIDEO_CODECS, () => {
+    assert.equal(webScreenCapabilities().capture, true);
+    assert.deepEqual(webScreenCapabilities().browserFormats, ['compatible', 'main']);
+    assert.equal(webCapabilities().screenShare, true);
+  });
+});
+
+test('a browser without a usable H.264 encoder shows screen sharing locked, as its runtime refuses it (#858)', (t: TestContext) => {
+  inBrowser(t, NO_H264_VIDEO_CODECS, () => {
+    assert.deepEqual({ capture: webScreenCapabilities().capture, reason: webScreenCapabilities().reason }, { capture: false, reason: 'encoder' });
+    assert.equal(webCapabilities().screenShare, false);
+  });
+});
+
+test('Firefox watches compatible H.264 screens and knows it cannot decode Main (#858)', (t: TestContext) => {
   inBrowser(t, FIREFOX_VIDEO_CODECS, () => {
-    assert.equal(browserReceivesScreenCodec('h264'), false);
+    assert.equal(browserReceivesScreenCodec('h264'), true);
+    assert.equal(browserReceivesH264Main(), false);
     assert.equal(browserReceivesScreenCodec('av1'), true);
   });
   inBrowser(t, CHROMIUM_VIDEO_CODECS, () => {
     assert.equal(browserReceivesScreenCodec('h264'), true);
+    assert.equal(browserReceivesH264Main(), true);
+  });
+  inBrowser(t, NO_H264_VIDEO_CODECS, () => {
+    assert.equal(browserReceivesScreenCodec('h264'), false);
+  });
+});
+
+test('a browser that cannot decode a screen is told which format and where to watch it (#858)', (t: TestContext) => {
+  inBrowser(t, FIREFOX_VIDEO_CODECS, () => {
+    // Firefox reaches an H.264 screen only when it is Main: the desktop's or the web's better format.
+    assert.equal(browserScreenRefusal('h264'), 'main');
+    // Firefox lists AV1 but does not decode the screen: named as AV1, never the generic network failure.
+    assert.equal(browserScreenRefusal('av1'), 'codec');
+  });
+  inBrowser(t, CHROMIUM_VIDEO_CODECS, () => {
+    assert.equal(browserScreenRefusal('h264'), null);
+    assert.equal(browserScreenRefusal('av1'), 'switch');
+  });
+  inBrowser(t, NO_H264_VIDEO_CODECS, () => {
+    assert.equal(browserScreenRefusal('h264'), 'codec');
   });
 });
 

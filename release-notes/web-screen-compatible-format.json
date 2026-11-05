@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Na versão web, a tela compartilhada usa por padrão um formato que todo navegador assiste, e o Firefox agora também compartilha tela. Quem quiser imagem melhor escolhe o H.264 Main no diálogo. Quem não consegue assistir vê o motivo.",
+  "en": "In the web version, shared screens now use a format every browser can watch by default, and Firefox can share its screen too. For a better picture, pick H.264 Main in the dialog. Viewers who cannot watch see why."
+}

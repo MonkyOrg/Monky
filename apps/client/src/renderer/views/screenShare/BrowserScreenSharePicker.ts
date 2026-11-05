@@ -1,4 +1,4 @@
-import { PUBLIC_AUDIENCE, type ResourceAudience } from '@monky/shared';
+import { PUBLIC_AUDIENCE, browserScreenFormatSchema, type BrowserScreenFormat, type ResourceAudience } from '@monky/shared';
 import { html, trustedHtml } from '../../utils/html';
 import { appEvents } from '../../core/EventBus';
 import { captureScreenShareCall, screenShareLimit, type ScreenShareCall } from '../../core/screenShareControls';
@@ -9,7 +9,8 @@ import { nativeScreenProfile } from '../../core/webrtc/NativeScreenController';
 import { voiceStore } from '../../stores/voiceStore';
 import { setButtonLoading } from '../../utils/buttonLoading';
 import { openModal, type ModalShell } from '../../utils/modalShell';
-import { renderSwitch } from '../../utils/formControls';
+import { renderChoiceCards, renderSwitch, selectChoiceCard, type ChoiceCard } from '../../utils/formControls';
+import { settingsStore } from '../../stores/settingsStore';
 import { ScreenShareUserError, screenShareFailureMessage } from '../../utils/screenShareFailure';
 import { t } from '../../i18n';
 import { showAlert } from '../Dialog';
@@ -25,6 +26,14 @@ const SCREEN_AUDIENCE_TEXTS: AudienceTexts = {
   search: 'screenShare.privateSearch', choose: 'screenShare.privateChoose', noResults: 'screenShare.privateNoResults',
   empty: 'screenShare.privateEmpty', selected: 'screenShare.privateSelected', roles: 'screenShare.privateRoles',
   members: 'screenShare.privateUsers', more: 'screenShare.privateMore',
+};
+
+/** Each format a browser shares in, said in its own words: who can watch it is part of the choice. */
+const FORMAT_CHOICES: Readonly<Record<BrowserScreenFormat, () => ChoiceCard<BrowserScreenFormat>>> = {
+  compatible: () => ({ value: 'compatible', icon: 'devices', title: t('screenShare.browserFormatCompatible'),
+    description: t('screenShare.browserFormatCompatibleDescription') }),
+  main: () => ({ value: 'main', icon: 'high_quality', title: t('screenShare.browserFormatMain'),
+    description: t('screenShare.browserFormatMainDescription') }),
 };
 
 function liveScreens(): LiveScreens {
@@ -48,6 +57,8 @@ export class BrowserScreenSharePicker {
   /** What the browser captures is known: the sound row shows, working or locked. */
   private capabilitiesKnown = false;
   private available = false;
+  /** The formats this browser can share in, the compatible one first. */
+  private formats: readonly BrowserScreenFormat[] = [];
   private starting = false;
 
   private createAudience(initial: ResourceAudience): ResourceAudiencePicker {
@@ -85,6 +96,10 @@ export class BrowserScreenSharePicker {
         <p id="share-capture-info" class="share-game-tip" role="status">${profile ? t('screenShare.browserProfile', {
           width: profile.width, height: profile.height, fps: profile.fps, bitrate: profile.maxBitrateKbps,
         }) : t('screenShare.nativeProfileChangeBlocked')}</p>
+        <div id="share-browser-format" class="share-aspect-option" hidden>
+          <div><span id="share-format-label">${t('screenShare.browserFormat')}</span></div>
+          <div id="share-format-cards"></div>
+        </div>
         <div id="share-browser-audio" class="share-aspect-option" hidden>
           <div>
             <label id="share-audio-text" for="chk-share-audio">${t('screenShare.browserAudio')}</label>
@@ -132,21 +147,46 @@ export class BrowserScreenSharePicker {
     this.audience.bind(shell.card, shell.signal, () => this.update());
     modal.querySelector('#btn-share')?.addEventListener('click', () => { void this.requestReplace(); }, options);
     modal.querySelector('#btn-share-add')?.addEventListener('click', () => { void this.start('add'); }, options);
+    modal.querySelector('#share-format-cards')?.addEventListener('click', event => {
+      const card = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-browser-format]') : null;
+      const format = browserScreenFormatSchema.safeParse(card?.dataset.browserFormat);
+      if (!card || this.starting || !format.success || !this.formats.includes(format.data)) return;
+      settingsStore.setBrowserScreenFormat(format.data);
+      selectChoiceCard(modal, 'data-browser-format', format.data);
+    }, options);
     this.update();
     appEvents.emit('modal.screenshare_picker_opened');
     void webRtcManager.getNativeScreenCapabilities().then(capabilities => {
       if (this.shell !== shell) return;
       this.available = capabilities.capture && profile !== null;
       this.captureAudio = capabilities.captureAudio;
+      this.formats = capabilities.browserFormats ?? [];
       this.capabilitiesKnown = true;
       const info = modal.querySelector<HTMLElement>('#share-capture-info');
       if (info && !capabilities.capture) info.textContent = t('screenShare.browserUnavailable');
+      this.renderFormats(modal);
       this.update();
     }, (error: unknown) => {
       console.error('[ScreenShare] Browser capture capabilities are unavailable:', error);
       const info = modal.querySelector<HTMLElement>('#share-capture-info');
       if (this.shell === shell && info) info.textContent = t('screenShare.browserUnavailable');
     });
+  }
+
+  /** The compatible format by default; a better one only where this browser encodes it (#858). */
+  private renderFormats(modal: HTMLElement): void {
+    const section = modal.querySelector<HTMLElement>('#share-browser-format');
+    const cards = modal.querySelector<HTMLElement>('#share-format-cards');
+    if (!section || !cards) return;
+    // A single format leaves nothing to choose.
+    section.hidden = this.formats.length < 2;
+    if (!this.formats.length) return;
+    if (!this.formats.includes(settingsStore.browserScreenFormat)) settingsStore.setBrowserScreenFormat(this.formats[0]);
+    if (section.hidden) return;
+    cards.innerHTML = renderChoiceCards({
+      id: 'share-format-choice', label: t('screenShare.browserFormat'), attribute: 'data-browser-format',
+      selected: settingsStore.browserScreenFormat, choices: this.formats.map(format => FORMAT_CHOICES[format]()),
+    }).toString();
   }
 
   /** The controls follow the start in flight, the audience and the sound another share already carries. */
@@ -181,6 +221,7 @@ export class BrowserScreenSharePicker {
     modal.querySelectorAll<HTMLButtonElement>('#btn-share, #btn-share-add').forEach(button => {
       button.disabled = this.starting || !this.available || !this.audience.isValid();
     });
+    modal.querySelectorAll<HTMLButtonElement>('[data-browser-format]').forEach(card => { card.disabled = this.starting; });
     modal.querySelector<HTMLButtonElement>('#btn-share')
       ?.setAttribute('aria-haspopup', voiceStore.screenShareIds.length > 1 ? 'menu' : 'false');
   }
@@ -289,6 +330,7 @@ export class BrowserScreenSharePicker {
     this.call = null;
     this.starting = false;
     this.available = false;
+    this.formats = [];
     this.captureAudio = false;
     this.capabilitiesKnown = false;
     appEvents.emit('modal.screenshare_picker_closed');

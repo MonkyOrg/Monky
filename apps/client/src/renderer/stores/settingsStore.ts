@@ -16,7 +16,7 @@ import {
   type BotFormValues,
   type BotLocale,
   type ScreenEncodingMode,
-  type ScreenCodec, type ScreenEncodingStrategy,
+  type ScreenCodec, type ScreenEncodingStrategy, type BrowserScreenFormat, browserScreenFormatSchema,
 } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import {
@@ -53,6 +53,7 @@ function savedSettings(store: SettingsStore) {
     screenEncodingMode: store.screenEncodingMode,
     screenEncodingStrategy: store.screenEncodingStrategy,
     preferredScreenCodec: store.preferredScreenCodec,
+    browserScreenFormat: store.browserScreenFormat,
     vadSensitivity: store.vadSensitivity,
     inputVolume: store.inputVolume,
     outputVolume: store.outputVolume,
@@ -204,6 +205,8 @@ export class SettingsStore {
   public screenEncodingMode: ScreenEncodingMode = 'hardware';
   public screenEncodingStrategy: ScreenEncodingStrategy = 'automatic';
   public preferredScreenCodec: ScreenCodec = 'h264';
+  /** How the web version encodes the screens it shares (#858): compatible with every viewer by default. */
+  public browserScreenFormat: BrowserScreenFormat = 'compatible';
   public customProfile: QualityProfile = { ...DEFAULT_CUSTOM_PROFILE };
   public inputMode: 'voice_activity' | 'push_to_talk' = 'voice_activity'; // #186
   public pttKey: PttKeyBinding = { code: 'KeyV', display: 'V', keyType: 'keyboard', keyCode: 47 };
@@ -327,6 +330,7 @@ export class SettingsStore {
     this.screenEncodingMode = 'hardware';
     this.screenEncodingStrategy = 'automatic';
     this.preferredScreenCodec = 'h264';
+    this.browserScreenFormat = 'compatible';
     this.screenShareReceiver = 'native';
     this.soundboardLimiterEnabled = false;
     this.soundboardLoudnessLimit = 6;
@@ -351,6 +355,8 @@ export class SettingsStore {
         this.qualityPreset = restoreQualityPreset(parsed.qualityPreset);
         this.screenEncodingMode = parsed.screenEncodingMode === 'software' ? 'software' : 'hardware';
         this.preferredScreenCodec = parsed.preferredScreenCodec === 'av1' ? 'av1' : 'h264';
+        const browserFormat = browserScreenFormatSchema.safeParse(parsed.browserScreenFormat);
+        this.browserScreenFormat = browserFormat.success ? browserFormat.data : 'compatible';
         this.screenEncodingStrategy = parsed.screenEncodingStrategy === 'manual' ? 'manual'
           : parsed.screenEncodingStrategy === undefined
             && (parsed.screenEncodingMode === 'software' || parsed.preferredScreenCodec === 'h264'
@@ -913,6 +919,11 @@ export class SettingsStore {
     this.screenShareReceiver = receiver;
     try { this.save(); }
     catch (error) { this.screenShareReceiver = previous; throw error; }
+  }
+
+  public setBrowserScreenFormat(format: BrowserScreenFormat): void {
+    this.browserScreenFormat = browserScreenFormatSchema.parse(format);
+    this.save();
   }
 
   private limitCustomProfile(): void {

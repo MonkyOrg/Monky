@@ -281,12 +281,19 @@ as an optional receiver of those screens, when selected in settings
 In the web version, the same command and event contract as the native source
 is answered by `src/renderer/platform/web/webScreen`: the capture comes from
 the browser's own dialog (`getDisplayMedia`), each requested profile is a copy
-of the capture scaled down by the browser, and it is sent as H.264 Main over a
+of the capture scaled down by the browser, and it is sent as H.264 over a
 connection of its own per viewer in P2P or through a pair of screen producers
 on the SFU, with the same `monky-native-screen-p2p` protocol and rendition
-data. The renderer above it does not change; the picker is the browser's
+data. The default format is Constrained Baseline (`42e0..`, packetization-mode
+1), which every receiver decodes, Firefox and Safari included; the publisher
+can choose H.264 Main, a better picture that only Chrome, Edge and the desktop
+watch. The codec is pinned by `setCodecPreferences` in P2P and by the
+producer's codec on the SFU, even when the browser would use its hardware
+encoder. The renderer above it does not change; the picker is the browser's
 dialog (`views/screenShare/BrowserScreenSharePicker.ts`), and the web version
-always watches with the Chromium receiver.
+always watches with the browser's receiver. A browser without the share's
+profile or codec (Firefox facing H.264 Main or AV1) gets a message naming the
+format, not the generic connection failure.
 
 The picker only uses native capture and explains why when it is unavailable:
 there is no fallback to Chromium capture. Closing the picker cancels pending

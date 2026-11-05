@@ -24,7 +24,8 @@ const answer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 98', 'a=rtpmap:98 H264/90000
   'm=audio 9 UDP/TLS/RTP/SAVPF 111', 'a=rtpmap:111 opus/48000/2', 'a=fmtp:111 minptime=10;useinbandfec=1', ''].join('\r\n');
 
 function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = true, capabilityGate, transportGate,
-  sourceVideo = video, sourceCodec, availableCodecs = codecs, negotiatedAv1Level = 5, quality = 'source' } = {}) {
+  sourceVideo = video, sourceCodec, availableCodecs = codecs, negotiatedAv1Level = 5, quality = 'source',
+  answerSdp, consumeError } = {}) {
   const sent = [], rpc = [], peers = [], transports = [], tracks = [], admitted = [], states = [], errors = [], probes = [], modes = [];
   const availableProducers = new Map();
   let closeFailures = 0;
@@ -39,7 +40,7 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
     remoteGate = null;
     constructor(config) { this.config = config; peers.push(this); }
     async setRemoteDescription(value) { if (this.remoteGate) await this.remoteGate.promise; this.remoteDescription = value; }
-    async createAnswer() { return { type: 'answer',
+    async createAnswer() { if (answerSdp) return { type: 'answer', sdp: answerSdp }; return { type: 'answer',
       sdp: sourceCodec === 'av1' ? answer.replace('H264/90000', 'AV1/90000')
         .replace('level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f',
           `profile=0;level-idx=${negotiatedAv1Level};tier=0`) : answer }; }
@@ -138,6 +139,7 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
         case shared.MessageType.SFU_CONSUME: {
           const producer = availableProducers.get(payload.producerId);
           assert.ok(producer);
+          if (consumeError && producer.kind === 'video') throw new Error(consumeError);
           return { ...producer, id: `consumer-${producer.producerId}`,
             rtpParameters: { codecs: [{ mimeType: producer.kind === 'audio' ? 'audio/opus'
               : sourceCodec === 'av1' ? 'video/AV1' : 'video/H264',
@@ -571,4 +573,38 @@ test('P2P answers and SFU capabilities extend H.264 Main only below the screen l
   assert.equal(h264MaxReceiveLevel('4d0034', screen), null, 'a higher level is never lowered');
   for (const other of ['42e01f', '640033', '4d01', undefined, 0x4d001f])
     assert.equal(h264MaxReceiveLevel(other, screen), null, `${String(other)} is not an H.264 Main profile-level-id`);
+});
+
+/** What Firefox's WebRTC receives: H.264 only as Constrained Baseline. */
+const FIREFOX_CODECS = [{ mimeType: 'video/H264', clockRate: 90000,
+  sdpFmtpLine: 'profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1' }];
+
+test('Firefox watches an H.264 screen, probing the Constrained Baseline it decodes at the level the screen needs (#858)', async t => {
+  const f = fixture(t, { availableCodecs: FIREFOX_CODECS });
+  await f.open();
+  assert.match(f.probes[0].video.contentType, /profile-level-id=42e033;packetization-mode=1/);
+  assert.deepEqual(f.states, []);
+  assert.equal(f.peers.length, 1);
+});
+
+test('an H.264 Main screen Firefox answers without video is refused as its codec, not the network (#858)', async t => {
+  const f = fixture(t, { availableCodecs: FIREFOX_CODECS, answerSdp: answer.replace('m=video 9 ', 'm=video 0 ') });
+  await f.open();
+  await f.turn().catch(() => {});
+  for (let i = 0; i < 5 && !f.states.length; i++) await tick();
+  assert.deepEqual(f.states, ['unsupported']);
+});
+
+test('an SFU screen Firefox cannot consume is refused as its codec, while a Chromium failure stays a failure (#858)', async t => {
+  const refusal = 'Cannot consume producer video-x with provided capabilities';
+  const firefox = fixture(t, { mode: 'sfu', availableCodecs: FIREFOX_CODECS, consumeError: refusal });
+  firefox.producer('video');
+  await firefox.open().catch(() => {});
+  for (let i = 0; i < 5 && !firefox.states.length; i++) await tick();
+  assert.deepEqual(firefox.states, ['unsupported']);
+  const chromium = fixture(t, { mode: 'sfu', consumeError: refusal });
+  chromium.producer('video');
+  await chromium.open().catch(() => {});
+  for (let i = 0; i < 5 && !chromium.states.length; i++) await tick();
+  assert.deepEqual(chromium.states, ['connection-failed']);
 });

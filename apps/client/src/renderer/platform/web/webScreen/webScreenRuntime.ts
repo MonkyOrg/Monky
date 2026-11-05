@@ -5,7 +5,7 @@ import {
   type NativeScreenParticipant, type NativeScreenPresentation, type NativeScreenSignalPayload, type NativeScreenSource,
 } from '@monky/shared';
 import type { PlatformApi } from '../../api';
-import { browserScreenProfile, screenSenderCodecs } from './browserScreenProfile';
+import { browserScreenFormats, browserScreenProfile } from './browserScreenProfile';
 import { DisplayCaptures, type DisplayCapture } from './displayCaptures';
 import { WebScreenBridge } from './webScreenBridge';
 import { WebScreenPublisher } from './webScreenPublisher';
@@ -45,14 +45,13 @@ const errorText = (error: unknown): string => (error instanceof Error ? error.me
 /** What a browser tab can do with screens: capture through its own dialog and send; receiving is the browser receiver's. */
 export function webScreenCapabilities(): NativeScreenCapabilities {
   const display = typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getDisplayMedia === 'function';
-  const encoder = typeof RTCRtpSender !== 'undefined'
-    && screenSenderCodecs(RTCRtpSender.getCapabilities('video')?.codecs ?? []).length > 0;
-  const capture = display && encoder;
+  const formats = typeof RTCRtpSender === 'undefined' ? [] : browserScreenFormats(RTCRtpSender.getCapabilities('video')?.codecs ?? []);
+  const capture = display && formats.length > 0;
   // Only Chromium shares a tab's or the system's sound, and only Chromium lists this constraint.
   const captureAudio = capture && 'suppressLocalAudioPlayback' in navigator.mediaDevices.getSupportedConstraints();
   return {
     capture, captureAudio, receive: false, captureKinds: capture ? ['window', 'monitor'] : [], backend: null,
-    reason: !display ? 'platform' : !encoder ? 'encoder' : null,
+    reason: !display ? 'platform' : !formats.length ? 'encoder' : null, browserFormats: capture ? formats : [],
   };
 }
 
@@ -242,6 +241,9 @@ export class WebScreenRuntime {
       throw new Error('The capture kind does not match what the browser captured.');
     if (command.audio && (!capture.audioTrack || !capabilities.captureAudio))
       throw new Error('The browser did not share sound with this capture.');
+    // The compatible format unless the publisher chose a better one this browser encodes; both are H.264.
+    const format = command.browserFormat ?? 'compatible';
+    if (!capabilities.browserFormats?.includes(format)) throw new Error(`This browser cannot share in the ${format} format.`);
     call.admitting.add(command.shareId);
     try {
       if (replacement) await this.retireSource(call, replacement);
@@ -252,7 +254,7 @@ export class WebScreenRuntime {
         video: browserScreenProfile(command.video, capture.video.getSettings()), audio: command.audio, codec: 'h264',
       });
       const publisher = new WebScreenPublisher({
-        call: call.config, source, capture, audioBitrateKbps: command.audioBitrateKbps,
+        call: call.config, source, format, capture, audioBitrateKbps: command.audioBitrateKbps,
         signal: signal => this.bridge.signal(call.config.callId, signal),
         rpc: (method, payload) => this.bridge.rpc(call.config.callId, call.config.channelId, method, payload),
         onError: error => console.warn('[WebScreen] A screen viewer failed:', error),

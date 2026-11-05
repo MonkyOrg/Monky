@@ -43,14 +43,38 @@ export function av1ReceiveLevel(parameters: Readonly<Record<string, unknown>>, v
   return av1 !== null && av1.level < minimum ? minimum : null;
 }
 
-/** Whether this browser's WebRTC receiver lists the codec of Monky screens at all: H.264 Main or AV1 profile 0. */
+const h264Receiver = (codec: { mimeType: string; sdpFmtpLine?: string }, profile: RegExp): boolean =>
+  codec.mimeType.toLowerCase() === 'video/h264'
+  && profile.test(/(?:^|;)\s*profile-level-id=([0-9a-f]{6})(?:;|$)/i.exec(codec.sdpFmtpLine ?? '')?.[1] ?? '')
+  && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(codec.sdpFmtpLine ?? '');
+
+/** Whether this browser receives H.264 Main, what the desktop app and the web's better format send. */
+export function browserReceivesH264Main(): boolean {
+  return RTCRtpReceiver.getCapabilities('video')?.codecs.some(codec => h264Receiver(codec, /^4d/i)) ?? false;
+}
+
+/**
+ * Whether this browser's WebRTC receiver lists the codec of Monky screens at all: AV1 profile 0, or H.264 as
+ * Main or as the Constrained Baseline the web shares by default (Firefox and Safari list only the latter).
+ */
 export function browserReceivesScreenCodec(selected: ScreenCodec = 'h264'): boolean {
   return RTCRtpReceiver.getCapabilities('video')?.codecs.some(codec =>
     selected === 'av1' ? codec.mimeType.toLowerCase() === 'video/av1'
       && av1Parameters(fmtpParameters(codec.sdpFmtpLine ?? ''))?.profile === 0
-      : codec.mimeType.toLowerCase() === 'video/h264'
-      && /(?:^|;)\s*profile-level-id=4d[0-9a-f]{4}(?:;|$)/i.test(codec.sdpFmtpLine ?? '')
-      && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(codec.sdpFmtpLine ?? '')) ?? false;
+      : h264Receiver(codec, /^(4d|42e0)/i)) ?? false;
+}
+
+/**
+ * What to tell a browser about a screen in `codec` it could not decode: `main`, an H.264 Main share it lacks
+ * (Firefox, Safari); `switch`, another codec the publisher can change to the H.264 it receives; `codec`, a format
+ * it does not decode with nothing to switch to (Firefox and AV1); `null`, nothing codec-specific.
+ */
+export function browserScreenRefusal(codec: ScreenCodec): 'main' | 'switch' | 'codec' | null {
+  const main = browserReceivesH264Main();
+  if (codec === 'h264' && !main && browserReceivesScreenCodec('h264')) return 'main';
+  if (codec !== 'h264' && main) return 'switch';
+  if (!browserReceivesScreenCodec(codec) || !main) return 'codec';
+  return null;
 }
 
 export async function supportsBrowserScreenCodec(
@@ -58,11 +82,14 @@ export async function supportsBrowserScreenCodec(
 ): Promise<boolean> {
   // For AV1 the advertised level is only a default: the decoder probe below decides.
   if (!browserReceivesScreenCodec(selected) || !navigator.mediaCapabilities?.decodingInfo) return false;
+  // A browser without Main is probed with the Constrained Baseline it receives, at the same level.
+  const h264 = getScreenH264ProfileLevelId(profile);
+  const profileLevelId = browserReceivesH264Main() ? h264 : `42e0${h264.slice(4)}`;
   const capability = await navigator.mediaCapabilities.decodingInfo({
     type: 'webrtc',
     video: {
       contentType: selected === 'av1' ? `video/AV1;profile=0;level-idx=${getScreenAv1MinimumLevelIndex(profile)};tier=0`
-        : `video/H264;profile-level-id=${getScreenH264ProfileLevelId(profile)};packetization-mode=1`,
+        : `video/H264;profile-level-id=${profileLevelId};packetization-mode=1`,
       width: profile.width, height: profile.height, framerate: profile.fps, bitrate: profile.maxBitrateKbps * 1000,
     },
   });
@@ -73,6 +100,9 @@ export function assertBrowserScreenCodec(
   sdp: string, selected: ScreenCodec, profile?: Readonly<NativeScreenVideoProfile>,
 ): void {
   const videoSections = sdp.split(/(?=^m=)/m).filter(section => section.startsWith('m=video '));
+  // A receiver that shares no codec with the screen answers its video rejected (port 0): that is the codec.
+  if (videoSections.length && videoSections.every(section => section.split(' ')[1] === '0'))
+    throw new BrowserScreenCodecError(`This browser receives no ${selected.toUpperCase()} profile the screen offers.`);
   for (const section of videoSections) {
     const [media, ...lines] = section.split(/\r?\n/);
     if (media.split(' ')[1] === '0') continue;
