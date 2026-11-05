@@ -219,8 +219,8 @@ export function createServerInviteAppLink(invite: ServerInvite): string {
  * The web version of Monky (#858). It only reaches servers over TLS, so the
  * invitation page offers it only for an invitation marked `tls`.
  */
-// Both domains are confirmed by the first deploy of each Vercel project; this is the one place to change them.
-export const MONKY_WEB_APP_URL = 'https://monky.vercel.app/';
+// Both domains are the ones Vercel gave each project; the release deploy pins them from here, so this is the one place to change them.
+export const MONKY_WEB_APP_URL = 'https://monkyweb.vercel.app/';
 
 /**
  * Where the web version opens bot miniapps: a site of its own, so a miniapp
