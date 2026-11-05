@@ -5,7 +5,7 @@ import {
   type NativeScreenVideoProfile, type SfuConsumedPayload, type SfuProducerClosedPayload,
   type SfuProducersListPayload, type SfuRouterRtpCapabilitiesPayload, type SfuWebRtcTransportCreatedPayload,
 } from '@monky/shared';
-import { BrowserScreenCodecError, av1ReceiveLevel, h264MaxReceiveLevel, supportsBrowserAv1Level } from './browserScreenCodecs';
+import { BrowserScreenCodecError, av1ReceiveLevel, browserReceivesH264Main, h264MaxReceiveLevel, supportsBrowserAv1Level } from './browserScreenCodecs';
 
 export type BrowserScreenRpc = <T>(method: NativeScreenRpcMethod, payload: Record<string, unknown>) => Promise<T>;
 type RouterResponse = Omit<SfuRouterRtpCapabilitiesPayload, 'rtpCapabilities'> & { rtpCapabilities: SfuTypes.RtpCapabilities };
@@ -169,10 +169,15 @@ export class BrowserScreenSfu {
         ? h264MaxReceiveLevel(codec.parameters?.['profile-level-id'], this.options.profile) : null;
       if (maxReceiveLevel) codec.parameters = { ...codec.parameters, 'max-recv-level': maxReceiveLevel };
     }
+    // A screen nobody here can decode is refused when consuming: by the server (no common profile) or by
+    // the browser's own description. Without an H.264 Main receiver that is the codec, not the network.
+    const codecRefusal = (error: unknown): unknown => producer.kind === 'video' && !browserReceivesH264Main()
+      && !(error instanceof DOMException)
+      ? new BrowserScreenCodecError(`This browser cannot consume the ${selectedMime} screen: ${String(error)}`) : error;
     const consumed = await rpc<ConsumerResponse | SfuProducerClosedPayload>(MessageType.SFU_CONSUME, {
       channelId: call.channelId, transportId: transport.id, producerId: producer.producerId,
       rtpCapabilities: capabilities,
-    });
+    }).catch((error: unknown) => { throw codecRefusal(error); });
     if (!('id' in consumed)) {
       if (consumed.channelId !== call.channelId || consumed.producerId !== producer.producerId)
         throw new Error('Screen consumption ended another producer.');
@@ -205,7 +210,7 @@ export class BrowserScreenSfu {
       id: consumed.id, producerId: consumed.producerId, kind: consumed.kind,
       rtpParameters: consumed.rtpParameters, appData: metadata.appData,
       ...(consumed.kind === 'audio' ? { codecOptions: { opusStereo: true } } : {}),
-    });
+    }).catch((error: unknown) => { throw codecRefusal(error); });
     if (!selected()) { consumer.close(); await this.closeConsumer(consumed.id); return; }
     entry.consumer = consumer;
     consumer.on('trackended', () => {

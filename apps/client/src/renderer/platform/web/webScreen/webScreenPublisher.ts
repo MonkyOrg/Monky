@@ -1,7 +1,7 @@
 import {
   getScreenShareProfile, nativeScreenFailureReason, nativeScreenSignalSchema, screenShareProfileKey,
   type NativeScreenCall, type NativeScreenFailure, type NativeScreenSignalPayload, type NativeScreenSource,
-  type NativeScreenVideoProfile, type ScreenShareQuality,
+  type NativeScreenVideoProfile, type ScreenShareQuality, type BrowserScreenFormat,
 } from '@monky/shared';
 import { BrowserScreenPeer } from './browserScreenPeer';
 import type { DisplayCapture } from './displayCaptures';
@@ -48,6 +48,8 @@ const capacity = (): Error => Object.assign(new Error('The screen profile has re
 export interface WebScreenPublisherOptions {
   readonly call: NativeScreenCall;
   readonly source: NativeScreenSource;
+  /** How this screen is encoded; its codec is the source's. */
+  readonly format: BrowserScreenFormat;
   readonly capture: DisplayCapture;
   readonly audioBitrateKbps: number;
   readonly signal: (signal: NativeScreenSignalPayload) => Promise<void>;
@@ -160,7 +162,7 @@ export class WebScreenPublisher {
     const { call, source, audioBitrateKbps } = this.options;
     let peer: ScreenP2pPublisherPeer | null = null;
     const port = new BrowserScreenPeer({
-      iceServers: call.iceServers, streamId: source.instanceId, video: pipeline.video, audio: pipeline.audio,
+      iceServers: call.iceServers, format: this.options.format, streamId: source.instanceId, video: pipeline.video, audio: pipeline.audio,
       maxBitrateBps: pipeline.profile.maxBitrateKbps * 1000, maxFramerate: pipeline.profile.fps,
       audioBitrateBps: audioBitrateKbps * 1000,
       onCandidate: candidate => peer?.localCandidate(candidate),
@@ -186,7 +188,7 @@ export class WebScreenPublisher {
 
   private async pipelineFor(viewer: Viewer): Promise<Pipeline> {
     const { source, capture, call } = this.options;
-    const profile = getScreenShareProfile(source.video, viewer.quality, 'h264');
+    const profile = getScreenShareProfile(source.video, viewer.quality, source.codec);
     const key = screenShareProfileKey(profile);
     const existing = this.pipelines.get(key);
     if (existing?.closing) {
@@ -200,7 +202,7 @@ export class WebScreenPublisher {
     pipeline.viewers.set(viewer.sessionId, viewer);
     if (!existing && call.mode === 'sfu') {
       const sfu = new WebScreenSfuRendition({
-        channelId: call.channelId, shareId: source.shareId,
+        channelId: call.channelId, shareId: source.shareId, format: this.options.format,
         rendition: { sourceInstanceId: source.instanceId, pipelineId: pipeline.id, video: profile },
         video: pipeline.video, audio: pipeline.audio, audioBitrateBps: this.options.audioBitrateKbps * 1000,
         rpc: this.options.rpc, onError: error => { void this.track(this.failPipeline(pipeline, error)); },

@@ -8,6 +8,7 @@ import { escapeHtml } from '../utils/html';
 import { animateEnter, ownSurface, removeWithMotion } from '../utils/surfaceMotion';
 import { normalizeSearchString } from '../utils/search';
 import { scrollWithin, smoothScrollTo } from '../utils/scroll';
+import { requestIdle } from '../utils/idleCallback';
 import { platformSupports } from '../platform/capabilities';
 import { mediaFolderLabel, mediaSourceButton, picksMediaFolder } from '../platform/mediaFolders';
 
@@ -97,7 +98,7 @@ export class EmojiPicker {
   private pendingGlyphs: HTMLElement[] = [];
   private glyphFrame = 0;
   private glyphTimer = 0;
-  private glyphTask = 0;
+  private cancelGlyphTask: (() => void) | null = null;
 
   constructor(options: EmojiPickerOptions) {
     // Stickers come from a folder on this computer: without one, emojis only (#858).
@@ -507,9 +508,9 @@ export class EmojiPicker {
 
   /** Draws the remaining glyphs while the renderer is idle, so scrolling later finds them ready. */
   private scheduleGlyphs(): void {
-    if (this.glyphTask || this.pendingGlyphs.length === 0) return;
-    this.glyphTask = requestIdleCallback((deadline) => {
-      this.glyphTask = 0;
+    if (this.cancelGlyphTask || this.pendingGlyphs.length === 0) return;
+    this.cancelGlyphTask = requestIdle((deadline) => {
+      this.cancelGlyphTask = null;
       const body = this.bodyEl;
       if (!body) return;
       let spent = 0;
@@ -531,10 +532,10 @@ export class EmojiPicker {
   private stopGlyphs(): void {
     cancelAnimationFrame(this.glyphFrame);
     clearTimeout(this.glyphTimer);
-    cancelIdleCallback(this.glyphTask);
+    this.cancelGlyphTask?.();
     this.glyphFrame = 0;
     this.glyphTimer = 0;
-    this.glyphTask = 0;
+    this.cancelGlyphTask = null;
     this.pendingGlyphs = [];
   }
 

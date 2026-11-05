@@ -78,7 +78,7 @@ const profile = (width = 1280, height = 720, fps = 60) => ({
 });
 const cancelled = () => new DOMException('Modeled operation was cancelled.', 'AbortError');
 
-function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false, commandResult = () => undefined, capabilities = {
+function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false, web = false, commandResult = () => undefined, capabilities = {
   capture: true, captureAudio: true, receive: true, backend: 'libobs-amf', reason: null,
 } } = {}) {
   const appBus = new EventEmitter();
@@ -236,6 +236,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
       getScreenAudioVolume: () => volume, get outputVolume() { return outputVolume; }, screenSharePreviewPauseWhenUnfocused: true,
       getScreenShareReceiver: () => receiver,
       screenEncodingStrategy: 'automatic', screenEncodingMode: 'hardware', preferredScreenCodec: 'h264',
+      browserScreenFormat: 'compatible',
     } },
     'stores/voiceStore': { voiceStore: {
       getScreenWatchers: () => watching ? [['publisher', [remote.shareId]]] : [],
@@ -243,6 +244,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
       getScreenQuality: () => quality, getEffectiveDeafened: () => deafened, isScreenAudioMuted: () => muted,
     } },
     'utils/audioPreferences': { resolveAudioOutput: () => 'default' },
+    'platform/capabilities': { platformSupports: feature => web && feature === 'browserScreenPicker' },
     i18n: { t: key => key },
     'core/screenEncoding': { acceptScreenEncoding() {} },
     'views/CopyToast': { showInfoToast: message => { toasts.push(message); } },
@@ -502,6 +504,18 @@ for (const strategy of ['automatic', 'manual']) {
       assert.equal(command.encodingMode, 'software');
       assert.equal(command.codec, 'av1');
     }
+  });
+}
+
+for (const web of [true, false]) {
+  test(`the browser format reaches every source start only on the web (web: ${web}) (#858)`, async t => {
+    const f = fixture(t, { web });
+    f.settings.browserScreenFormat = 'main';
+    await f.local();
+    await f.controller.applyQuality(profile());
+    const additions = f.commands.filter(command => command.action === 'source-add');
+    assert.equal(additions.length, 2);
+    for (const command of additions) assert.equal(command.browserFormat, web ? 'main' : undefined);
   });
 }
 

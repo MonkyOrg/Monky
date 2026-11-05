@@ -735,3 +735,47 @@ test('the web version still dials this machine and secure servers, and words a f
   f.lastSocket().drop();
   await assert.rejects(remote, { message: t('network.webSecureFailed', { host: 'chat.example', port: 443 }) });
 });
+
+const SAFARI_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Safari/605.1.15';
+const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
+
+function useUserAgent(context: TestContext, userAgent: string): void {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent } });
+  context.after(() => {
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+}
+
+test('WebKit releases a socket to an IP address with a companion closed before it connects (#883)', async context => {
+  useUserAgent(context, SAFARI_UA);
+  const f = fixture(context);
+  const pending = f.client.connect('147.15.118.243', 3000, identity, 'Fixture');
+  assert.equal(f.sockets.length, 2);
+  const [socket, companion] = f.sockets;
+  assert.equal(companion.url, socket.url);
+  assert.equal(companion.readyState, f.Socket.CLOSED);
+  assert.equal(companion.sent.length, 0);
+  socket.open();
+  socket.auth();
+  await pending;
+  assert.equal(f.client.getStatus(), 'CONNECTED');
+});
+
+for (const [label, userAgent, host] of [
+  ['Chromium', CHROME_UA, '147.15.118.243'],
+  ['WebKit with a DNS name', SAFARI_UA, 'chat.example'],
+  ['WebKit with loopback', SAFARI_UA, '127.0.0.1'],
+] as const) {
+  test(`${label} opens a single socket (#883)`, async context => {
+    useUserAgent(context, userAgent);
+    const f = fixture(context);
+    const pending = f.client.connect(host, 3000, identity, 'Fixture');
+    assert.equal(f.sockets.length, 1);
+    f.lastSocket().open();
+    f.lastSocket().auth();
+    await pending;
+    assert.equal(f.client.getStatus(), 'CONNECTED');
+  });
+}

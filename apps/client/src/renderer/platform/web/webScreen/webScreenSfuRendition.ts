@@ -1,12 +1,13 @@
 import { Device, type types as SfuTypes } from 'mediasoup-client';
-import { MessageType, type NativeScreenRendition } from '@monky/shared';
-import { isScreenH264 } from './browserScreenProfile';
+import { MessageType, type BrowserScreenFormat, type NativeScreenRendition } from '@monky/shared';
+import { isScreenCodec } from './browserScreenProfile';
 
 export type WebScreenRpc = (method: MessageType, payload: Record<string, unknown>) => Promise<unknown>;
 
 export interface WebScreenSfuRenditionOptions {
   readonly channelId: string;
   readonly shareId: string;
+  readonly format: BrowserScreenFormat;
   readonly rendition: NativeScreenRendition;
   readonly video: MediaStreamTrack;
   readonly audio: MediaStreamTrack | null;
@@ -59,11 +60,12 @@ export class WebScreenSfuRendition {
       throw new Error('The screen router capabilities belong to another channel.');
     await this.device.load({ routerRtpCapabilities: router.rtpCapabilities });
     this.current();
-    const codec = this.device.rtpCapabilities.codecs?.find(value => isScreenH264({
+    const { format } = this.options;
+    const codec = this.device.rtpCapabilities.codecs?.find(value => value.kind === 'video' && isScreenCodec({
       mimeType: value.mimeType,
       sdpFmtpLine: Object.entries(value.parameters ?? {}).map(([key, parameter]) => `${key}=${String(parameter)}`).join(';'),
-    }));
-    if (!codec || !this.device.canProduce('video')) throw new Error('The server and this browser share no H.264 Main screen codec.');
+    }, format));
+    if (!codec || !this.device.canProduce('video')) throw new Error(`The server and this browser share no ${format} screen codec.`);
     const created = await rpc(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, {
       channelId, direction: 'send', purpose: 'screen', screenSessionId: rendition.pipelineId,
     });

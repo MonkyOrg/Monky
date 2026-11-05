@@ -67,7 +67,8 @@ export class RemoteMediaRouter {
   private async routeAudioOutput(category: 'voice' | 'screen'): Promise<void> {
     const context = this.getOrCreateAudioContext(category);
     const sinkId = this.speakerDeviceIds[category] ?? effectiveAudioOutput(category);
-    if (typeof context.setSinkId !== 'function') throw new Error('Audio output selection unavailable');
+    // Without AudioContext.setSinkId (Safari, #883) the graph already plays on the default output;
+    // only a specific speaker is out of reach, and setAudioOutputSink refuses that one.
     await setAudioOutputSink(context, sinkId);
     if (context.state === 'suspended') await context.resume();
   }

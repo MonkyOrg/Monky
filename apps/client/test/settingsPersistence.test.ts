@@ -175,3 +175,14 @@ test('keys that are not settings, as an imported backup may bring, never reach t
     off();
   }
 });
+
+test('the format a browser shares its screen in is saved, and an unknown one falls back to the compatible format (#858)', async () => {
+  const { settingsStore } = await loaded;
+  assert.equal(settingsStore.browserScreenFormat, 'compatible', 'every viewer can watch by default');
+  settingsStore.setBrowserScreenFormat('main');
+  assert.equal(stored().browserScreenFormat, 'main');
+  storage.setItem('monky_settings', JSON.stringify({ ...stored(), browserScreenFormat: 'av1' }));
+  settingsStore.load();
+  assert.equal(settingsStore.browserScreenFormat, 'compatible', 'a format this version does not offer is not used');
+  settingsStore.setBrowserScreenFormat('compatible');
+});

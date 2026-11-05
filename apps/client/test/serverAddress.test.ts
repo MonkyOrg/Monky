@@ -7,7 +7,7 @@ import { settingsStore } from '../src/renderer/stores/settingsStore';
 import { toAbsoluteServerIconUrl } from '../src/renderer/utils/avatar';
 import { captureHostedServerLeaveState } from '../src/renderer/utils/hostedServer';
 import {
-  isLoopbackHost, isSecureServer, normalizeHost, parseServerHostInput, parseServerUrl, sameServerAddress, serverAddressKey,
+  isIpLiteralHost, isLoopbackHost, isSecureServer, normalizeHost, parseServerHostInput, parseServerUrl, sameServerAddress, serverAddressKey,
   setServerTransport, toHttpBase, toWsUrl,
 } from '../src/renderer/utils/serverAddress';
 
@@ -55,6 +55,15 @@ test('the loopback list is one and accepts IPv6 with or without brackets', () =>
     assert.equal(isLoopbackHost(host), true, host);
   }
   for (const host of ['example.test', '192.168.0.2', '[::2]', '']) assert.equal(isLoopbackHost(host), false, host);
+});
+
+test('IP literals are told apart from names resolved by DNS (#883)', () => {
+  for (const host of ['147.15.118.243', ' 10.0.0.1 ', '::ffff:93.184.216.34', '[2001:db8::1]', 'wss://[::1]']) {
+    assert.equal(isIpLiteralHost(host), true, host);
+  }
+  for (const host of ['147-15-118-243.sslip.io', 'chat.example', 'localhost', '1.2.3', '']) {
+    assert.equal(isIpLiteralHost(host), false, host);
+  }
 });
 
 test('URLs put IPv6 between brackets, drop schemes and keep the host as typed', () => {
