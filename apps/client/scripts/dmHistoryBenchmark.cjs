@@ -8,9 +8,8 @@
  *
  *   node --expose-gc scripts/dmHistoryBenchmark.cjs [--dist dist-test] [--messages 50000]
  *
- * `--dist` is the folder the client tests compile to (it holds
- * `src/main/dm/dmService.js`); point it at a build of another revision to
- * compare.
+ * `--dist` is the folder the client tests compile to (it holds the desktop
+ * store, `src/main/dm/nodeDmBackend.js`); the engine is `@monky/dm` (#858).
  */
 
 const fs = require('node:fs');
@@ -26,10 +25,8 @@ function option(name, fallback) {
 
 const dist = path.resolve(option('--dist', path.join(__dirname, '..', 'dist-test')));
 const total = Number(option('--messages', '50000'));
-const dm = (name) => require(path.join(dist, 'src', 'main', 'dm', `${name}.js`));
-const { DmService } = dm('dmService');
-const { DmKeyring, newDmId } = dm('dmCrypto');
-const { DmPersistence } = dm('dmPersistence');
+const { nodeDmFileStore } = require(path.join(dist, 'src', 'main', 'dm', 'nodeDmBackend.js'));
+const { DmKeyring, DmPersistence, DmService, newDmId } = require('@monky/dm');
 
 const DAY_MS = 86_400_000;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-dm-bench-'));
@@ -44,7 +41,7 @@ function identity() {
 }
 
 function device(id, dir) {
-  const service = new DmService({ keyring: new DmKeyring(id.publicKey, id.privateKey), dir });
+  const service = new DmService({ keyring: new DmKeyring(id.publicKey, id.privateKey), store: nodeDmFileStore(dir) });
   service.setSelfNickname('bench');
   return { id, dir, service };
 }
@@ -114,7 +111,7 @@ for (let index = 0; index < total; index += 1) {
     forwarded: null,
   });
 }
-const store = new DmPersistence(aliceDir, new DmKeyring(aliceId.publicKey, aliceId.privateKey).storageKey());
+const store = new DmPersistence(nodeDmFileStore(aliceDir), new DmKeyring(aliceId.publicKey, aliceId.privateKey).storageKey());
 store.writeJsonNow(DmPersistence.peerFileName(bobId.publicKey), { version: 1, peer: bobId.publicKey, messages });
 const legacyBytes = fs.statSync(path.join(aliceDir, DmPersistence.peerFileName(bobId.publicKey))).size;
 

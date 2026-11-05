@@ -49,8 +49,9 @@ function bindControlGlyphMotion(
   const animate = (button: HTMLButtonElement, hover = false) => {
     cancel(button);
     const glyph = button.querySelector<HTMLElement>(glyphSelector);
+    // A locked control (#858) suggests no action: no hover or press motion.
     if (reducedMotion.matches || button.disabled || button.hidden || button.style.display === 'none'
-      || !button.isConnected || !glyph) return;
+      || !button.isConnected || !glyph || button.hasAttribute('data-desktop-only')) return;
     const motion: { animations: Animation[]; decoration?: HTMLElement } = { animations: [] };
     motions.set(button, motion);
     const play = (target: Element, frames: Keyframe[], duration: number) => {

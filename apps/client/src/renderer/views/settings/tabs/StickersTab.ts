@@ -2,6 +2,7 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { stickerService } from '../../../core/StickerService';
 import { t, tCount } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { mediaFolderLabel, mediaSourceButton } from '../../../platform/mediaFolders';
 import { setButtonLoading } from '../../../utils/buttonLoading';
 
 /**
@@ -11,6 +12,7 @@ import { setButtonLoading } from '../../../utils/buttonLoading';
  */
 export class StickersTab {
   public renderHtml(): string {
+    const source = mediaSourceButton('stickers', t('emojiPicker.chooseFolder'));
     return `
       <div data-settings-section="sticker-folder" data-settings-label="${escapeHtml(t('settings.stickerFolder'))}" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
         <span style="font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px;">
@@ -22,13 +24,13 @@ export class StickersTab {
       <div class="form-group" style="margin-bottom: 12px;">
         <label>${t('settings.stickerFolder')}</label>
         <div style="display: flex; gap: 8px; align-items: center;">
-          <input id="input-stickers-path" type="text" readonly value="${settingsStore.stickersFolderPath || ''}" placeholder="${t('settings.noFolderPlaceholder')}" style="flex: 1; font-size: 12px; cursor: pointer;">
+          <input id="input-stickers-path" type="text" readonly value="${escapeHtml(mediaFolderLabel(settingsStore.stickersFolderPath || ''))}" placeholder="${t('settings.noFolderPlaceholder')}" style="flex: 1; font-size: 12px; cursor: pointer;">
           <button type="button" id="btn-refresh-stickers" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px; white-space: nowrap;" title="${t('emojiPicker.refresh')}">
             <span class="material-symbols-outlined md-14">refresh</span>
           </button>
           <button type="button" id="btn-select-stickers-folder" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px; white-space: nowrap;">
-            <span class="material-symbols-outlined md-14" style="margin-right: 4px;">folder_open</span>
-            ${t('emojiPicker.chooseFolder')}
+            <span class="material-symbols-outlined md-14" style="margin-right: 4px;">${source.icon}</span>
+            ${source.label}
           </button>
         </div>
         <div id="stickers-folder-info" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
@@ -71,7 +73,7 @@ export class StickersTab {
         if (!folder) return;
         settingsStore.stickersFolderPath = folder;
         settingsStore.save();
-        if (inputPath) inputPath.value = folder;
+        if (inputPath) inputPath.value = mediaFolderLabel(folder);
         await stickerService.loadStickers(true);
         updateInfo();
       } finally {

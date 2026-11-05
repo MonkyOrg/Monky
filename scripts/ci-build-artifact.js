@@ -9,14 +9,16 @@ import { pathToFileURL } from 'node:url';
 
 const sourcePackage = 'release/monky-native-sources-0.0.0-ci';
 const commonRoots = ['packages/shared/dist', 'packages/bot-sdk/dist', 'apps/server/dist'];
+// The desktop's main process loads the friends and DM engine (#858); the CLI does not.
+const clientRoots = ['packages/dm/dist', 'apps/client/dist', 'apps/client/dist-electron'];
 export const roots = {
   cli: commonRoots,
-  mac: [...commonRoots, 'apps/client/dist', 'apps/client/dist-electron',
+  mac: [...commonRoots, ...clientRoots,
     'apps/client/native/screen-share/bin/darwin-arm64', 'apps/client/native/screen-share/bin/darwin-x64',
     'apps/client/native/screen-share/licenses', 'apps/client/native/screen-share/LICENSE',
     'apps/client/native/screen-share/THIRD_PARTY_NOTICES',
     'release/monky-native-macos-sources-0.0.0-ci.json', 'release/monky-native-macos-sources-0.0.0-ci.tar.xz'],
-  win: [...commonRoots, 'apps/client/dist', 'apps/client/dist-electron',
+  win: [...commonRoots, ...clientRoots,
     'apps/client/native/screen-share/bin/win32-x64', 'apps/client/native/screen-share/licenses',
     'apps/client/native/screen-share/LICENSE',
     'apps/client/native/screen-share/THIRD_PARTY_NOTICES',

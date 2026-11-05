@@ -1,6 +1,7 @@
 import { ActionShortcutBinding } from '@monky/shared';
 import { settingsStore } from '../stores/settingsStore';
 import { appEvents } from './EventBus';
+import { platformSupports } from '../platform/capabilities';
 
 export interface KeybindActionDefinition {
   id: string;
@@ -67,7 +68,7 @@ export class KeybindService {
   }
 
   public syncShortcuts(): void {
-    if (!window.api?.registerActionShortcuts) return;
+    if (!platformSupports('globalShortcuts') || !window.api?.registerActionShortcuts) return;
 
     const shortcuts: ActionShortcutBinding[] = [];
     for (const [action, binding] of Object.entries(settingsStore.keybindShortcuts)) {

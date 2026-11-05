@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { withBase } from 'vitepress';
 import {
-  createServerInviteAppLink, createServerInviteLink, decodeServerInviteToken,
+  createServerInviteAppLink, createServerInviteLink, createServerInviteWebAppLink, decodeServerInviteToken,
   type ServerInvite,
 } from '../../../../packages/shared/src/serverInvites';
 
@@ -18,6 +18,7 @@ const labels = computed(() => english.value ? {
   address: 'Address',
   port: 'Port',
   open: 'Open in Monky',
+  openWeb: 'Open in the web version',
   copy: 'Copy invitation',
   copied: 'Invitation copied!',
   copyFailed: 'Could not copy. Copy the full address from your browser instead.',
@@ -35,6 +36,7 @@ const labels = computed(() => english.value ? {
   address: 'Endereço',
   port: 'Porta',
   open: 'Abrir no Monky',
+  openWeb: 'Abrir na versão web',
   copy: 'Copiar convite',
   copied: 'Convite copiado!',
   copyFailed: 'Não foi possível copiar. Copie o endereço completo pela barra do navegador.',
@@ -47,6 +49,8 @@ const labels = computed(() => english.value ? {
   privacy: 'O convite é decodificado localmente a partir do trecho após #, que não é enviado a este site. Codificação não é criptografia. O HTTPS protege esta página; não configura TLS nem abre portas no servidor Monky.',
 });
 const appLink = computed(() => invite.value ? createServerInviteAppLink(invite.value) : '');
+// The web version only reaches servers over TLS: other invitations would fail there.
+const webAppLink = computed(() => invite.value?.tls ? createServerInviteWebAppLink(invite.value) : '');
 const downloadLink = computed(() => withBase(english.value ? '/en/download.html' : '/download.html'));
 let generation = 0;
 
@@ -100,6 +104,7 @@ onBeforeUnmount(() => {
       <p :class="{ 'invite-password-warning': invite.password }">{{ invite.password ? labels.password : labels.noPassword }}</p>
       <div class="invite-actions">
         <a :href="appLink" class="invite-primary">{{ labels.open }}</a>
+        <a v-if="webAppLink" :href="webAppLink" rel="noopener">{{ labels.openWeb }}</a>
         <button type="button" @click="copyInvite">{{ labels.copy }}</button>
         <a :href="downloadLink">{{ labels.download }}</a>
       </div>

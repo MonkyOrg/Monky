@@ -2,6 +2,8 @@ import '../styles/tooltips.css';
 import { cancelSurfaceMotion, hideWithMotion, showWithMotion } from '../utils/surfaceMotion';
 
 const HOVER_DELAY = 150;
+/** What a person can point at or focus inside a locked panel (#858). */
+const PANEL_CONTROL = 'button, input, select, textarea, a[href], label, [tabindex]:not([tabindex="-1"])';
 const instances = new WeakMap<Document, () => void>();
 let nextId = 0;
 
@@ -58,6 +60,8 @@ export function initTooltips(doc: Document = document): () => void {
   function textFor(element: Element): string {
     const explicitText = element.getAttribute('data-tooltip');
     if (explicitText !== null) return explicitText;
+    const panelText = element.closest('[data-desktop-only-panel-tooltip]')?.getAttribute('data-desktop-only-panel-tooltip');
+    if (panelText) return panelText;
     if (!element.hasAttribute('data-tooltip-source')) return sourceTitle(element) ?? '';
     const source = sourceOf(element);
     if (!source) return '';
@@ -159,6 +163,13 @@ export function initTooltips(doc: Document = document): () => void {
   }
 
   function candidate(target: Element | null): Element | null {
+    // A locked feature explains itself before any of its parts (#858).
+    const locked = target?.closest('[data-desktop-only][data-tooltip]');
+    if (locked) return locked;
+    // Inside a locked panel, each control under the pointer or focus carries the panel's explanation.
+    const lockedArea = target?.closest('[data-desktop-only-panel-tooltip]');
+    const lockedControl = lockedArea ? target?.closest(PANEL_CONTROL) : null;
+    if (lockedArea && lockedControl && lockedArea.contains(lockedControl)) return lockedControl;
     for (let element = target; element?.isConnected; element = element.parentElement) {
       if (element.hasAttribute('data-tooltip') || element.hasAttribute('data-tooltip-source')
         || sourceTitle(element) !== null) {
@@ -307,6 +318,13 @@ export function initTooltips(doc: Document = document): () => void {
     refresh();
   }
 
+  // Scrolling moves the content under a resting pointer, so a pointer tooltip goes. A focused control moves
+  // with the content, and focusing it is often what scrolled it into view: its tooltip follows it instead.
+  function onScroll(): void {
+    if (keyboard && focusTarget && shown) refresh();
+    else dismiss();
+  }
+
   // A meter redrawn every frame or a busy chat elsewhere leaves the tooltip alone;
   // changes that can affect it are looked at once per frame, where reading layout
   // costs the least (R-SHELL-15).
@@ -330,7 +348,7 @@ export function initTooltips(doc: Document = document): () => void {
   doc.addEventListener('focusin', onFocusIn, true);
   doc.addEventListener('focusout', onFocusOut, true);
   doc.addEventListener('keydown', onKeyDown, true);
-  doc.addEventListener('scroll', dismiss, true);
+  doc.addEventListener('scroll', onScroll, true);
   doc.addEventListener('visibilitychange', onBlur);
   win.addEventListener('blur', onBlur);
   win.addEventListener('resize', dismiss);
@@ -351,7 +369,7 @@ export function initTooltips(doc: Document = document): () => void {
     doc.removeEventListener('focusin', onFocusIn, true);
     doc.removeEventListener('focusout', onFocusOut, true);
     doc.removeEventListener('keydown', onKeyDown, true);
-    doc.removeEventListener('scroll', dismiss, true);
+    doc.removeEventListener('scroll', onScroll, true);
     doc.removeEventListener('visibilitychange', onBlur);
     win.removeEventListener('blur', onBlur);
     win.removeEventListener('resize', dismiss);

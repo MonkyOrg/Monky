@@ -468,24 +468,40 @@ for (const mode of ['p2p', 'sfu']) {
     assert.deepEqual(f.states, ['unsupported']);
     assert.equal(f.sent.length + f.peers.length + f.transports.length + f.probes.length, 0);
   });
-  test(`${mode}: default AV1 level 3.1 is not advertised as supporting 1080p120`, async t => {
-    const f = fixture(t, { mode, sourceCodec: 'av1',
+  test(`${mode}: a browser advertising AV1 level 3.1 receives 1080p120 once its decoder probe admits it`, async t => {
+    // Chromium advertises libwebrtc's default AV1 level (3.1) whatever dav1d decodes; the probe decides.
+    const f = fixture(t, { mode, sourceCodec: 'av1', negotiatedAv1Level: 5,
+      availableCodecs: [{ mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'level-idx=5;profile=0;tier=0' }] });
+    if (mode === 'sfu') f.producer('video');
+    if (mode === 'sfu') await assert.rejects(f.open(), /consumer level is insufficient/);
+    else await f.open();
+    assert.equal(f.probes[0].video.contentType, 'video/AV1;profile=0;level-idx=12;tier=0');
+    assert.equal(f.sent[0].action, 'watch');
+    if (mode === 'p2p') {
+      await f.turn();
+      const answer = f.sent.find(message => message.action === 'control' && message.control.type === 'answer');
+      assert.match(answer.control.sdp, /a=fmtp:\d+ profile=0;level-idx=12;tier=0/, 'the answer advertises the level the screen needs');
+      assert.deepEqual(f.states, []);
+    } else {
+      const consumed = f.rpc.find(value => value.method === shared.MessageType.SFU_CONSUME);
+      assert.equal(consumed.payload.rtpCapabilities.codecs[0].parameters['level-idx'], 12);
+      // The modeled producer still declares level 3.1: a stream that cannot carry the profile stays refused.
+      assert.ok(f.states.includes('unsupported'));
+    }
+  });
+  test(`${mode}: AV1 at a level the decoder probe refuses is rejected before media allocation`, async t => {
+    const f = fixture(t, { mode, sourceCodec: 'av1', supported: false,
       availableCodecs: [{ mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0;level-idx=5;tier=0' }] });
     await assert.rejects(f.sub.start(), /AV1.*Select H.264/);
     assert.deepEqual(f.states, ['unsupported']);
-    assert.equal(f.sent.length + f.peers.length + f.transports.length + f.probes.length, 0);
+    assert.equal(f.probes.length, 1);
+    assert.equal(f.sent.length + f.peers.length + f.transports.length, 0);
   });
-  test(`${mode}: insufficient negotiated AV1 level is rejected even when the capability API claims a higher level`, async t => {
+  test(`${mode}: an AV1 receiver of another profile is not raised into one the probe never checked`, async t => {
     const f = fixture(t, { mode, sourceCodec: 'av1',
-      availableCodecs: [{ mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0;level-idx=23;tier=0' }] });
-    if (mode === 'sfu') {
-      f.producer('video');
-      await assert.rejects(f.open(), /AV1 receive level is insufficient/);
-    } else {
-      await f.open();
-      await assert.rejects(f.turn(), /AV1 receive level is insufficient/);
-    }
-    assert.ok(f.states.includes('unsupported'));
+      availableCodecs: [{ mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=1;level-idx=5;tier=0' }] });
+    await assert.rejects(f.sub.start(), /AV1.*Select H.264/);
+    assert.equal(f.sent.length + f.peers.length + f.transports.length + f.probes.length, 0);
   });
   test(`${mode}: explicitly sufficient AV1 API and negotiated levels admit the requested high rendition`, async t => {
     const f = fixture(t, { mode, sourceCodec: 'av1', negotiatedAv1Level: 23,
@@ -520,8 +536,19 @@ test('P2P screen answers cannot silently negotiate a different codec than the so
 });
 
 test('P2P answers and SFU capabilities extend H.264 Main only below the screen level (R-VOICE-11)', t => {
-  const { h264MaxReceiveLevel } = fixture(t).load('./browserScreenCodecs');
+  const { h264MaxReceiveLevel, av1ReceiveLevel, withBrowserScreenReceiveParameters } = fixture(t).load('./browserScreenCodecs');
   const screen = shared.getScreenShareProfile({ width: 3840, height: 2160, fps: 30, maxBitrateKbps: 80000 }, 'source');
+  const fullHd = { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 };
+  assert.equal(av1ReceiveLevel({ profile: 0, 'level-idx': 5, tier: 0 }, fullHd), 9, 'Chromium\'s default AV1 3.1 is raised to 4.1, what 1080p60 needs');
+  assert.equal(av1ReceiveLevel({}, fullHd), 9, 'an absent level means the RTP default, 3.1');
+  assert.equal(av1ReceiveLevel({ 'level-idx': '9' }, fullHd), null, 'the level the screen needs is already offered');
+  assert.equal(av1ReceiveLevel({ 'level-idx': 12 }, fullHd), null, 'a higher level is never lowered');
+  for (const invalid of [{ 'level-idx': 'x' }, { profile: 3 }, { tier: 2 }])
+    assert.equal(av1ReceiveLevel(invalid, fullHd), null);
+  const av1Answer = answer.replace('H264/90000', 'AV1/90000')
+    .replace('level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f', 'level-idx=5;profile=0;tier=0');
+  assert.match(withBrowserScreenReceiveParameters(av1Answer, false, fullHd, 'av1'), /a=fmtp:\d+ level-idx=9;profile=0;tier=0\r\n/);
+  assert.equal(withBrowserScreenReceiveParameters(av1Answer, false, fullHd, 'h264'), av1Answer, 'only an AV1 screen raises AV1');
   assert.equal(h264MaxReceiveLevel('4d001f', screen), '0033', 'a lower default level is extended to the screen');
   assert.equal(h264MaxReceiveLevel('4D001F', screen), '0033', 'SDP hex is case-insensitive');
   assert.equal(h264MaxReceiveLevel('4d0033', screen), null, 'the level the screen needs is already offered');

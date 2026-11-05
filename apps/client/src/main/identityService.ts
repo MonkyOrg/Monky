@@ -9,7 +9,8 @@ import {
 } from '@monky/shared';
 import { fileErrorCode, renameFileSync, writeFileAtomicSync } from './atomicFile';
 import { secretEnvelopeError } from './secretEnvelope';
-import { DmKeyring } from './dm/dmCrypto';
+import { DmKeyring } from '@monky/dm';
+import './dm/nodeDmBackend';
 
 const IDENTITY_FILE_NAME = 'identity.json';
 

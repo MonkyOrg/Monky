@@ -1,7 +1,8 @@
 import { app, dialog, type BrowserWindow } from 'electron';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { downloadToFile, sanitizeDownloadFileName, suggestedDownloadName } from '../attachmentDownload';
+import { sanitizeDownloadFileName } from '@monky/shared';
+import { downloadToFile, suggestedDownloadName } from '../attachmentDownload';
 import { mt } from '../i18n';
 import { webUrl } from './guards';
 import type { IpcRegistry } from './registry';

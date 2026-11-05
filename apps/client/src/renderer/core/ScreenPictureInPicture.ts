@@ -6,6 +6,7 @@ import { settingsStore } from '../stores/settingsStore';
 import { showInfoToast } from '../views/CopyToast';
 import { t } from '../i18n';
 import { stageTileKey } from '../views/stage/stageTiles';
+import { platformSupports } from '../platform/capabilities';
 
 export interface ScreenPictureInPictureSource {
   sessionKey: string;
@@ -81,7 +82,7 @@ class ScreenPictureInPicture {
   private current: Presentation | null = null;
 
   public isAvailable(): boolean {
-    return typeof window.api?.openScreenPictureInPicture === 'function';
+    return platformSupports('screenPictureInPicture') && typeof window.api?.openScreenPictureInPicture === 'function';
   }
 
   public isPresenting(video: HTMLVideoElement): boolean {
@@ -148,21 +149,37 @@ class ScreenPictureInPicture {
     entry.dispose.push(unbindInactive, unbindActive);
     try {
       const aspectRatio = video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : 16 / 9;
-      // Main authorizes exactly this popup; the automatic one only while
-      // Monky is still minimized or hidden to the tray.
-      const opened = await window.api.openScreenPictureInPicture(
-        entry.requestId, automatic === 'window-inactive', aspectRatio);
-      if (this.current !== entry) return;
+      // A browser opens its always-on-top window only for a click (#858); the
+      // desktop's Main authorizes exactly this popup, the automatic one only
+      // while Monky is still minimized or hidden to the tray.
+      let documentWindow: Window | null = null;
+      let opened: boolean;
+      if (platformSupports('documentPictureInPicture') && window.documentPictureInPicture) {
+        if (automatic) {
+          this.retire(entry);
+          return;
+        }
+        const width = 480;
+        documentWindow = await window.documentPictureInPicture.requestWindow({ width, height: Math.round(width / aspectRatio) });
+        opened = true;
+      } else {
+        opened = await window.api.openScreenPictureInPicture(entry.requestId, automatic === 'window-inactive', aspectRatio);
+      }
+      if (this.current !== entry) {
+        documentWindow?.close();
+        return;
+      }
       entry.opening = false;
       if (!opened) {
         this.retire(entry);
         return;
       }
       if (!this.isAuthorized(source) || (automatic && !settingsStore.screenShareAutoPictureInPicture)) {
+        documentWindow?.close();
         this.close(!this.isAuthorized(source));
         return;
       }
-      if (!this.present(entry)) throw new Error('The screen Picture-in-Picture window could not be opened.');
+      if (!this.present(entry, documentWindow)) throw new Error('The screen Picture-in-Picture window could not be opened.');
       if (automatic) showInfoToast(t('stage.automaticPictureInPicture'), 7000);
     } catch (error) {
       if (this.current !== entry) return;
@@ -257,8 +274,8 @@ class ScreenPictureInPicture {
     this.retire(entry);
   }
 
-  private present(entry: Presentation): boolean {
-    const child = window.open('', `${PIP_FRAME_PREFIX}${entry.requestId}`, 'popup');
+  private present(entry: Presentation, documentWindow: Window | null = null): boolean {
+    const child = documentWindow ?? window.open('', `${PIP_FRAME_PREFIX}${entry.requestId}`, 'popup');
     if (!child) return false;
     entry.window = child;
     const doc = child.document;

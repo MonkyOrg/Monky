@@ -27,6 +27,7 @@ import { settingsModal } from '../SettingsModal';
 import { soundboardModal } from '../SoundboardModal';
 import { userContextMenu } from '../UserContextMenu';
 import { t } from '../../i18n';
+import { lockedAttributes } from '../../utils/desktopOnly';
 
 /** Who the card shows. */
 export interface UserCardProfile {
@@ -93,10 +94,10 @@ export class UserControlBar {
               <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
             </button>
           </div>
-          <button id="media-btn-screen" class="btn btn-icon media-bar-btn-lg ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${t('main.shareScreen')}">
+          <button id="media-btn-screen" class="btn btn-icon media-bar-btn-lg ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${t('main.shareScreen')}"${trustedHtml(lockedAttributes('screenShare', 'screenShare'))}>
             <span class="material-symbols-outlined md-18">${voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share'}</span>
           </button>
-          <button id="media-btn-soundboard" class="btn btn-icon media-bar-btn-lg" title="${t('main.openSoundboard')}">
+          <button id="media-btn-soundboard" class="btn btn-icon media-bar-btn-lg" title="${t('main.openSoundboard')}"${trustedHtml(lockedAttributes('mediaFolders', 'mediaLibrary'))}>
             <span class="material-symbols-outlined md-18">music_note</span>
           </button>
         </div>

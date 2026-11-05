@@ -2,7 +2,7 @@ import { app, dialog, type BrowserWindow } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  FILE_BATCH_DOWNLOAD_IPC, fileBatchDownloadRequestSchema,
+  FILE_BATCH_DOWNLOAD_IPC, fileBatchDownloadRequestSchema, uniqueFileName,
   type FileBatchDownloadFile, type FileBatchDownloadRequest, type FileBatchDownloadResult,
 } from '@monky/shared';
 import { mt } from './i18n';
@@ -11,15 +11,6 @@ import { writeStoredZip, ZipTooLargeError } from './zipWriter';
 
 /** Writes one requested file to `destination`: an HTTP download, or a DM attachment copied out. */
 type Download = (file: FileBatchDownloadFile, destination: string) => Promise<void>;
-
-/** `foto.png`, `foto (2).png`, ...: never overwrites a file nor repeats a name inside the batch. */
-export function uniqueFileName(name: string, isTaken: (candidate: string) => boolean): string {
-  const extension = path.extname(name);
-  const base = extension ? name.slice(0, -extension.length) : name;
-  let candidate = name;
-  for (let copy = 2; isTaken(candidate); copy++) candidate = `${base} (${copy})${extension}`;
-  return candidate;
-}
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : 'Unknown error';
 

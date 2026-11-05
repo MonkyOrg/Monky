@@ -2,7 +2,7 @@ import { app, dialog, type BrowserWindow } from 'electron';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { EVENT_CALENDAR_IPC, eventCalendarExportSchema, type EventCalendarSaveResult } from '@monky/shared';
-import { createEventCalendar } from './serverEventCalendar';
+import { createEventCalendar } from '../renderer/utils/eventCalendar';
 import { mt } from './i18n';
 import type { IpcRegistry } from './ipc/registry';
 

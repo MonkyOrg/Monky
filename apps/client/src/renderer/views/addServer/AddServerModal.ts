@@ -18,6 +18,8 @@ import { parseServerHostInput, setServerTransport } from '../../utils/serverAddr
 import { showConfirm } from '../Dialog';
 import { joinInviteModal } from '../JoinInviteModal';
 import { onboardingWizard, type WizardExit } from '../OnboardingWizard';
+import { platformSupports } from '../../platform/capabilities';
+import { lockedAttributes, lockedBadge } from '../../utils/desktopOnly';
 
 type AddServerScreen = 'choice' | 'join' | 'create';
 
@@ -177,9 +179,9 @@ class AddServerModal {
     if (this.screen === 'create') return this.renderCreate();
     return `
       <div class="add-server-choice-grid">
-        <button type="button" class="add-server-option" id="add-server-option-create">
+        <button type="button" class="add-server-option" id="add-server-option-create"${lockedAttributes('hostServer', 'hostServer')}>
           <span class="material-symbols-outlined" aria-hidden="true">dns</span>
-          <strong>${t('addServer.createTitle')}</strong>
+          <strong>${t('addServer.createTitle')}${lockedBadge('hostServer')}</strong>
           <small>${t('addServer.createDesc')}</small>
         </button>
         <button type="button" class="add-server-option" id="add-server-option-join">
@@ -195,6 +197,7 @@ class AddServerModal {
   }
 
   private renderJoin(): string {
+    const hosting = platformSupports('hostServer');
     return `
       <form id="add-server-join-form" class="add-server-form">
         <button type="button" class="btn btn-secondary add-server-back" id="add-server-join-back">
@@ -214,7 +217,7 @@ class AddServerModal {
         <div class="form-row">
           <div class="form-group" style="flex: 2;">
             <label for="add-server-host">${t('connection.hostLabel')}</label>
-            <input id="add-server-host" type="text" placeholder="${t('connection.hostPlaceholder')}" value="127.0.0.1" required>
+            <input id="add-server-host" type="text" placeholder="${t(hosting ? 'connection.hostPlaceholder' : 'connection.hostPlaceholderWeb')}" value="${hosting ? '127.0.0.1' : ''}" required>
           </div>
           <div class="form-group small-col">
             <label for="add-server-port">${t('connection.portLabel')}</label>
@@ -317,8 +320,8 @@ class AddServerModal {
     return `
       <section class="add-server-lan-list" aria-labelledby="add-server-lan-heading">
         <div class="add-server-section-heading">
-          <span id="add-server-lan-heading">${t('connection.lanServersCount', { count: servers.length })}</span>
-          <button type="button" id="add-server-scan-lan" class="btn btn-secondary" ${this.isScanningLan ? 'disabled' : ''}>
+          <span id="add-server-lan-heading">${t('connection.lanServersCount', { count: servers.length })}${lockedBadge('lanDiscovery')}</span>
+          <button type="button" id="add-server-scan-lan" class="btn btn-secondary" ${this.isScanningLan ? 'disabled' : ''}${lockedAttributes('lanDiscovery', 'lanServers')}>
             <span class="material-symbols-outlined md-14" aria-hidden="true">radar</span>
             ${this.isScanningLan ? t('connection.scanning') : t('connection.scan')}
           </button>

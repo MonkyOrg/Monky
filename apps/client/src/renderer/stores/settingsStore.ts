@@ -25,6 +25,7 @@ import {
 } from '../utils/audioPreferences';
 import { autoEntryServerKey, restoreAutoEntryServerKeys, type AutoEntryServerAddress } from '../utils/autoEntry';
 import { normalizeCustomQualityProfile } from '../utils/qualityProfileLimits';
+import { platformSupports } from '../platform/capabilities';
 
 /**
  * Chat-notification-sound mode for the 3-level configuration (#153).
@@ -446,7 +447,8 @@ export class SettingsStore {
         if (!['grid', 'list'].includes(this.soundboardViewMode)) {
           this.soundboardViewMode = 'grid';
         }
-        if (!['voice_activity', 'push_to_talk'].includes(this.inputMode)) {
+        // Push-to-talk listens to the keyboard outside the app: desktop only (#858).
+        if (!['voice_activity', 'push_to_talk'].includes(this.inputMode) || !platformSupports('globalShortcuts')) {
           this.inputMode = 'voice_activity';
         }
         if (!this.pttKey || typeof this.pttKey !== 'object' || !this.pttKey.code || !this.pttKey.display) {
@@ -899,7 +901,8 @@ export class SettingsStore {
   }
 
   public getScreenShareReceiver(): ScreenShareReceiver {
-    return this.screenShareReceiver;
+    // Without the native runtime (the web version, #858) Chromium is the only receiver.
+    return platformSupports('nativeScreenAudio') ? this.screenShareReceiver : 'chromium';
   }
 
   public setScreenShareReceiver(receiver: ScreenShareReceiver): void {

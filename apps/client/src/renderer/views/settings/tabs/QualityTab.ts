@@ -11,6 +11,7 @@ import { showAlert } from '../../Dialog';
 import { showInfoToast, showSuccessToast } from '../../CopyToast';
 import { ScreenEncodingControls } from '../../ScreenEncodingControls';
 import { nativeScreenProfile } from '../../../core/webrtc/NativeScreenController';
+import { lockedBlock } from '../../../utils/desktopOnly';
 import {
   ASPECT_RATIO_GROUPS,
   AUDIO_BITRATE_OPTIONS,
@@ -157,7 +158,7 @@ export class QualityTab {
     const preset = this.requestedQuality?.preset ?? settingsStore.qualityPreset;
     return `
       ${ScreenEncodingControls.html()}
-      <div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
+      ${lockedBlock('nativeScreenAudio', 'screenReceiver', `<div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
         <label>${t('settings.screenReceiverSection')}</label>
         <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenReceiverSection'))}" aria-describedby="screen-receiver-warning screen-receiver-apply">
           <button type="button" class="voice-mode-card input-mode-card" id="screen-receiver-native"
@@ -173,7 +174,7 @@ export class QualityTab {
         </div>
         <p id="screen-receiver-warning" class="audio-device-status" role="note" style="color: var(--warning);">${t('settings.screenReceiverWarning')}</p>
         <p id="screen-receiver-apply" class="audio-device-status">${t('settings.screenReceiverApply')}</p>
-      </div>
+      </div>`)}
 
       <!-- Quality Preset -->
       <div class="form-group">
@@ -198,7 +199,7 @@ export class QualityTab {
         </small>
       </div>
 
-      <div data-settings-section="screen-pip" data-settings-label="${escapeHtml(t('settings.screenAutoPipLabel'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      ${lockedBlock('automaticPictureInPicture', 'screenAutoPip', `<div data-settings-section="screen-pip" data-settings-label="${escapeHtml(t('settings.screenAutoPipLabel'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div>
             <label for="checkbox-screen-auto-pip" style="cursor: pointer;">${t('settings.screenAutoPipLabel')}</label>
@@ -209,7 +210,7 @@ export class QualityTab {
             <span class="toggle-slider"></span>
           </label>
         </div>
-      </div>
+      </div>`)}
 
       <div data-settings-section="screen-preview" data-settings-label="${escapeHtml(t('settings.screenPreviewSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">

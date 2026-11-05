@@ -3,7 +3,7 @@ import {
   type LogEntry, type ServerDetails, type ServerMonitorGetPayload, type ServerMonitorLogLine, type ServerMonitorStats,
   type ServerStats, type UserSummary,
 } from '@monky/shared';
-import type { ElectronApi } from '../../preload/api';
+import type { PlatformApi } from '../platform/api';
 import type { NetworkClient } from './NetworkClient';
 import { BoundRequests, SessionBinding, type SessionBindingFailure } from './sessionBinding';
 
@@ -167,7 +167,7 @@ export class RemoteServerMonitorSource implements ServerMonitorSource {
   }
 }
 
-export type LocalMonitorApi = Pick<ElectronApi,
+export type LocalMonitorApi = Pick<PlatformApi,
   'hostServerStatus' | 'hostServerStats' | 'hostServerLogs' | 'onHostServerLog' | 'onHostServerStatusChanged'
 >;
 type LocalStatus = Awaited<ReturnType<LocalMonitorApi['hostServerStatus']>>;

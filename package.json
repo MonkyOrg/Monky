@@ -29,7 +29,7 @@
     "dist": "npm run build && node scripts/package.js",
     "dev:server": "npm run dev --workspace=apps/server",
     "dev:client": "npm run dev --workspace=apps/client",
-    "build": "npm run build --workspace=packages/shared && npm run build --workspace=packages/bot-sdk && npm run build --workspace=apps/server && npm run build --workspace=apps/client",
+    "build": "npm run build --workspace=packages/shared && npm run build --workspace=packages/dm && npm run build --workspace=packages/bot-sdk && npm run build --workspace=apps/server && npm run build --workspace=apps/client",
     "build:server": "npm run build --workspace=packages/shared && npm run build --workspace=apps/server",
     "build:light": "npm run build --workspace=packages/shared && node scripts/build-light.js",
     "prepare:native-screen": "node apps/client/native/screen-share/scripts/prepare.cjs",

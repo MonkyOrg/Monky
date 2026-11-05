@@ -84,6 +84,12 @@ export function hasUnownedAudio(live: LiveScreens): boolean {
   return live.audioShareIds.some(shareId => !live.shareIds.includes(shareId));
 }
 
+/** The live shares a new share replaces: none when added, the chosen one, or all of them. */
+function replacedShares(request: { readonly mode: 'add' | 'replace'; readonly targetShareId?: string }, live: LiveScreens): string[] {
+  return request.mode === 'add' ? []
+    : request.targetShareId !== undefined ? [request.targetShareId] : [...live.shareIds];
+}
+
 /**
  * How the audio of a new share fits the existing ones (#253): each application may share its own sound,
  * but a whole screen's sound is the entire system mix, so nothing else may carry sound beside it. The
@@ -97,8 +103,7 @@ export function planAudio(request: {
   /** The enumerated sources, to tell the processes of an application apart. */
   readonly sources: readonly DesktopSource[];
 }, live: LiveScreens, isMac: boolean): AudioPlan {
-  const retiring = request.mode === 'add' ? []
-    : request.targetShareId !== undefined ? [request.targetShareId] : [...live.shareIds];
+  const retiring = replacedShares(request, live);
   const owners = live.audioShareIds.filter(shareId => live.shareIds.includes(shareId))
     .map(shareId => ({ shareId, system: isSystemAudio(live.capture(shareId)?.captureKind, isMac) }));
   const handedOver = owners.filter(owner => retiring.includes(owner.shareId)).map(owner => owner.shareId);
@@ -110,6 +115,19 @@ export function planAudio(request: {
   if (sharesAppAudio(request.source, remaining.map(owner => owner.shareId), request.sources, live))
     return { kind: 'blocked', reason: 'app' };
   return { kind: 'free', handedOver };
+}
+
+/**
+ * The sound of a share chosen in the browser's own dialog (#858). What it captures, and so whether its
+ * sound is a tab's or the whole system's, is only known afterwards: one share carries sound at a time,
+ * and the shares it replaces hand theirs over.
+ */
+export function planBrowserAudio(request: { readonly mode: 'add' | 'replace'; readonly targetShareId?: string },
+  live: LiveScreens): AudioPlan {
+  const retiring = replacedShares(request, live);
+  const owners = live.audioShareIds.filter(shareId => live.shareIds.includes(shareId));
+  if (hasUnownedAudio(live) || owners.some(shareId => !retiring.includes(shareId))) return { kind: 'blocked', reason: 'system' };
+  return { kind: 'free', handedOver: owners };
 }
 
 /**

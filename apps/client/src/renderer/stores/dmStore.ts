@@ -20,6 +20,7 @@ import {
 import { EventBus } from '../core/EventBus';
 import { DmTransport } from '../core/DmTransport';
 import { clientLog } from '../core/ClientLogService';
+import { platformSupports } from '../platform/capabilities';
 
 const EMPTY: DmSnapshot = {
   me: null,
@@ -111,9 +112,10 @@ export class DmStore {
   }
 
   async init(): Promise<void> {
-    // Outside Electron (tests, a page opened without the preload) there is no bridge.
+    // Outside Electron (tests, a page opened without the preload) there is no bridge,
+    // and the web version has no direct messages yet (#858).
     const api = window.api?.dm;
-    if (!api || this.api) return;
+    if (!api || this.api || !platformSupports('directMessages')) return;
     this.api = api;
     this.firstSnapshotPending = true;
     this.transport = new DmTransport(api);

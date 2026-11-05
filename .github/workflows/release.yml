@@ -702,3 +702,87 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ needs.version.outputs.version }}
         run: gh release edit "$TAG" --draft=false
+
+  web:
+    name: Deploy web version (Vercel)
+    needs: [version, release]
+    # Only what was just published reaches the site: every release, beta or
+    # stable, ships the web build of the same commit (#858).
+    if: needs.version.outputs.release == 'true'
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    # Vercel's token is a release secret: only main deploys, like the other signing jobs.
+    environment: release
+    permissions:
+      contents: read
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set the released version
+        run: |
+          node -e "const f='apps/client/package.json';const p=require('./'+f);p.version=process.env.RELEASE_VERSION;require('fs').writeFileSync(f, JSON.stringify(p, null, 2)+'\n');"
+
+      - name: Build and deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          # The site embeds the release notes; a build that cannot read them fails.
+          MONKY_REQUIRE_RELEASES: '1'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx --yes vercel@latest pull --yes --environment=production --token="$VERCEL_TOKEN"
+          npx --yes vercel@latest build --prod --token="$VERCEL_TOKEN"
+          npx --yes vercel@latest deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+
+  miniapps:
+    name: Deploy miniapps site (Vercel)
+    needs: [version, release]
+    # The site that runs bot miniapps for the web version, on an origin of its own (#858).
+    if: needs.version.outputs.release == 'true'
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    # Vercel's token is a release secret: only main deploys, like the other signing jobs.
+    environment: release
+    permissions:
+      contents: read
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_MINIAPPS_PROJECT_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build the miniapps site
+        run: |
+          npm ci
+          npm run build --workspace=packages/shared
+          npm run build:miniapps --workspace=apps/client
+
+      - name: Deploy
+        working-directory: apps/client/dist-miniapps
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          npx --yes vercel@latest pull --yes --environment=production --token="$VERCEL_TOKEN"
+          npx --yes vercel@latest build --prod --token="$VERCEL_TOKEN"
+          npx --yes vercel@latest deploy --prebuilt --prod --token="$VERCEL_TOKEN"

@@ -2,7 +2,7 @@ import http from 'http';
 import path from 'path';
 import { readUpdateInventory } from './infrastructure/database/updateInventory';
 import { v4 as uuidv4 } from 'uuid';
-import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ServerStats, UserSummary, VoiceMode, parseTrustedProxies, stripAdministrator, type LogEntry, type ServerInviteInfoPayload, type ServerShutdownReason, type TrustedProxyProblem } from '@monky/shared';
+import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ServerStats, UserSummary, VoiceMode, parseTrustedProxies, stripAdministrator, type AutoTlsStatus, type LogEntry, type ServerInviteInfoPayload, type ServerShutdownReason, type TrustedProxyProblem } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { AttachmentService } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
@@ -50,7 +50,7 @@ import {
 import { Logger } from './infrastructure/logger/Logger';
 import { ServerLogScope } from './infrastructure/logger/ServerLogScope';
 import { LanBroadcaster } from './infrastructure/discovery/LanBroadcaster';
-import { scanServerNetworkInterfaces } from './infrastructure/discovery/ServerIpScanner';
+import { getPublicIp } from './infrastructure/discovery/ServerIpScanner';
 import { AttachmentStorageService } from './infrastructure/security/AttachmentStorageService';
 import { AvatarStorageService } from './infrastructure/security/AvatarStorageService';
 import { PasswordService } from './infrastructure/security/PasswordService';
@@ -66,6 +66,12 @@ import { createHttpRequestListener } from './infrastructure/http/HttpRouter';
 import { publicRoutes } from './infrastructure/http/publicRoutes';
 import { attachmentRoutes } from './infrastructure/http/attachmentRoutes';
 import { resolveServerVersion } from './runtimeVersion';
+import { describeServerInvite } from './infrastructure/discovery/inviteInfo';
+import { AcmeChallenges } from './infrastructure/tls/AcmeChallenges';
+import { AutoTlsService, type AutoTlsEnableOptions } from './infrastructure/tls/AutoTlsService';
+import { CertificateStore } from './infrastructure/tls/CertificateStore';
+import { DualProtocolListener } from './infrastructure/tls/DualProtocolListener';
+import { LetsEncryptIssuer, acmeTestOverrides, allowValidationPort } from './infrastructure/tls/LetsEncryptIssuer';
 
 export interface ServerConfig {
   port: number;
@@ -235,6 +241,8 @@ export class MonkyServer {
     private config: ServerConfig,
     dbConn: DatabaseConnection,
     httpServer: http.Server,
+    private readonly listener: DualProtocolListener,
+    private readonly autoTls: AutoTlsService,
     wsServer: WebSocketServer,
     avatarStorage: AvatarStorageService,
     rateLimiter: RateLimiter,
@@ -430,15 +438,19 @@ export class MonkyServer {
         users: named(people),
       };
     };
-    const describeInvite = async (): Promise<ServerInviteInfoPayload> => {
-      const server = await serverRepo.getServer();
-      const address = httpServer.address();
-      return {
-        port: address && typeof address === 'object' ? address.port : config.port || LIMITS.DEFAULT_PORT,
-        serverName: server?.name || config.serverName || 'Monky Server',
-        networkInterfaces: await scanServerNetworkInterfaces(),
-      };
-    };
+    const describeInvite = (): Promise<ServerInviteInfoPayload> => describeServerInvite({
+      serverRepo,
+      port: () => {
+        const address = listener.address();
+        return address && typeof address === 'object' ? address.port : config.port || null;
+      },
+      fallbackName: config.serverName,
+      publicIp,
+      secureAddress: () => autoTls.secureAddress(),
+    });
+    const acmeChallenges = new AcmeChallenges();
+    const acmeOverrides = acmeTestOverrides();
+    const publicIp = async (): Promise<string | null> => acmeOverrides.publicIp || getPublicIp();
 
     // No deadline for a whole request: Node's default of 5 minutes cut large
     // uploads on slow links. An upload stops on inactivity or below a minimum
@@ -447,6 +459,7 @@ export class MonkyServer {
     // because Node derives it from requestTimeout and would turn it off as well (S-WS-11).
     const httpServer = http.createServer({ requestTimeout: 0, headersTimeout: 60_000 }, createHttpRequestListener([
       ...publicRoutes({ avatars: avatarStorage, preview: describePreview, inviteInfo: describeInvite }),
+      ...acmeChallenges.routes(),
       ...attachmentRoutes({
         attachments: attachmentService,
         storage: attachmentStorage,
@@ -456,6 +469,25 @@ export class MonkyServer {
       }),
     ]));
     resources.defer('HTTP listener', () => closeHttpServer(httpServer));
+    // Plain and TLS connections share the port (#860); it stops accepting before the HTTP side drains.
+    const listener = new DualProtocolListener(httpServer);
+    resources.defer('TLS listener', () => listener.close());
+    const tlsStore = new CertificateStore(config.dataDir);
+    const autoTls = new AutoTlsService({
+      store: tlsStore,
+      issuer: new LetsEncryptIssuer({
+        store: tlsStore,
+        challenges: acmeChallenges,
+        serverPort: config.port,
+        directoryOverride: acmeOverrides.directoryOverride,
+        validationPort: acmeOverrides.validationPort,
+      }),
+      publicIp,
+      install: (context) => listener.setSecureContext(context),
+      allowNonPublicAddress: !!acmeOverrides.directoryOverride,
+      grantPortPermission: allowValidationPort,
+    });
+    resources.defer('automatic TLS', () => autoTls.dispose());
 
     const coturnManager = new CoturnManager(config.dataDir);
     resources.defer('TURN relay', () => coturnManager.stop());
@@ -536,6 +568,7 @@ export class MonkyServer {
       audit: new ServerAuditService(serverRecord.id, new SqliteServerAuditRepository(db), rateLimiter),
       botStorageService: botStorage,
       trustedProxies: config.trustedProxies,
+      inviteInfo: describeInvite,
     });
     resources.defer('WebSocket server', () => wsServer.close(instance?.shutdownReason ?? 'stopped'));
 
@@ -545,6 +578,8 @@ export class MonkyServer {
       config,
       dbConn,
       httpServer,
+      listener,
+      autoTls,
       wsServer,
       avatarStorage,
       rateLimiter,
@@ -569,7 +604,7 @@ export class MonkyServer {
   }
 
   private async startListening(): Promise<void> {
-    await listenHttpServer(this.httpServer, this.config.port, '0.0.0.0');
+    await listenHttpServer(this.listener.listener, this.config.port, '0.0.0.0');
     if (this.stopping) throw new Error('Server startup was interrupted by shutdown');
     this.startedAt = Date.now();
     Logger.info('INFO', `Monky Server running on 0.0.0.0:${this.config.port}`);
@@ -581,6 +616,7 @@ export class MonkyServer {
       this.attachmentService.reconcile().catch((error) => Logger.warn('ATTACHMENT', 'Startup reconciliation failed', error)),
       this.startTurnIfEnabled(),
     );
+    this.autoTls.start();
     await this.lanBroadcaster.start()
       .catch((error) => Logger.warn('NETWORK', 'LAN discovery broadcast unavailable; continuing without it.', error));
     if (this.stopping) throw new Error('Server startup was interrupted by shutdown');
@@ -641,6 +677,23 @@ export class MonkyServer {
     });
   }
 
+  /** Automatic TLS of this server (#860), managed only by whoever hosts it: the desktop app or the CLI. */
+  public getAutoTlsStatus(): AutoTlsStatus {
+    return this.autoTls.status();
+  }
+
+  public enableAutoTls(options?: AutoTlsEnableOptions): Promise<AutoTlsStatus> {
+    return Logger.withScope(this.logScope, () => this.autoTls.enable(options));
+  }
+
+  public disableAutoTls(): Promise<AutoTlsStatus> {
+    return Logger.withScope(this.logScope, () => this.autoTls.disable());
+  }
+
+  public subscribeAutoTls(listener: (status: AutoTlsStatus) => void): () => void {
+    return this.autoTls.subscribe(listener);
+  }
+
   public getUpdateInventory(): ReturnType<typeof readUpdateInventory> {
     return readUpdateInventory(this.dbConn.getDb());
   }
@@ -685,7 +738,7 @@ export class MonkyServer {
     // Counts people rather than sockets: one person may hold several sessions
     // since a single identity can be connected from more than one device.
     const onlineUsers = listOnlineHumans(this.wsServer.getOnlineUsersMap().values()).length;
-    const address = this.httpServer.address();
+    const address = this.listener.address();
 
     return {
       serverName: serverRecord?.name ?? this.config.serverName ?? 'Monky Server',

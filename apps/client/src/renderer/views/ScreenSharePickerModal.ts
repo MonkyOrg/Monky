@@ -1,5 +1,5 @@
 import {
-  PUBLIC_AUDIENCE, SCREEN_SHARE_LIMITS, type DesktopSource, type NativeScreenCapabilities, type ResourceAudience,
+  PUBLIC_AUDIENCE, type DesktopSource, type NativeScreenCapabilities, type ResourceAudience,
 } from '@monky/shared';
 import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
@@ -22,6 +22,7 @@ import { nativeScreenProfile } from '../core/webrtc/NativeScreenController';
 import { GameCaptureGuideModal } from './GameCaptureGuideModal';
 import { ResourceAudiencePicker, type AudienceTexts } from './ResourceAudiencePicker';
 import { nextIndex } from '../utils/rovingFocus';
+import { confirmExtraScreen } from './screenShare/extraScreens';
 import {
   SOURCE_TABS, canCaptureNatively, captureKindOf, captureUnavailableMessage, hasUnownedAudio, isMacPlatform, planAudio,
   sourceMatchesTab, supportsCaptureKind, supportsTab, windowCaptureMethods,
@@ -65,8 +66,6 @@ export class ScreenSharePickerModal {
   private audience = this.createAudience(PUBLIC_AUDIENCE);
   private pickerCall: ScreenShareCall | null = null;
   private audioAttentionTimer: number | null = null;
-  /** The call in which adding screens past the comfortable amount was already confirmed. */
-  private extraScreensConfirmedFor: string | null = null;
 
   /** Who can watch, picked from the call's server; the call may end while the picker is open. */
   private createAudience(initial: ResourceAudience): ResourceAudiencePicker {
@@ -713,25 +712,6 @@ export class ScreenSharePickerModal {
   }
 
   /**
-   * Past SCREEN_SHARE_LIMITS.comfortable each screen costs another capture, encoder and upload, so adding one
-   * more asks first, once per call. Closing the picker dismisses the question.
-   */
-  private async confirmExtraScreen(limit: number): Promise<boolean> {
-    const count = voiceStore.screenShareIds.length;
-    const callKey = `${voiceStore.voiceSessionKey ?? ''}\n${voiceStore.currentVoiceChannelId ?? ''}`;
-    if (count < SCREEN_SHARE_LIMITS.comfortable || this.extraScreensConfirmedFor === callKey) return true;
-    const confirmed = await showConfirm({
-      title: t('screenShare.extraScreensTitle'),
-      message: t('screenShare.extraScreensMessage', { count: String(count), max: String(limit) }),
-      confirmLabel: t('screenShare.extraScreensConfirm'),
-      variant: 'warning',
-      signal: this.shell?.signal,
-    });
-    if (confirmed) this.extraScreensConfirmedFor = callKey;
-    return confirmed;
-  }
-
-  /**
    * Whole-screen audio replaces the applications' own audio, which it already contains (#253). Declining
    * keeps their audio and shares the screen silently.
    */
@@ -832,7 +812,7 @@ export class ScreenSharePickerModal {
         call,
         isOpen: () => this.shell === shell,
         isSelected: () => this.activeTab === tab && this.selectedSourceId === sourceId && this.captureKind() === captureKind,
-        confirmExtraScreen: () => this.confirmExtraScreen(limit),
+        confirmExtraScreen: () => confirmExtraScreen(limit, shell.signal),
         confirmAudioTakeover: shareIds => this.confirmAudioTakeover(shareIds),
         confirmMacSystemAudio: () => showConfirm({
           title: t('screenShare.macSystemAudioWarnTitle'),

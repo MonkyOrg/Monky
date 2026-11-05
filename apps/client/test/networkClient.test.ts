@@ -11,6 +11,7 @@ import { setForegroundContext, setSessionEventRouter } from '../src/renderer/cor
 import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 import { t } from '../src/renderer/i18n';
 import { connectionStore } from '../src/renderer/stores/connectionStore';
+import { setServerTransport } from '../src/renderer/utils/serverAddress';
 
 const identity = { clientId: 'fixture-client', publicKey: 'fixture-public-key' };
 const NONCE = 'ab'.repeat(32);
@@ -704,4 +705,33 @@ test('only an invitation naming the new key replaces a pinned one, and the serve
   forget();
   assert.equal(connectionStore.findSavedServer(address)?.serverKey, OTHER_KEY);
   assert.deepEqual(connectionStore.serverKeyExpectation(address), { pinned: OTHER_KEY, invited: undefined });
+});
+
+test('the web version refuses a plain server on another machine without opening a socket (#858)', async context => {
+  const f = fixture(context);
+  Object.assign(f.browser.api, { capabilities: { plainRemoteServers: false } });
+  const attempt = f.client.connect('192.168.0.10', 3000, identity, 'Fixture');
+  const opened = f.sockets.length;
+  f.sockets.at(-1)?.drop();
+  await assert.rejects(attempt, { message: t('network.webUnsupportedServer', { host: '192.168.0.10', port: 3000 }) });
+  assert.equal(opened, 0);
+  assert.equal(f.client.getStatus(), 'DISCONNECTED');
+});
+
+test('the web version still dials this machine and secure servers, and words a failed secure one (#858)', async context => {
+  const f = fixture(context);
+  Object.assign(f.browser.api, { capabilities: { plainRemoteServers: false } });
+  const secure = { host: 'chat.example', port: 443 };
+  setServerTransport(secure, true);
+  context.after(() => setServerTransport(secure, false));
+
+  const local = f.client.connect('localhost', 48731, identity, 'Fixture');
+  assert.equal(f.lastSocket().url, 'ws://localhost:48731');
+  f.lastSocket().drop();
+  await assert.rejects(local, { message: t('network.genericConnectError') });
+
+  const remote = f.client.connect(secure.host, secure.port, identity, 'Fixture');
+  assert.equal(f.lastSocket().url, 'wss://chat.example:443');
+  f.lastSocket().drop();
+  await assert.rejects(remote, { message: t('network.webSecureFailed', { host: 'chat.example', port: 443 }) });
 });

@@ -215,6 +215,37 @@ export function createServerInviteAppLink(invite: ServerInvite): string {
   return `${SERVER_INVITE_SCHEME}://#${inviteToken(invite)}`;
 }
 
+/**
+ * The web version of Monky (#858). It only reaches servers over TLS, so the
+ * invitation page offers it only for an invitation marked `tls`.
+ */
+// Both domains are confirmed by the first deploy of each Vercel project; this is the one place to change them.
+export const MONKY_WEB_APP_URL = 'https://monky.vercel.app/';
+
+/**
+ * Where the web version opens bot miniapps: a site of its own, so a miniapp
+ * never runs with the app's origin or under its CSP. With `{id}` in the host,
+ * each document gets its own subdomain, as each gets its own origin on the
+ * desktop; without it, each runs in an opaque, sandboxed origin.
+ */
+export const MONKY_MINIAPPS_URL = 'https://monky-miniapps.vercel.app/';
+
+/** The CSP source that admits every document of a miniapps site; `{id}` must be the first label of its host. */
+export function miniappsFrameSource(url: string): string {
+  if (!url.includes('{id}')) return new URL(url).origin;
+  if (!/^https?:\/\/\{id\}\.[^/{}]+\//.test(url)) throw new Error(`Unsupported miniapps URL: ${url}`);
+  const site = new URL(url.replace('{id}', 'x'));
+  return `${site.protocol}//*.${site.host.slice(2)}`;
+}
+/** The page of the miniapps site that receives a document from the app and shows it. */
+export const MINIAPP_LOADER_PAGE = 'frame.html';
+export const MINIAPP_LOADER_MESSAGES = { ready: 'monky-miniapp-loader', document: 'monky-miniapp-document' } as const;
+
+/** Opens the invitation in the web version, which reads it from the fragment as the app link does. */
+export function createServerInviteWebAppLink(invite: ServerInvite): string {
+  return `${MONKY_WEB_APP_URL}#${inviteToken(invite)}`;
+}
+
 function inflateBody(bytes: Uint8Array): Uint8Array {
   if (!bytes.length) throw new Error('Missing compressed invitation data');
   const chunks: Uint8Array[] = [];

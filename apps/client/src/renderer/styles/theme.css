@@ -15120,3 +15120,42 @@ button:hover .role-option-check:not(.checked) {
     transform: none;
   }
 }
+/* Automatic secure connection of a hosted server (#860). */
+.auto-tls-modal {
+  width: 92%;
+  max-width: 540px;
+}
+
+.auto-tls-intro {
+  margin: 0 0 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.auto-tls-busy {
+  margin: 0 0 12px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.auto-tls-details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 12px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+}
+
+.auto-tls-details dt {
+  color: var(--text-secondary);
+}
+
+.auto-tls-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

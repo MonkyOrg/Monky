@@ -8,6 +8,8 @@ import { escapeHtml } from '../utils/html';
 import { animateEnter, ownSurface, removeWithMotion } from '../utils/surfaceMotion';
 import { normalizeSearchString } from '../utils/search';
 import { scrollWithin, smoothScrollTo } from '../utils/scroll';
+import { platformSupports } from '../platform/capabilities';
+import { mediaFolderLabel, mediaSourceButton, picksMediaFolder } from '../platform/mediaFolders';
 
 type PickerTab = 'emojis' | 'stickers';
 
@@ -98,7 +100,8 @@ export class EmojiPicker {
   private glyphTask = 0;
 
   constructor(options: EmojiPickerOptions) {
-    this.options = options;
+    // Stickers come from a folder on this computer: without one, emojis only (#858).
+    this.options = platformSupports('mediaFolders') ? options : { ...options, emojiOnly: true };
   }
 
   public isOpen(): boolean {
@@ -547,9 +550,9 @@ export class EmojiPicker {
 
     if (!stickerService.hasFolder()) {
       body.innerHTML = this.renderEmptyState(
-        'folder_open',
-        t('emojiPicker.noFolderTitle'),
-        t('emojiPicker.noFolderDesc')
+        picksMediaFolder() ? 'folder_open' : 'add_photo_alternate',
+        t(picksMediaFolder() ? 'emojiPicker.noFolderTitle' : 'emojiPicker.emptyFolderTitle'),
+        t(picksMediaFolder() ? 'emojiPicker.noFolderDesc' : 'media.noStickersStoredDesc')
       );
       footer.innerHTML = this.renderFolderButton(t('emojiPicker.chooseFolder'));
       return;
@@ -566,7 +569,8 @@ export class EmojiPicker {
         ? this.renderEmptyState('hourglass_top', t('emojiPicker.loadingStickers'), '')
         : stickerService.didListingFail()
           ? this.renderEmptyState('folder_off', t('emojiPicker.folderUnavailableTitle'), t('emojiPicker.folderUnavailableDesc'))
-          : this.renderEmptyState('image_not_supported', t('emojiPicker.emptyFolderTitle'), t('emojiPicker.emptyFolderDesc'));
+          : this.renderEmptyState('image_not_supported', t('emojiPicker.emptyFolderTitle'),
+            t(picksMediaFolder() ? 'emojiPicker.emptyFolderDesc' : 'media.noStickersStoredDesc'));
     } else if (visible.length === 0) {
       body.innerHTML = this.renderEmptyState('search_off', t('emojiPicker.noResults'), '');
     } else {
@@ -578,7 +582,7 @@ export class EmojiPicker {
     }
 
     footer.innerHTML = `
-      <span class="emoji-picker-footer-info" title="${escapeHtml(settingsStore.stickersFolderPath)}">
+      <span class="emoji-picker-footer-info" title="${escapeHtml(mediaFolderLabel(settingsStore.stickersFolderPath))}">
         ${tCount('emojiPicker.stickersFound', all.length)}
       </span>
       <button type="button" class="btn btn-secondary emoji-picker-refresh-btn" title="${t('emojiPicker.refresh')}" aria-label="${t('emojiPicker.refresh')}">
@@ -635,10 +639,11 @@ export class EmojiPicker {
   }
 
   private renderFolderButton(label: string): string {
+    const source = mediaSourceButton('stickers', label);
     return `
       <button type="button" class="btn btn-secondary emoji-picker-folder-btn">
-        <span class="material-symbols-outlined md-14">folder_open</span>
-        ${label}
+        <span class="material-symbols-outlined md-14">${source.icon}</span>
+        ${source.label}
       </button>
     `;
   }

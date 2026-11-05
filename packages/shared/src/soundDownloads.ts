@@ -6,6 +6,27 @@ const timestamp = z.number().int().nonnegative().safe();
 const avatarUrl = z.string().max(2048).nullable().optional();
 
 export const SOUNDBOARD_AUDIO_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm'] as const;
+export type SoundboardAudioExtension = typeof SOUNDBOARD_AUDIO_EXTENSIONS[number];
+
+/** Accepted MIME types per sound extension; the first one is what a file of that extension is served as. */
+export const SOUND_AUDIO_MIME_TYPES: Readonly<Record<SoundboardAudioExtension, readonly [string, ...string[]]>> = {
+  '.mp3': ['audio/mpeg', 'audio/mp3'],
+  '.wav': ['audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave'],
+  '.ogg': ['audio/ogg', 'application/ogg'],
+  '.m4a': ['audio/mp4', 'audio/x-m4a', 'audio/m4a'],
+  '.aac': ['audio/aac', 'audio/aacp', 'audio/x-aac'],
+  '.webm': ['audio/webm'],
+};
+
+/** Lower-case extension of a file name including the dot, or '' when it has none. */
+export function fileNameExtension(fileName: string): string {
+  const dot = fileName.lastIndexOf('.');
+  return dot > 0 ? fileName.slice(dot).toLowerCase() : '';
+}
+
+export function isSoundboardAudioExtension(extension: string): extension is SoundboardAudioExtension {
+  return Object.hasOwn(SOUND_AUDIO_MIME_TYPES, extension);
+}
 
 export const soundDownloadUrlSchema = z.string().url().max(2048).refine((value) => {
   try {

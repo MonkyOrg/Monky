@@ -11,6 +11,7 @@ import { favoritesStore, soundFavoriteKey } from '../stores/favoritesStore';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
 import { t, tCount } from '../i18n';
+import { mediaFolderLabel, mediaSourceButton, picksMediaFolder } from '../platform/mediaFolders';
 import { showAlert, showConfirm, showConfirmWithText } from './Dialog';
 import { SoundboardPlayersBar } from './SoundboardPlayersBar';
 import { SoundboardEditor } from './SoundboardEditor';
@@ -26,6 +27,7 @@ import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } fr
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { bindSoundboardSettings, bindSoundboardVolumeSlider, renderSoundboardSettings } from './SoundboardSettings';
 import { reportError } from '../utils/feedback';
+import { lockedAttributes } from '../utils/desktopOnly';
 
 export class SoundboardModal {
   private modalEl: HTMLElement | null = null;
@@ -86,11 +88,10 @@ export class SoundboardModal {
           <!-- Folder select & Change -->
           <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
             <button id="sb-btn-change-folder" class="btn btn-secondary" style="font-size: 11px; padding: 4px 10px; height: 28px; white-space: nowrap;">
-              <span class="material-symbols-outlined md-14" style="margin-right: 4px;">folder_open</span>
-              ${settingsStore.soundboardFolderPath ? t('soundboard.changeFolder') : t('soundboard.chooseFolder')}
+              ${this.folderButtonContent()}
             </button>
-            <span id="sb-folder-path-label" style="font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(settingsStore.soundboardFolderPath || '')}">
-              ${settingsStore.soundboardFolderPath ? escapeHtml(settingsStore.soundboardFolderPath) : t('soundboard.noFolderSelected')}
+            <span id="sb-folder-path-label" style="font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(mediaFolderLabel(settingsStore.soundboardFolderPath || ''))}">
+              ${settingsStore.soundboardFolderPath ? escapeHtml(mediaFolderLabel(settingsStore.soundboardFolderPath)) : t('soundboard.noFolderSelected')}
             </span>
           </div>
 
@@ -220,16 +221,17 @@ export class SoundboardModal {
     }
 
     if (sounds.length === 0) {
+      const source = mediaSourceButton('soundboard', t('soundboard.changeFolderButton'));
       return `
         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 180px; text-align: center; color: var(--text-muted); gap: 12px;">
           <span class="material-symbols-outlined" style="font-size: 48px; color: var(--text-dim);">audio_file</span>
           <div>
             <div style="font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">${t('soundboard.noAudioFilesTitle')}</div>
-            <div style="font-size: 12px; max-width: 340px;">${t('soundboard.noAudioFilesDesc')}</div>
+            <div style="font-size: 12px; max-width: 340px;">${t(picksMediaFolder() ? 'soundboard.noAudioFilesDesc' : 'media.noSoundsStoredDesc')}</div>
           </div>
           <button type="button" id="sb-btn-select-folder-empty" class="btn btn-secondary" style="font-size: 12px; padding: 6px 14px;">
-            <span class="material-symbols-outlined md-16" style="margin-right: 6px;">folder_open</span>
-            ${t('soundboard.changeFolderButton')}
+            <span class="material-symbols-outlined md-16" style="margin-right: 6px;">${source.icon}</span>
+            ${source.label}
           </button>
         </div>
       `;
@@ -287,7 +289,7 @@ export class SoundboardModal {
                 <!-- Shortcut Badge or Add Shortcut Button -->
                 <div style="padding: 4px 6px 8px; display: flex; align-items: center; justify-content: center;">
                   ${shortcut && shortcut.display ? `
-                    <div class="sb-shortcut-badge" data-soundname="${escapeHtml(s.name)}" title="${t('soundboard.shortcutBadgeTitle', { combo: escapeHtml(shortcut.display) })}" style="display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; background: rgba(88, 101, 242, 0.15); border: 1px solid rgba(88, 101, 242, 0.4); border-radius: 4px; font-family: var(--font-mono); font-size: 10px; color: #ffffff; cursor: pointer; max-width: 100%;">
+                    <div class="sb-shortcut-badge" data-soundname="${escapeHtml(s.name)}"${lockedAttributes('globalShortcuts', 'soundboardShortcuts')} title="${t('soundboard.shortcutBadgeTitle', { combo: escapeHtml(shortcut.display) })}" style="display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; background: rgba(88, 101, 242, 0.15); border: 1px solid rgba(88, 101, 242, 0.4); border-radius: 4px; font-family: var(--font-mono); font-size: 10px; color: #ffffff; cursor: pointer; max-width: 100%;">
                       <span class="material-symbols-outlined" style="font-size: 11px; color: var(--accent-primary);">keyboard</span>
                       <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70px;">${escapeHtml(shortcut.display)}</span>
                       <button type="button" class="sb-btn-remove-shortcut" data-soundname="${escapeHtml(s.name)}" title="${t('soundboard.removeShortcut')}" style="background: none; border: none; color: var(--text-muted); cursor: pointer; display: inline-flex; align-items: center; padding: 0; margin-left: 2px;">
@@ -295,7 +297,7 @@ export class SoundboardModal {
                       </button>
                     </div>
                   ` : `
-                    <button type="button" class="sb-btn-add-shortcut" data-soundname="${escapeHtml(s.name)}" title="${t('soundboard.addShortcut')}" style="display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; background: transparent; border: 1px dashed var(--border-color); border-radius: 4px; font-size: 10px; color: var(--text-muted); cursor: pointer; transition: all 0.15s ease;">
+                    <button type="button" class="sb-btn-add-shortcut" data-soundname="${escapeHtml(s.name)}"${lockedAttributes('globalShortcuts', 'soundboardShortcuts')} title="${t('soundboard.addShortcut')}" style="display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; background: transparent; border: 1px dashed var(--border-color); border-radius: 4px; font-size: 10px; color: var(--text-muted); cursor: pointer; transition: all 0.15s ease;">
                       <span class="material-symbols-outlined" style="font-size: 11px;">keyboard</span>
                       <span>${t('soundboard.shortcut')}</span>
                     </button>
@@ -349,7 +351,7 @@ export class SoundboardModal {
                 <!-- Shortcut Badge or Add Shortcut Button -->
                 <div style="display: flex; align-items: center; flex-shrink: 0;">
                   ${shortcut && shortcut.display ? `
-                    <div class="sb-shortcut-badge" data-soundname="${escapeHtml(s.name)}" title="${t('soundboard.shortcutBadgeTitle', { combo: escapeHtml(shortcut.display) })}" style="display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; background: rgba(88, 101, 242, 0.15); border: 1px solid rgba(88, 101, 242, 0.4); border-radius: 4px; font-family: var(--font-mono); font-size: 10px; color: #ffffff; cursor: pointer;">
+                    <div class="sb-shortcut-badge" data-soundname="${escapeHtml(s.name)}"${lockedAttributes('globalShortcuts', 'soundboardShortcuts')} title="${t('soundboard.shortcutBadgeTitle', { combo: escapeHtml(shortcut.display) })}" style="display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; background: rgba(88, 101, 242, 0.15); border: 1px solid rgba(88, 101, 242, 0.4); border-radius: 4px; font-family: var(--font-mono); font-size: 10px; color: #ffffff; cursor: pointer;">
                       <span class="material-symbols-outlined" style="font-size: 11px; color: var(--accent-primary);">keyboard</span>
                       <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80px;">${escapeHtml(shortcut.display)}</span>
                       <button type="button" class="sb-btn-remove-shortcut" data-soundname="${escapeHtml(s.name)}" title="${t('soundboard.removeShortcut')}" style="background: none; border: none; color: var(--text-muted); cursor: pointer; display: inline-flex; align-items: center; padding: 0; margin-left: 2px;">
@@ -357,7 +359,7 @@ export class SoundboardModal {
                       </button>
                     </div>
                   ` : `
-                    <button type="button" class="sb-btn-add-shortcut" data-soundname="${escapeHtml(s.name)}" title="${t('soundboard.addShortcut')}" style="display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; background: transparent; border: 1px dashed var(--border-color); border-radius: 4px; font-size: 10px; color: var(--text-muted); cursor: pointer; transition: all 0.15s ease;">
+                    <button type="button" class="sb-btn-add-shortcut" data-soundname="${escapeHtml(s.name)}"${lockedAttributes('globalShortcuts', 'soundboardShortcuts')} title="${t('soundboard.addShortcut')}" style="display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; background: transparent; border: 1px dashed var(--border-color); border-radius: 4px; font-size: 10px; color: var(--text-muted); cursor: pointer; transition: all 0.15s ease;">
                       <span class="material-symbols-outlined" style="font-size: 11px;">keyboard</span>
                       <span>${t('soundboard.shortcut')}</span>
                     </button>
@@ -513,14 +515,18 @@ export class SoundboardModal {
     const folder = settingsStore.soundboardFolderPath;
     const label = this.modalEl?.querySelector<HTMLElement>('#sb-folder-path-label');
     if (label) {
-      label.textContent = folder || t('soundboard.noFolderSelected');
-      label.title = folder || '';
+      label.textContent = folder ? mediaFolderLabel(folder) : t('soundboard.noFolderSelected');
+      label.title = mediaFolderLabel(folder || '');
     }
     const button = this.modalEl?.querySelector<HTMLButtonElement>('#sb-btn-change-folder');
-    if (button) {
-      button.innerHTML = `<span class="material-symbols-outlined md-14" style="margin-right: 4px;">folder_open</span>
-        ${t(folder ? 'soundboard.changeFolder' : 'soundboard.chooseFolder')}`;
-    }
+    if (button) button.innerHTML = this.folderButtonContent();
+  }
+
+  private folderButtonContent(): string {
+    const source = mediaSourceButton('soundboard',
+      t(settingsStore.soundboardFolderPath ? 'soundboard.changeFolder' : 'soundboard.chooseFolder'));
+    return `<span class="material-symbols-outlined md-14" style="margin-right: 4px;">${source.icon}</span>
+        ${source.label}`;
   }
 
   private async changeFolder(trigger: HTMLButtonElement): Promise<void> {

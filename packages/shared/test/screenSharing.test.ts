@@ -4,7 +4,8 @@ import {
   getScreenShareProfile, getScreenShareQualities, getScreenH264ProfileLevelId, nativeScreenP2pControlSchema,
   nativeScreenSignalSchema, nativeScreenSourcesSchema, nativeScreenVideoProfileSchema,
   nativeScreenCommandSchema, nativeScreenPreviewPacketSchema, nativeScreenFailureReason,
-  getScreenAv1MinimumLevelIndex, SCREEN_SHARE_LIMITS, type NativeScreenFailure,
+  getScreenAv1MinimumLevelIndex, SCREEN_SHARE_LIMITS, BROWSER_SCREEN_CAPTURE_PREFIX, browserScreenCommandSchema,
+  type NativeScreenFailure,
 } from '../src/index.js';
 
 const video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 };
@@ -145,6 +146,18 @@ test('encoder IPC accepts bounded explicit choices, never arbitrary encoder IDs 
     assert.equal(nativeScreenCommandSchema.safeParse({ ...command, encodingStrategy: 'manual', encodingMode: undefined }).success, false);
     assert.equal(nativeScreenCommandSchema.safeParse({ ...command, encodingStrategy: 'invalid' }).success, false);
   }
+});
+
+test('web screen commands name only browser captures, which the desktop never accepts (#858)', () => {
+  const source = { action: 'source-add', callId: instanceId, shareId: 'screen', video, audio: false, audioBitrateKbps: 128 };
+  const capture = `${BROWSER_SCREEN_CAPTURE_PREFIX}${subscriptionId}`;
+  assert.equal(browserScreenCommandSchema.safeParse({ ...source, desktopSourceId: capture }).success, true);
+  assert.equal(nativeScreenCommandSchema.safeParse({ ...source, desktopSourceId: capture }).success, false);
+  for (const desktopSourceId of ['window:123:0', `native-monitor:${'a'.repeat(64)}`, 'browser-capture:', `${capture}x`])
+    assert.equal(browserScreenCommandSchema.safeParse({ ...source, desktopSourceId }).success, false);
+  // Every other command is the same contract on both platforms.
+  assert.equal(browserScreenCommandSchema.safeParse({ action: 'stats', callId: instanceId }).success, true);
+  assert.equal(browserScreenCommandSchema.safeParse({ ...source, desktopSourceId: capture, encodingStrategy: 'manual', codec: 'auto' }).success, false);
 });
 
 test('preview packet codec remains independent of geometry and missing codec retains legacy H264 metadata', () => {

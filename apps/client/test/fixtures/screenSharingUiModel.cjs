@@ -557,12 +557,13 @@ function fixture(language = 'en') {
   const allowed = new Set([
     'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
     'views/ScreenEncodingControls', 'core/screenEncoding', 'core/screenShareStart', 'views/screenShare/captureRules',
+    'views/screenShare/extraScreens',
     'views/ResourceAudiencePicker',
     'utils/feedback', 'utils/screenShareFailure', 'core/ClientLogService',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
     'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/locales/botStorage', 'i18n/messageSearch',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits', 'utils/avatar', 'utils/colors',
-    'utils/serverAddress', 'utils/rovingFocus',
+    'utils/serverAddress', 'utils/rovingFocus', 'platform/capabilities', 'utils/desktopOnly',
   ]);
   function load(name) {
     if (Object.hasOwn(stubs, name)) return stubs[name];
@@ -588,6 +589,7 @@ function fixture(language = 'en') {
       setTimeout, clearTimeout, console: { warn: (...value) => warnings.push(value), error: (...value) => warnings.push(value) },
       require(request) {
         if (request === '@monky/shared') return shared;
+        if (request.endsWith('.css')) return {};
         assert.ok(request.startsWith('.'), `Unexpected network/device dependency: ${request}`);
         let resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), request));
         if (resolved === 'i18n') resolved = 'i18n/index';

@@ -1,9 +1,10 @@
 import {
-  BOT_SCREEN_LIMITS, botScreenActionSchema, botScreenDocumentConsentSchema, type BotDeviceStorageStatus, type BotScreen, type BotScreenAction,
+  BOT_SCREEN_CSP, BOT_SCREEN_LIMITS, botScreenActionSchema, botScreenDocumentConsentSchema, type BotDeviceStorageStatus, type BotScreen, type BotScreenAction,
   type BotScreenBeforeCloseReason, type BotScreenBridge, type BotScreenCloseReason, type BotScreenDocumentConsent, type BotScreenJson,
   type BotStorageUsage,
 } from '@monky/shared';
 import type { SupportedLanguage } from '../i18n';
+import type { BotScreenDocumentHost } from '../platform/api';
 import { installMiniappVolume } from './botScreenVolume';
 import {
   MINIAPP_STORAGE_OBJECT_BYTES, installMiniappStorage, miniappStorageResult, readMiniappStorageRequest, storageStatusMessage,
@@ -14,15 +15,6 @@ export interface BotScreenViewer { id: string; nickname: string; locale: Support
 
 /** Storage on this computer as the open view sees it. */
 export interface BotScreenStorageState { status: BotDeviceStorageStatus; usage: BotStorageUsage | null }
-
-export const BOT_SCREEN_CSP = [
-  "default-src 'self' http: https: data: blob:",
-  "script-src 'self' http: https: data: blob: 'unsafe-inline' 'unsafe-eval'",
-  "style-src 'self' http: https: data: blob: 'unsafe-inline'",
-  "connect-src 'self' http: https: ws: wss: data: blob:",
-  "worker-src 'self' http: https: data: blob:",
-  "object-src 'none'", "base-uri 'self' http: https:", "form-action http: https:",
-].join('; ');
 
 interface FrameSeed {
   viewer: BotScreenViewer;
@@ -346,6 +338,9 @@ export class BotScreenFrame {
   private volume: number;
   private visible: boolean;
   private documentUrl: string | null = null;
+  private host!: BotScreenDocumentHost;
+  /** Loads of the page that receives the document, which come before the miniapp's own. */
+  private loaderLoads = 0;
   private storage: BotScreenStorageState = { status: 'unavailable', usage: null };
   private storageScopeId: string | null = null;
   private storageWindowStart = 0;
@@ -375,6 +370,8 @@ export class BotScreenFrame {
       frame.destroy();
     }
     BotScreenFrame.active.add(this);
+    this.host = window.api.botScreenDocuments;
+    this.loaderLoads = this.host.loaderLoads;
     this.snapshot = screen;
     this.locale = viewer.locale;
     this.volume = frameVolume(volume);
@@ -383,7 +380,8 @@ export class BotScreenFrame {
     this.element.className = 'bot-screen-frame';
     this.element.name = `monky-bot-screen-${crypto.randomUUID()}`;
     this.element.title = screen.title;
-    this.element.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-modals allow-pointer-lock allow-downloads allow-presentation');
+    // Without an origin of its own, the document must not share the site's: each frame gets an opaque one.
+    this.element.setAttribute('sandbox', `allow-scripts${this.host.isolation === 'origin' ? ' allow-same-origin' : ''} allow-forms allow-modals allow-pointer-lock allow-downloads allow-presentation`);
     this.element.setAttribute('referrerpolicy', 'no-referrer');
     this.element.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen *; autoplay *; encrypted-media *; gamepad *; usb 'none'; serial 'none'; hid 'none'");
     this.channel.port1.onmessage = this.onMessage;
@@ -541,6 +539,10 @@ export class BotScreenFrame {
   private onLoad = (): void => {
     // Navigation is allowed, but the new page cannot inherit the authenticated bridge.
     if (this.destroyed || !this.documentUrl) return;
+    if (this.loaderLoads > 0) {
+      this.loaderLoads--;
+      return;
+    }
     if (this.connected) {
       this.channel.port1.onmessage = null;
       this.channel.port1.close();
@@ -553,8 +555,10 @@ export class BotScreenFrame {
     }
     this.connected = true;
     // A document that navigated before its own load makes this the destination's load: only the
-    // miniapp's own origin may receive the port, so such a page is left without the bridge.
-    this.element.contentWindow?.postMessage('monky-screen-connect', new URL(this.documentUrl).origin, [this.channel.port2]);
+    // miniapp's own origin may receive the port, so such a page is left without the bridge. An
+    // opaque origin cannot be named; there, only a page the miniapp itself went to could receive it.
+    const target = this.host.isolation === 'origin' ? new URL(this.documentUrl).origin : '*';
+    this.element.contentWindow?.postMessage('monky-screen-connect', target, [this.channel.port2]);
     this.channel.port1.postMessage({ type: 'state', state: this.snapshot.state, revision: this.snapshot.revision } satisfies FrameUpdate);
     this.channel.port1.postMessage({ type: 'locale', locale: this.locale } satisfies FrameUpdate);
     // The document started with the volume of its creation; it may have changed while loading.

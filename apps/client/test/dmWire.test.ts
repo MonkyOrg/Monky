@@ -2,9 +2,8 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { test } from 'node:test';
 import { DM_MAX_ATTACHMENTS, DM_MAX_MESSAGE_LENGTH } from '@monky/shared';
-import { newDmId } from '../src/main/dm/dmCrypto';
-import { editedAtWins, messageFingerprint, type StoredMessage } from '../src/main/dm/dmModel';
-import { parseWireMessage, storedMessage, toWireMessage } from '../src/main/dm/dmWire';
+import { editedAtWins, messageFingerprint, newDmId, parseWireMessage, storedMessage, toWireMessage, type StoredMessage } from '@monky/dm';
+import '../src/main/dm/nodeDmBackend';
 
 function identityKey(): string {
   return generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).toString('hex');

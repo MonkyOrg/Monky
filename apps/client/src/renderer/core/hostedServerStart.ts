@@ -1,12 +1,14 @@
 import { connectionStore, type CreatedServer } from '../stores/connectionStore';
 import { t, getLanguage } from '../i18n';
 import { isLoopbackHost } from '../utils/serverAddress';
+import { platformSupports } from '../platform/capabilities';
 
 /** Starts in flight, per server: a second click joins the same start. */
 const pendingStarts = new Map<string, Promise<void>>();
 
 export function findOwnedServer(host: string, port: number): CreatedServer | undefined {
-  if (!isLoopbackHost(host)) return undefined;
+  // Where the app cannot host (the web version, #858), a created server is just a saved address.
+  if (!platformSupports('hostServer') || !isLoopbackHost(host)) return undefined;
   return connectionStore.createdServers.find(server => server.port === port);
 }
 

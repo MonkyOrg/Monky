@@ -13,6 +13,7 @@ import { populateCameraDeviceSelect } from '../CameraDeviceSelection';
 import { appEvents } from '../../../core/EventBus';
 import { renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
 import { reportError } from '../../../utils/feedback';
+import { lockedAttributes, lockedBadge } from '../../../utils/desktopOnly';
 
 export class VoiceVideoTab {
   private unbindVadMeter: (() => void) | null = null;
@@ -70,7 +71,7 @@ export class VoiceVideoTab {
         ${this.renderVolumeSlider('input', 'mic', settingsStore.inputVolume)}
       </div>
 
-      <!-- Input Mode Selector (#186) -->
+      <!-- Input Mode Selector (#186); push-to-talk needs the desktop (#858) -->
       <div data-settings-section="input-mode" data-settings-label="${escapeHtml(t('settings.inputMode'))}" class="form-group" style="margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">keyboard_voice</span>
@@ -81,8 +82,8 @@ export class VoiceVideoTab {
             <span class="input-mode-card-title"><span class="material-symbols-outlined md-18" aria-hidden="true">graphic_eq</span>${t('settings.inputModeVad')}</span>
             <span class="input-mode-card-description">${t('settings.inputModeVadDesc')}</span>
           </button>
-          <button type="button" class="voice-mode-card input-mode-card" id="mode-card-ptt" aria-pressed="${settingsStore.inputMode === 'push_to_talk'}">
-            <span class="input-mode-card-title"><span class="material-symbols-outlined md-18" aria-hidden="true">keyboard</span>${t('settings.inputModePtt')}</span>
+          <button type="button" class="voice-mode-card input-mode-card" id="mode-card-ptt" aria-pressed="${settingsStore.inputMode === 'push_to_talk'}"${lockedAttributes('globalShortcuts', 'pushToTalk')}>
+            <span class="input-mode-card-title"><span class="material-symbols-outlined md-18" aria-hidden="true">keyboard</span>${t('settings.inputModePtt')}${lockedBadge('globalShortcuts')}</span>
             <span class="input-mode-card-description">${t('settings.inputModePttDesc')}</span>
           </button>
         </div>
@@ -105,7 +106,7 @@ export class VoiceVideoTab {
       </div>
 
       <!-- PTT Configuration Container (#186) -->
-      <div id="container-ptt-settings" data-settings-section="push-to-talk" data-settings-label="${escapeHtml(t('settings.inputModePtt'))}" style="display: ${settingsStore.inputMode === 'push_to_talk' ? 'block' : 'none'}; margin-bottom: 14px;">
+      <div id="container-ptt-settings"${lockedAttributes('globalShortcuts', 'pushToTalk')} data-settings-section="push-to-talk" data-settings-label="${escapeHtml(t('settings.inputModePtt'))}" style="display: ${settingsStore.inputMode === 'push_to_talk' ? 'block' : 'none'}; margin-bottom: 14px;">
         ${renderPttIndicator()}
         <!-- Shortcut Key Card -->
         <div class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin-bottom: 10px;">

@@ -15,6 +15,7 @@ import { renderBotCommandContext } from '../botResponse';
 import { renderImageCarousel } from '../ImageCarousel';
 import { nativePollVoterProfile, renderNativePoll } from '../nativePoll';
 import type { ChatContext } from './chatContext';
+import { lockedAttributes } from '../../utils/desktopOnly';
 import {
   renderDeletedNotice,
   renderEditedBadge,
@@ -204,7 +205,7 @@ function renderStickers(stickers: AttachmentMeta[]): string {
   const items = stickers.map((a) => a.url ? html`
         <div class="chat-sticker-wrap">
           <img class="chat-sticker" src="${getAttachmentUrl(a.url)}" alt="${a.originalName}" title="${a.originalName}" loading="lazy">
-          <button type="button" class="chat-sticker-save" data-sticker-url="${a.url}" data-sticker-name="${a.originalName}" title="${t('chat.saveSticker')}" aria-label="${t('chat.saveSticker')}">
+          <button type="button" class="chat-sticker-save" data-sticker-url="${a.url}" data-sticker-name="${a.originalName}" title="${t('chat.saveSticker')}" aria-label="${t('chat.saveSticker')}"${trustedHtml(lockedAttributes('mediaFolders', 'mediaLibrary'))}>
             <span class="material-symbols-outlined md-14">bookmark_add</span>
           </button>
         </div>

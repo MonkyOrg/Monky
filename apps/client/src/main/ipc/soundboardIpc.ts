@@ -1,7 +1,7 @@
 import { app, dialog, type BrowserWindow } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
-import { AUDIO_PREVIEW_IPC, LIMITS, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, LIMITS, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, SOUND_AUDIO_MIME_TYPES, isSoundboardAudioExtension } from '@monky/shared';
 import { AudioPreviews } from '../audioPreviews';
 import { mt } from '../i18n';
 import type { LocalTools } from '../localExecution/LocalTools';
@@ -13,8 +13,6 @@ import { registerSoundboardFilesIpc } from '../soundboardFilesIpc';
 import type { MediaFolderConsent } from './mediaFoldersIpc';
 import { sendEvent, type IpcRegistry } from './registry';
 
-/** Extensões que a soundboard aceita, na listagem e na leitura de um som. */
-const SOUNDBOARD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']);
 const INVALID_REQUEST = { status: 'failed', reason: 'invalid_request' } as const;
 
 export interface SoundboardIpcDeps {
@@ -162,10 +160,8 @@ export function registerSoundboardIpc(registry: IpcRegistry, { window, folders, 
         return [];
       }
       const entries = await fs.promises.readdir(folderPath, { withFileTypes: true });
-      const validExts = SOUNDBOARD_EXTENSIONS;
-      
       const soundPromises = entries
-        .filter((entry) => entry.isFile() && validExts.has(path.extname(entry.name).toLowerCase()))
+        .filter((entry) => entry.isFile() && isSoundboardAudioExtension(path.extname(entry.name).toLowerCase()))
         .map(async (entry) => {
           const ext = path.extname(entry.name).toLowerCase();
           const fullPath = path.join(folderPath, entry.name);
@@ -196,7 +192,8 @@ export function registerSoundboardIpc(registry: IpcRegistry, { window, folders, 
     }
     // O caminho vem do renderer, então a extensão é conferida antes da leitura:
     // sem isso o canal devolvia o conteúdo de qualquer arquivo até 3 MB (#372).
-    if (!SOUNDBOARD_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (!isSoundboardAudioExtension(ext)) {
       return null;
     }
     // ...e o arquivo precisa estar numa pasta confirmada pelo diálogo do sistema (D4).
@@ -211,13 +208,7 @@ export function registerSoundboardIpc(registry: IpcRegistry, { window, folders, 
         throw new Error(mt('error.audioFileTooLarge'));
       }
       const buffer = await fs.promises.readFile(soundFile);
-      const ext = path.extname(filePath).toLowerCase();
-      let mime = 'audio/mpeg';
-      if (ext === '.wav') mime = 'audio/wav';
-      else if (ext === '.ogg') mime = 'audio/ogg';
-      else if (ext === '.m4a') mime = 'audio/mp4';
-      else if (ext === '.aac') mime = 'audio/aac';
-      else if (ext === '.webm') mime = 'audio/webm';
+      const mime = SOUND_AUDIO_MIME_TYPES[ext][0];
 
       return {
         fileName: path.basename(filePath),

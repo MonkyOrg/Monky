@@ -26,6 +26,8 @@ function runtime(name = 'Synthetic server') {
   return {
     starts: 0, stops: 0, cleared: 0,
     logListeners: new Set(),
+    tlsListeners: new Set(),
+    tlsStatus: { enabled: false, active: false, busy: false, ip: null, validUntil: null, nextRenewalAt: null, lastError: null },
     onStart: async () => {},
     onStop: async () => {},
     async start() { this.starts++; await this.onStart(); },
@@ -36,6 +38,12 @@ function runtime(name = 'Synthetic server') {
     getRecentLogs() { return [{ message: `recent from ${name}` }]; },
     clearLogs() { this.cleared++; },
     log(message) { for (const listener of this.logListeners) listener({ message }); },
+    getAutoTlsStatus() { return this.tlsStatus; },
+    subscribeAutoTls(listener) { this.tlsListeners.add(listener); return () => this.tlsListeners.delete(listener); },
+    tls(status) {
+      this.tlsStatus = { ...this.tlsStatus, ...status };
+      for (const listener of this.tlsListeners) listener(this.tlsStatus);
+    },
   };
 }
 
@@ -237,6 +245,27 @@ test('two servers run side by side, each with its own stats, logs and stop', asy
   assert.equal(second.stops, 1);
   assert.deepEqual(structuredClone(f.manager.getStatus()), stopped);
   assert.equal(first.logListeners.size + second.logListeners.size, 0);
+  assert.equal(first.tlsListeners.size + second.tlsListeners.size, 0, 'TLS listeners leave with the server');
+});
+
+test('a failed TLS renewal reaches the owner once per failure, tagged with its port (#860)', async () => {
+  const server = runtime('TLS');
+  const f = fixture(async () => server);
+  assert.equal((await f.manager.startServer(serverA)).success, true);
+  const problems = () => f.events.filter(event => event.channel === 'server-host:auto-tls-problem').map(event => event.args);
+  const failure = { code: 'unreachable', detail: 'port 80 closed', at: 1 };
+  server.tls({ enabled: true, active: true, busy: true });
+  server.tls({ busy: false });
+  assert.deepEqual(problems(), [], 'a renewal that works says nothing');
+  server.tls({ busy: false, lastError: failure });
+  server.tls({ busy: true });
+  server.tls({ busy: false });
+  assert.deepEqual(problems(), [[3000, failure]], 'the same failure is reported once');
+  server.tls({ lastError: { ...failure, at: 2 } });
+  assert.equal(problems().length, 2, 'a new failure is reported again');
+  server.tls({ enabled: false, lastError: { ...failure, at: 3 } });
+  assert.equal(problems().length, 2, 'nothing is reported once the owner turned it off');
+  await f.manager.stopAll();
 });
 
 test('stopAll tries every server even when one fails to stop', async () => {

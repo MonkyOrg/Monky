@@ -2,14 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { HttpGetError, httpGet } from './net/httpGet';
+import { sanitizeDownloadFileName } from '@monky/shared';
 
 const IDLE_TIMEOUT_MS = 30_000;
-
-export function sanitizeDownloadFileName(fileName: string): string {
-  const baseName = path.basename((fileName || '').trim()) || 'download';
-  const sanitized = baseName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
-  return sanitized || 'download';
-}
 
 /**
  * Name offered by the save dialog: the one the renderer knows, otherwise the

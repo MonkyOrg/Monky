@@ -1,7 +1,8 @@
 import type http from 'http';
+import type net from 'net';
 import { LIMITS } from '@monky/shared';
 
-export function listenHttpServer(server: http.Server, port: number, host: string): Promise<void> {
+export function listenHttpServer(server: net.Server, port: number, host: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const cleanup = () => {
       server.off('error', onError);

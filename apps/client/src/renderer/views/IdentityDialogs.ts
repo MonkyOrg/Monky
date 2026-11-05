@@ -11,6 +11,7 @@ import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBa
 import { isButtonLoading, setButtonLoading, withButtonLoading } from '../utils/buttonLoading';
 import { showConfirm } from './Dialog';
 import { acceptExportPassword, exportPasswordHint } from './exportPassword';
+import { lockedBlock } from '../utils/desktopOnly';
 
 export interface IdentityInfo {
   publicKey: string;
@@ -63,8 +64,10 @@ export async function showIdentityExportDialog(currentClientId: string): Promise
         <div style="font-size: 11px; color: var(--text-muted);">${escapeHtml(t('backup.includeLabel'))}</div>
         ${includeRow('identity-export-include-servers', t('backup.scopeServers'))}
         ${includeRow('identity-export-include-settings', t('backup.scopeSettings'))}
-        ${includeRow('identity-export-include-friends', t('backup.scopeFriends'), { checked: true })}
-        ${includeRow('identity-export-include-history', t('backup.scopeDmHistory'), { hint: t('backup.scopeDmHistoryHint') })}
+        ${lockedBlock('directMessages', 'directMessages', `<div style="display: grid; gap: 10px;">
+          ${includeRow('identity-export-include-friends', t('backup.scopeFriends'), { checked: true })}
+          ${includeRow('identity-export-include-history', t('backup.scopeDmHistory'), { hint: t('backup.scopeDmHistoryHint') })}
+        </div>`)}
       </div>
       <div style="display: flex; gap: 8px; margin-bottom: 14px;">
         <button type="button" id="btn-run-export-identity" class="btn btn-primary" style="flex: 1;">${escapeHtml(t('identity.exportAction'))}</button>

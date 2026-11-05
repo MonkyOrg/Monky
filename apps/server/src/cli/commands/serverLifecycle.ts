@@ -32,6 +32,7 @@ import { getCliLanguage, t } from '../i18n/index';
 import { prepareUpdateRestart } from '../../infrastructure/lifecycle/updateRestart';
 import { Logger } from '../../infrastructure/logger/Logger';
 import { updateTiming } from '../updateSafety';
+import { printAutoTlsProblem } from './tls';
 
 /**
  * Flags that only ever applied while the database was being created.
@@ -800,6 +801,7 @@ export async function statusServerCommand(globalArgs: GlobalArgs, args: string[]
     const target = await resolveTargetServer(globalArgs, t('action.check'));
     await printServerDetails(target);
     await printTurnStatusAsync(target.dataDir);
+    printAutoTlsProblem(target.dataDir);
     return;
   }
 
@@ -813,6 +815,7 @@ export async function statusServerCommand(globalArgs: GlobalArgs, args: string[]
   if (servers.length === 1) {
     await printServerDetails(servers[0]);
     await printTurnStatusAsync(servers[0].dataDir);
+    printAutoTlsProblem(servers[0].dataDir);
     return;
   }
 

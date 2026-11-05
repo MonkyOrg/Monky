@@ -32,6 +32,7 @@ import { appEvents } from '../core/EventBus';
 import { addServerModal } from './addServer/AddServerModal';
 import { folderSettingsModal } from './FolderSettingsModal';
 import { trustedProxiesModal } from './TrustedProxiesModal';
+import { autoTlsModal, describeAutoTlsError } from './AutoTlsModal';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter } from '../utils/surfaceMotion';
 import { markSessionRead } from '../core/readState';
@@ -110,6 +111,9 @@ export class ServerRailView {
     };
     window.api.onHostServerStatusChanged?.(apply);
     void window.api.hostServerStatus().then(apply, () => {});
+    window.api.onHostServerAutoTlsProblem?.((port, error) => {
+      reportError(t('autoTls.problem', { port, reason: describeAutoTlsError(error.code) }));
+    });
   }
 
   private static keyOf(host: string, port: number): string {
@@ -778,6 +782,12 @@ export class ServerRailView {
           label: t('trustedProxies.menu'),
           icon: 'lan',
           onClick: () => trustedProxiesModal.open(owned.id),
+        },
+        {
+          label: t('autoTls.menu'),
+          icon: 'lock',
+          disabled: !running,
+          onClick: () => { void autoTlsModal.open(owned.port); },
         },
         {
           label: t('connection.deleteSavedServer'),

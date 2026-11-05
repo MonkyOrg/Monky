@@ -15,7 +15,8 @@ import {
 import { createDmKeyring } from '../identityService';
 import { isRecord } from '../ipc/guards';
 import type { IpcRegistry } from '../ipc/registry';
-import { DmError, DmService, type DmExportData } from './dmService';
+import { DmService, dmResult, type DmExportData } from '@monky/dm';
+import { nodeDmFileStore, writeDmAttachmentFile } from './nodeDmBackend';
 
 let service: DmService | null = null;
 let eventSink: ((event: DmEvent) => void) | null = null;
@@ -40,7 +41,7 @@ function currentService(): DmService | null {
   try {
     service = new DmService({
       keyring,
-      dir: path.join(dmRoot(), folder),
+      store: nodeDmFileStore(path.join(dmRoot(), folder)),
       onEvent: (event) => eventSink?.(event),
     });
   } catch (error) {
@@ -95,18 +96,6 @@ export function importDirectMessages(data: unknown): void {
   }
 }
 
-function failure(error: unknown): DmFailure {
-  if (error instanceof DmError) {
-    return { code: error.code, message: error.message, details: error.details };
-  }
-  console.error('[DM] Operation failed.', error);
-  return {
-    code: 'unavailable',
-    message: error instanceof Error ? error.message : String(error),
-    details: {},
-  };
-}
-
 function text(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
@@ -120,7 +109,7 @@ function text(value: unknown): string {
 export async function writeDmAttachment(peer: string, messageId: string, fileId: string, destination: string): Promise<void> {
   const dm = currentService();
   if (!dm) throw new Error('Direct messages are unavailable: no identity is loaded.');
-  await dm.writeAttachmentTo(text(peer), text(messageId), text(fileId), text(destination));
+  await writeDmAttachmentFile(dm, text(peer), text(messageId), text(fileId), text(destination));
 }
 
 /** Runs `run` on the store of the current identity; errors travel as data because Electron drops custom error fields. */
@@ -129,11 +118,7 @@ async function withDm<T>(run: (dm: DmService) => T | Promise<T>): Promise<DmResu
   if (!dm) {
     return { ok: false, error: { code: 'unavailable', message: 'No identity', details: {} } };
   }
-  try {
-    return { ok: true, value: await run(dm) };
-  } catch (error) {
-    return { ok: false, error: failure(error) };
-  }
+  return dmResult(() => run(dm));
 }
 
 /** Friends and DMs answer only the main window; anyone else is told so as data, like every other DM failure. */

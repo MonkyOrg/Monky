@@ -4,6 +4,8 @@ import { appEvents } from '../../core/EventBus';
 import { getActiveNetworkClient } from '../../core/NetworkClient';
 import { getLanguage, t } from '../../i18n';
 import { translateProtocolError } from '../../i18n/protocolErrors';
+import { platformSupports } from '../../platform/capabilities';
+import { isDesktopOnly, showDesktopOnly } from '../../utils/desktopOnly';
 import { chatStore, getActiveChatStore } from '../../stores/chatStore';
 import { getActiveServerStore, serverStore } from '../../stores/serverStore';
 import { settingsStore } from '../../stores/settingsStore';
@@ -444,7 +446,13 @@ export class ChatCommands {
       getActiveChatStore() === store && client.getConnectionId() === connectionId &&
       !this.ctx.composer.messageEdit && selection === this.selection && client.getStatus() === 'CONNECTED' &&
       this.ctx.container.querySelector<MarkdownInput>('#chat-message-input')?.value === sourceText;
-    if (!window.api?.soundDownloadAvailability) {
+    // Saving a bot's sound is the desktop's (#858): a command the person chose offers the app.
+    if (isDesktopOnly('botSoundDownloads') && userGesture) {
+      this.close();
+      showDesktopOnly('botSounds');
+      return;
+    }
+    if (!platformSupports('botSoundDownloads') || !window.api?.soundDownloadAvailability) {
       this.showNotice(t('botChat.downloadDesktopOnly'));
       return;
     }

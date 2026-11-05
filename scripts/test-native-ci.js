@@ -748,11 +748,13 @@ test('release grants nothing by default: only the publishing job writes, and onl
     build: { contents: 'read', actions: 'read' },
     cli: { contents: 'read', actions: 'read' },
     release: { contents: 'write', 'id-token': 'write' },
+    web: { contents: 'read' },
+    miniapps: { contents: 'read' },
   }, 'Dependency install scripts and packagers run where the token can only read.');
-  // build signs the macOS app and release signs the checksums with Cosign's OIDC identity: both run
-  // in the environment that holds the signing secrets and admits only main.
+  // build signs the macOS app and release signs the checksums with Cosign's OIDC identity; web and
+  // miniapps deploy with the Vercel token. All run in the environment that holds those secrets and admits only main.
   assert.deepEqual(Object.entries(release.jobs).filter(([, job]) => job.environment).map(([id, job]) => [id, job.environment]),
-    [['build', 'release'], ['release', 'release']]);
+    [['build', 'release'], ['release', 'release'], ['web', 'release'], ['miniapps', 'release']]);
   for (const [id, job] of Object.entries(release.jobs)) {
     const secrets = [...JSON.stringify(job).matchAll(/secrets\.(\w+)/gu)].map(([, name]) => name)
       .filter(name => name !== 'GITHUB_TOKEN');

@@ -1,8 +1,7 @@
-import type http from 'http';
 import type { WebSocket } from 'ws';
 import {
   LIMITS, MessageType, Permission, ProtocolErrorCode, channelNameSchema, isAfkTimeoutSeconds, serverUpdateSettingsSchema,
-  type ServerMessage, type ServerSettingsUpdatedPayload, type ServerUpdateSettingsPayload, type VoiceModeTransition,
+  type ServerInviteInfoPayload, type ServerMessage, type ServerSettingsUpdatedPayload, type ServerUpdateSettingsPayload, type VoiceModeTransition,
 } from '@monky/shared';
 import type { AuthService } from '../../application/services/AuthService';
 import type { BotLocalExecutionService } from '../../application/services/BotLocalExecutionService';
@@ -12,7 +11,6 @@ import type { RecentSoundCacheService } from '../../application/services/RecentS
 import { auditRef } from '../../application/services/ServerAuditService';
 import { channelChanges, serverSettingsChanges } from '../../application/services/serverAuditChanges';
 import type { IServerRepository } from '../../domain/repositories';
-import { scanServerNetworkInterfaces } from '../discovery/ServerIpScanner';
 import { Logger } from '../logger/Logger';
 import { describeSfuPortProblem, type SfuManager } from '../sfu/SfuManager';
 import { checkSfuPreflight, formatSfuPreflightForLog } from '../sfu/SfuPreflight';
@@ -28,7 +26,7 @@ import { featureUnavailableCode, route, type Route } from './routing/MessageRout
 import type { VoiceSessionHandler } from './voice/VoiceSessionHandler';
 
 export interface ServerSettingsHost {
-  readonly httpServer: http.Server;
+  describeInvite(): Promise<ServerInviteInfoPayload>;
   readonly serverRepo: IServerRepository;
   readonly auth: AuthService;
   readonly coturn: CoturnManager;
@@ -423,19 +421,10 @@ export class ServerSettingsHandler {
 
   private async inviteInfo(session: ClientSession, requestId?: string): Promise<void> {
     try {
-      const server = await this.host.serverRepo.getServer();
-      const addr = this.host.httpServer.address();
-      const port = addr && typeof addr === 'object' ? addr.port : LIMITS.DEFAULT_PORT;
-      const networkInterfaces = await scanServerNetworkInterfaces();
-
       this.host.send(session.ws, {
         type: MessageType.SERVER_INVITE_INFO,
         requestId,
-        payload: {
-          port,
-          serverName: server?.name || 'Monky Server',
-          networkInterfaces,
-        },
+        payload: await this.host.describeInvite(),
       });
     } catch (error: unknown) {
       Logger.error('NETWORK', 'Error generating server invite info', error);

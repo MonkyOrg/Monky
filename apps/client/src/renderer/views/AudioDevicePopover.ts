@@ -12,6 +12,7 @@ import { smoothScrollIntoView } from '../utils/scroll';
 import { createTypeahead, focusItem, nextIndex } from '../utils/rovingFocus';
 import '../styles/mediaPopovers.css';
 import { reportError } from '../utils/feedback';
+import { isDesktopOnly, setDesktopOnly } from '../utils/desktopOnly';
 
 let nextId = 0;
 type PopoverKind = 'input' | 'output' | 'camera' | 'noise';
@@ -119,7 +120,12 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
           button.className = 'audio-input-mode-option';
           button.dataset.inputMode = mode;
           button.innerHTML = `<span class="material-symbols-outlined md-16" aria-hidden="true">${icon}</span><span></span><span class="material-symbols-outlined md-16 audio-input-mode-check" aria-hidden="true"></span>`;
-          button.children[1].textContent = t(key);
+          const label = button.children[1];
+          label.textContent = t(key);
+          // Push-to-talk needs the desktop (#858): offered there, locked here.
+          if (mode === 'push_to_talk' && isDesktopOnly('globalShortcuts') && label instanceof HTMLElement) {
+            setDesktopOnly(button, 'pushToTalk', label);
+          }
           modeOptions.append(button);
           inputModeButtons.push(button);
         }

@@ -1,5 +1,6 @@
 import { t, type TranslationKey } from '../../i18n';
-import { html, type SafeHtml } from '../../utils/html';
+import { html, trustedHtml, type SafeHtml } from '../../utils/html';
+import { desktopOnlyBadge } from '../../utils/desktopOnly';
 
 /** One entry of a settings sidebar: the app's settings and a server's settings declare theirs once, as a table. */
 export interface SettingsTabEntry {
@@ -8,6 +9,8 @@ export interface SettingsTabEntry {
   label: TranslationKey;
   /** A divider goes above it in the sidebar. */
   separated?: boolean;
+  /** Only the desktop app uses it (#858): still selectable, it shows its content read-only. */
+  desktopOnly?: boolean;
 }
 
 /** The icon and the name of a tab, for its sidebar button and for the title above its panel. */
@@ -20,7 +23,8 @@ export function renderSettingsTabButtons(tabs: readonly SettingsTabEntry[], acti
   return html`<div class="settings-sidebar-title">${t('connection.settingsTitle')}</div>
     ${tabs.map(tab => html`${tab.separated ? html`<div class="settings-sidebar-divider" role="separator"></div>` : null}
       <button type="button" class="settings-tab-btn${tab.id === active ? ' active' : ''}" data-tab="${tab.id}"
-        ${tab.id === active ? html`aria-current="page"` : null}>${renderSettingsTabLabel(tab)}</button>`)}`;
+        ${tab.id === active ? html`aria-current="page"` : null}${tab.desktopOnly ? html` data-tooltip="${t('desktopOnly.tooltip')}"` : null}>${
+          renderSettingsTabLabel(tab)}${tab.desktopOnly ? trustedHtml(desktopOnlyBadge()) : null}</button>`)}`;
 }
 
 /** Marks the tab shown now in the sidebar and returns its button. */

@@ -728,6 +728,24 @@ O range precisa estar aberto no firewall do servidor (Oracle Cloud, AWS Security
 
 ---
 
+## `monky tls`: conexão segura automática {#monky-tls}
+
+Faz o servidor aceitar também `wss://`, criptografado, usando um certificado gratuito da Let's Encrypt emitido **direto para o IP público**, sem domínio e sem proxy reverso. É o que permite entrar no servidor pela versão web do Monky. O `ws://` continua funcionando para quem já usa.
+
+```bash
+monky tls            # mostra o estado: válido até, próxima renovação, último erro
+monky tls enable     # confere a porta 80 e ativa
+monky tls disable    # volta a aceitar só ws://
+```
+
+- **Requisitos:** IP público e a porta **80/TCP** aberta para a internet, além da porta do servidor. A Let's Encrypt valida o IP acessando a porta 80, que o Monky abre só durante a validação.
+- **Pré-checagem:** antes de ativar, o Monky pede um certificado de teste ao ambiente de *staging* da Let's Encrypt. Se a porta 80 não estiver acessível, a ativação é recusada com o motivo.
+- **Linux sem root:** o sistema não deixa um usuário comum abrir a porta 80. O `monky tls enable` oferece liberar isso com `sudo` (grava `net.ipv4.ip_unprivileged_port_start=80` em `/etc/sysctl.d/60-monky-tls.conf`). Sem `sudo` sem senha, ele mostra o comando para você rodar uma vez.
+- **Renovação:** o certificado vale cerca de 6 dias e é renovado sozinho 2 dias antes de vencer, sem derrubar ninguém. Se o IP mudar, um certificado novo é emitido. Se a renovação falhar, o servidor continua aceitando `ws://`, avisa em `monky status` e tenta de novo.
+- **Não funciona** com VPN (Radmin, Hamachi, ZeroTier, Tailscale), CGNAT ou só rede local: nesses casos o app desktop continua conectando por `ws://`.
+- A mudança vale a partir do próximo `monky start` ou `monky restart`; com o servidor no ar, o comando oferece reiniciar.
+
+---
 ## `monky update`
 
 Atualiza o Monky para a última versão publicada.

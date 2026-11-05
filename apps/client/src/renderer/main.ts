@@ -1,5 +1,7 @@
 // First import: marks when the bundle starts running.
 import { markStartup, startupTimings } from './core/startupTiming';
+import './platform/install';
+import { platformSupports } from './platform/capabilities';
 import { MessageType, Permission, type AppIdentityStatus, type AuthSuccessPayload } from '@monky/shared';
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
@@ -47,6 +49,7 @@ import { bindBotVoiceCommandEvents } from './core/botVoiceCommandEvents';
 import { selectEnhancer } from './core/SelectEnhancer';
 import { dateTimeControls } from './core/DateTimeControls';
 import { initTooltips } from './core/TooltipService';
+import { installDesktopOnlyGate } from './utils/desktopOnly';
 import { bindCameraPublication } from './core/CameraPublication';
 import { AutoEntryService } from './core/AutoEntryService';
 import { runFatalBootstrap } from './utils/fatalBootstrap';
@@ -125,6 +128,7 @@ class App {
     this.appContainer = document.getElementById('app')!;
     installImageFallback();
     const disposeTooltips = initTooltips();
+  installDesktopOnlyGate();
     selectEnhancer.init();
     dateTimeControls.init();
     window.addEventListener('pagehide', () => {
@@ -282,7 +286,7 @@ class App {
     // Start checking for app updates (non-blocking)
     if (developmentQa) void startDevelopmentQa(developmentQa);
     else {
-      updateService.init();
+      if (platformSupports('autoUpdate')) updateService.init();
       void invitations.then(received => {
         if (received || this.disposed) return;
         // First Home: show the guide; automatic entry waits until it is done.
@@ -380,6 +384,11 @@ class App {
 
   private setupTitleBar(): void {
     const titlebar = document.getElementById('titlebar');
+    // A browser tab has its own frame: the app's title bar would be a second one.
+    if (!platformSupports('windowControls')) {
+      titlebar?.remove();
+      return;
+    }
     if (window.api?.platform === 'darwin') {
       titlebar?.classList.add('titlebar--mac');
     }
@@ -452,11 +461,17 @@ class App {
 
     // ── Bot infrastructure (#569) ────────────────────────────────────────
     bindBotChatEvents();
-    bindBotScreenEvents();
+    // Bot screens are documents served by the desktop app (#858).
+    if (platformSupports('botScreens')) bindBotScreenEvents();
     bindBotVoiceCommandEvents();
 
     appEvents.on('modal.open_screenshare_picker', () => {
-      screenSharePickerModal.open();
+      // A browser chooses what to share in its own dialog (#858), loaded only by the web build.
+      if (import.meta.env.MODE === 'web' && platformSupports('browserScreenPicker')) {
+        void import('./views/screenShare/BrowserScreenSharePicker')
+          .then(({ browserScreenSharePicker }) => browserScreenSharePicker.open())
+          .catch((error: unknown) => reportError(t('screenShare.startFailed', { reason: '' }).trim(), { log: 'SCREEN_SHARE', error }));
+      } else screenSharePickerModal.open();
     });
   }
 

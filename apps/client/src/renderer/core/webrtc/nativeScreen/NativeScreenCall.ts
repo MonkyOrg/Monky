@@ -3,7 +3,7 @@ import {
   type NativeScreenCall as NativeScreenCallConfig, type NativeScreenCapabilities, type NativeScreenCommand,
   type NativeScreenCommandResult, type NativeScreenEvent, type NativeScreenSignalPayload,
 } from '@monky/shared';
-import type { ElectronApi } from '../../../../preload/api';
+import type { PlatformApi } from '../../../platform/api';
 import type { NetworkClient } from '../../NetworkClient';
 import type { ParticipantManager } from '../../ParticipantManager';
 import { appEvents } from '../../EventBus';
@@ -28,7 +28,7 @@ export interface Call {
   readonly config: NativeScreenCallConfig;
   readonly context: NativeScreenCallContext;
   readonly connectionId: string;
-  readonly api: ElectronApi;
+  readonly api: PlatformApi;
   readonly sources: Map<string, LocalSource>;
   readonly sourceTasks: Map<string, Promise<void>>;
   readonly presentations: Map<string, Presentation>;
@@ -82,7 +82,7 @@ export function warnRetirement(result: Extract<NativeScreenCommandResult, { kind
     { error: result.error, remoteAcknowledged: result.remoteAcknowledged });
 }
 
-function nativeScreenApi(): ElectronApi {
+function nativeScreenApi(): PlatformApi {
   if (typeof window === 'undefined' || !window.api?.nativeScreenCommand)
     throw new Error('The native screen IPC boundary is unavailable.');
   return window.api;
