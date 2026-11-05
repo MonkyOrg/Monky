@@ -318,6 +318,13 @@ export function initTooltips(doc: Document = document): () => void {
     refresh();
   }
 
+  // Scrolling moves the content under a resting pointer, so a pointer tooltip goes. A focused control moves
+  // with the content, and focusing it is often what scrolled it into view: its tooltip follows it instead.
+  function onScroll(): void {
+    if (keyboard && focusTarget && shown) refresh();
+    else dismiss();
+  }
+
   // A meter redrawn every frame or a busy chat elsewhere leaves the tooltip alone;
   // changes that can affect it are looked at once per frame, where reading layout
   // costs the least (R-SHELL-15).
@@ -341,7 +348,7 @@ export function initTooltips(doc: Document = document): () => void {
   doc.addEventListener('focusin', onFocusIn, true);
   doc.addEventListener('focusout', onFocusOut, true);
   doc.addEventListener('keydown', onKeyDown, true);
-  doc.addEventListener('scroll', dismiss, true);
+  doc.addEventListener('scroll', onScroll, true);
   doc.addEventListener('visibilitychange', onBlur);
   win.addEventListener('blur', onBlur);
   win.addEventListener('resize', dismiss);
@@ -362,7 +369,7 @@ export function initTooltips(doc: Document = document): () => void {
     doc.removeEventListener('focusin', onFocusIn, true);
     doc.removeEventListener('focusout', onFocusOut, true);
     doc.removeEventListener('keydown', onKeyDown, true);
-    doc.removeEventListener('scroll', dismiss, true);
+    doc.removeEventListener('scroll', onScroll, true);
     doc.removeEventListener('visibilitychange', onBlur);
     win.removeEventListener('blur', onBlur);
     win.removeEventListener('resize', dismiss);

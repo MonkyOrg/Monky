@@ -90,7 +90,10 @@ if (!process.versions.electron) {
       await frames();
     };
     const pointAt = async (selector) => evaluate(`(() => {
-      const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+      const element = document.querySelector(${JSON.stringify(selector)});
+      // A real user only clicks what is on screen; scroll it there so the click lands on it, not on what covers it.
+      element.scrollIntoView({ block: 'center', inline: 'center' });
+      const box = element.getBoundingClientRect();
       return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
     })()`);
     const click = async (selector) => {
@@ -217,6 +220,15 @@ if (!process.versions.electron) {
         await key('Tab');
         await check('document.activeElement?.id === "after"', 'Tab moves past the locked icon');
 
+        // Focusing a control below the fold scrolls it into view; its tooltip follows it instead of vanishing.
+        const steadyTooltip = 'document.querySelector(".monky-tooltip:not([hidden]):not([data-ui-closing])")?.textContent === window.qa.t("desktopOnly.tooltip")';
+        await evaluate('document.querySelector("#scroll-before").focus()');
+        await key('Tab');
+        await check('document.activeElement?.id === "scroll-locked" && document.querySelector("#scroller").scrollTop > 0',
+          'Tab scrolls the locked control into view');
+        for (let frame = 0; frame < 20; frame++) await frames();
+        await check(steadyTooltip, 'The focus tooltip survives the scroll that focusing caused');
+
         // Locked buttons do not react to the pointer: the look under it and while pressed is the resting one.
         for (const selector of ['#locked', '#locked-icon']) {
           browser.webContents.sendInputEvent({ type: 'mouseMove', x: 990, y: 790 });
@@ -256,12 +268,15 @@ if (!process.versions.electron) {
         await frames();
         await check(`${dialogs} === 0 && document.querySelector("#mode-card-ptt").getAttribute("aria-pressed") === "false"`,
           'A click on push-to-talk inside Settings does nothing');
+        browser.webContents.sendInputEvent({ type: 'mouseMove', x: 20, y: 20 });
+        await frames();
         await focusTooltipPreview(browser);
         await evaluate('document.querySelector("#mode-card-vad").focus()');
         await key('Tab');
         await check('document.activeElement?.id === "mode-card-ptt"', 'Tab reaches the locked push-to-talk card');
-        await waitFor('document.querySelector(".monky-tooltip:not([hidden])")?.textContent === window.qa.t("desktopOnly.tooltip")',
-          'Focusing push-to-talk shows the tooltip');
+        await waitFor(steadyTooltip, 'Focusing push-to-talk shows the tooltip');
+        for (let frame = 0; frame < 20; frame++) await frames();
+        await check(steadyTooltip, 'The push-to-talk tooltip stays while Settings scrolls it into view');
         for (const pressed of ['Enter', 'Space']) {
           await key(pressed);
           await frames();
@@ -320,7 +335,12 @@ async function setup(language) {
     ${desktopOnly.lockedPanel('globalShortcuts', 'globalShortcuts', `<button type="button" id="panel-button" class="btn btn-secondary">Record</button>
       <div>${renderSwitch({ id: 'panel-switch', label: 'Sound', checked: false })}</div><input id="locked-field" value="abc">`)}
     <button type="button" id="locked-icon" class="btn btn-icon"${desktopOnly.lockedAttributes('overlay', 'overlay')}><span class="material-symbols-outlined">picture_in_picture_alt</span></button>
-    <button type="button" id="after">after</button>`;
+    <button type="button" id="after">after</button>
+    <div id="scroller" style="height: 48px; overflow: auto;">
+      <button type="button" id="scroll-before">scroll before</button>
+      <div style="height: 240px;"></div>
+      <button type="button" id="scroll-locked"${desktopOnly.lockedAttributes('overlay', 'overlay')}>Overlay${desktopOnly.lockedBadge('overlay')}</button>
+    </div>`;
   // The desktop: the bridge has every capability, so nothing is touched.
   window.api = { capabilities: undefined };
   const desktop = markup();
