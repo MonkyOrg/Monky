@@ -214,8 +214,10 @@ for (const voiceMode of ['p2p', 'sfu']) {
     await alice.join(channelId);
     await bob.join(channelId);
     // The synthetic microphone plays a constant tone, so both sides see Alice speak.
+    // Without an action the change may already have happened: Alice speaks as
+    // soon as her own call starts, possibly before Bob's join returns.
     const speech = async (speaking, action) => {
-      const since = [alice.events.length, bob.events.length];
+      const since = action ? [alice.events.length, bob.events.length] : [0, 0];
       if (action) await action();
       await Promise.all([alice, bob].map((client, index) => client.wait(event => event.event === 'speaking' &&
         event.sessionId === auth.sessionId && event.speaking === speaking, since[index])));
