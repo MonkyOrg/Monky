@@ -194,6 +194,7 @@ if (!process.versions.electron) {
         await frames();
         await check(`${dialogs} === 0 && window.qa.panelRuns === 0 && !document.querySelector("#panel-switch").checked`,
           'A switch inside the locked panel neither toggles nor opens the offer');
+        await focusTooltipPreview(browser);
         await evaluate('document.querySelector("#panel-button").focus()');
         await key('Tab');
         await check('document.activeElement?.id === "panel-switch"', 'Tab moves through the locked panel');
@@ -255,6 +256,7 @@ if (!process.versions.electron) {
         await frames();
         await check(`${dialogs} === 0 && document.querySelector("#mode-card-ptt").getAttribute("aria-pressed") === "false"`,
           'A click on push-to-talk inside Settings does nothing');
+        await focusTooltipPreview(browser);
         await evaluate('document.querySelector("#mode-card-vad").focus()');
         await key('Tab');
         await check('document.activeElement?.id === "mode-card-ptt"', 'Tab reaches the locked push-to-talk card');
@@ -283,6 +285,7 @@ if (!process.versions.electron) {
         await click('#add-server-scan-lan');
         await frames();
         await check(`${dialogs} === 0`, 'Scanning the local network inside Add Server does nothing');
+        await focusTooltipPreview(browser);
         await evaluate('document.querySelector("#add-server-scan-lan").focus()');
         await key('Enter');
         await frames();
