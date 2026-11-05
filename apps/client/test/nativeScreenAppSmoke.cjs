@@ -264,14 +264,16 @@ async function freePort() {
 
 async function startLoopbackServer(instance, port) {
   assert.ok(instance.httpServer instanceof http.Server);
-  const listen = instance.httpServer.listen;
-  instance.httpServer.listen = function (requestedPort, host, ...args) {
+  // The port is owned by the TLS/plain listener in front of the HTTP server (#860).
+  const socketServer = instance.listener.listener;
+  const listen = socketServer.listen;
+  socketServer.listen = function (requestedPort, host, ...args) {
     assert.equal(requestedPort, port); assert.equal(host, '0.0.0.0');
     return Reflect.apply(listen, this, [port, '127.0.0.1', ...args]);
   };
   instance.lanBroadcaster.start = async () => {};
   await instance.start();
-  assert.equal(instance.httpServer.address().address, '127.0.0.1');
+  assert.equal(instance.listener.address().address, '127.0.0.1');
 }
 
 function mainFixture({ clientRoot, origin, ownerPid, clockFeedbackStall, fourK, cadenceDiagnostics, closeAppActive, observeSourceClosure,

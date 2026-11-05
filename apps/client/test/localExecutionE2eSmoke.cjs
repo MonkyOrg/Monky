@@ -2,7 +2,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const http = require('node:http');
 const dns = require('node:dns');
 const net = require('node:net');
 const { createHash, generateKeyPairSync } = require('node:crypto');
@@ -202,20 +201,9 @@ function startActor(config, rows) {
 async function startRealServer(root, mode) {
   const { MonkyServer } = require(path.join(repoRoot, 'apps', 'server', 'dist', 'server.js'));
   const { LanBroadcaster } = require(path.join(repoRoot, 'apps', 'server', 'dist', 'infrastructure', 'discovery', 'LanBroadcaster.js'));
-  const create = http.createServer;
   const announce = LanBroadcaster.prototype.start;
   let server;
   let listeners = 0;
-  http.createServer = (...args) => {
-    const listener = Reflect.apply(create, http, args);
-    const listen = listener.listen;
-    listener.listen = function(port, _host, ...rest) {
-      assert.equal(port, 0, 'A real server must not acquire a normal application port.');
-      listeners++;
-      return Reflect.apply(listen, this, [0, '127.0.0.1', ...rest]);
-    };
-    return listener;
-  };
   LanBroadcaster.prototype.start = async () => {
     throw new Error('LAN broadcasting is intentionally disabled in this loopback-only smoke.');
   };
@@ -225,15 +213,23 @@ async function startRealServer(root, mode) {
       serverName: 'Isolated local execution E2E', voiceMode: mode,
       initialVoiceChannel: 'Authored audio', initialTextChannel: 'Smoke commands',
     });
+    // The port is owned by the TLS/plain listener in front of the HTTP server (#860).
+    const socketServer = server.listener.listener;
+    const listen = socketServer.listen;
+    socketServer.listen = function(port, _host, ...rest) {
+      assert.equal(port, 0, 'A real server must not acquire a normal application port.');
+      listeners++;
+      return Reflect.apply(listen, this, [0, '127.0.0.1', ...rest]);
+    };
     await server.start();
     assert.equal(listeners, 1);
+    assert.equal(server.listener.address().address, '127.0.0.1');
     assert.ok((await server.getStats()).port > 0);
     return server;
   } catch (error) {
     if (server) await server.stop();
     throw error;
   } finally {
-    http.createServer = create;
     LanBroadcaster.prototype.start = announce;
   }
 }

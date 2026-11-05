@@ -711,6 +711,8 @@ jobs:
     if: needs.version.outputs.release == 'true'
     timeout-minutes: 20
     runs-on: ubuntu-latest
+    # Vercel's token is a release secret: only main deploys, like the other signing jobs.
+    environment: release
     permissions:
       contents: read
     env:
@@ -751,6 +753,8 @@ jobs:
     if: needs.version.outputs.release == 'true'
     timeout-minutes: 10
     runs-on: ubuntu-latest
+    # Vercel's token is a release secret: only main deploys, like the other signing jobs.
+    environment: release
     permissions:
       contents: read
     env:

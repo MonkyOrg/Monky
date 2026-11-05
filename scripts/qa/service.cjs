@@ -39,16 +39,18 @@ async function startServer() {
   try {
     // Same instance-scoped network seam as the existing real-server E2E actor:
     // no auth/database methods are replaced and no normal server defaults change.
+    // The port is owned by the TLS/plain listener in front of the HTTP server (#860).
     assert.ok(server.httpServer instanceof http.Server);
-    const listen = server.httpServer.listen;
-    server.httpServer.listen = function(requestedPort, host, ...args) {
+    const socketServer = server.listener.listener;
+    const listen = socketServer.listen;
+    socketServer.listen = function(requestedPort, host, ...args) {
       assert.equal(requestedPort, port);
       assert.equal(host, '0.0.0.0');
       return Reflect.apply(listen, this, [port, '127.0.0.1', ...args]);
     };
     server.lanBroadcaster.start = async () => {};
     await server.start();
-    assert.equal(server.httpServer.address().address, '127.0.0.1');
+    assert.equal(server.listener.address().address, '127.0.0.1');
     if (config.scenario === 'connected' && !config.smoke) {
       await new SqliteServerRepository(server.dbConn.getDb()).updateServer({
         recentSoundCacheEnabled: true,

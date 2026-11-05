@@ -105,8 +105,10 @@ async function startServer(root, text, password) {
     // throwaway channel takes it and is deleted before any capture.
     initialTextChannel: 'qa', initialVoiceChannel: text.voice,
   });
-  const listen = server.httpServer.listen;
-  server.httpServer.listen = function listenOnLoopback(requestedPort, host, ...args) {
+  // The port is owned by the TLS/plain listener in front of the HTTP server (#860).
+  const socketServer = server.listener.listener;
+  const listen = socketServer.listen;
+  socketServer.listen = function listenOnLoopback(requestedPort, host, ...args) {
     return Reflect.apply(listen, this, [port, '127.0.0.1', ...args]);
   };
   server.lanBroadcaster.start = async () => {};
