@@ -247,6 +247,22 @@ test('unsupported browser decoder starts no capture request, PC or SFU transport
   assert.equal(f.sent.length + f.rpc.length + f.peers.length + f.transports.length, 0);
 });
 
+for (const [arrived, reason] of [[400, 'unsupported'], [0, 'connection-failed']]) {
+  test(`a first frame that never comes with ${arrived} video packets received is ${reason} (#858)`, async t => {
+    // Firefox admits AV1 in its probe, receives the screen and decodes none of it: that is its decoder, not the network.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const f = fixture(t, { sourceCodec: 'av1', availableCodecs: [{ mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0' }] });
+    await f.open();
+    await f.turn();
+    f.peers[0].getStats = () => Promise.resolve(new Map([['inbound', {
+      type: 'inbound-rtp', kind: 'video', packetsReceived: arrived, framesDecoded: 0,
+    }]]));
+    t.mock.timers.tick(30000);
+    for (let i = 0; i < 5 && !f.states.length; i++) await tick();
+    assert.deepEqual(f.states, [reason]);
+  });
+}
+
 for (const [fps, level] of [[30, '0033'], [60, '0034'], [120, '003c']]) {
   test(`4K${fps} browser probe and receive extension agree on level ${level}`, async t => {
     const f = fixture(t, { sourceVideo: { width: 3840, height: 2160, fps, maxBitrateKbps: 80000 } });

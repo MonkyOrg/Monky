@@ -279,7 +279,7 @@ class Decoder final : public webrtc::VideoDecoder {
       if (sps) {
         Require(sps->width >= 4 && sps->width <= 3840 && sps->height >= 2 && sps->height <= 2160 &&
             !(sps->width & 1) && !(sps->height & 1) && sps->levelIdc <= mode_.level &&
-            sv::MatchesH264Profile(*sps, mode_.profile) && sv::IsBt709LimitedCompatible(*sps),
+            sv::DecodesAsH264Profile(*sps, mode_.profile) && sv::IsBt709LimitedCompatible(*sps),
             "ERR_RTC_MAC_DECODER_SPS");
         if (width_ != sps->width || height_ != sps->height) {
           Require(keyframe, "ERR_RTC_MAC_DECODER_RESIZE");

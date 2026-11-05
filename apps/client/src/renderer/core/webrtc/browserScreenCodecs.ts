@@ -43,17 +43,21 @@ export function av1ReceiveLevel(parameters: Readonly<Record<string, unknown>>, v
   return av1 !== null && av1.level < minimum ? minimum : null;
 }
 
-export async function supportsBrowserScreenCodec(
-  profile: Readonly<NativeScreenVideoProfile>, selected: ScreenCodec = 'h264',
-): Promise<boolean> {
-  // For AV1 the advertised level is only a default: the decoder probe below decides.
-  const main = RTCRtpReceiver.getCapabilities('video')?.codecs.some(codec =>
+/** Whether this browser's WebRTC receiver lists the codec of Monky screens at all: H.264 Main or AV1 profile 0. */
+export function browserReceivesScreenCodec(selected: ScreenCodec = 'h264'): boolean {
+  return RTCRtpReceiver.getCapabilities('video')?.codecs.some(codec =>
     selected === 'av1' ? codec.mimeType.toLowerCase() === 'video/av1'
       && av1Parameters(fmtpParameters(codec.sdpFmtpLine ?? ''))?.profile === 0
       : codec.mimeType.toLowerCase() === 'video/h264'
       && /(?:^|;)\s*profile-level-id=4d[0-9a-f]{4}(?:;|$)/i.test(codec.sdpFmtpLine ?? '')
-      && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(codec.sdpFmtpLine ?? ''));
-  if (!main || !navigator.mediaCapabilities?.decodingInfo) return false;
+      && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(codec.sdpFmtpLine ?? '')) ?? false;
+}
+
+export async function supportsBrowserScreenCodec(
+  profile: Readonly<NativeScreenVideoProfile>, selected: ScreenCodec = 'h264',
+): Promise<boolean> {
+  // For AV1 the advertised level is only a default: the decoder probe below decides.
+  if (!browserReceivesScreenCodec(selected) || !navigator.mediaCapabilities?.decodingInfo) return false;
   const capability = await navigator.mediaCapabilities.decodingInfo({
     type: 'webrtc',
     video: {

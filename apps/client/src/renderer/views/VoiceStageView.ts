@@ -14,6 +14,8 @@ import { settingsStore } from '../stores/settingsStore';
 import { voiceStore, VoiceStore } from '../stores/voiceStore';
 import { videoService } from '../core/VideoService';
 import { webRtcManager } from '../core/WebRtcManager';
+import { browserReceivesScreenCodec } from '../core/webrtc/browserScreenCodecs';
+import type { NativeScreenWatchState } from '../core/webrtc/NativeScreenController';
 import { getAvatarUrl } from '../utils/avatar';
 import { screenShareFailureMessage } from '../utils/screenShareFailure';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
@@ -1216,6 +1218,22 @@ export class VoiceStageView {
       && webRtcManager.getLocalScreenSourceWarning(shareId) !== 'hidden';
   }
 
+  /** Why a watched screen is unavailable, with the way out this platform and browser actually have. */
+  private screenFailureText(sessionId: string, shareId: string, state: NativeScreenWatchState): string {
+    const failure = t(`screenShare.nativeFailure.${state.reason ?? 'connection-failed'}`);
+    if (state.receiver === 'native') return `${failure} ${t('screenShare.nativeReceiverSettingsHint')}`;
+    if (state.reason !== 'unsupported') return failure;
+    // Choosing the native receiver exists only where the platform has one (the desktop).
+    if (platformSupports('nativeScreenAudio')) return `${failure} ${t('screenShare.chromiumReceiverSettingsHint')}`;
+    const codec = webRtcManager.getNativeScreenSource(sessionId, shareId)?.codec ?? 'h264';
+    // The publisher can help only a browser that receives H.264, by switching another codec to it.
+    if (codec !== 'h264' && browserReceivesScreenCodec('h264')) return `${failure} ${t('screenShare.browserReceiverHint')}`;
+    // Without the share's codec, or with nothing to switch to (Firefox and Safari have no H.264 Main receiver).
+    if (!browserReceivesScreenCodec(codec) || !browserReceivesScreenCodec('h264'))
+      return t('screenShare.browserCannotReceive', { codec: codec === 'av1' ? 'AV1' : 'H.264' });
+    return failure;
+  }
+
   private refreshNativeScreenState(): void {
     for (const card of this.container.querySelectorAll<HTMLElement>('[data-kind="screen"][data-session-id]')) {
       const sessionId = card.dataset.sessionId;
@@ -1291,11 +1309,7 @@ export class VoiceStageView {
       error.className = 'stage-native-error';
       error.setAttribute('role', 'alert');
       const text = document.createElement('span');
-      text.textContent = t(`screenShare.nativeFailure.${state.reason ?? 'connection-failed'}`);
-      if (state.receiver === 'native') text.textContent += ` ${t('screenShare.nativeReceiverSettingsHint')}`;
-      // Choosing the native receiver exists only where the platform has one (the desktop).
-      else if (state.reason === 'unsupported') text.textContent += ` ${t(platformSupports('nativeScreenAudio')
-        ? 'screenShare.chromiumReceiverSettingsHint' : 'screenShare.browserReceiverHint')}`;
+      text.textContent = this.screenFailureText(sessionId, shareId, state);
       const retry = document.createElement('button');
       retry.type = 'button';
       retry.className = 'btn btn-secondary';

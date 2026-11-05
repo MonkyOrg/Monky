@@ -155,6 +155,11 @@ bool MatchesH264Profile(const H264Sps& sps, H264Profile profile) {
   return false;
 }
 
+bool DecodesAsH264Profile(const H264Sps& sps, H264Profile negotiated) {
+  return MatchesH264Profile(sps, negotiated) ||
+      (negotiated == H264Profile::Main && MatchesH264Profile(sps, H264Profile::ConstrainedBaseline));
+}
+
 H264Sps ParseH264Sps(std::span<const std::uint8_t> nal) {
   if (Type(nal) != 7 || nal.size() > maxParameterBytes) throw std::runtime_error("Invalid SPS");
   Bits bits(nal);

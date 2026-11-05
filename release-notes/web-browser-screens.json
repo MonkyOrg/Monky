@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Telas transmitidas pelo navegador voltam a abrir no app desktop. No Firefox e no Safari, compartilhar tela aparece travado com o motivo, e uma tela que o navegador não decodifica mostra uma mensagem clara. Miniapps que usam serviço sem HTTPS na web agora avisam.",
+  "en": "Screens shared from a browser open again in the desktop app. In Firefox and Safari, screen sharing shows as locked with the reason, and a screen the browser cannot decode shows a clear message. Miniapps using a service without HTTPS on the web now explain it."
+}

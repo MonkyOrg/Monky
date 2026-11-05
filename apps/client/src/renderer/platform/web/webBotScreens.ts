@@ -3,6 +3,8 @@ import {
   type BotScreenDocumentConsent,
 } from '@monky/shared';
 import type { BotScreenDocumentHost } from '../api';
+import { t } from '../../i18n';
+import { reportError } from '../../utils/feedback';
 
 /**
  * Bot miniapps on the web (#858). The app's own origin and CSP must never run a
@@ -15,6 +17,8 @@ interface PendingDocument {
   /** The loader's origin as seen in its messages: its own, or "null" when opaque. */
   origin: string;
   html: string | null;
+  /** Whether a plain http/ws service this miniapp was refused has been reported: once is enough. */
+  refused: boolean;
 }
 
 const MAX_DOCUMENTS = 2;
@@ -45,12 +49,30 @@ function isMiniappFrame(source: MessageEventSource): source is WindowProxy {
     .some((frame) => frame.contentWindow === source);
 }
 
+/** The origin of a plain http/ws service a miniapp was refused, or null for anything else. */
+function refusedService(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 256) return null;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'ws:') && url.origin === value ? url.origin : null;
+  } catch { return null; }
+}
+
 const deliver = (event: MessageEvent<unknown>): void => {
   const data = event.data;
   if (!event.source || typeof data !== 'object' || data === null || !('type' in data) || !('token' in data) ||
-      data.type !== MINIAPP_LOADER_MESSAGES.ready || typeof data.token !== 'string') return;
+      typeof data.token !== 'string') return;
   const entry = [...documents.values()].find((candidate) => candidate.token === data.token);
-  if (!entry || entry.html === null || event.origin !== entry.origin || !isMiniappFrame(event.source)) return;
+  if (!entry || event.origin !== entry.origin || !isMiniappFrame(event.source)) return;
+  if (data.type === MINIAPP_LOADER_MESSAGES.insecure) {
+    // A page served over HTTPS cannot reach plain services; the miniapp only shows its own generic failure.
+    const service = refusedService('origin' in data ? data.origin : null);
+    if (!service || entry.refused) return;
+    entry.refused = true;
+    reportError(t('botScreen.webInsecureService', { service }));
+    return;
+  }
+  if (data.type !== MINIAPP_LOADER_MESSAGES.ready || entry.html === null) return;
   const html = entry.html;
   // Once: a page the miniapp navigates to later cannot ask for it again.
   entry.html = null;
@@ -68,7 +90,7 @@ export function createWebBotScreenDocument(html: string, consent: BotScreenDocum
   if (documents.size >= MAX_DOCUMENTS) return Promise.reject(new Error('Close another miniapp before opening this one.'));
   const token = crypto.randomUUID();
   const { url, origin } = documentUrl(token);
-  documents.set(url, { token, origin, html });
+  documents.set(url, { token, origin, html, refused: false });
   if (!listening) {
     listening = true;
     window.addEventListener('message', deliver);

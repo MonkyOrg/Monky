@@ -21,7 +21,7 @@ import { createWebMediaLibrary, supportsDirectoryPicker } from './webMediaLibrar
 import { createWebBotScreenDocument, removeWebBotScreenDocument, webBotScreenDocumentHost } from './webBotScreens';
 import { createEventCalendar } from '../../utils/eventCalendar';
 import { clearWebLogs, exportWebLogs, getWebLogConfig, getWebLogSize, setWebLogConfig, writeWebLog } from './webClientLog';
-import { WebScreenRuntime } from './webScreen/webScreenRuntime';
+import { WebScreenRuntime, webScreenCapabilities } from './webScreen/webScreenRuntime';
 
 /**
  * The platform bridge of the web version (#858). It answers the same contract
@@ -30,7 +30,7 @@ import { WebScreenRuntime } from './webScreen/webScreenRuntime';
  * Methods the app calls on its own (start-up, settings sync) answer the
  * neutral value instead: nothing to report, nothing registered.
  */
-function webCapabilities(): PlatformCapabilities {
+export function webCapabilities(): PlatformCapabilities {
   // Chrome and Edge offer an always-on-top window to a click; other browsers do not.
   const documentPictureInPicture = 'documentPictureInPicture' in window;
   return {
@@ -48,7 +48,7 @@ function webCapabilities(): PlatformCapabilities {
     autoUpdate: false,
     gamePresence: false,
     nativeScreenAudio: false,
-    screenShare: typeof navigator.mediaDevices?.getDisplayMedia === 'function',
+    screenShare: webScreenCapabilities().capture,
     browserScreenPicker: true,
     screenEncoderChoice: false,
     localExecution: false,
