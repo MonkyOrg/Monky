@@ -994,6 +994,7 @@ async function runSettingsNavigationSmoke() {
   const pickerOptions = { container: document.body, anchor, emojiOnly: true, floating: true, onSelectEmoji: emoji => selected.push(emoji) };
   const picker = new EmojiPicker(pickerOptions);
   let laterPicker = null;
+  let safariPicker = null;
   try {
     setReduced(false);
     await picker.open();
@@ -1056,9 +1057,26 @@ async function runSettingsNavigationSmoke() {
     const laterDrawn = catalogCells().filter(drawn).length;
     check(laterDrawn > 0 && laterDrawn < 300 && visibleCells().length > 0 && visibleCells().every(drawn),
       `Later pickers draw only the visible glyphs, within the opening click (${laterDrawn} drawn)`);
+    laterPicker.close();
+    const idleApis = { request: window.requestIdleCallback, cancel: window.cancelIdleCallback };
+    window.requestIdleCallback = undefined;
+    window.cancelIdleCallback = undefined;
+    try {
+      safariPicker = new EmojiPicker(pickerOptions);
+      await safariPicker.open();
+      pickerBody = document.querySelector('.emoji-picker:not([data-ui-closing]) .emoji-picker-body');
+      for (let attempt = 0; attempt < 400 && !catalogCells().every(drawn); attempt++) await wait(50);
+      check(catalogCells().length === catalogSize && catalogCells().every(drawn),
+        'Without requestIdleCallback (Safari) the picker still lists and draws every emoji');
+      safariPicker.close();
+    } finally {
+      window.requestIdleCallback = idleApis.request;
+      window.cancelIdleCallback = idleApis.cancel;
+    }
   } finally {
     picker.destroy();
     laterPicker?.destroy();
+    safariPicker?.destroy();
     anchor.remove();
   }
 

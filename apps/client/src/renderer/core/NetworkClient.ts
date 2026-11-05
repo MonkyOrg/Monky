@@ -29,8 +29,23 @@ import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
 import { settingsStore } from '../stores/settingsStore';
 import { connectionStore } from '../stores/connectionStore';
-import { isLoopbackHost, isSecureServer, normalizeHost, toWsUrl } from '../utils/serverAddress';
+import { isIpLiteralHost, isLoopbackHost, isSecureServer, normalizeHost, toWsUrl } from '../utils/serverAddress';
 import { platformSupports } from '../platform/capabilities';
+
+/**
+ * WebKit 26 (Safari and every iOS browser) leaves a WebSocket to an IP address
+ * stuck in CONNECTING without ever sending a TCP SYN, so the web build could
+ * not enter servers addressed by IP (#883). A second socket to the same URL,
+ * closed right away, releases the first one; being closed before connecting,
+ * it sends nothing to the server. Names resolved by DNS and loopback work.
+ * https://bugs.webkit.org/show_bug.cgi?id=308073
+ * https://developer.apple.com/forums/thread/817697
+ */
+function needsWebKitIpSocketNudge(host: string): boolean {
+  if (typeof navigator === 'undefined' || !isIpLiteralHost(host) || isLoopbackHost(host)) return false;
+  const userAgent = navigator.userAgent;
+  return /AppleWebKit\//.test(userAgent) && !/(Chrome|Chromium|Edg|OPR)\//.test(userAgent);
+}
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';
 
@@ -407,6 +422,7 @@ export class NetworkClient {
           return;
         }
         this.ws = new WebSocket(this.currentServerUrl);
+        if (needsWebKitIpSocketNudge(host)) new WebSocket(this.currentServerUrl).close();
       } catch (error) {
         fail(new Error(t('network.addressError', {
           url: this.currentServerUrl, error: error instanceof Error ? error.message : String(error),
