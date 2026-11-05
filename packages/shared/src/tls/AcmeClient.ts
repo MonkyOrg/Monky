@@ -1,6 +1,6 @@
 import { createHash, createPublicKey, sign, type KeyObject } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { AutoTlsFailure } from './AutoTlsService';
+import { AutoTlsFailure } from './errors';
 
 /**
  * A minimal ACME client (RFC 8555) for one job: a certificate for one IP
@@ -279,16 +279,24 @@ export class AcmeClient {
   private async request(url: string, init: RequestInit): Promise<AcmeResponse> {
     let response: Response;
     let text: string;
+    const controller = new AbortController();
+    const abort = (): void => controller.abort(this.options.signal.reason);
+    if (this.options.signal.aborted) abort();
+    this.options.signal.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(new Error('The ACME request timed out.')), 30_000);
     try {
       response = await fetch(url, {
         ...init,
         headers: { 'user-agent': 'Monky-ACME/1', ...init.headers },
-        signal: AbortSignal.any([this.options.signal, AbortSignal.timeout(30_000)]),
+        signal: controller.signal,
       });
       text = init.method === 'HEAD' ? '' : await response.text();
     } catch (error) {
       if (this.options.signal.aborted) throw error;
       throw new AutoTlsFailure('network', error instanceof Error ? error.message : String(error));
+    } finally {
+      clearTimeout(timer);
+      this.options.signal.removeEventListener('abort', abort);
     }
     const nonce = response.headers.get('replay-nonce');
     if (nonce) this.nonce = nonce;

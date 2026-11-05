@@ -520,6 +520,7 @@ export const en: CliTranslationMap = {
   'tls.checking': 'Asking Let\'s Encrypt for a test certificate to check that port {port} is reachable from the internet. This takes a few seconds...',
   'tls.askGrant': 'Linux does not let the server open port {port} without permission. Allow it now with sudo? (runs: {command})',
   'tls.enabledNow': 'Secure connection enabled. The server also accepts {address}.',
+  'tls.enabledReused': 'Secure connection enabled with the certificate already shared on this machine. The server also accepts {address}.',
   'tls.notEnabled': 'The secure connection was not enabled.',
   'tls.disabledNow': 'Secure connection disabled. The server accepts ws:// only.',
   'tls.restartNow': 'The server is running. Restart it now to apply the secure connection?',
@@ -534,5 +535,5 @@ export const en: CliTranslationMap = {
   'tls.error.rateLimited': 'Let\'s Encrypt asked to wait before issuing another certificate. Try again later.',
   'tls.error.rejected': 'Let\'s Encrypt refused the request. See the server logs for the reason.',
   'tls.error.network': 'Could not reach Let\'s Encrypt. Check the internet connection.',
-  'tls.error.storage': 'Could not save the certificate in the server\'s data folder.',
+  'tls.error.storage': 'Could not save the certificate in the shared certificate folder (~/.monky/tls or MONKY_TLS_DIR).',
 };

@@ -32,6 +32,8 @@ export type { BotDeviceStorageStatus, BotScreenStorage, BotScreenStorageEntry, B
 export * from './managedTools';
 export * from './localExecution/contracts';
 export { handleReachabilityProbe } from './reachability';
+export { createBotTls, AutoTlsFailure, sharedTlsDirectory } from './tls';
+export type { BotTls, BotTlsChange, BotTlsEnableOptions, BotTlsMaterial, BotTlsOptions, AutoTlsStatus, TlsLogger } from './tls';
 import {
   createReachabilityIdentity, runtimeBotIdentity, signBotAuthChallenge, type BotReachabilityIdentity,
 } from './reachability';

@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomBytes, sign, type KeyObject } from 'node:crypto';
 import {
   ipAddressBytes, objectIdentifier, octetString, sequence, set, smallInteger, tlv, bitString,
-} from '../infrastructure/tls/der';
+} from '@monky/shared/dist/tls/der';
 
 /** Test-only X.509 and DER helpers for automatic TLS (#860). */
 

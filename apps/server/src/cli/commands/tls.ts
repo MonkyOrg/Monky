@@ -1,9 +1,7 @@
 import { AUTO_TLS_LOW_PORT_COMMAND, AUTO_TLS_VALIDATION_PORT, type AutoTlsErrorCode, type AutoTlsStatus } from '@monky/shared';
+import { AcmeChallenges, AutoTlsFailure, AutoTlsService, LetsEncryptIssuer, acmeTestOverrides, allowValidationPort } from '@monky/shared/dist/tls';
 import { getPublicIp } from '../../infrastructure/discovery/ServerIpScanner';
-import { AcmeChallenges } from '../../infrastructure/tls/AcmeChallenges';
-import { AutoTlsFailure, AutoTlsService } from '../../infrastructure/tls/AutoTlsService';
-import { CertificateStore } from '../../infrastructure/tls/CertificateStore';
-import { LetsEncryptIssuer, acmeTestOverrides, allowValidationPort } from '../../infrastructure/tls/LetsEncryptIssuer';
+import { serverTlsStorage } from '../../infrastructure/tls/sharedTls';
 import { ANSI, color } from '../constants';
 import type { GlobalArgs } from '../context';
 import { formatDate } from '../formatters';
@@ -32,10 +30,13 @@ export function describeAutoTlsError(code: AutoTlsErrorCode): string {
 
 /** The service as the CLI runs it: issuing here, serving later in the server process. */
 function cliService(dataDir: string): AutoTlsService {
-  const store = new CertificateStore(dataDir);
+  const storage = serverTlsStorage(dataDir);
+  const store = storage.store;
   const overrides = acmeTestOverrides();
   return new AutoTlsService({
     store,
+    settings: storage.settings,
+    legacyDirectory: storage.legacyDirectory,
     // The server may be running on its own port; the CLI always answers on the validation port itself.
     issuer: new LetsEncryptIssuer({
       store, challenges: new AcmeChallenges(), serverPort: -1,
@@ -85,7 +86,7 @@ async function enable(dataDir: string): Promise<void> {
       if (!(await confirm(t('tls.askGrant', { port: AUTO_TLS_VALIDATION_PORT, command: AUTO_TLS_LOW_PORT_COMMAND }), true))) throw error;
       status = await service.enable({ grantPortPermission: true });
     }
-    console.log(color(t('tls.enabledNow', { address: `wss://${status.ip}` }), ANSI.green));
+    console.log(color(t(service.reusedSharedCertificate ? 'tls.enabledReused' : 'tls.enabledNow', { address: `wss://${status.ip}` }), ANSI.green));
     printStatus(status);
   } catch (error) {
     if (error instanceof AutoTlsFailure) throw new Error(`${t('tls.notEnabled')} ${describeAutoTlsError(error.code)}`);

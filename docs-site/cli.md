@@ -745,6 +745,36 @@ monky tls disable    # volta a aceitar só ws://
 - **Não funciona** com VPN (Radmin, Hamachi, ZeroTier, Tailscale), CGNAT ou só rede local: nesses casos o app desktop continua conectando por `ws://`.
 - A mudança vale a partir do próximo `monky start` ou `monky restart`; com o servidor no ar, o comando oferece reiniciar.
 
+### Certificado compartilhado entre servidor e bots
+
+O certificado fica numa pasta da **máquina**, `~/.monky/tls` (mude com a variável `MONKY_TLS_DIR`), e é usado por todos: o servidor e qualquer bot feito com o `@monky/bot-sdk`. Quem ativa o TLS primeiro emite o certificado; os demais, ao rodar `tls enable`, só reaproveitam o que já existe para o IP público da máquina, sem pedir outro à Let's Encrypt. Cada servidor ou bot ativa e desativa por conta própria; `tls disable` nunca apaga o certificado compartilhado.
+
+- **Renovação:** quem estiver com o TLS ativo renova, e um arquivo de trava (`renew.lock`) garante que só um processo renove por vez e só ele abra a porta 80. Os outros enxergam o arquivo renovado em até 1 minuto e trocam o certificado sem reiniciar.
+- **Migração:** se o servidor já tinha um certificado em `<dados>/tls/certificate.json`, ele é copiado para a pasta compartilhada na primeira vez.
+
+### Nos bots
+
+Todo bot do `@monky/bot-sdk` ganha o mesmo comando (troque `<bot>` pelo nome do comando do seu bot):
+
+```bash
+<bot> tls            # mostra o estado
+<bot> tls enable     # reaproveita o certificado compartilhado ou emite um novo
+<bot> tls disable    # este bot deixa de usar TLS
+```
+
+No código do bot:
+
+```js
+const https = require('node:https');
+const { createBotTls } = require('@monky/bot-sdk');
+
+const tls = createBotTls({ dataDir: process.env.MONKY_BOT_HOME });
+const material = tls.material(); // { cert, key } ou null se o TLS não estiver ativo
+const server = material ? https.createServer(material, handler) : http.createServer(handler);
+tls.onChange(({ material }) => material && server.setSecureContext?.(material));
+tls.start(); // renova e acompanha o arquivo compartilhado
+```
+
 ---
 ## `monky update`
 
