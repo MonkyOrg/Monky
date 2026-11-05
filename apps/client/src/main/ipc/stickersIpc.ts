@@ -1,28 +1,13 @@
 import { app, dialog, type BrowserWindow } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
+import { MAX_STICKERS_LISTED, MAX_STICKER_BYTES, stickerMimeType } from '@monky/shared';
 import { mt } from '../i18n';
 import type { MediaFolderConsent } from './mediaFoldersIpc';
 import type { IpcRegistry } from './registry';
 
 // Same shape as the soundboard folder feature: the user points at a folder on
 // their machine and we only ever read image files out of it.
-const STICKER_MIME_TYPES: Record<string, string> = {
-  '.png': 'image/png',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.apng': 'image/apng',
-  '.avif': 'image/avif',
-};
-// Animated GIFs and WebPs are routinely a few megabytes, so the ceiling has to
-// be generous enough not to quietly swallow a normal sticker. The server
-// accepts far more (LIMITS.MAX_ATTACHMENT_FILE_SIZE_DEFAULT is 50 MB); the
-// tighter bound here exists only because the renderer decodes these as base64
-// data URLs, which costs ~33% on top of the file size.
-const MAX_STICKER_BYTES = 8 * 1024 * 1024;
-const MAX_STICKERS_LISTED = 500;
 
 /** Chat stickers (#356): the folder they come from, listing and reading them, and saving one somebody sent. */
 export function registerStickersIpc(registry: IpcRegistry, window: BrowserWindow, folders: MediaFolderConsent): void {
@@ -90,22 +75,23 @@ export function registerStickersIpc(registry: IpcRegistry, window: BrowserWindow
       }
       const entries = await fs.promises.readdir(folderPath, { withFileTypes: true });
       const candidates = entries
-        .filter((entry) => entry.isFile() && STICKER_MIME_TYPES[path.extname(entry.name).toLowerCase()])
+        .filter((entry) => entry.isFile() && stickerMimeType(path.extname(entry.name).toLowerCase()))
         .slice(0, MAX_STICKERS_LISTED);
 
       const stickers = await Promise.all(
         candidates.map(async (entry) => {
           const ext = path.extname(entry.name).toLowerCase();
+          const mimeType = stickerMimeType(ext);
           const fullPath = path.join(folderPath, entry.name);
           const stat = await fs.promises.stat(fullPath).catch(() => null);
-          if (!stat) return null;
+          if (!stat || !mimeType) return null;
           return {
             name: path.basename(entry.name, ext),
             fileName: entry.name,
             filePath: fullPath,
             sizeBytes: stat.size,
             ext,
-            mimeType: STICKER_MIME_TYPES[ext],
+            mimeType,
             // Listed but flagged instead of dropped, so an oversized file is
             // visibly rejected rather than appearing to have been ignored.
             tooLarge: stat.size > MAX_STICKER_BYTES,
@@ -128,7 +114,7 @@ export function registerStickersIpc(registry: IpcRegistry, window: BrowserWindow
     }
     // Only ever hand image bytes back to the renderer, and only from a confirmed folder.
     const ext = path.extname(filePath).toLowerCase();
-    const mimeType = STICKER_MIME_TYPES[ext];
+    const mimeType = stickerMimeType(ext);
     if (!mimeType) return null;
     const stickerFile = await folders.resolveFile('stickers', filePath);
     if (!stickerFile) return null;
@@ -164,7 +150,7 @@ export function registerStickersIpc(registry: IpcRegistry, window: BrowserWindow
     // never be able to steer the write outside that folder.
     const safeName = path.basename(String(fileName ?? ''));
     const ext = path.extname(safeName).toLowerCase();
-    if (!safeName || !STICKER_MIME_TYPES[ext]) {
+    if (!safeName || !stickerMimeType(ext)) {
       return { ok: false, reason: 'bad-extension' as const };
     }
     if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > MAX_STICKER_BYTES) {

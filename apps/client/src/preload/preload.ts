@@ -11,10 +11,10 @@ import {
   nativeScreenEventSchema,
   type ConfiguredMediaFolders,
 } from '@monky/shared';
-import type { ElectronApi } from './api';
+import type { PlatformApi } from '../renderer/platform/api';
 import { invoke, send, subscribe } from './ipc';
 
-export type { BotStorageApi, ElectronApi } from './api';
+export type { BotStorageApi, PlatformApi } from '../renderer/platform/api';
 
 const preparedQa = process.argv.includes('--monky-prepared-qa');
 
@@ -85,7 +85,14 @@ window.addEventListener('beforeunload', () => {
   });
   nativePresentationErrors.clear();
 });
-const api: ElectronApi = {
+const api: PlatformApi = {
+  capabilities: {
+    windowControls: true, screenPictureInPicture: true, documentPictureInPicture: false, automaticPictureInPicture: true, hostServer: true, lanDiscovery: true, overlay: true, globalShortcuts: true, tray: true,
+    autoStart: true, autoUpdate: true, gamePresence: true, nativeScreenAudio: true, screenShare: true,
+    browserScreenPicker: false, screenEncoderChoice: true,
+    localExecution: true, botScreens: true, directMessages: true, mediaFolders: true, mediaFolderPicker: true, botSoundDownloads: true, folderDownloads: true,
+    durableIdentity: true, plainRemoteServers: true,
+  },
   nativeScreenCommand: command => {
     if (command?.action === 'watch') prepareNativeAudio();
     return invoke(NATIVE_SCREEN_IPC.invoke, command);
@@ -152,6 +159,7 @@ const api: ElectronApi = {
   openBackupFile: () => invoke('backup:open-file'),
   takeServerInvite: () => invoke(SERVER_INVITE_IPC.take),
   createBotScreenDocument: (html, consent) => invoke(BOT_SCREEN_DOCUMENT_IPC.create, html, consent),
+  botScreenDocuments: { isolation: 'origin', loaderLoads: 0 },
   removeBotScreenDocument: url => invoke(BOT_SCREEN_DOCUMENT_IPC.remove, url),
   botStorage: {
     documentState: url => invoke(BOT_STORAGE_IPC.documentState, url),
@@ -181,11 +189,16 @@ const api: ElectronApi = {
   cancelDesktopSourcePreviews: () => invoke(DESKTOP_SOURCES_IPC.cancelPreviews),
   prepareScreenShareWindow: sourceId => invoke('screen-share:prepare-window', sourceId),
   ensureScreenPermission: () => invoke('screen-share:ensure-permission'),
+  // The desktop lists sources in its own picker (`browserScreenPicker` is false): no browser dialog opens.
+  captureDisplay: () => Promise.resolve(null),
+  // Desktop sources are windows and screens of the system: nothing is held for them.
+  releaseScreenCapture: () => {},
   selectImageDialog: () => invoke('dialog:select-image'),
   selectImagesDialog: maxFiles => invoke('dialog:select-images', maxFiles),
   selectSoundFile: () => invoke('dialog:select-sound-file'),
   selectSoundboardFolder: () => invoke('dialog:select-soundboard-folder'),
   getDefaultSoundboardFolder: () => invoke(SOUND_DOWNLOAD_IPC.defaultFolder),
+  describeMediaFolder: folder => folder,
   // Only a direct user action (opening the soundboard or the stickers, Retry) may
   // raise Main's native confirmation of a folder not chosen on this computer (D4).
   listSoundboardSounds: folderPath => invoke('soundboard:list-sounds', folderPath, navigator.userActivation.isActive),
@@ -219,6 +232,7 @@ const api: ElectronApi = {
   onLocalExecutionTaskFailed: callback => subscribe(LOCAL_EXECUTION_TASK_FAILED, callback),
   onSoundDownloadProgress: callback => subscribe(SOUND_DOWNLOAD_PROGRESS, callback),
   selectStickersFolder: () => invoke('dialog:select-stickers-folder'),
+  getDefaultStickersFolder: () => Promise.resolve(null),
   listStickers: folderPath => invoke('stickers:list', folderPath, navigator.userActivation.isActive),
   readSticker: filePath => invoke('stickers:read', filePath),
   saveSticker: (folderPath, fileName, bytes) => invoke('stickers:save', folderPath, fileName, bytes),
@@ -322,6 +336,6 @@ performance.mark('monky:preload');
 
 declare global {
   interface Window {
-    api: ElectronApi;
+    api: PlatformApi;
   }
 }

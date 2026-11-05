@@ -1,34 +1,31 @@
 import path from 'node:path';
+import { SOUND_AUDIO_MIME_TYPES, isSoundboardAudioExtension } from '@monky/shared';
 
-const MIME_TYPES: Readonly<Record<string, readonly string[]>> = {
-  '.mp3': ['audio/mpeg', 'audio/mp3'],
-  '.wav': ['audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave'],
-  '.ogg': ['audio/ogg', 'application/ogg'],
-  '.m4a': ['audio/mp4', 'audio/x-m4a', 'audio/m4a'],
-  '.aac': ['audio/aac', 'audio/aacp', 'audio/x-aac'],
-  '.webm': ['audio/webm'],
-};
+function mimeTypesOf(fileName: string): readonly string[] | undefined {
+  const extension = path.extname(fileName).toLowerCase();
+  return isSoundboardAudioExtension(extension) ? SOUND_AUDIO_MIME_TYPES[extension] : undefined;
+}
 
 export function isSoundFileName(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 128 && Buffer.byteLength(value) <= 255 &&
     value === value.trim() && !value.startsWith('.') &&
     !/[<>:"/\\|?*\x00-\x1f\x7f]/.test(value) && !/[. ]$/.test(value) &&
     !/^(?:con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])(?:[. ]|$)/i.test(value) &&
-    value !== '.' && value !== '..' && !!MIME_TYPES[path.extname(value).toLowerCase()];
+    value !== '.' && value !== '..' && !!mimeTypesOf(value);
 }
 
 export function isSoundMime(fileName: string, contentType: string): boolean {
   const mime = contentType.split(';', 1)[0].trim().toLowerCase();
-  return MIME_TYPES[path.extname(fileName).toLowerCase()]?.includes(mime) ?? false;
+  return mimeTypesOf(fileName)?.includes(mime) ?? false;
 }
 
 export function soundMimeType(fileName: string): string | undefined {
-  return MIME_TYPES[path.extname(fileName).toLowerCase()]?.[0];
+  return mimeTypesOf(fileName)?.[0];
 }
 
 export function soundFileNameForMime(contentType: string): string | undefined {
   const mime = contentType.split(';', 1)[0].trim().toLowerCase();
-  const extension = Object.keys(MIME_TYPES).find((candidate) => MIME_TYPES[candidate].includes(mime));
+  const extension = Object.entries(SOUND_AUDIO_MIME_TYPES).find(([, types]) => types.includes(mime))?.[0];
   return extension ? `preview${extension}` : undefined;
 }
 

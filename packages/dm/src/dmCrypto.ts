@@ -1,16 +1,5 @@
-import {
-  createCipheriv,
-  createDecipheriv,
-  createHash,
-  createPrivateKey,
-  createPublicKey,
-  diffieHellman,
-  hkdfSync,
-  KeyObject,
-  randomBytes,
-  sign,
-  verify,
-} from 'crypto';
+import { dmCrypto, type DmGcmSealer } from './backend';
+import { concatBytes, equalBytes, fromBase64, fromHex, fromUtf8, toBase64, toHex, utf8 } from './bytes';
 
 /**
  * End-to-end crypto for friends and direct messages (#743).
@@ -24,17 +13,18 @@ import {
  * Envelopes use static-static ECDH -> HKDF -> AES-256-GCM with a random nonce;
  * the header (sender, recipient, id, type, time) is authenticated as AAD. The
  * relay server only ever sees the sealed string.
+ *
+ * The primitives come from the platform (`installDmCrypto`): the bytes are the
+ * same on the desktop and in the browser.
  */
 
-const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
-const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
-const X25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex');
-const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
+const ED25519_PKCS8_PREFIX = fromHex('302e020100300506032b657004220420');
+const ED25519_SPKI_PREFIX_HEX = '302a300506032b6570032100';
 
-const DM_KEY_SALT = Buffer.from('monky-dm-key-v1', 'utf8');
-const DM_KEY_INFO = Buffer.from('x25519', 'utf8');
-const STORE_KEY_SALT = Buffer.from('monky-dm-store-v1', 'utf8');
-const AEAD_INFO = Buffer.from('monky-dm-aead-v1', 'utf8');
+const DM_KEY_SALT = utf8('monky-dm-key-v1');
+const DM_KEY_INFO = utf8('x25519');
+const STORE_KEY_SALT = utf8('monky-dm-store-v1');
+const AEAD_INFO = utf8('monky-dm-aead-v1');
 const CERT_DOMAIN = 'monky-dm-cert-v1\n';
 const STATEMENT_DOMAIN = 'monky-dm-statement-v1\n';
 
@@ -105,43 +95,33 @@ export function isIdentityPublicKey(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   const normalized = normalizeIdentityKey(value);
   return (
-    normalized.length === ED25519_SPKI_PREFIX.length * 2 + 64 &&
+    normalized.length === ED25519_SPKI_PREFIX_HEX.length + 64 &&
     HEX.test(normalized) &&
-    normalized.startsWith(ED25519_SPKI_PREFIX.toString('hex'))
+    normalized.startsWith(ED25519_SPKI_PREFIX_HEX)
   );
 }
 
-function identityPublicKeyObject(identityPublicKeyHex: string): KeyObject {
+/** Raw Ed25519 key inside an identity public key (SPKI DER hex). */
+function identityRawKey(identityPublicKeyHex: string): Uint8Array {
   if (!isIdentityPublicKey(identityPublicKeyHex)) {
     throw new DmCryptoError('Chave de identidade inválida.');
   }
-  return createPublicKey({
-    key: Buffer.from(normalizeIdentityKey(identityPublicKeyHex), 'hex'),
-    format: 'der',
-    type: 'spki',
-  });
+  return fromHex(normalizeIdentityKey(identityPublicKeyHex).slice(ED25519_SPKI_PREFIX_HEX.length));
 }
 
-function dmPublicKeyObject(rawHex: string): KeyObject {
+function dmRawKey(rawHex: string): Uint8Array {
   if (typeof rawHex !== 'string' || rawHex.length !== 64 || !HEX.test(rawHex)) {
     throw new DmCryptoError('Chave de DM inválida.');
   }
-  return createPublicKey({
-    key: Buffer.concat([X25519_SPKI_PREFIX, Buffer.from(rawHex, 'hex')]),
-    format: 'der',
-    type: 'spki',
-  });
+  return fromHex(rawHex);
 }
 
-function certificateMessage(identityPublicKeyHex: string, dmKeyHex: string): Buffer {
-  return Buffer.from(`${CERT_DOMAIN}${normalizeIdentityKey(identityPublicKeyHex)}\n${dmKeyHex}`, 'utf8');
+function certificateMessage(identityPublicKeyHex: string, dmKeyHex: string): Uint8Array {
+  return utf8(`${CERT_DOMAIN}${normalizeIdentityKey(identityPublicKeyHex)}\n${dmKeyHex}`);
 }
 
-function statementMessage(identityPublicKeyHex: string, payload: unknown): Buffer {
-  return Buffer.from(
-    `${STATEMENT_DOMAIN}${normalizeIdentityKey(identityPublicKeyHex)}\n${canonicalJson(payload)}`,
-    'utf8'
-  );
+function statementMessage(identityPublicKeyHex: string, payload: unknown): Uint8Array {
+  return utf8(`${STATEMENT_DOMAIN}${normalizeIdentityKey(identityPublicKeyHex)}\n${canonicalJson(payload)}`);
 }
 
 export function verifyDmCertificate(identityPublicKeyHex: string, certificate: unknown): certificate is DmKeyCertificate {
@@ -153,11 +133,10 @@ export function verifyDmCertificate(identityPublicKeyHex: string, certificate: u
     if (cert.key.length !== 64 || !HEX.test(cert.key) || cert.sig.length !== 128 || !HEX.test(cert.sig)) {
       return false;
     }
-    return verify(
-      null,
+    return dmCrypto().ed25519Verify(
+      identityRawKey(identityPublicKeyHex),
       certificateMessage(identityPublicKeyHex, cert.key),
-      identityPublicKeyObject(identityPublicKeyHex),
-      Buffer.from(cert.sig, 'hex')
+      fromHex(cert.sig)
     );
   } catch {
     return false;
@@ -168,69 +147,73 @@ export function verifyDmCertificate(identityPublicKeyHex: string, certificate: u
 export function verifyDmStatement(identityPublicKeyHex: string, payload: unknown, signatureHex: unknown): boolean {
   try {
     if (typeof signatureHex !== 'string' || signatureHex.length !== 128 || !HEX.test(signatureHex)) return false;
-    return verify(
-      null,
+    return dmCrypto().ed25519Verify(
+      identityRawKey(identityPublicKeyHex),
       statementMessage(identityPublicKeyHex, payload),
-      identityPublicKeyObject(identityPublicKeyHex),
-      Buffer.from(signatureHex, 'hex')
+      fromHex(signatureHex)
     );
   } catch {
     return false;
   }
 }
 
-function extractEd25519Seed(privateKey: KeyObject, privateKeyDer: Buffer): Buffer {
+/** The 32-byte seed of an Ed25519 PKCS#8 key, the 48-byte form Node and WebCrypto both export. */
+function extractEd25519Seed(privateKeyDer: Uint8Array): Uint8Array {
   if (
     privateKeyDer.length === ED25519_PKCS8_PREFIX.length + 32 &&
-    privateKeyDer.subarray(0, ED25519_PKCS8_PREFIX.length).equals(ED25519_PKCS8_PREFIX)
+    equalBytes(privateKeyDer.subarray(0, ED25519_PKCS8_PREFIX.length), ED25519_PKCS8_PREFIX)
   ) {
-    return Buffer.from(privateKeyDer.subarray(ED25519_PKCS8_PREFIX.length));
+    return privateKeyDer.slice(ED25519_PKCS8_PREFIX.length);
   }
-  const jwk = privateKey.export({ format: 'jwk' });
-  if (jwk.crv !== 'Ed25519' || typeof jwk.d !== 'string') {
-    throw new DmCryptoError('A identidade não é uma chave Ed25519.');
-  }
-  return Buffer.from(jwk.d, 'base64url');
+  throw new DmCryptoError('A identidade não é uma chave Ed25519.');
 }
 
-function hkdf(input: Buffer, salt: Buffer, info: Buffer): Buffer {
-  return Buffer.from(hkdfSync('sha256', input, salt, info, 32));
+function hkdf(input: Uint8Array, salt: Uint8Array, info: Uint8Array): Uint8Array {
+  return dmCrypto().hkdf32(input, salt, info);
+}
+
+export function sha256Hex(data: Uint8Array | string): string {
+  return toHex(dmCrypto().sha256().update(typeof data === 'string' ? utf8(data) : data).digest());
+}
+
+/** SHA-256 fed piece by piece; text is hashed as UTF-8, as Node's `createHash` does. */
+export function createSha256(): { update(data: Uint8Array | string): ReturnType<typeof createSha256>; hex(): string } {
+  const hash = dmCrypto().sha256();
+  const hasher = {
+    update(data: Uint8Array | string) {
+      hash.update(typeof data === 'string' ? utf8(data) : data);
+      return hasher;
+    },
+    hex: () => toHex(hash.digest()),
+  };
+  return hasher;
 }
 
 export class DmKeyring {
   readonly identityPublicKey: string;
   readonly dmPublicKey: string;
-  private readonly identityPrivateKey: KeyObject;
-  private readonly dmPrivateKey: KeyObject;
-  private readonly storeKey: Buffer;
+  private readonly identitySeed: Uint8Array;
+  private readonly dmPrivateKey: Uint8Array;
+  private readonly storeKey: Uint8Array;
   private readonly cert: DmKeyCertificate;
-  private readonly sharedKeys = new Map<string, Buffer>();
+  private readonly sharedKeys = new Map<string, Uint8Array>();
 
   constructor(identityPublicKeyHex: string, identityPrivateKeyDerBase64: string) {
+    const crypto = dmCrypto();
     this.identityPublicKey = normalizeIdentityKey(identityPublicKeyHex);
-    const privateKeyDer = Buffer.from(identityPrivateKeyDerBase64, 'base64');
-    this.identityPrivateKey = createPrivateKey({ key: privateKeyDer, format: 'der', type: 'pkcs8' });
-    const derivedPublic = createPublicKey(this.identityPrivateKey)
-      .export({ format: 'der', type: 'spki' })
-      .toString('hex');
+    const seed = extractEd25519Seed(fromBase64(identityPrivateKeyDerBase64));
+    const derivedPublic = `${ED25519_SPKI_PREFIX_HEX}${toHex(crypto.ed25519PublicKey(seed))}`;
     if (derivedPublic !== this.identityPublicKey) {
       throw new DmCryptoError('A chave privada não corresponde à identidade.');
     }
-
-    const seed = extractEd25519Seed(this.identityPrivateKey, privateKeyDer);
-    const dmSeed = hkdf(seed, DM_KEY_SALT, DM_KEY_INFO);
-    this.dmPrivateKey = createPrivateKey({
-      key: Buffer.concat([X25519_PKCS8_PREFIX, dmSeed]),
-      format: 'der',
-      type: 'pkcs8',
-    });
-    const dmSpki = createPublicKey(this.dmPrivateKey).export({ format: 'der', type: 'spki' });
-    this.dmPublicKey = dmSpki.subarray(X25519_SPKI_PREFIX.length).toString('hex');
-    this.storeKey = hkdf(seed, STORE_KEY_SALT, Buffer.from(this.identityPublicKey, 'utf8'));
+    this.identitySeed = seed;
+    this.dmPrivateKey = hkdf(seed, DM_KEY_SALT, DM_KEY_INFO);
+    this.dmPublicKey = toHex(crypto.x25519PublicKey(this.dmPrivateKey));
+    this.storeKey = hkdf(seed, STORE_KEY_SALT, utf8(this.identityPublicKey));
     this.cert = {
       v: 1,
       key: this.dmPublicKey,
-      sig: sign(null, certificateMessage(this.identityPublicKey, this.dmPublicKey), this.identityPrivateKey).toString('hex'),
+      sig: toHex(crypto.ed25519Sign(seed, certificateMessage(this.identityPublicKey, this.dmPublicKey))),
     };
   }
 
@@ -239,15 +222,15 @@ export class DmKeyring {
   }
 
   /** Key that encrypts the local DM store at rest. Same on every device of the identity. */
-  storageKey(): Buffer {
-    return Buffer.from(this.storeKey);
+  storageKey(): Uint8Array {
+    return this.storeKey.slice();
   }
 
   signStatement(payload: unknown): string {
-    return sign(null, statementMessage(this.identityPublicKey, payload), this.identityPrivateKey).toString('hex');
+    return toHex(dmCrypto().ed25519Sign(this.identitySeed, statementMessage(this.identityPublicKey, payload)));
   }
 
-  private sharedKey(peerIdentity: string, peerCert: DmKeyCertificate): Buffer {
+  private sharedKey(peerIdentity: string, peerCert: DmKeyCertificate): Uint8Array {
     const peer = normalizeIdentityKey(peerIdentity);
     const cacheKey = `${peer}:${peerCert?.key}`;
     const cached = this.sharedKeys.get(cacheKey);
@@ -255,12 +238,11 @@ export class DmKeyring {
     if (!verifyDmCertificate(peer, peerCert)) {
       throw new DmCryptoError('Certificado de DM inválido.');
     }
-    const secret = diffieHellman({ privateKey: this.dmPrivateKey, publicKey: dmPublicKeyObject(peerCert.key) });
+    const crypto = dmCrypto();
+    const secret = crypto.x25519SharedSecret(this.dmPrivateKey, dmRawKey(peerCert.key));
     const identities = [this.identityPublicKey, peer].sort();
     const dmKeys = [this.dmPublicKey, peerCert.key].sort();
-    const salt = createHash('sha256')
-      .update(`monky-dm-v1\n${identities.join('\n')}\n${dmKeys.join('\n')}`, 'utf8')
-      .digest();
+    const salt = crypto.sha256().update(utf8(`monky-dm-v1\n${identities.join('\n')}\n${dmKeys.join('\n')}`)).digest();
     const key = hkdf(secret, salt, AEAD_INFO);
     this.sharedKeys.set(cacheKey, key);
     return key;
@@ -279,19 +261,14 @@ export class DmKeyring {
   ): string {
     const route: DmEnvelopeRoute = { from: this.identityPublicKey, to: normalizeIdentityKey(peerIdentity) };
     const inner: InnerEnvelope = { i: header.id, t: header.type, s: header.ts, b: body ?? null };
-    const nonce = randomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', this.sharedKey(route.to, peerCert), nonce);
-    cipher.setAAD(envelopeAad(route));
-    const ciphertext = Buffer.concat([
-      cipher.update(Buffer.from(JSON.stringify(inner), 'utf8')),
-      cipher.final(),
-      cipher.getAuthTag(),
-    ]);
+    const crypto = dmCrypto();
+    const nonce = crypto.randomBytes(12);
+    const ciphertext = crypto.aesGcmSeal(this.sharedKey(route.to, peerCert), nonce, utf8(JSON.stringify(inner)), envelopeAad(route));
     const sealed: SealedEnvelope = {
       v: DM_ENVELOPE_VERSION,
       h: route,
-      n: nonce.toString('base64'),
-      c: ciphertext.toString('base64'),
+      n: toBase64(nonce),
+      c: toBase64(ciphertext),
     };
     return JSON.stringify(sealed);
   }
@@ -315,23 +292,27 @@ export class DmKeyring {
     if (parsed.h.to !== this.identityPublicKey) {
       throw new DmCryptoError('Envelope não endereçado a esta identidade.');
     }
-    const payload = Buffer.from(parsed.c, 'base64');
-    const nonce = Buffer.from(parsed.n, 'base64');
+    let payload: Uint8Array;
+    let nonce: Uint8Array;
+    try {
+      payload = fromBase64(parsed.c);
+      nonce = fromBase64(parsed.n);
+    } catch {
+      throw new DmCryptoError('Envelope de DM inválido.');
+    }
     if (nonce.length !== 12 || payload.length < 16) {
       throw new DmCryptoError('Envelope de DM inválido.');
     }
-    const decipher = createDecipheriv('aes-256-gcm', this.sharedKey(from, peerCert), nonce);
-    decipher.setAAD(envelopeAad(parsed.h));
-    decipher.setAuthTag(payload.subarray(payload.length - 16));
-    let plaintext: Buffer;
+    const key = this.sharedKey(from, peerCert);
+    let plaintext: Uint8Array;
     try {
-      plaintext = Buffer.concat([decipher.update(payload.subarray(0, payload.length - 16)), decipher.final()]);
+      plaintext = dmCrypto().aesGcmOpen(key, nonce, payload, envelopeAad(parsed.h));
     } catch {
       throw new DmCryptoError('Não foi possível abrir o envelope de DM.');
     }
     let inner: InnerEnvelope;
     try {
-      inner = JSON.parse(plaintext.toString('utf8')) as InnerEnvelope;
+      inner = JSON.parse(fromUtf8(plaintext)) as InnerEnvelope;
     } catch {
       throw new DmCryptoError('Conteúdo de DM inválido.');
     }
@@ -362,8 +343,8 @@ interface InnerEnvelope {
   b: unknown;
 }
 
-function envelopeAad(route: DmEnvelopeRoute): Buffer {
-  return Buffer.from(canonicalJson({ v: DM_ENVELOPE_VERSION, from: route.from, to: route.to }), 'utf8');
+function envelopeAad(route: DmEnvelopeRoute): Uint8Array {
+  return utf8(canonicalJson({ v: DM_ENVELOPE_VERSION, from: route.from, to: route.to }));
 }
 
 function parseSealed(sealed: string): SealedEnvelope {
@@ -388,13 +369,12 @@ function parseSealed(sealed: string): SealedEnvelope {
   return { v: parsed.v, h: { from: normalizeIdentityKey(route.from), to: normalizeIdentityKey(route.to) }, n: parsed.n, c: parsed.c };
 }
 /** AES-256-GCM helpers for the local store (`MKDM1` + nonce + ciphertext + tag). */
-const STORE_MAGIC = Buffer.from('MKDM1', 'utf8');
+const STORE_MAGIC = utf8('MKDM1');
 
-export function sealAtRest(key: Buffer, plaintext: Buffer, label: string): Buffer {
-  const nonce = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, nonce);
-  cipher.setAAD(Buffer.from(label, 'utf8'));
-  return Buffer.concat([STORE_MAGIC, nonce, cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
+export function sealAtRest(key: Uint8Array, plaintext: Uint8Array, label: string): Uint8Array {
+  const crypto = dmCrypto();
+  const nonce = crypto.randomBytes(12);
+  return concatBytes(STORE_MAGIC, nonce, crypto.aesGcmSeal(key, nonce, plaintext, utf8(label)));
 }
 
 /**
@@ -402,35 +382,27 @@ export function sealAtRest(key: Buffer, plaintext: Buffer, label: string): Buffe
  * never needs a second copy of itself in memory. The tag goes last, after
  * every piece; a piece source that throws stops the output before it.
  */
-export function* sealAtRestStream(key: Buffer, pieces: Iterable<Buffer>, label: string): Generator<Buffer> {
-  const nonce = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, nonce);
-  cipher.setAAD(Buffer.from(label, 'utf8'));
-  yield Buffer.concat([STORE_MAGIC, nonce]);
-  for (const piece of pieces) yield cipher.update(piece);
-  yield cipher.final();
-  yield cipher.getAuthTag();
+export function* sealAtRestStream(key: Uint8Array, pieces: Iterable<Uint8Array>, label: string): Generator<Uint8Array> {
+  const crypto = dmCrypto();
+  const nonce = crypto.randomBytes(12);
+  const sealer: DmGcmSealer = crypto.aesGcmSealer(key, nonce, utf8(label));
+  yield concatBytes(STORE_MAGIC, nonce);
+  for (const piece of pieces) yield sealer.update(piece);
+  yield sealer.final();
 }
 
-export function openAtRest(key: Buffer, data: Buffer, label: string): Buffer {
-  if (data.length < STORE_MAGIC.length + 12 + 16 || !data.subarray(0, STORE_MAGIC.length).equals(STORE_MAGIC)) {
+export function openAtRest(key: Uint8Array, data: Uint8Array, label: string): Uint8Array {
+  if (data.length < STORE_MAGIC.length + 12 + 16 || !equalBytes(data.subarray(0, STORE_MAGIC.length), STORE_MAGIC)) {
     throw new DmCryptoError('Arquivo de DM inválido.');
   }
   const nonce = data.subarray(STORE_MAGIC.length, STORE_MAGIC.length + 12);
-  const body = data.subarray(STORE_MAGIC.length + 12, data.length - 16);
-  const decipher = createDecipheriv('aes-256-gcm', key, nonce);
-  decipher.setAAD(Buffer.from(label, 'utf8'));
-  decipher.setAuthTag(data.subarray(data.length - 16));
   try {
-    // GCM hands out every byte in update(); final() only checks the tag, so no copy is needed to join them.
-    const plaintext = decipher.update(body);
-    decipher.final();
-    return plaintext;
+    return dmCrypto().aesGcmOpen(key, nonce, data.subarray(STORE_MAGIC.length + 12), utf8(label));
   } catch {
     throw new DmCryptoError('Arquivo de DM corrompido.');
   }
 }
 
 export function newDmId(): string {
-  return randomBytes(16).toString('hex');
+  return toHex(dmCrypto().randomBytes(16));
 }

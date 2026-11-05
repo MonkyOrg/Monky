@@ -1,6 +1,9 @@
 import { settingsStore } from '../../../stores/settingsStore';
 import { soundboardService, SoundItem } from '../../../core/SoundboardService';
 import { t, tCount } from '../../../i18n';
+import { platformSupports } from '../../../platform/capabilities';
+import { isDesktopOnly, lockedAttributes, lockedBadge } from '../../../utils/desktopOnly';
+import { mediaFolderLabel, mediaSourceButton } from '../../../platform/mediaFolders';
 import { escapeHtml } from '../../../utils/html';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../../../utils/favoriteMotion';
 import { appEvents } from '../../../core/EventBus';
@@ -55,18 +58,18 @@ export class SoundboardTab {
       <div class="form-group" style="margin-bottom: 12px;">
         <label>${t('settings.soundFolder')}</label>
         <div style="display: flex; gap: 8px; align-items: center;">
-          <input id="input-soundboard-path" type="text" readonly value="${escapeHtml(settingsStore.soundboardFolderPath || '')}" placeholder="${t('settings.noFolderPlaceholder')}" style="flex: 1; font-size: 12px; cursor: pointer;">
+          <input id="input-soundboard-path" type="text" readonly value="${escapeHtml(mediaFolderLabel(settingsStore.soundboardFolderPath || ''))}" placeholder="${t('settings.noFolderPlaceholder')}" style="flex: 1; font-size: 12px; cursor: pointer;">
           <button type="button" id="btn-select-soundboard-folder" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px; white-space: nowrap;">
-            <span class="material-symbols-outlined md-14" style="margin-right: 4px;">folder_open</span>
-            ${t('soundboard.chooseFolder')}
+            <span class="material-symbols-outlined md-14" style="margin-right: 4px;">${this.folderSource().icon}</span>
+            ${this.folderSource().label}
           </button>
         </div>
         <div id="soundboard-folder-info" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
           ${this.folderSummary()}
         </div>
         <p id="soundboard-download-folder-status" role="status" aria-live="polite" style="font-size: 12px; color: var(--text-muted); margin-top: 8px;" hidden></p>
-        <button type="button" id="btn-confirm-soundboard-folder" class="btn btn-secondary" style="font-size: 12px;" hidden>
-          ${t('soundboard.confirmFolder')}
+        <button type="button" id="btn-confirm-soundboard-folder" class="btn btn-secondary" style="font-size: 12px;"${lockedAttributes('botSoundDownloads', 'botSounds')} hidden>
+          ${t('soundboard.confirmFolder')}${lockedBadge('botSoundDownloads')}
         </button>
       </div>
 
@@ -103,12 +106,13 @@ export class SoundboardTab {
         ${renderSoundboardLimiterControls('soundboard')}
       </div>
 
-      <!-- Soundboard Shortcuts Table -->
+      <!-- Soundboard shortcuts are global: the desktop's, locked elsewhere (#858). -->
       <div data-settings-section="soundboard-shortcuts" data-settings-label="${escapeHtml(t('soundboard.shortcut'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
           <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 0;">
             <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">keyboard</span>
             ${t('soundboard.shortcut')}
+            ${lockedBadge('globalShortcuts')}
           </label>
         </div>
         <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">
@@ -192,11 +196,11 @@ export class SoundboardTab {
             <span class="sb-keybind-badge ${hasShortcut ? 'has-key' : ''}" style="font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; background: rgba(255,255,255,0.06); border-radius: 4px; border: 1px solid var(--border-color); color: ${hasShortcut ? 'var(--accent-primary)' : 'var(--text-muted)'}; min-width: 60px; text-align: center;">
               ${escapeHtml(displayKey)}
             </span>
-            <button type="button" class="btn-bind-shortcut btn btn-secondary" data-sound-name="${escapeHtml(sound.name)}" style="font-size: 11px; padding: 2px 8px; height: 24px;" title="${hasShortcut ? t('soundboard.keybindTitle') : t('soundboard.addShortcut')}">
+            <button type="button" class="btn-bind-shortcut btn btn-secondary" data-sound-name="${escapeHtml(sound.name)}"${lockedAttributes('globalShortcuts', 'soundboardShortcuts')} style="font-size: 11px; padding: 2px 8px; height: 24px;" title="${hasShortcut ? t('soundboard.keybindTitle') : t('soundboard.addShortcut')}">
               ${hasShortcut ? t('soundboard.keybindTitle') : t('soundboard.addShortcut')}
             </button>
             ${hasShortcut ? `
-              <button type="button" class="btn-clear-shortcut btn btn-icon" data-sound-name="${escapeHtml(sound.name)}" style="width: 24px; height: 24px;" title="${t('soundboard.removeShortcut')}">
+              <button type="button" class="btn-clear-shortcut btn btn-icon" data-sound-name="${escapeHtml(sound.name)}"${lockedAttributes('globalShortcuts', 'soundboardShortcuts')} style="width: 24px; height: 24px;" title="${t('soundboard.removeShortcut')}">
                 <span class="material-symbols-outlined md-14" style="color: var(--danger);">close</span>
               </button>
             ` : ''}
@@ -208,6 +212,10 @@ export class SoundboardTab {
     return `
       <div class="sb-shortcuts-list" style="max-height: 200px; overflow-y: auto; padding-right: 2px;">${rows}</div>
     `;
+  }
+
+  private folderSource(): { icon: string; label: string } {
+    return mediaSourceButton('soundboard', t('soundboard.chooseFolder'));
   }
 
   private folderSummary(): string {
@@ -245,7 +253,7 @@ export class SoundboardTab {
     this.unbindSettings = appEvents.on('settings.updated', () => {
       if (observedFolder === settingsStore.soundboardFolderPath) return;
       observedFolder = settingsStore.soundboardFolderPath;
-      if (inputPath) inputPath.value = observedFolder;
+      if (inputPath) inputPath.value = mediaFolderLabel(observedFolder);
       void this.refreshFolderDownloadState(container);
     });
     const handlePickFolder = async () => {
@@ -255,7 +263,7 @@ export class SoundboardTab {
       try {
         const folder = await soundboardService.selectFolder();
         if (!folder || !container.isConnected) return;
-        if (inputPath) inputPath.value = folder;
+        if (inputPath) inputPath.value = mediaFolderLabel(folder);
         const info = container.querySelector<HTMLElement>('#soundboard-folder-info');
         if (info) {
           info.textContent = this.folderSummary();
@@ -341,7 +349,13 @@ export class SoundboardTab {
     const status = container.querySelector<HTMLElement>('#soundboard-download-folder-status');
     const confirm = container.querySelector<HTMLButtonElement>('#btn-confirm-soundboard-folder');
     if (!status || !confirm) return;
-    if (!folder || !window.api?.soundDownloadAvailability) {
+    // Bots saving sounds into the folder is the desktop's (#858): its step shows, locked.
+    if (folder && isDesktopOnly('botSoundDownloads')) {
+      status.hidden = true;
+      confirm.hidden = false;
+      return;
+    }
+    if (!folder || !platformSupports('botSoundDownloads') || !window.api?.soundDownloadAvailability) {
       status.hidden = true;
       confirm.hidden = true;
       return;

@@ -79,7 +79,20 @@ export type NativeScreenParticipant = z.infer<typeof nativeScreenParticipantSche
 export const nativeScreenCaptureKindSchema = z.enum(['window', 'monitor', 'game']);
 export type NativeScreenCaptureKind = z.infer<typeof nativeScreenCaptureKindSchema>;
 
-export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
+/** A window or screen listed by the desktop's own source picker. */
+const desktopScreenSourceIdSchema = z.string()
+  .regex(/^(?:window:[1-9][0-9]{0,15}:(?:[0-9]{1,10}|[a-f0-9]{64})|screen:[0-9]{1,16}:[0-9]{1,10}|native-monitor:[a-f0-9]{64})$/);
+
+/**
+ * A capture the browser's own dialog (getDisplayMedia) handed to the web version (#858). The tab keeps the
+ * stream; the command names it by this handle in place of a desktop source.
+ */
+export const BROWSER_SCREEN_CAPTURE_PREFIX = 'browser-capture:';
+export const browserScreenCaptureIdSchema = z.string()
+  .regex(new RegExp(`^${BROWSER_SCREEN_CAPTURE_PREFIX}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`));
+
+/** The screen commands, with the sources the platform answering them can capture. */
+const screenCommandSchema = (sourceId: z.ZodString) => z.discriminatedUnion('action', [
   z.object({ action: z.literal('capabilities') }).strict(),
   z.object({
     action: z.literal('probe-encoding'), video: nativeScreenVideoProfileSchema,
@@ -96,7 +109,7 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
   }).strict(),
   callScope.extend({
     action: z.literal('source-add'), shareId: screenShareIdSchema,
-    desktopSourceId: z.string().regex(/^(?:window:[1-9][0-9]{0,15}:(?:[0-9]{1,10}|[a-f0-9]{64})|screen:[0-9]{1,16}:[0-9]{1,10}|native-monitor:[a-f0-9]{64})$/),
+    desktopSourceId: sourceId,
     captureKind: nativeScreenCaptureKindSchema.optional(),
     preserveAspectRatio: z.boolean().default(true),
     /** Audible sources this one takes the audio from; each gives it up before this capture starts (#253). */
@@ -139,6 +152,9 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
     && (!command.encodingMode || !command.codec || command.codec === 'auto'))
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Manual encoding requires an exact encoding mode and H264 or AV1 codec.' });
 });
+export const nativeScreenCommandSchema = screenCommandSchema(desktopScreenSourceIdSchema);
+/** The same commands answered by the web version, whose only sources are browser captures (#858). */
+export const browserScreenCommandSchema = screenCommandSchema(browserScreenCaptureIdSchema);
 export type NativeScreenCommand = z.input<typeof nativeScreenCommandSchema>;
 
 export interface NativeScreenCapabilities {

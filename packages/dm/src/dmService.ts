@@ -11,6 +11,7 @@ import type {
   DmSettings,
   DmSnapshot,
 } from '@monky/shared';
+import type { DmFileStore } from './backend';
 import { DmKeyring, isIdentityPublicKey, normalizeIdentityKey, type DmEnvelopeHeader } from './dmCrypto';
 import { DmConversations } from './dmConversations';
 import { DmDeviceSync } from './dmDeviceSync';
@@ -32,7 +33,8 @@ const HELLO_FLUSH_GAP_MS = 5_000;
 
 export interface DmServiceOptions {
   keyring: DmKeyring;
-  dir: string;
+  /** Where this identity's encrypted store lives: files on the desktop, IndexedDB in the browser. */
+  store: DmFileStore;
   now?: () => number;
   onEvent?: (event: DmEvent) => void;
   /** Memory for the decrypted files being sent to friends; the default suits the largest file allowed. Tests use less. */
@@ -40,7 +42,8 @@ export interface DmServiceOptions {
 }
 
 /**
- * Friends and direct messages engine (#743), running in the main process.
+ * Friends and direct messages engine (#743): in the main process on the
+ * desktop, in the page on the web (#858).
  *
  * It owns the encrypted local store and all crypto. It never talks to a server
  * directly: every operation returns a {@link DmDispatch} with the sealed relay
@@ -74,7 +77,7 @@ export class DmService {
   constructor(options: DmServiceOptions) {
     this.keyring = options.keyring;
     this.me = options.keyring.identityPublicKey;
-    const store = new DmPersistence(options.dir, options.keyring.storageKey());
+    const store = new DmPersistence(options.store, options.keyring.storageKey());
     this.ledger = new DmLedger(this.me, store, options.now ?? Date.now, options.onEvent ?? (() => undefined));
     this.outbox = new DmOutbox(this.ledger, this.keyring);
     this.files = new DmFiles(this.ledger, this.outbox, options.fileCacheMaxBytes);
@@ -229,13 +232,8 @@ export class DmService {
     return this.files.retry(peer, messageId, fileId) ? this.outgoing([peer], true) : {};
   }
 
-  readAttachment(peerKey: string, messageId: string, fileId: string): { name: string; mime: string; data: Buffer } {
+  readAttachment(peerKey: string, messageId: string, fileId: string): { name: string; mime: string; data: Uint8Array } {
     return this.files.readAttachment(peerKey, messageId, fileId);
-  }
-
-  /** Decrypts a ready/local attachment into `destination` (absolute path), creating or overwriting it. */
-  writeAttachmentTo(peerKey: string, messageId: string, fileId: string, destination: string): Promise<void> {
-    return this.files.writeAttachmentTo(peerKey, messageId, fileId, destination);
   }
 
   // ---------------------------------------------------------------------------

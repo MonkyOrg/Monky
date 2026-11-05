@@ -50,16 +50,16 @@ function fixture(compatibility, options = {}) {
       shell: { openPath: async () => { actions.push('openDmg'); return ''; } },
     }],
     ['electron-updater', { autoUpdater: updater, CancellationToken }],
-    ['@monky/shared', { ...shared, fetchReleaseCompatibility: async (_v, _fetch, signal) => {
-      metadataCalls++;
-      if (options.metadata) return options.metadata(signal);
-      return compatibility;
-    } }],
+    ['@monky/shared', { ...shared, fetchVersionReleaseNotes: async () => ({ status: 'unavailable' }),
+      fetchReleaseCompatibility: async (_v, _fetch, signal) => {
+        metadataCalls++;
+        if (options.metadata) return options.metadata(signal);
+        return compatibility;
+      } }],
     ['./i18n', { mt: (key) => key }],
     ['./updateInstall', { consumeUpdateOutcome: () => null, beginUpdateInstall: options.beginUpdateInstall
       ?? (() => assert.fail('No installer')) }],
     ['./updateLog', { updateLog() {} }],
-    ['./releaseNotes', { fetchVersionReleaseNotes: async () => ({ status: 'unavailable' }) }],
     ['./updateDownload', { downloadToFile: async (_url, _path, signal, progress) => {
       if (options.macDownload) return options.macDownload(signal, progress);
     } }],

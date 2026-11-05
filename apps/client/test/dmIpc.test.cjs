@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const shared = require('@monky/shared');
+const { DmError, dmResult } = require('@monky/dm');
 const { loadMain, fakeIpcMain } = require('./mainModules.cjs');
 
 const quiet = { console: { ...console, warn: () => {}, error: () => {} } };
@@ -11,9 +12,6 @@ function fixture({ identity = true } = {}) {
   const calls = [];
   let flushed = 0;
   let options = null;
-  class DmError extends Error {
-    constructor(code, message) { super(message); this.code = code; this.details = {}; }
-  }
   class DmService {
     constructor(value) { options = value; }
     snapshot() { calls.push(['snapshot']); return { friends: [] }; }
@@ -25,10 +23,10 @@ function fixture({ identity = true } = {}) {
   }
   const { registerDmIpc } = loadMain('dm/dmIpc', {
     globals: quiet,
-    packages: { electron: { app: { getPath: () => 'C:\\modeled-profile' }, dialog: {} } },
+    packages: { electron: { app: { getPath: () => 'C:\\modeled-profile' }, dialog: {} }, '@monky/dm': { DmService, dmResult } },
     local: {
       identityService: { createDmKeyring: () => identity ? { identityPublicKey: Buffer.alloc(32, 7) } : null },
-      'dm/dmService': { DmService, DmError },
+      'dm/nodeDmBackend': { nodeDmFileStore: (dir) => ({ dir }), writeDmAttachmentFile: async () => {} },
     },
   });
   const { IpcRegistry } = loadMain('ipc/registry', { globals: quiet });

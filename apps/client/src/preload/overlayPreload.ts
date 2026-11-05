@@ -1,5 +1,5 @@
 import { contextBridge } from 'electron';
-import type { ElectronApi } from './api';
+import type { PlatformApi } from '../renderer/platform/api';
 import { invoke, subscribe } from './ipc';
 
 /**
@@ -8,7 +8,7 @@ import { invoke, subscribe } from './ipc';
  * transparent and stays on top of games, so whatever loads in it — even a page
  * it was steered to — never reaches identity, files, servers or settings.
  */
-export type OverlayWindowApi = Pick<ElectronApi,
+export type OverlayWindowApi = Pick<PlatformApi,
   | 'closeOverlay' | 'layoutOverlayCards' | 'sendOverlaySignal' | 'onOverlayConfigUpdated'
   | 'onOverlaySignalReceived' | 'onOverlaySyncStateReceived' | 'onOverlayHoverChanged' | 'onOverlayResizeStateChanged'>;
 

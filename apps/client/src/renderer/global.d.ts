@@ -1,10 +1,19 @@
 /// <reference types="vite/client" />
 
-import type { ElectronApi } from '../preload/api';
+import type { PlatformApi } from './platform/api';
 
 declare global {
+  /** Version of the app being built (apps/client/package.json), set by Vite. */
+  const __MONKY_VERSION__: string;
+  /** Where the web version opens bot miniapps (vite.config.ts). */
+  const __MONKY_MINIAPPS_URL__: string;
+
   interface Window {
-    api: ElectronApi;
+    api: PlatformApi;
+    /** Chrome and Edge only: an always-on-top window for a document (#858). */
+    documentPictureInPicture?: {
+      requestWindow(options?: { width?: number; height?: number }): Promise<Window>;
+    };
     /** Console helper that prints the voice engine status (`debugVoice()` in DevTools). */
     debugVoice?: () => unknown;
   }

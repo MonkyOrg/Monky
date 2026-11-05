@@ -36,7 +36,7 @@ export class DmLedger {
   readonly state: DmState;
   readonly history: DmHistory;
   private lastStamp = 0;
-  private snapshotTimer: NodeJS.Timeout | null = null;
+  private snapshotTimer: DmTimer | null = null;
   private selfNickname = '';
 
   constructor(

@@ -2,6 +2,7 @@ import { app, BrowserWindow, net, shell } from 'electron';
 import path from 'path';
 import type { CancellationToken } from 'electron-updater';
 import { UpdateOutcome, ReleaseNotesResult, ReleaseHistoryResult, UPDATER_IPC, fetchReleaseCompatibility, isReleaseVersion,
+  fetchReleaseHistory, fetchVersionReleaseNotes,
   type HostedBotUpdateWarning, type HostedUpdateServer, type IpcEventChannel, type IpcEvents, type UpdatePreflightResult,
   type UpdateCheckResult } from '@monky/shared';
 import type { IpcRegistry } from './ipc/registry';
@@ -10,7 +11,6 @@ import { requestUpdateMetadata } from './updateMetadataRequest';
 import { mt } from './i18n';
 import { beginUpdateInstall, consumeUpdateOutcome } from './updateInstall';
 import { updateLog } from './updateLog';
-import { fetchReleaseHistory, fetchVersionReleaseNotes } from './releaseNotes';
 import {
   cleanVer,
   feedUrlForTag,

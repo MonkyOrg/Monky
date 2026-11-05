@@ -6,7 +6,8 @@ import { setButtonLoading } from '../utils/buttonLoading';
 import { html } from '../utils/html';
 import { showErrorToast } from './CopyToast';
 import { showConfirm } from './Dialog';
-import { showIdentityImportDialog } from './IdentityDialogs';
+import { showIdentityExportDialog, showIdentityImportDialog } from './IdentityDialogs';
+import { platformSupports } from '../platform/capabilities';
 
 const UNREADABLE_MESSAGES: Record<IdentityUnreadableReason, TranslationKey> = {
   locked: 'identity.unreadableLocked',
@@ -16,6 +17,21 @@ const UNREADABLE_MESSAGES: Record<IdentityUnreadableReason, TranslationKey> = {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * In a browser, clearing the site's data deletes the identity with it (#858):
+ * right after creating one, the person is urged to export a copy.
+ */
+async function offerWebBackup(identity: AppIdentityResult): Promise<void> {
+  const exportNow = await showConfirm({
+    title: t('identity.webBackupTitle'),
+    message: t('identity.webBackupMessage'),
+    confirmLabel: t('identity.webBackupNow'),
+    cancelLabel: t('identity.webBackupLater'),
+    variant: 'info',
+  });
+  if (exportNow) await showIdentityExportDialog(identity.clientId);
 }
 
 /**
@@ -69,7 +85,9 @@ export function showIdentityOnboarding(
         });
         if (!confirmed) return null;
       }
-      return window.api.createIdentity();
+      const identity = await window.api.createIdentity();
+      if (!platformSupports('durableIdentity')) void offerWebBackup(identity);
+      return identity;
     };
 
     const retry = async (): Promise<AppIdentityResult | null> => {

@@ -1,20 +1,18 @@
-import { createHash } from 'crypto';
-import fs from 'fs';
-import path from 'path';
-import { fileErrorCode, renameFileSync, writeFileAtomicSync } from '../atomicFile';
-import { openAtRest, sealAtRest, sealAtRestStream } from './dmCrypto';
+import { dmCrypto, type DmFileStore } from './backend';
+import { concatBytes, fromUtf8, readUint32BE, toHex, utf8, writeUint32BE } from './bytes';
+import { openAtRest, sealAtRest, sealAtRestStream, sha256Hex } from './dmCrypto';
 
 /**
  * Encrypted local storage for friends and DMs (#743).
  *
- * Every file is sealed with the identity-derived storage key (AES-256-GCM) and
- * written atomically (temp + fsync + rename). JSON documents are written with a
- * short debounce so a burst of messages costs one write; a write that fails
- * stays pending and is tried again with backoff, never dropped. Conversations
- * live in one folder each, split by month, so a change rewrites only its month
- * (#823). Attachments
- * are stored as separate sealed blobs; partial downloads are appended as
- * individually sealed chunks so nothing touches the disk in clear text.
+ * Every document is sealed with the identity-derived storage key (AES-256-GCM)
+ * and written atomically by the platform's store (on the desktop, temp + fsync
+ * + rename). JSON documents are written with a short debounce so a burst of
+ * messages costs one write; a write that fails stays pending and is tried
+ * again with backoff, never dropped. Conversations live in one folder each,
+ * split by month, so a change rewrites only its month (#823). Attachments are
+ * stored as separate sealed blobs; partial downloads are appended as
+ * individually sealed chunks so nothing is stored in clear text.
  */
 
 const WRITE_DEBOUNCE_MS = 250;
@@ -24,25 +22,23 @@ const MAX_SEALED_PART_BYTES = 1024 * 1024;
 
 interface PendingWrite {
   produce: () => unknown;
-  timer: NodeJS.Timeout | null;
+  timer: DmTimer | null;
   failures: number;
 }
 
 export class DmPersistence {
   private readonly pendingWrites = new Map<string, PendingWrite>();
-  /** Told which documents reached the disk after every write pass; lets acks wait for the data they confirm. */
+  /** Told which documents were stored after every write pass; lets acks wait for the data they confirm. */
   onWritten: ((written: ReadonlySet<string>) => void) | null = null;
 
   constructor(
-    readonly dir: string,
-    private readonly key: Buffer
-  ) {
-    fs.mkdirSync(path.join(dir, 'files'), { recursive: true });
-  }
+    private readonly store: DmFileStore,
+    private readonly key: Uint8Array
+  ) {}
 
   /** Folder of a conversation (#823): one sealed file per month and its `index.mkdm`. */
   static conversationDir(peer: string): string {
-    return `conv-${createHash('sha256').update(peer, 'utf8').digest('hex').slice(0, 40)}`;
+    return `conv-${sha256Hex(peer).slice(0, 40)}`;
   }
 
   /** The single file a conversation lived in before #823; only read to migrate it. */
@@ -60,51 +56,35 @@ export class DmPersistence {
 
   /** The months (`yyyymm`) a conversation has a file for. */
   listSegments(peer: string): number[] {
-    let names: string[];
-    try {
-      names = fs.readdirSync(this.filePath(DmPersistence.conversationDir(peer)));
-    } catch (error) {
-      if (fileErrorCode(error) === 'ENOENT') return [];
-      throw error;
-    }
-    return names.flatMap((name) => {
+    return this.store.list(DmPersistence.conversationDir(peer)).flatMap((name) => {
       const match = /^(\d{6})\.mkdm$/.exec(name);
       return match ? [Number(match[1])] : [];
     });
   }
 
   exists(name: string): boolean {
-    return fs.existsSync(this.filePath(name));
+    return this.store.exists(name);
   }
 
-  /** Deletes a document; one that is already gone is fine. Throws when the disk refuses. */
+  /** Deletes a document; one that is already gone is fine. Throws when the store refuses. */
   remove(name: string): void {
-    fs.rmSync(this.filePath(name), { force: true });
-  }
-
-  private filePath(name: string): string {
-    return path.join(this.dir, name);
+    this.store.remove(name);
   }
 
   /**
-   * Reads a sealed JSON document. A missing file reads as `null`. A file that
-   * exists but does not open or does not pass `accept` (damaged, cut short) is
-   * renamed to `<name>.corrupt-<time>` and also reads as `null`, so the next
-   * save starts over without destroying those bytes. Any other read error (a
-   * file held by another program, no permission) throws and leaves everything
-   * in place, for the caller to fail now and try again later.
+   * Reads a sealed JSON document. A missing document reads as `null`. One
+   * that exists but does not open or does not pass `accept` (damaged, cut
+   * short) is renamed to `<name>.corrupt-<time>` and also reads as `null`, so
+   * the next save starts over without destroying those bytes. Any other read
+   * error (a file held by another program, no permission) throws and leaves
+   * everything in place, for the caller to fail now and try again later.
    */
   readJson<T>(name: string, accept: (value: unknown) => value is T): T | null {
-    let data: Buffer;
-    try {
-      data = fs.readFileSync(this.filePath(name));
-    } catch (error) {
-      if (fileErrorCode(error) === 'ENOENT') return null;
-      throw error;
-    }
+    const data = this.store.read(name);
+    if (data === null) return null;
     let value: unknown;
     try {
-      value = JSON.parse(openAtRest(this.key, data, name).toString('utf8'));
+      value = JSON.parse(fromUtf8(openAtRest(this.key, data, name)));
     } catch {
       value = undefined;
     }
@@ -115,17 +95,17 @@ export class DmPersistence {
 
   /** Moves an unreadable document out of the way; if even that fails, it throws and the document stays untouched. */
   private setAside(name: string): void {
-    const aside = `${this.filePath(name)}.corrupt-${Date.now()}`;
-    renameFileSync(this.filePath(name), aside);
-    console.error(`[DM] ${name} could not be read; it was kept as ${path.basename(aside)} and starts over.`);
+    const aside = `${name}.corrupt-${Date.now()}`;
+    this.store.rename(name, aside);
+    console.error(`[DM] ${name} could not be read; it was kept as ${aside} and starts over.`);
   }
 
-  /** Writes now, cancelling any debounced write of the same document. Throws when the disk refuses it. */
+  /** Writes now, cancelling any debounced write of the same document. Throws when the store refuses it. */
   writeJsonNow(name: string, value: unknown): void {
     const pending = this.pendingWrites.get(name);
     if (pending?.timer) clearTimeout(pending.timer);
     this.pendingWrites.delete(name);
-    this.atomicWrite(name, sealAtRest(this.key, Buffer.from(JSON.stringify(value), 'utf8'), name));
+    this.store.write(name, sealAtRest(this.key, utf8(JSON.stringify(value)), name));
     this.onWritten?.(new Set([name]));
   }
 
@@ -141,7 +121,7 @@ export class DmPersistence {
     this.schedule(name, entry, WRITE_DEBOUNCE_MS);
   }
 
-  /** Documents changed in memory that have not reached the disk yet. */
+  /** Documents changed in memory that have not been stored yet. */
   pendingNames(): Set<string> {
     return new Set(this.pendingWrites.keys());
   }
@@ -168,7 +148,7 @@ export class DmPersistence {
       if (entry.timer) clearTimeout(entry.timer);
       entry.timer = null;
       try {
-        this.atomicWrite(name, sealAtRest(this.key, Buffer.from(JSON.stringify(entry.produce()), 'utf8'), name));
+        this.store.write(name, sealAtRest(this.key, utf8(JSON.stringify(entry.produce())), name));
       } catch (error) {
         entry.failures += 1;
         const delayMs = Math.min(WRITE_DEBOUNCE_MS * 2 ** entry.failures, MAX_RETRY_DELAY_MS);
@@ -182,12 +162,12 @@ export class DmPersistence {
     if (written.size > 0) this.onWritten?.(written);
   }
 
-  /** Writes everything pending now. Whatever the disk refuses stays pending for the next try. */
+  /** Writes everything pending now. Whatever the store refuses stays pending for the next try. */
   flush(): void {
     this.writePass([...this.pendingWrites.keys()]);
   }
 
-  /** Drops pending writes without touching the disk (logout wipes the folder). */
+  /** Drops pending writes without touching the store (logout wipes it). */
   discardPending(): void {
     for (const pending of this.pendingWrites.values()) {
       if (pending.timer) clearTimeout(pending.timer);
@@ -195,36 +175,31 @@ export class DmPersistence {
     this.pendingWrites.clear();
   }
 
-  private atomicWrite(name: string, data: Uint8Array | Iterable<Uint8Array>): void {
-    writeFileAtomicSync(this.filePath(name), data);
-  }
-
   private attachmentName(fileId: string): string {
-    return path.join('files', `${fileId}.mkdm`);
+    return `files/${fileId}.mkdm`;
   }
 
   private partName(fileId: string): string {
-    return path.join('files', `${fileId}.part`);
+    return `files/${fileId}.part`;
   }
 
   hasAttachment(fileId: string): boolean {
-    return fs.existsSync(this.filePath(this.attachmentName(fileId)));
+    return this.store.exists(this.attachmentName(fileId));
   }
 
-  writeAttachment(fileId: string, data: Buffer): void {
-    this.atomicWrite(this.attachmentName(fileId), sealAtRestStream(this.key, [data], `file:${fileId}`));
+  writeAttachment(fileId: string, data: Uint8Array): void {
+    this.store.write(this.attachmentName(fileId), sealAtRestStream(this.key, [data], `file:${fileId}`));
   }
 
-  readAttachment(fileId: string): Buffer | null {
-    const filePath = this.filePath(this.attachmentName(fileId));
-    if (!fs.existsSync(filePath)) return null;
-    return openAtRest(this.key, fs.readFileSync(filePath), `file:${fileId}`);
+  readAttachment(fileId: string): Uint8Array | null {
+    const data = this.store.read(this.attachmentName(fileId));
+    return data === null ? null : openAtRest(this.key, data, `file:${fileId}`);
   }
 
   deleteAttachment(fileId: string): void {
     for (const name of [this.attachmentName(fileId), this.partName(fileId)]) {
       try {
-        fs.rmSync(this.filePath(name), { force: true });
+        this.store.remove(name);
       } catch {
         // Best effort.
       }
@@ -232,31 +207,13 @@ export class DmPersistence {
   }
 
   /**
-   * Appends one sealed chunk to a partial download. When the disk refuses it
-   * halfway (full disk), the torn bytes are cut off again so the next chunk
-   * does not land after garbage; {@link repairPart} covers a crash instead.
+   * Appends one sealed chunk to a partial download. The store leaves the
+   * document as it was when the append fails (full disk); {@link repairPart}
+   * covers a crash instead.
    */
-  appendPart(fileId: string, chunkIndex: number, chunk: Buffer): void {
+  appendPart(fileId: string, chunkIndex: number, chunk: Uint8Array): void {
     const sealed = sealAtRest(this.key, chunk, `part:${fileId}:${chunkIndex}`);
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(sealed.length, 0);
-    const filePath = this.filePath(this.partName(fileId));
-    let sizeBefore = 0;
-    try {
-      sizeBefore = fs.statSync(filePath).size;
-    } catch (error) {
-      if (fileErrorCode(error) !== 'ENOENT') throw error;
-    }
-    try {
-      fs.appendFileSync(filePath, Buffer.concat([header, sealed]));
-    } catch (error) {
-      try {
-        fs.truncateSync(filePath, sizeBefore);
-      } catch {
-        // repairPart() drops the torn tail before the download resumes.
-      }
-      throw error;
-    }
+    this.store.append(this.partName(fileId), concatBytes(writeUint32BE(sealed.length), sealed));
   }
 
   /**
@@ -271,21 +228,15 @@ export class DmPersistence {
       count += 1;
       intact = record.end;
     }
-    const filePath = this.filePath(this.partName(fileId));
-    let size: number;
-    try {
-      size = fs.statSync(filePath).size;
-    } catch (error) {
-      if (fileErrorCode(error) === 'ENOENT') return 0;
-      throw error;
-    }
-    if (intact < size) fs.truncateSync(filePath, intact);
+    const size = this.store.size(this.partName(fileId));
+    if (size === null) return 0;
+    if (intact < size) this.store.truncate(this.partName(fileId), intact);
     return count;
   }
 
   resetPart(fileId: string): void {
     try {
-      fs.rmSync(this.filePath(this.partName(fileId)), { force: true });
+      this.store.remove(this.partName(fileId));
     } catch {
       // Best effort.
     }
@@ -299,8 +250,8 @@ export class DmPersistence {
    */
   completePart(fileId: string, size: number, sha256: string): boolean {
     const records = this.partRecords(fileId);
-    function* verified(): Generator<Buffer> {
-      const hash = createHash('sha256');
+    function* verified(): Generator<Uint8Array> {
+      const hash = dmCrypto().sha256();
       let total = 0;
       for (const { chunk } of records) {
         total += chunk.length;
@@ -308,10 +259,10 @@ export class DmPersistence {
         hash.update(chunk);
         yield chunk;
       }
-      if (total !== size || hash.digest('hex') !== sha256) throw new PartMismatch();
+      if (total !== size || toHex(hash.digest()) !== sha256) throw new PartMismatch();
     }
     try {
-      this.atomicWrite(this.attachmentName(fileId), sealAtRestStream(this.key, verified(), `file:${fileId}`));
+      this.store.write(this.attachmentName(fileId), sealAtRestStream(this.key, verified(), `file:${fileId}`));
     } catch (error) {
       if (error instanceof PartMismatch) return false;
       throw error;
@@ -324,24 +275,19 @@ export class DmPersistence {
    * each opened chunk and the offset where its record ends. It stops at the
    * first record that is torn (a crash, a full disk) or does not open.
    */
-  private *partRecords(fileId: string): Generator<{ chunk: Buffer; end: number }> {
-    let descriptor: number;
+  private *partRecords(fileId: string): Generator<{ chunk: Uint8Array; end: number }> {
+    const reader = this.store.openReader(this.partName(fileId));
+    if (!reader) return;
     try {
-      descriptor = fs.openSync(this.filePath(this.partName(fileId)), 'r');
-    } catch (error) {
-      if (fileErrorCode(error) === 'ENOENT') return;
-      throw error;
-    }
-    try {
-      const header = Buffer.alloc(4);
       let position = 0;
       for (let index = 0; ; index += 1) {
-        if (fs.readSync(descriptor, header, 0, 4, position) < 4) return;
-        const length = header.readUInt32BE(0);
+        const header = reader.read(position, 4);
+        if (header.length < 4) return;
+        const length = readUint32BE(header);
         if (length > MAX_SEALED_PART_BYTES) return;
-        const sealed = Buffer.allocUnsafe(length);
-        if (fs.readSync(descriptor, sealed, 0, length, position + 4) < length) return;
-        let chunk: Buffer;
+        const sealed = reader.read(position + 4, length);
+        if (sealed.length < length) return;
+        let chunk: Uint8Array;
         try {
           chunk = openAtRest(this.key, sealed, `part:${fileId}:${index}`);
         } catch {
@@ -351,7 +297,7 @@ export class DmPersistence {
         yield { chunk, end: position };
       }
     } finally {
-      fs.closeSync(descriptor);
+      reader.close();
     }
   }
 }

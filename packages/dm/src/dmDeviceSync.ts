@@ -1,6 +1,5 @@
-import { createHash } from 'crypto';
 import type { DmDispatch, DmRelayItem } from '@monky/shared';
-import { isIdentityPublicKey, newDmId, normalizeIdentityKey } from './dmCrypto';
+import { isIdentityPublicKey, newDmId, normalizeIdentityKey, sha256Hex } from './dmCrypto';
 import type { DmConversations } from './dmConversations';
 import type { DmFriends } from './dmFriends';
 import type { DmLedger } from './dmLedger';
@@ -112,9 +111,7 @@ export class DmDeviceSync {
       this.digestRounds.set(device, rounds);
     } else {
       // The same state seen again shortly after (another shared server) only gets what changed since.
-      const hash = createHash('sha256')
-        .update(JSON.stringify(complete.map((body) => [body?.peers, body?.convs])))
-        .digest('hex');
+      const hash = sha256Hex(JSON.stringify(complete.map((body) => [body?.peers, body?.convs])));
       const last = this.lastDigest.get(device);
       repeat = !!last && last.hash === hash && now - last.at < SELF_REPEAT_WINDOW_MS;
       if (!repeat) {

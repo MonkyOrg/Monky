@@ -1,10 +1,9 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { DM_MAX_FILE_BYTES_LIMIT, type DmAttachmentState, type DmDispatch, type DmRelayItem } from '@monky/shared';
 import type { DmLedger } from './dmLedger';
 import { DmError, SELF_REPEAT_WINDOW_MS, type DownloadState, type PeerRecord, type StoredAttachment, type StoredMessage } from './dmModel';
 import type { DmOutbox } from './dmOutbox';
 import { isDmId } from './dmWire';
+import { fromBase64, toBase64 } from './bytes';
 
 export const DM_FILE_CHUNK_BYTES = 96 * 1024;
 const FILE_WINDOW_CHUNKS = 6;
@@ -69,11 +68,11 @@ interface LiveDownload {
  * goes quiet, and only gives up after rounds with nothing but "not here".
  */
 export class DmFiles {
-  private readonly fileCache = new Map<string, { data: Buffer; expiresAt: number; activeUntil: number }>();
-  private fileCacheTimer: NodeJS.Timeout | null = null;
+  private readonly fileCache = new Map<string, { data: Uint8Array; expiresAt: number; activeUntil: number }>();
+  private fileCacheTimer: DmTimer | null = null;
   private readonly liveDownloads = new Map<string, LiveDownload>();
   /** Per friend with downloads: asks again when they go quiet (see {@link DM_DOWNLOAD_STALL_MS}). */
-  private readonly stallTimers = new Map<string, { timer: NodeJS.Timeout | null; retries: number }>();
+  private readonly stallTimers = new Map<string, { timer: DmTimer | null; retries: number }>();
   /** File requests answered lately, by envelope id, oldest first (see {@link repeatedRequest}). */
   private readonly answeredRequests = new Map<string, number>();
   /** Which own message holds each file asked for lately (null: none), so every window does not search the history. */
@@ -115,7 +114,7 @@ export class DmFiles {
    * leave by timer after {@link FILE_CACHE_TTL_MS}. Returns null when the file
    * is not on this device.
    */
-  private servedFile(fileId: string, size: number): Buffer | 'busy' | null {
+  private servedFile(fileId: string, size: number): Uint8Array | 'busy' | null {
     const now = this.ledger.now();
     const cached = this.fileCache.get(fileId);
     if (cached) {
@@ -207,7 +206,7 @@ export class DmFiles {
       if (start >= content.length && !(content.length === 0 && start === 0)) break;
       const chunk = content.subarray(start, Math.min(content.length, start + DM_FILE_CHUNK_BYTES));
       items.push(
-        this.outbox.envelopeItem(record, 'file-chunk', { fileId, offset: start, data: chunk.toString('base64') }, 'file')
+        this.outbox.envelopeItem(record, 'file-chunk', { fileId, offset: start, data: toBase64(chunk) }, 'file')
       );
       if (content.length === 0) break;
     }
@@ -322,7 +321,12 @@ export class DmFiles {
     this.fileHeld(live);
     const received = Math.min(download.size, live.chunks * DM_FILE_CHUNK_BYTES);
     if (data.offset !== received || typeof data.data !== 'string') return [];
-    const chunk = Buffer.from(data.data, 'base64');
+    let chunk: Uint8Array;
+    try {
+      chunk = fromBase64(data.data);
+    } catch {
+      return [];
+    }
     if (chunk.length !== Math.min(DM_FILE_CHUNK_BYTES, download.size - received)) return [];
     try {
       this.ledger.store.appendPart(fileId, live.chunks, chunk);
@@ -576,7 +580,7 @@ export class DmFiles {
     return true;
   }
 
-  readAttachment(peerKey: string, messageId: string, fileId: string): { name: string; mime: string; data: Buffer } {
+  readAttachment(peerKey: string, messageId: string, fileId: string): { name: string; mime: string; data: Uint8Array } {
     const peer = this.ledger.requirePeerKey(peerKey);
     const ref = this.attachmentRef(peer, messageId, fileId);
     if (!ref || (ref.file.state !== 'ready' && ref.file.state !== 'local')) {
@@ -585,15 +589,6 @@ export class DmFiles {
     const data = this.ledger.store.readAttachment(fileId);
     if (!data) throw new DmError('not-found', 'Arquivo não disponível.');
     return { name: ref.file.name, mime: ref.file.mime, data };
-  }
-
-  /** Decrypts a ready/local attachment into `destination` (absolute path), creating or overwriting it. */
-  async writeAttachmentTo(peerKey: string, messageId: string, fileId: string, destination: string): Promise<void> {
-    if (typeof destination !== 'string' || !path.isAbsolute(destination) || destination.includes('\0')) {
-      throw new Error('Invalid destination for the DM attachment: an absolute file path is required.');
-    }
-    const file = this.readAttachment(peerKey, messageId, fileId);
-    await fs.writeFile(destination, file.data);
   }
 
   /** The message of this file is gone: so are the file, its memory and its download. */

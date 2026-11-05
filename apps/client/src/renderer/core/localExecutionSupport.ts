@@ -4,6 +4,7 @@ import {
   type LocalRuntimeSourceFailure, type SlashCommand,
 } from '@monky/shared';
 import { t } from '../i18n';
+import { platformSupports } from '../platform/capabilities';
 
 export type LocalExecutionApi = Pick<Window['api'],
   'setLocalExecutionConnection' | 'prepareLocalExecution' | 'startLocalExecutionTask' |
@@ -38,7 +39,8 @@ export function toLocalExecutionError(error: unknown): LocalExecutionError {
 
 export function getLocalExecutionApi(): LocalExecutionApi | null {
   const api = typeof window === 'undefined' ? undefined : window.api;
-  if (!api) return null;
+  // Tools that run on this computer need the desktop (#858).
+  if (!api || !platformSupports('localExecution')) return null;
   const methods: ReadonlyArray<keyof LocalExecutionApi> = [
     'setLocalExecutionConnection', 'prepareLocalExecution', 'startLocalExecutionTask',
     'readLocalExecutionFrames', 'acknowledgeLocalExecutionFrames', 'setLocalExecutionPaused',

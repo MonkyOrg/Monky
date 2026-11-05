@@ -15,6 +15,7 @@ import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
+import { platformSupports } from '../platform/capabilities';
 import { SoundboardAudioOutput } from './SoundboardAudioOutput';
 import { showErrorToast } from '../views/CopyToast';
 
@@ -148,7 +149,7 @@ export class SoundboardService {
   }
 
   public async syncShortcuts(): Promise<void> {
-    if (!window.api?.registerSoundboardShortcuts) return;
+    if (!platformSupports('globalShortcuts') || !window.api?.registerSoundboardShortcuts) return;
     try {
       const shortcuts = settingsStore.soundboardShortcuts;
       const list = Object.entries(shortcuts)

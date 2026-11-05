@@ -16,7 +16,7 @@ import { isSoundAudio, isSoundFileName } from '../src/main/soundAudioValidation'
 import { AudioPreviews } from '../src/main/audioPreviews';
 import type { SoundDownloadApproval, SoundDownloadConfirmationDetails } from '../src/renderer/utils/soundDownloadConfirmation';
 import { LocalSoundDownloadService } from '../src/renderer/core/LocalSoundDownloadService';
-import type { ElectronApi } from '../src/preload/api';
+import type { PlatformApi } from '../src/renderer/platform/api';
 import { createChatStore, setActiveChatStore } from '../src/renderer/stores/chatStore';
 import { createServerStore } from '../src/renderer/stores/serverStore';
 import { createNetworkClient } from '../src/renderer/core/NetworkClient';
@@ -696,7 +696,7 @@ function confirmationFixture(
   let downloads = 0;
   let cancels = 0;
   const inputs: SoundboardDownloadInput[] = [];
-  const api: Pick<ElectronApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'> = {
+  const api: Pick<PlatformApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'> = {
     authorizeSoundDownload: async () => ({ status: 'authorized', token: 'native-permit' }),
     downloadSound: async (input) => { downloads++; inputs.push(input); return { status: 'downloaded' }; },
     cancelSoundDownload: async () => { cancels++; return true; },
@@ -1126,7 +1126,7 @@ test('renderer retains the original authorization for a download requested after
   let downloads = 0;
   let downloadDeadline = 0;
   let listeners = 0;
-  const api: Pick<ElectronApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'> = {
+  const api: Pick<PlatformApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'> = {
     authorizeSoundDownload: async (input) => {
       allowedUntil = input.expiresAt;
       return { status: 'authorized', token: 'one-shot' };
@@ -1219,7 +1219,7 @@ test('download completion stays in the captured background store and only actual
   let subscriptions = 0;
   let report: (progress: SoundboardDownloadProgress) => void = () => {};
   let finish: (result: SoundDownloadResult) => void = () => {};
-  const api: Pick<ElectronApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'> = {
+  const api: Pick<PlatformApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'> = {
     authorizeSoundDownload: async () => ({ status: 'authorized', token: 'local-only-token' }),
     downloadSound: async () => {
       downloads++;
@@ -1289,7 +1289,7 @@ test('network lifecycle revokes I/O but cannot discard its real Main outcome or 
       let cancels = 0;
       let subscriptions = 0;
       let progress: (value: SoundboardDownloadProgress) => void = () => {};
-      const api: Pick<ElectronApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'> = {
+      const api: Pick<PlatformApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'> = {
         authorizeSoundDownload: () => new Promise((resolve) => { allow = () => resolve({ status: 'authorized', token: 'one-shot' }); }),
         downloadSound: () => { downloads++; return new Promise((resolve) => { finish = resolve; }); },
         cancelSoundDownload: async () => { cancels++; return true; },

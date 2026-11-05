@@ -1,5 +1,6 @@
 import type { FileBatchDownloadFile, FileBatchDownloadMode } from '@monky/shared';
 import { t, tCount } from '../i18n';
+import { platformSupports } from '../platform/capabilities';
 import { showErrorToast, showSuccessToast } from '../views/CopyToast';
 import { showConfirmWithChoice, type DialogChoice } from '../views/Dialog';
 
@@ -68,15 +69,20 @@ export async function downloadFilesWithChoice(
     ...(current ? [{
       value: 'current' as const, icon: 'download', label: t('chat.downloadOnlyCurrent'), description: current.fileName,
     }] : []),
-    {
-      value: 'folder', icon: 'folder_open', label: t('chat.downloadAllSeparate', { count }),
+    ...(platformSupports('folderDownloads') ? [{
+      value: 'folder' as const, icon: 'folder_open', label: t('chat.downloadAllSeparate', { count }),
       description: t('chat.downloadAllSeparateHint'),
-    },
+    }] : []),
     {
       value: 'zip', icon: 'folder_zip', label: t('chat.downloadAllZip', { count }),
       description: t('chat.downloadAllZipHint'),
     },
   ];
+  // Nothing to choose: the only way is one ZIP.
+  if (options.length === 1) {
+    await downloadFileBatch(files, 'zip', archiveName);
+    return;
+  }
   const { confirmed, choice } = await showConfirmWithChoice<DownloadChoice>({
     title: t('chat.downloadChoiceTitle'),
     message: '',

@@ -9,6 +9,8 @@ import { nextIndex } from '../utils/rovingFocus';
 import { appEvents } from '../core/EventBus';
 import { FPS_OPTIONS } from './settings/qualityOptions';
 import { showInfoToast } from './CopyToast';
+import { platformSupports } from '../platform/capabilities';
+import { isDesktopOnly, lockedBlock } from '../utils/desktopOnly';
 
 type CheckedProfile = {
   profile: NativeScreenVideoProfile;
@@ -51,7 +53,9 @@ export class ScreenEncodingControls {
     private readonly handedOffSettled?: () => void) {}
 
   static html(): string {
-    return `<div class="form-group" data-settings-section="screen-encoding"
+    // A browser encodes on its own (#858): the section is shown locked and read-only, still applying quality changes.
+    const locked = isDesktopOnly('screenEncoderChoice');
+    return lockedBlock('screenEncoderChoice', 'screenEncoder', `<div class="form-group" data-settings-section="screen-encoding"
       data-settings-label="${escapeHtml(t('settings.screenEncodingSection'))}">
       <label>${t('settings.screenEncodingSection')}</label>
       <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenEncodingStrategy'))}"
@@ -68,14 +72,14 @@ export class ScreenEncodingControls {
       <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenEncodingSection'))}"
         aria-describedby="screen-encoding-status screen-encoding-apply">
         <button type="button" class="voice-mode-card input-mode-card" id="screen-encoding-hardware"
-          aria-pressed="${settingsStore.screenEncodingStrategy === 'manual' && settingsStore.screenEncodingMode === 'hardware'}" disabled>
+          aria-pressed="${settingsStore.screenEncodingStrategy === 'manual' && settingsStore.screenEncodingMode === 'hardware'}" ${locked ? '' : 'disabled'}>
           <span class="input-mode-card-title">${t('settings.screenEncodingHardware')}</span>
           <span class="input-mode-card-description">${t('settings.screenEncodingHardwareDesc')}</span>
           <span id="screen-encoding-hardware-choice" class="input-mode-card-description"></span>
         </button>
         <button type="button" class="voice-mode-card input-mode-card" id="screen-encoding-software"
           aria-pressed="${settingsStore.screenEncodingStrategy === 'manual' && settingsStore.screenEncodingMode === 'software'}"
-          ${settingsStore.screenEncodingStrategy === 'automatic' ? 'disabled' : ''}>
+          ${settingsStore.screenEncodingStrategy === 'automatic' && !locked ? 'disabled' : ''}>
           <span class="input-mode-card-title">${t('settings.screenEncodingSoftware')}</span>
           <span class="input-mode-card-description">${t('settings.screenEncodingSoftwareDesc')}</span>
           <span id="screen-encoding-software-choice" class="input-mode-card-description"></span>
@@ -84,15 +88,15 @@ export class ScreenEncodingControls {
       <div class="form-group" style="margin-top: 12px; margin-bottom: 0;">
         <label for="select-video-codec">${t('settings.videoCodecSection')}</label>
         <select id="select-video-codec" aria-describedby="screen-codec-description screen-encoding-status screen-encoding-choices"
-          ${settingsStore.screenEncodingStrategy === 'automatic' ? 'disabled' : ''}>
+          ${settingsStore.screenEncodingStrategy === 'automatic' && !locked ? 'disabled' : ''}>
           <option value="h264" ${settingsStore.preferredScreenCodec === 'h264' ? 'selected' : ''}>${t('settings.codecH264')}</option>
           <option value="av1" ${settingsStore.preferredScreenCodec === 'av1' ? 'selected' : ''}>${t('settings.codecAv1')}</option>
         </select>
       </div>
-      <p id="screen-encoding-status" class="audio-device-status" role="status" aria-live="polite">${t('common.loading')}</p>
+      <p id="screen-encoding-status" class="audio-device-status" role="status" aria-live="polite">${locked ? '' : t('common.loading')}</p>
       <p id="screen-encoding-choices" class="audio-device-status" role="status" aria-live="polite"></p>
       <p id="screen-encoding-apply" class="audio-device-status">${t('settings.screenEncodingApply')}</p>
-    </div>`;
+    </div>`);
   }
 
   attach(container: HTMLElement): void {
@@ -385,6 +389,7 @@ export class ScreenEncodingControls {
 
   /** Main reports whether this device can capture at all; probing where it cannot only fails (#490). */
   private async nativeCaptureAvailable(): Promise<boolean> {
+    if (!platformSupports('screenEncoderChoice')) return false;
     try {
       const capabilities = await webRtcManager.getNativeScreenCapabilities();
       return capabilities.capture || capabilities.requiresSelectionProbe === true;
@@ -465,6 +470,10 @@ export class ScreenEncodingControls {
   get ready(): boolean { return !this.pending && this.availability?.selection !== null && !!this.availability; }
 
   private render(): void {
+    if (isDesktopOnly('screenEncoderChoice')) {
+      this.renderLocked();
+      return;
+    }
     const preferences = this.preferences();
     const automatic = preferences.encodingStrategy === 'automatic';
     const unavailable = this.captureUnavailable;
@@ -537,6 +546,24 @@ export class ScreenEncodingControls {
         : !this.availability?.hardware.available
           ? t('settings.screenEncodingHardwareUnavailable')
           : t('settings.screenEncodingReady', { codec: selection.codec.toUpperCase() });
+    }
+  }
+
+  /** The saved choices, read-only: nothing here is checked, so no control is disabled or reports a failure. */
+  private renderLocked(): void {
+    const preferences = this.preferences();
+    for (const strategy of ['automatic', 'manual'] as const) {
+      this.container?.querySelector(`#screen-encoding-${strategy}`)
+        ?.setAttribute('aria-pressed', String(preferences.encodingStrategy === strategy));
+    }
+    for (const mode of ['hardware', 'software'] as const) {
+      this.container?.querySelector(`#screen-encoding-${mode}`)?.setAttribute('aria-pressed',
+        String(preferences.encodingStrategy === 'manual' && preferences.encodingMode === mode));
+    }
+    const status = this.container?.querySelector<HTMLElement>('#screen-encoding-status');
+    if (status) {
+      status.setAttribute('aria-busy', 'false');
+      status.textContent = '';
     }
   }
 

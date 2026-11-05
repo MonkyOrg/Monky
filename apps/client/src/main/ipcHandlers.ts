@@ -1,6 +1,7 @@
 import { app, ipcMain as electronIpcMain, type BrowserWindow } from 'electron';
 import * as screenAudio from '@monky/screen-audio';
-import { downloadToFile, sanitizeDownloadFileName } from './attachmentDownload';
+import { sanitizeDownloadFileName } from '@monky/shared';
+import { downloadToFile } from './attachmentDownload';
 import type { ClientLogger } from './clientLogger';
 import { registerDmIpc, writeDmAttachment } from './dm/dmIpc';
 import { registerEditorCommands } from './editorCommands';

@@ -26,7 +26,7 @@ function loadZipWriter() {
   vm.runInNewContext(transpiled('zipWriter'), {
     exports, Buffer, Error,
     require: name => {
-      if (['node:fs', 'node:zlib'].includes(name)) return require(name);
+      if (['node:fs', 'node:zlib', '@monky/shared'].includes(name)) return require(name);
       throw new Error(`Unexpected import: ${name}`);
     },
   });

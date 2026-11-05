@@ -108,6 +108,8 @@ function fixture(language = 'en') {
         if (request.endsWith('/CopyToast')) return { showErrorToast(message) { errors.push(message); return () => {}; }, showSuccessToast() {}, showCopyToast() {} };
         if (request.endsWith('/core/ClientLogService')) return { clientLog: { warn() {} } };
         if (request.endsWith('/utils/surfaceVisibility')) return { setSurfaceVisible() {} };
+        // The desktop's local tools: here the platform has them (#858).
+        if (request.endsWith('/utils/desktopOnly')) return { isDesktopOnly: () => false };
         if (!request.startsWith('.')) throw new Error(`Unexpected IPC or network dependency: ${request}`);
         let resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), request));
         if (resolved === 'i18n') resolved = 'i18n/index';

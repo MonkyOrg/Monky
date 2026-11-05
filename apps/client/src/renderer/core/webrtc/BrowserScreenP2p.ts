@@ -185,11 +185,12 @@ export class BrowserScreenP2p {
         this.routeTracks();
         const answer = await this.peer.createAnswer();
         this.current();
-        assertBrowserScreenCodec(answer.sdp ?? '', this.options.source.codec ?? 'h264', this.options.profile);
+        // The receive levels the decoder probe admitted are written first; the codec is checked on what is sent.
+        const sdp = withBrowserScreenReceiveParameters(answer.sdp ?? '', this.options.source.audio, this.options.profile,
+          this.options.source.codec ?? 'h264');
+        assertBrowserScreenCodec(sdp, this.options.source.codec ?? 'h264', this.options.profile);
         this.localDescriptionTurn = control.turn;
-        await this.peer.setLocalDescription({ type: 'answer',
-          sdp: withBrowserScreenReceiveParameters(answer.sdp ?? '', this.options.source.audio, this.options.profile,
-            this.options.source.codec ?? 'h264') });
+        await this.peer.setLocalDescription({ type: 'answer', sdp });
         this.current();
         if (!this.peer.localDescription?.sdp) throw new Error('The browser did not produce a screen answer.');
         await this.send({ type: 'answer', turn: control.turn, sdp: this.peer.localDescription.sdp });

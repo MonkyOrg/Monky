@@ -446,12 +446,15 @@ export class VideoService {
     clientLog.info('SCREEN_SHARE', `Stopping screen share(s)`, { shareIds: ids });
     for (const id of ids) {
       if (!this.screenStreams.has(id)) continue;
+      const sourceId = this.screenSourceIds.get(id);
       // Native preview tracks are borrowed from preload: their presentation owner
       // stops decoder output and drains the writer before ending the generator.
       this.screenStreams.delete(id);
       this.screenSourceIds.delete(id);
       this.screenLabels.delete(id);
       this.nativeScreenCaptures.delete(id);
+      // A capture the browser handed over ends with its share (#858).
+      if (sourceId && typeof window !== 'undefined') window.api?.releaseScreenCapture?.(sourceId);
       appEvents.emit('local.screen_stopped', id);
     }
   }

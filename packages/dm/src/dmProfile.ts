@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import type {
   DmDispatch,
   DmObservedPeer,
@@ -6,14 +5,14 @@ import type {
   DmSelfProfileInput,
   DmSelfProfileResult,
 } from '@monky/shared';
-import { isIdentityPublicKey, normalizeIdentityKey } from './dmCrypto';
+import { isIdentityPublicKey, normalizeIdentityKey, sha256Hex } from './dmCrypto';
 import type { DmLedger } from './dmLedger';
 import { MAX_CLOCK_SKEW_MS, SELF_REPEAT_WINDOW_MS, type PeerRecord } from './dmModel';
 import type { DmOutbox } from './dmOutbox';
 import { isRecord, sanitizeAvatar, sanitizeNickname, sanitizeProfileAvatar } from './dmWire';
 
 function profileHash(nickname: string, avatar: string | null): string {
-  return createHash('sha256').update(`${nickname}\n${avatar ?? ''}`).digest('hex').slice(0, 16);
+  return sha256Hex(`${nickname}\n${avatar ?? ''}`).slice(0, 16);
 }
 
 /** Last-writer-wins with a deterministic tie-break, so every device converges. */

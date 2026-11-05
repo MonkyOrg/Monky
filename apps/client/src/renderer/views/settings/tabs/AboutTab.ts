@@ -8,6 +8,7 @@ import { renderSwitch } from '../../../utils/formControls';
 import { bindVersionCopyButton, renderVersionCopyButton, setVersionCopyButton } from '../../VersionCopyButton';
 import { showErrorToast } from '../../CopyToast';
 import { openExternalUrl } from '../../../utils/feedback';
+import { isDesktopOnly, lockedAttributes, lockedBadge } from '../../../utils/desktopOnly';
 import licenseText from '../../../../../../../LICENSE?raw';
 
 const SOURCE_URL = 'https://github.com/MonkyOrg/Monky';
@@ -21,6 +22,9 @@ export class AboutTab {
   private unbindUpdateCheck: (() => void) | null = null;
 
   public renderHtml(): string {
+    // What a browser tab cannot do is shown locked (#858): updates, auto start, tray, hosting.
+    // The changelog works everywhere: the web build carries its release notes.
+    const autoStartLocked = isDesktopOnly('autoStart');
     return `
       <!-- Updates -->
       <div class="form-group" style="margin-bottom: 16px;">
@@ -35,9 +39,9 @@ export class AboutTab {
             </div>
             <div id="settings-update-status" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;"></div>
           </div>
-          <button id="btn-check-updates" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px;">
+          <button id="btn-check-updates" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px;"${lockedAttributes('autoUpdate', 'appUpdates')}>
             <span class="material-symbols-outlined md-16" style="margin-right: 4px;">refresh</span>
-            ${t('settings.checkUpdates')}
+            ${t('settings.checkUpdates')}${lockedBadge('autoUpdate')}
           </button>
         </div>
         <div style="margin-top: 8px;">
@@ -46,11 +50,11 @@ export class AboutTab {
             ${t('settings.viewChangelog')}
           </button>
         </div>
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);"${lockedAttributes('autoUpdate', 'appUpdates')}>
           <div>
             <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-update-beta">
               <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">science</span>
-              ${t('settings.betaChannel')}
+              ${t('settings.betaChannel')}${lockedBadge('autoUpdate')}
             </label>
             <div style="font-size: 11px; color: var(--text-muted);">
               ${t('settings.betaChannelDesc')}
@@ -58,25 +62,25 @@ export class AboutTab {
           </div>
           ${renderSwitch({ id: 'checkbox-update-beta', label: t('settings.betaChannel'), checked: settingsStore.updateBetaChannel })}
         </div>
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);"${lockedAttributes('autoStart', 'autoStart')}>
           <div>
             <label data-settings-section="auto-start" data-settings-label="${escapeHtml(t('settings.autoStart'))}" style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-auto-start">
               <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">power_settings_new</span>
-              ${t('settings.autoStart')}
+              ${t('settings.autoStart')}${lockedBadge('autoStart')}
             </label>
             <div style="font-size: 11px; color: var(--text-muted);">
               ${t('settings.autoStartDesc')}
             </div>
           </div>
-          <span id="auto-start-loading" class="skeleton loading-skeleton-switch" role="status" aria-label="${escapeHtml(t('common.loading'))}"></span>
-          ${renderSwitch({ id: 'checkbox-auto-start', label: t('settings.autoStart'), checked: false, disabled: true, wrapperId: 'auto-start-control', hidden: true })}
+          <span id="auto-start-loading" class="skeleton loading-skeleton-switch" role="status" aria-label="${escapeHtml(t('common.loading'))}" ${autoStartLocked ? 'hidden' : ''}></span>
+          ${renderSwitch({ id: 'checkbox-auto-start', label: t('settings.autoStart'), checked: false, disabled: !autoStartLocked, wrapperId: 'auto-start-control', hidden: !autoStartLocked })}
         </div>
         <p id="auto-start-load-error" class="audio-device-status" role="status" hidden></p>
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);"${lockedAttributes('tray', 'tray')}>
           <div>
             <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-minimize-to-tray">
               <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">dock_to_bottom</span>
-              ${t('settings.minimizeToTray')}
+              ${t('settings.minimizeToTray')}${lockedBadge('tray')}
             </label>
             <div style="font-size: 11px; color: var(--text-muted);">
               ${t('settings.minimizeToTrayDesc')}
@@ -84,11 +88,11 @@ export class AboutTab {
           </div>
           ${renderSwitch({ id: 'checkbox-minimize-to-tray', label: t('settings.minimizeToTray'), checked: settingsStore.minimizeToTrayOnClose })}
         </div>
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);"${lockedAttributes('hostServer', 'hostServer')}>
           <div>
             <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-ask-shutdown">
               <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">dns</span>
-              ${t('settings.askShutdownOnLastLeave')}
+              ${t('settings.askShutdownOnLastLeave')}${lockedBadge('hostServer')}
             </label>
             <div style="font-size: 11px; color: var(--text-muted);">
               ${t('settings.askShutdownOnLastLeaveDesc')}
@@ -229,7 +233,7 @@ export class AboutTab {
       }
     });
 
-    if (checkboxAutoStart) {
+    if (checkboxAutoStart && !isDesktopOnly('autoStart')) {
       const loading = container.querySelector<HTMLElement>('#auto-start-loading');
       const control = container.querySelector<HTMLElement>('#auto-start-control');
       const failure = container.querySelector<HTMLElement>('#auto-start-load-error');

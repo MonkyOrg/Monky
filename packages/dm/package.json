@@ -1,0 +1,19 @@
+{
+  "name": "@monky/dm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Friends and end-to-end encrypted direct messages, shared by the desktop app and the web version.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@monky/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  },
+  "license": "GPL-3.0-or-later"
+}

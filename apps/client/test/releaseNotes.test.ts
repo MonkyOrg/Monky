@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { RELEASE_HISTORY_PAGE_SIZE, fetchReleaseHistory, fetchVersionReleaseNotes } from '../src/main/releaseNotes';
+import { RELEASE_HISTORY_PAGE_SIZE, fetchReleaseHistory, fetchVersionReleaseNotes } from '@monky/shared';
 import { parseClientReleaseNotes } from '../src/renderer/utils/clientReleaseNotes';
 
 const note = { 'pt-BR': 'Copie sua versão com um clique!', en: 'Copy your version with a click!' };

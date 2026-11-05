@@ -15,6 +15,19 @@ export const BOT_SCREEN_LIMITS = {
   actionsPerScreenPerSecond: 40,
 } as const;
 
+/** A miniapp document: its HTML, the state written into it and the bridge around them. */
+export const BOT_SCREEN_DOCUMENT_MAX_BYTES = BOT_SCREEN_LIMITS.htmlBytes + BOT_SCREEN_LIMITS.stateBytes * 6 + 32 * 1024;
+
+/** What a miniapp document may load and run, in its own isolated origin. */
+export const BOT_SCREEN_CSP = [
+  "default-src 'self' http: https: data: blob:",
+  "script-src 'self' http: https: data: blob: 'unsafe-inline' 'unsafe-eval'",
+  "style-src 'self' http: https: data: blob: 'unsafe-inline'",
+  "connect-src 'self' http: https: ws: wss: data: blob:",
+  "worker-src 'self' http: https: data: blob:",
+  "object-src 'none'", "base-uri 'self' http: https:", "form-action http: https:",
+].join('; ');
+
 export type BotScreenJson = null | boolean | number | string | BotScreenJson[] | { [key: string]: BotScreenJson };
 
 /** Validate iteratively before serialization: neither cycles nor excessive depth may overflow the stack. */

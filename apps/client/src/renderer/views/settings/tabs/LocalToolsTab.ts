@@ -16,6 +16,7 @@ import { renderLoadingIndicator } from '../../../utils/loadingIndicator';
 import { renderLoadingError } from '../../../utils/loadingSkeleton';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { BotDeviceStorageList } from '../BotDeviceStorageList';
+import { isDesktopOnly } from '../../../utils/desktopOnly';
 
 type Mutation =
   | { kind: 'permission'; permissionId: string; enabled: boolean }
@@ -141,10 +142,13 @@ export class LocalToolsTab {
   private readonly storageList = new BotDeviceStorageList();
 
   public renderHtml(): string {
+    // Shown read-only where bots cannot run here (#858): nothing loads, so it shows the empty state.
+    const locked = isDesktopOnly('localExecution');
+    const emptyHidden = locked ? '' : 'hidden';
     return `<div data-local-tools-root style="font-size: 12px; line-height: 1.5;">
       <p style="margin-top: 0; color: var(--text-secondary);">${escapeHtml(t('localExecution.description'))}</p>
       <p style="color: var(--text-muted);">${escapeHtml(t('localExecution.safety'))}</p>
-      <div data-local-loading role="status">${renderLoadingIndicator(t('localExecution.loading'))}</div>
+      <div data-local-loading role="status" ${locked ? 'hidden' : ''}>${renderLoadingIndicator(t('localExecution.loading'))}</div>
       <div data-local-load-error hidden></div>
       <p data-local-unsupported role="status" hidden>${escapeHtml(t('localExecution.unsupported'))}</p>
       <div data-local-feedback role="status" aria-live="polite" aria-atomic="true"
@@ -156,23 +160,23 @@ export class LocalToolsTab {
         </div>
         <p style="color: var(--text-muted);">${escapeHtml(t('localExecution.removalHint'))}</p>
         <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <button type="button" data-local-action="cache" class="btn btn-secondary" disabled>${escapeHtml(t('localExecution.clearCache'))}</button>
+          <button type="button" data-local-action="cache" class="btn btn-secondary" ${locked ? '' : 'disabled'}>${escapeHtml(t('localExecution.clearCache'))}</button>
           <button type="button" data-local-action="refresh" class="btn btn-secondary">${escapeHtml(t('localExecution.refresh'))}</button>
         </div>
       `)}
       ${sectionHtml('local-tools-tools', 'localExecution.tools', `
         <p style="color: var(--text-muted);">${escapeHtml(t('localExecution.sharedTools'))}</p>
-        <p data-local-empty="tools" style="color: var(--text-muted);" hidden>${escapeHtml(t('localExecution.noTools'))}</p>
+        <p data-local-empty="tools" style="color: var(--text-muted);" ${emptyHidden}>${escapeHtml(t('localExecution.noTools'))}</p>
         <div data-local-list="tools"></div>
       `)}
       ${sectionHtml('local-tools-permissions', 'localExecution.permissions', `
         <p style="color: var(--text-muted);">${escapeHtml(t('localExecution.permissionScope'))}</p>
-        <p data-local-empty="permissions" style="color: var(--text-muted);" hidden>${escapeHtml(t('localExecution.noPermissions'))}</p>
+        <p data-local-empty="permissions" style="color: var(--text-muted);" ${emptyHidden}>${escapeHtml(t('localExecution.noPermissions'))}</p>
         <div data-local-list="permissions"></div>
       `)}
       ${sectionHtml('local-tools-bot-storage', 'botStorage.localTitle', BotDeviceStorageList.html())}
       ${sectionHtml('local-tools-tasks', 'localExecution.tasks', `
-        <p data-local-empty="tasks" style="color: var(--text-muted);" hidden>${escapeHtml(t('localExecution.noTasks'))}</p>
+        <p data-local-empty="tasks" style="color: var(--text-muted);" ${emptyHidden}>${escapeHtml(t('localExecution.noTasks'))}</p>
         <div data-local-list="tasks"></div>
       `)}
     </div>`;

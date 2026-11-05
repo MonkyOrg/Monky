@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ipcMain, protocol, type Session, type WebContents } from 'electron';
-import { BOT_SCREEN_DOCUMENT_IPC, BOT_SCREEN_LIMITS, botScreenDocumentConsentSchema, type BotDeviceStorageScope } from '@monky/shared';
+import { BOT_SCREEN_DOCUMENT_IPC, BOT_SCREEN_DOCUMENT_MAX_BYTES, botScreenDocumentConsentSchema, type BotDeviceStorageScope } from '@monky/shared';
 import { botDeviceStorageScopeId, type BotDeviceStorage } from './botStorage/BotDeviceStorage';
 
 /** Storage on this computer that one opened miniapp document may reach. */
@@ -15,7 +15,6 @@ const scheme = 'monky-miniapp';
 const documents = new Map<string, { owner: WebContents; session: Session; html: string; storage: BotScreenStorageBinding | null }>();
 const sessions = new WeakSet<Session>();
 const owners = new WeakSet<WebContents>();
-const maxDocumentBytes = BOT_SCREEN_LIMITS.htmlBytes + BOT_SCREEN_LIMITS.stateBytes * 6 + 32 * 1024;
 
 /** Removing the document (leaving the miniapp) ends whatever it was allowed to store. */
 export function botScreenDocumentStorage(url: string, owner: WebContents): BotScreenStorageBinding | null {
@@ -56,7 +55,7 @@ export function installBotScreenDocuments(session: Session): void {
 export function bindBotScreenDocuments(isOwner: (contents: WebContents) => boolean, storage?: BotDeviceStorage): () => void {
   ipcMain.handle(BOT_SCREEN_DOCUMENT_IPC.create, async (event, ...args: unknown[]): Promise<string> => {
     if (!isOwner(event.sender) || event.senderFrame !== event.sender.mainFrame || args.length !== 2 ||
-        typeof args[0] !== 'string' || !args[0] || Buffer.byteLength(args[0]) > maxDocumentBytes) {
+        typeof args[0] !== 'string' || !args[0] || Buffer.byteLength(args[0]) > BOT_SCREEN_DOCUMENT_MAX_BYTES) {
       throw new Error('Invalid miniapp document request.');
     }
     const consent = botScreenDocumentConsentSchema.safeParse(args[1]);

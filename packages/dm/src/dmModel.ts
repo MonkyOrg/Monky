@@ -3,6 +3,7 @@ import type {
   DmDeliveryState,
   DmErrorCode,
   DmRelation,
+  DmResult,
   DmSelfProfile,
   DmSettings,
   MessageForward,
@@ -246,6 +247,24 @@ export class DmError extends Error {
     readonly details: Record<string, unknown> = {}
   ) {
     super(message);
+  }
+}
+
+/**
+ * Runs one operation of the engine and answers it as data, as both bridges
+ * (desktop IPC and the web) hand it to the page: an expected refusal keeps its
+ * code; anything else is logged and reads as unavailable.
+ */
+export async function dmResult<T>(run: () => T | Promise<T>): Promise<DmResult<T>> {
+  try {
+    return { ok: true, value: await run() };
+  } catch (error) {
+    if (error instanceof DmError) return { ok: false, error: { code: error.code, message: error.message, details: error.details } };
+    console.error('[DM] Operation failed.', error);
+    return {
+      ok: false,
+      error: { code: 'unavailable', message: error instanceof Error ? error.message : String(error), details: {} },
+    };
   }
 }
 

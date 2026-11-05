@@ -20,6 +20,7 @@ import { CustomStatusEditor } from '../../CustomStatusModal';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { customStatusLabel } from '../../../utils/presenceTag';
 import type { TranslationKey } from '../../../i18n';
+import { lockedBlock } from '../../../utils/desktopOnly';
 
 const PRESENCE_OPTIONS: ReadonlyArray<{ status: PresenceStatus; icon: string; label: TranslationKey; description: TranslationKey }> = [
   { status: 'online', icon: 'circle', label: 'main.statusOnline', description: 'settings.presenceOnlineDesc' },
@@ -152,8 +153,8 @@ export class AccountTab {
           role="region" aria-label="${escapeHtml(t('customStatus.title'))}" hidden></div>
       </div>
 
-      <!-- Game activity (#675) -->
-      <div data-settings-section="game-activity" data-settings-label="${escapeHtml(t('settings.gameActivitySection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <!-- Game activity (#675); detecting games needs the desktop (#858) -->
+      ${lockedBlock('gamePresence', 'gamePresence', `<div data-settings-section="game-activity" data-settings-label="${escapeHtml(t('settings.gameActivitySection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">sports_esports</span>
           ${t('settings.gameActivitySection')}
@@ -173,7 +174,7 @@ export class AccountTab {
           </div>
           ${renderSwitch({ id: 'toggle-game-share-suggestion', labelledBy: 'game-share-suggestion-label', describedBy: 'game-share-suggestion-hint', checked: settingsStore.suggestGameShare })}
         </div>` : ''}
-      </div>
+      </div>`)}
 
       <div data-settings-section="connections" data-settings-label="${escapeHtml(t('settings.connectionsSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">

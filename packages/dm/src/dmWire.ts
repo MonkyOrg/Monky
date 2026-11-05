@@ -9,6 +9,7 @@ import {
   type MessageForward,
 } from '@monky/shared';
 import { isIdentityPublicKey, normalizeIdentityKey } from './dmCrypto';
+import { utf8Length as utf8ByteLength } from './bytes';
 import type {
   AttachmentMeta,
   SignedStatement,
@@ -40,7 +41,7 @@ export function isDmId(value: unknown): value is string {
 }
 
 export function utf8Length(value: string): number {
-  return Buffer.byteLength(value, 'utf8');
+  return utf8ByteLength(value);
 }
 
 export function sanitizeNickname(value: unknown, fallback: string): string {

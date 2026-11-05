@@ -44,7 +44,7 @@ function sides(t) {
     safeStorage: { isEncryptionAvailable: () => false },
   };
   const app = load(mainSource('identityService.ts'), {
-    crypto, electron, fs, path, '@monky/shared': shared, './secretEnvelope': envelope, './dm/dmCrypto': { DmKeyring: class {} },
+    crypto, electron, fs, path, '@monky/shared': shared, './secretEnvelope': envelope, '@monky/dm': { DmKeyring: class {} }, './dm/nodeDmBackend': {},
     './atomicFile': load(mainSource('atomicFile.ts'), { crypto, fs, path }),
   });
   const cli = load(path.join(repository, 'apps', 'server', 'src', 'cli', 'identity.ts'), {

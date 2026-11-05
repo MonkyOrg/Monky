@@ -46,10 +46,11 @@ O repositório é um monorepo com workspaces npm:
 
 | Workspace | O que é |
 |---|---|
-| `apps/client` | O app Electron — a interface, e também o anfitrião quando você hospeda pelo próprio app |
+| `apps/client` | O app Electron — a interface, e também o anfitrião quando você hospeda pelo próprio app. O mesmo renderer gera a versão web (`npm run build:web`) |
 | `apps/server` | O servidor: WebSocket, SQLite e o [Monky CLI](/cli) |
 | `apps/light` | Núcleo nativo headless em desenvolvimento; não é o cliente desktop publicado descrito nos guias de uso |
 | `packages/shared` | O contrato entre os dois: tipos do protocolo, validadores, limites e perfis de qualidade |
+| `packages/dm` | Amigos e mensagens diretas: o mesmo motor no desktop e na versão web, com criptografia e armazenamento fornecidos por cada um |
 | `packages/bot-sdk` | SDK, contratos de bot, conexão de voz, execução local e empacotamento do CLI de bots |
 
 `packages/shared` é o que impede cliente e servidor de divergirem: os dois
@@ -76,6 +77,18 @@ O renderer roda com `contextIsolation: true` e `nodeIntegration: false`: a
 interface **não tem acesso ao Node**. Tudo que precisa do sistema operacional —
 escolher uma tela para compartilhar, ler o módulo nativo de áudio, mexer na
 bandeja — passa pela ponte `window.api` exposta pelo preload.
+
+A ponte tem um contrato só, a `PlatformApi` (`src/renderer/platform/api.ts`).
+No desktop, quem a implementa é o preload; na versão web, é
+`src/renderer/platform/web`, com recursos do navegador (IndexedDB, WebCrypto,
+File System Access). Cada implementação declara suas `capabilities`. A interface
+é a mesma nas duas: o que a plataforma não tem, como hospedar servidor ou usar
+atalhos globais, aparece no mesmo lugar, bloqueado e marcado "Desktop". Dentro
+de uma janela ou modal, um aviso no topo explica e oferece baixar o app; fora
+delas, ativar o item abre esse convite. Uma regra só decide isso, `featureAvailability`
+(`platform/capabilities.ts`), e os controles bloqueados vêm de
+`utils/desktopOnly.ts`. Só a barra de título e os botões da janela do desktop
+somem na web.
 
 Três barreiras protegem essa ponte. A Content-Security-Policy do `index.html`
 só executa scripts do próprio app, então um HTML injetado por engano não roda;
@@ -267,6 +280,16 @@ Cada tela é capturada, codificada e enviada pela fonte nativa, em conexões
 próprias, tanto em P2P quanto em SFU. O Chromium participa só como receptor
 opcional dessas telas, quando escolhido nas configurações
 (`BrowserScreenSubscription`, por P2P ou SFU).
+
+Na versão web, o mesmo contrato de comandos e eventos da fonte nativa é
+respondido por `src/renderer/platform/web/webScreen`: a captura vem da janela
+do próprio navegador (`getDisplayMedia`), cada perfil pedido é uma cópia da
+captura reduzida pelo navegador, e o envio é H.264 Main por conexões próprias
+para cada espectador em P2P ou por um par de producers de tela no SFU, com o
+mesmo protocolo `monky-native-screen-p2p` e os mesmos dados de rendição. O
+renderer acima dele não muda; o seletor é a janela do navegador
+(`views/screenShare/BrowserScreenSharePicker.ts`), e a versão web assiste
+sempre com o receptor Chromium.
 
 O seletor só usa a captura nativa e explica o motivo quando ela não está
 disponível: não existe alternativa pela captura do Chromium. Fechar o seletor
@@ -796,6 +819,7 @@ Monky tem um módulo nativo em C++:
 | **Windows** | WASAPI *process loopback* — captura o som do sistema ou de um app específico, excluindo o próprio Monky para não gerar eco |
 | **macOS** | ScreenCaptureKit (macOS 13+ para áudio; caminho de vídeo nativo requer 14+), com áudio do sistema ou do aplicativo inteiro selecionado, mediante confirmação |
 | **Outras** | Não suportado — o app segue funcionando, só sem áudio de tela |
+| **Versão web** | O som que o navegador entrega com a captura: no Chrome e no Edge, o de uma guia e, em alguns sistemas, o da tela inteira |
 
 No Windows, o mesmo módulo também identifica as janelas e os monitores do
 seletor, lê o layout do teclado para os atalhos e limita o redimensionamento do
@@ -903,6 +927,7 @@ apps/
     src/preload/             a ponte window.api
     src/renderer/
       core/                  serviços: rede, WebRTC, áudio, vídeo
+      platform/              contrato da ponte (PlatformApi) e a implementação web
       stores/                estado + eventos
       views/                 as telas
       i18n/                  traduções PT/EN
@@ -912,6 +937,7 @@ apps/
     src/cli/                 o Monky CLI
 packages/
   shared/                    protocolo, validadores, limites, perfis
+  dm/                        amigos e mensagens diretas (desktop e web)
 ```
 
 ## Limites conhecidos
@@ -928,8 +954,12 @@ Coisas que são consequência direta da arquitetura, não bugs:
   ao conectar, mas só a partir de um piso (`MIN_CLIENT_PROTOCOL` para clientes,
   `MIN_BOT_PROTOCOL` para bots). Quem estiver abaixo dele não entra até
   atualizar, e um recurso novo só aparece quando os dois lados o têm.
+- **Versão web só em servidores seguros.** Uma página https só abre conexões
+  `wss://` (ou com o próprio computador). Servidores acessados por IP, VPN ou
+  rede local continuam só no app de desktop.
 - **Áudio de tela só em Windows e macOS**, por depender de API nativa de cada
-  sistema.
+  sistema. Na versão web, quem decide é o navegador: Chrome e Edge compartilham
+  o som de uma guia e, em alguns sistemas, o da tela inteira.
 - **O primeiro contato confia no servidor.** A chave de um servidor é fixada no
   primeiro login protegido. Antes disso, um servidor desconhecido pode apresentar
   a chave de outro que você ainda não visitou com o app atual (veja

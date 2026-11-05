@@ -11,6 +11,7 @@ import { portForwardTutorial } from '../tutorials/portForwardTutorial';
 import { lanTutorial } from '../tutorials/lanTutorial';
 import { vpsOracleFreeTutorial, vpsGenericTutorial } from '../tutorials/vpsTutorial';
 import { preloadOnboardingShots, renderOnboardingShot, type OnboardingShot } from './onboardingShots';
+import { lockedAttributes, lockedBadge } from '../utils/desktopOnly';
 
 type WizardScreen = 'welcome' | 'choose' | 'host-method' | 'vpn-select' | 'vps-select' | 'tutorial';
 /** `guide` is the full getting-started flow; `host-tutorials` is opened from the create-server form. */
@@ -170,9 +171,9 @@ export class OnboardingWizard {
     `;
   }
 
-  private optionCard(id: string, icon: string, title: string, description: string, trailing: string, extra = ''): string {
+  private optionCard(id: string, icon: string, title: string, description: string, trailing: string, extra = '', attributes = ''): string {
     return `
-      <button type="button" class="onboarding-option-card${extra}" id="${id}">
+      <button type="button" class="onboarding-option-card${extra}" id="${id}"${attributes}>
         <span class="material-symbols-outlined onboarding-option-icon" aria-hidden="true">${icon}</span>
         <span class="onboarding-option-text">
           <span class="onboarding-option-title">${title}</span>
@@ -229,7 +230,8 @@ export class OnboardingWizard {
       ${renderOnboardingShot('add-server-choice', t('onboarding.choiceShotAlt'))}
       <div class="onboarding-options">
         ${this.optionCard('onboarding-join', 'login', t('onboarding.joinTitle'), t('onboarding.joinDesc'), this.arrow())}
-        ${this.optionCard('onboarding-host', 'dns', t('onboarding.hostTitle'), t('onboarding.hostDesc'), this.arrow())}
+        ${this.optionCard('onboarding-host', 'dns', t('onboarding.hostTitle'), t('onboarding.hostDesc'),
+          lockedBadge('hostServer') || this.arrow(), '', lockedAttributes('hostServer', 'hostServer'))}
       </div>
       <div class="onboarding-footer">
         ${this.backButton('onboarding-choose-back')}

@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import {
   DM_MAX_ATTACHMENTS,
   DM_MAX_MESSAGE_LENGTH,
@@ -8,7 +7,7 @@ import {
   type DmRelayItem,
   type DmSendMessageInput,
 } from '@monky/shared';
-import { newDmId, type DmEnvelopeHeader } from './dmCrypto';
+import { newDmId, sha256Hex, type DmEnvelopeHeader } from './dmCrypto';
 import type { DmFiles } from './dmFiles';
 import type { DmLedger } from './dmLedger';
 import {
@@ -77,13 +76,13 @@ export class DmConversations {
     const replyTo = input.replyTo && this.ledger.findMessage(peer, input.replyTo) ? input.replyTo : null;
     const forwarded = sanitizeDmForward(input.forwarded);
     const attachments: StoredAttachment[] = files.map((file) => {
-      const data = Buffer.from(file.data);
+      const data = new Uint8Array(file.data);
       const meta = sanitizeAttachmentMeta({
         fileId: newDmId(),
         name: file.name,
         size: data.length,
         mime: file.mime,
-        sha256: createHash('sha256').update(data).digest('hex'),
+        sha256: sha256Hex(data),
       })!;
       this.ledger.store.writeAttachment(meta.fileId, data);
       return { ...meta, state: 'local', receivedBytes: meta.size };

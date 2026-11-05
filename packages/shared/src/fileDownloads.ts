@@ -46,3 +46,20 @@ export type FileBatchDownloadResult =
   | { status: 'cancelled' }
   /** `saved` counts what still reached the disk: a folder keeps the files that finished, a ZIP keeps none. */
   | { status: 'failed'; saved: number; error: string };
+
+/** A name any system can save: the last path segment, without characters Windows refuses. */
+export function sanitizeDownloadFileName(fileName: string): string {
+  const baseName = (fileName || '').trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'download';
+  const sanitized = baseName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
+  return sanitized || 'download';
+}
+
+/** `foto.png`, `foto (2).png`, ...: never overwrites a file nor repeats a name inside the batch. */
+export function uniqueFileName(name: string, isTaken: (candidate: string) => boolean): string {
+  const dot = name.lastIndexOf('.');
+  const extension = dot > 0 ? name.slice(dot) : '';
+  const base = extension ? name.slice(0, -extension.length) : name;
+  let candidate = name;
+  for (let copy = 2; isTaken(candidate); copy++) candidate = `${base} (${copy})${extension}`;
+  return candidate;
+}

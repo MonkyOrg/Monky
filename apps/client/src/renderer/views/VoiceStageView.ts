@@ -42,6 +42,8 @@ import { StageTelemetryMonitor } from './stage/StageTelemetryMonitor';
 import { FocusedScreenZoom } from './stage/FocusedScreenZoom';
 import { showErrorToast } from './CopyToast';
 import { reportError } from '../utils/feedback';
+import { platformSupports } from '../platform/capabilities';
+import { lockedAttributes } from '../utils/desktopOnly';
 
 /** Where a card sits: the grid, the focus stack or the strip beside it; each frames the tile differently. */
 type StagePlacement = 'grid' | 'focused' | 'strip';
@@ -376,14 +378,14 @@ export class VoiceStageView {
           <button id="stage-btn-camera" class="btn btn-icon ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isCameraOn ? t('stage.cameraOff') : t('stage.cameraOn')}">
             <span class="material-symbols-outlined">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>
           </button>
-          <button id="stage-btn-screen" class="btn btn-icon ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isScreenSharing ? t('stage.stopScreenShare') : t('main.shareScreen')}">
+          <button id="stage-btn-screen" class="btn btn-icon ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isScreenSharing ? t('stage.stopScreenShare') : t('main.shareScreen')}"${lockedAttributes('screenShare', 'screenShare')}>
             <span class="material-symbols-outlined">${voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share'}</span>
             <span class="material-symbols-outlined screen-audio-badge" style="font-size: 12px; position: absolute; bottom: 2px; right: 2px; color: var(--success);" hidden>volume_up</span>
           </button>
-          <button id="stage-btn-overlay" class="btn btn-icon ${overlayBridgeService.isActive() ? 'broadcasting-pulse active' : ''}" title="${t('overlay.openOverlay')}">
+          <button id="stage-btn-overlay" class="btn btn-icon ${overlayBridgeService.isActive() ? 'broadcasting-pulse active' : ''}" title="${t('overlay.openOverlay')}"${lockedAttributes('overlay', 'overlay')}>
             <span class="material-symbols-outlined">picture_in_picture_alt</span>
           </button>
-          <button id="stage-btn-soundboard" class="btn btn-icon" title="${t('main.openSoundboard')}">
+          <button id="stage-btn-soundboard" class="btn btn-icon" title="${t('main.openSoundboard')}"${lockedAttributes('mediaFolders', 'mediaLibrary')}>
             <span class="material-symbols-outlined">music_note</span>
           </button>
           <button id="stage-btn-stop-share" class="btn btn-danger" style="display: ${voiceStore.isScreenSharing ? 'inline-flex' : 'none'}; margin-left: 12px; padding: 0 16px; height: 38px;" title="${t('stage.stopScreenShare')}">
@@ -1291,7 +1293,9 @@ export class VoiceStageView {
       const text = document.createElement('span');
       text.textContent = t(`screenShare.nativeFailure.${state.reason ?? 'connection-failed'}`);
       if (state.receiver === 'native') text.textContent += ` ${t('screenShare.nativeReceiverSettingsHint')}`;
-      else if (state.reason === 'unsupported') text.textContent += ` ${t('screenShare.chromiumReceiverSettingsHint')}`;
+      // Choosing the native receiver exists only where the platform has one (the desktop).
+      else if (state.reason === 'unsupported') text.textContent += ` ${t(platformSupports('nativeScreenAudio')
+        ? 'screenShare.chromiumReceiverSettingsHint' : 'screenShare.browserReceiverHint')}`;
       const retry = document.createElement('button');
       retry.type = 'button';
       retry.className = 'btn btn-secondary';

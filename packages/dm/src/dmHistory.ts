@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import {
   DAY_MS,
   messageFingerprint,
@@ -10,6 +9,8 @@ import {
 } from './dmModel';
 import { DmPersistence } from './dmPersistence';
 import { isRecord } from './dmWire';
+import { createSha256 } from './dmCrypto';
+import { afterCurrentTask } from './backend';
 
 /** Deletes of messages this device never had, remembered per conversation. */
 const MAX_TOMBSTONES = 500;
@@ -98,7 +99,7 @@ export class DmHistory {
   private readonly conversations = new Map<string, Conversation>();
   /** Months in memory, least recently used first. */
   private readonly recent = new Map<string, { conversation: Conversation; month: number }>();
-  private trimTimer: NodeJS.Immediate | null = null;
+  private cancelTrim: (() => void) | null = null;
 
   constructor(
     private readonly store: DmPersistence,
@@ -270,8 +271,8 @@ export class DmHistory {
 
   /** Forgets everything in memory; used right before the store is deleted. */
   discard(): void {
-    if (this.trimTimer) clearImmediate(this.trimTimer);
-    this.trimTimer = null;
+    this.cancelTrim?.();
+    this.cancelTrim = null;
     this.conversations.clear();
     this.recent.clear();
   }
@@ -495,7 +496,7 @@ export class DmHistory {
 
   /** What earlier versions computed for the digest, so devices on either version agree on a day. */
   private dayIndex(messages: StoredMessage[]): DayIndex {
-    const hash = createHash('sha256');
+    const hash = createSha256();
     let visible = 0;
     let incoming = 0;
     for (const message of messages) {
@@ -504,7 +505,7 @@ export class DmHistory {
       visible += 1;
       if (message.author !== this.me) incoming += 1;
     }
-    return { h: hash.digest('hex').slice(0, 12), n: visible, i: incoming };
+    return { h: hash.hex().slice(0, 12), n: visible, i: incoming };
   }
 
   // ---------------------------------------------------------------------------
@@ -515,12 +516,11 @@ export class DmHistory {
     conversation.segments.set(segment.month, segment);
     this.bump(conversation, segment.month);
     // Later, so a month is never dropped in the middle of an operation that holds its messages.
-    if (!this.trimTimer) {
-      this.trimTimer = setImmediate(() => {
-        this.trimTimer = null;
+    if (!this.cancelTrim) {
+      this.cancelTrim = afterCurrentTask(() => {
+        this.cancelTrim = null;
         this.trim();
       });
-      this.trimTimer.unref?.();
     }
   }
 

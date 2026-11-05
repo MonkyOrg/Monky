@@ -1,11 +1,15 @@
-import { compareReleaseVersions, type ReleaseHistoryEntry, type ReleaseHistoryResult, type ReleaseNotesResult } from '@monky/shared';
+import { compareReleaseVersions } from './githubReleases.js';
+import type { ReleaseHistoryEntry, ReleaseHistoryResult, ReleaseNotesResult } from './ipc.js';
 
 const REPOSITORY = 'MonkyOrg/Monky';
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?$/i;
 export const RELEASE_HISTORY_PAGE_SIZE = 20;
 const MAX_HISTORY_PAGE = 50;
 
-/** The updater passes Electron's `net.fetch`, which honours the system proxy like the update check does. */
+/**
+ * The desktop updater passes Electron's `net.fetch`, which honours the system proxy like the update check does;
+ * the web version answers from the releases embedded in its build.
+ */
 export type ReleaseRequest = (url: string, init: RequestInit) => Promise<Response>;
 
 const baseVersion = (version: string): string => version.split(/[-+]/)[0];

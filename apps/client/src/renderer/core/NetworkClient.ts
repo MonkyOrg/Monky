@@ -29,7 +29,8 @@ import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
 import { settingsStore } from '../stores/settingsStore';
 import { connectionStore } from '../stores/connectionStore';
-import { normalizeHost, toWsUrl } from '../utils/serverAddress';
+import { isLoopbackHost, isSecureServer, normalizeHost, toWsUrl } from '../utils/serverAddress';
+import { platformSupports } from '../platform/capabilities';
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';
 
@@ -222,6 +223,10 @@ export class NetworkClient {
 
   private async diagnoseConnectionFailure(host: string, port: number): Promise<Error> {
     clientLog.warn('NETWORK', `Diagnosing connection failure to ${host}:${port}`);
+    // On the web every other server is reached over TLS, and the page cannot probe it (#858).
+    if (!platformSupports('plainRemoteServers') && !isLoopbackHost(host)) {
+      return new Error(t('network.webSecureFailed', { host, port }));
+    }
     // Outside Electron (tests, a page opened without the preload) there is no probe.
     const probe = window.api?.probeServer;
     if (typeof probe !== 'function') {
@@ -396,6 +401,11 @@ export class NetworkClient {
       if (isStale()) return;
 
       try {
+        // A page served over HTTPS may only open `wss://` or this machine (#858).
+        if (!platformSupports('plainRemoteServers') && !isSecureServer({ host, port }) && !isLoopbackHost(host)) {
+          fail(new Error(t('network.webUnsupportedServer', { host: probeHost, port })));
+          return;
+        }
         this.ws = new WebSocket(this.currentServerUrl);
       } catch (error) {
         fail(new Error(t('network.addressError', {

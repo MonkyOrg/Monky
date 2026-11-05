@@ -46,10 +46,11 @@ The repository is a monorepo with npm workspaces:
 
 | Workspace | What it is |
 |---|---|
-| `apps/client` | The Electron app — the interface, and also the host when you host from the app itself |
+| `apps/client` | The Electron app — the interface, and also the host when you host from the app itself. The same renderer builds the web version (`npm run build:web`) |
 | `apps/server` | The server: WebSocket, SQLite and the [Monky CLI](/en/cli) |
 | `apps/light` | Native headless core under development; not the published desktop client covered by the user guides |
 | `packages/shared` | The contract between the two: protocol types, validators, limits and quality profiles |
+| `packages/dm` | Friends and direct messages: the same engine on the desktop and in the web version, with crypto and storage supplied by each |
 | `packages/bot-sdk` | SDK, bot contracts, voice connection, local execution and bot CLI packaging |
 
 `packages/shared` is what stops client and server from drifting apart: both
@@ -76,6 +77,18 @@ The renderer runs with `contextIsolation: true` and `nodeIntegration: false`: th
 UI **has no access to Node**. Anything that needs the operating system — picking
 a screen to share, reading the native audio module, touching the tray — goes
 through the `window.api` bridge exposed by the preload.
+
+The bridge has a single contract, `PlatformApi` (`src/renderer/platform/api.ts`).
+On the desktop the preload implements it; in the web version,
+`src/renderer/platform/web` does, with browser features (IndexedDB, WebCrypto,
+File System Access). Each implementation declares its `capabilities`. The
+interface is the same on both: what the platform lacks, such as hosting a
+server or global shortcuts, appears in the same place, locked and marked
+"Desktop". Inside a window or dialog, a notice at the top explains it and offers
+to download the app; elsewhere, activating the item opens that offer. One rule decides it,
+`featureAvailability` (`platform/capabilities.ts`), and the locked controls come
+from `utils/desktopOnly.ts`. Only the desktop's title bar and window buttons are
+left out on the web.
 
 Three barriers protect that bridge. The Content-Security-Policy in `index.html`
 only runs the app's own scripts, so HTML injected by mistake does not execute;
@@ -264,6 +277,16 @@ microphone and camera. Each screen is captured, encoded and sent by its native
 source over its own connections, in both P2P and SFU. Chromium only takes part
 as an optional receiver of those screens, when selected in settings
 (`BrowserScreenSubscription`, over P2P or SFU).
+
+In the web version, the same command and event contract as the native source
+is answered by `src/renderer/platform/web/webScreen`: the capture comes from
+the browser's own dialog (`getDisplayMedia`), each requested profile is a copy
+of the capture scaled down by the browser, and it is sent as H.264 Main over a
+connection of its own per viewer in P2P or through a pair of screen producers
+on the SFU, with the same `monky-native-screen-p2p` protocol and rendition
+data. The renderer above it does not change; the picker is the browser's
+dialog (`views/screenShare/BrowserScreenSharePicker.ts`), and the web version
+always watches with the Chromium receiver.
 
 The picker only uses native capture and explains why when it is unavailable:
 there is no fallback to Chromium capture. Closing the picker cancels pending
@@ -789,6 +812,7 @@ is why Monky has a native C++ module:
 | **Windows** | WASAPI *process loopback* — captures system sound or a specific app's, excluding Monky itself so it does not echo |
 | **macOS** | ScreenCaptureKit (macOS 13+ for audio; native video requires 14+), capturing system audio or the entire selected application after confirmation |
 | **Others** | Not supported — the app keeps working, just without screen audio |
+| **Web version** | The sound the browser hands over with the capture: in Chrome and Edge, a tab's and, on some systems, the entire screen's |
 
 On Windows the same module also identifies the picker's windows and monitors,
 reads the keyboard layout for shortcuts and constrains the overlay's resizing.
@@ -893,6 +917,7 @@ apps/
     src/preload/             the window.api bridge
     src/renderer/
       core/                  services: network, WebRTC, audio, video
+      platform/              bridge contract (PlatformApi) and the web implementation
       stores/                state + events
       views/                 the screens
       i18n/                  PT/EN translations
@@ -902,6 +927,7 @@ apps/
     src/cli/                 the Monky CLI
 packages/
   shared/                    protocol, validators, limits, profiles
+  dm/                        friends and direct messages (desktop and web)
 ```
 
 ## Known limits
@@ -918,8 +944,12 @@ Things that follow directly from the architecture, and are not bugs:
   features when they connect, but only from a floor up (`MIN_CLIENT_PROTOCOL`
   for clients, `MIN_BOT_PROTOCOL` for bots). Anyone below it cannot join until
   they update, and a new feature only appears when both sides have it.
+- **Web version only on secure servers.** An https page only opens `wss://`
+  connections (or ones to the same computer). Servers reached by IP, VPN or
+  local network stay in the desktop app.
 - **Screen audio only on Windows and macOS**, because it depends on each system's
-  native API.
+  native API. In the web version, the browser decides: Chrome and Edge share a
+  tab's sound and, on some systems, the entire screen's.
 - **First contact trusts the server.** A server's key is pinned on the first
   protected sign-in. Before that, an unknown server can present the key of
   another one you have not yet visited with the current app (see

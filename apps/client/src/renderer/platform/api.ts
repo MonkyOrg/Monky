@@ -1,9 +1,20 @@
 import type {
   BotDeviceStorageDecision, BotDeviceStorageDocumentState, BotDeviceStorageEntry, BotDeviceStorageRequest,
   BotDeviceStorageResponse, BotDeviceStorageScope, DmApi, IpcInvoker as Invoke, IpcSubscriber as Subscribe,
-  NativeScreenPresentation, NativeScreenPresentationSample, SoundboardSoundEntry, StickerEntry,
+  NativeScreenCaptureKind, NativeScreenPresentation, NativeScreenPresentationSample, NativeScreenVideoProfile,
+  SoundboardSoundEntry, StickerEntry,
 } from '@monky/shared';
 export type { LinkPreviewData, OverlayBounds, OverlayConfig, OverlayMode, OverlayLayout, OverlayPosition, OverlayParticipantState, OverlaySyncState } from '@monky/shared';
+
+/**
+ * - `origin`: each document has an origin of its own, and only that origin receives the bridge.
+ * - `opaque`: documents share a site, so each frame runs sandboxed in an opaque origin.
+ * `loaderLoads` counts the frame loads before the miniapp's own (a page that receives it).
+ */
+export interface BotScreenDocumentHost {
+  isolation: 'origin' | 'opaque';
+  loaderLoads: 0 | 1;
+}
 
 export interface BotStorageApi {
   documentState: (url: string) => Promise<BotDeviceStorageDocumentState>;
@@ -19,14 +30,96 @@ export interface BotStorageApi {
   onChanged: Subscribe<'bot-storage:changed'>;
 }
 
+/** A capture the browser's own dialog handed over; `sourceId` names it in the screen commands. */
+export interface BrowserDisplayCapture {
+  sourceId: string;
+  /** What the browser says was chosen (a tab title, a window, a screen). */
+  label: string;
+  captureKind: NativeScreenCaptureKind;
+  /** The browser also gave its sound, which the person may decline in the dialog. */
+  audio: boolean;
+}
+
 /**
- * What the main window's page may ask of Main. A member typed `Invoke<channel>`
- * or `Subscribe<event>` is exactly that channel of the contract in @monky/shared
- * (`IpcInvokeChannels`/`IpcEvents`); the others add something of the preload's.
+ * What the platform running the app can do (#858). What is false is never
+ * a button that fails: `featureAvailability` shows it locked, offering the
+ * desktop app. The desktop has everything, the web version only what a
+ * browser tab can do.
  */
-export interface ElectronApi {
+export interface PlatformCapabilities {
+  /** Window frame drawn by the app (minimize, maximize, close). */
+  windowControls: boolean;
+  /** A screen share popped out into its own always-on-top window. */
+  screenPictureInPicture: boolean;
+  /**
+   * That window comes from the browser's Document Picture-in-Picture API
+   * (Chrome and Edge), which opens only on a click: never automatically.
+   */
+  documentPictureInPicture: boolean;
+  /** That window also opens on its own, when Monky goes to the background with a screen on stage. */
+  automaticPictureInPicture: boolean;
+  hostServer: boolean;
+  lanDiscovery: boolean;
+  overlay: boolean;
+  /** Push-to-talk and shortcuts that work with the app in the background. */
+  globalShortcuts: boolean;
+  tray: boolean;
+  autoStart: boolean;
+  autoUpdate: boolean;
+  gamePresence: boolean;
+  /** Native screen and system audio capture, with its own source picker. */
+  nativeScreenAudio: boolean;
+  /** Sharing this computer's screen in a call. */
+  screenShare: boolean;
+  /**
+   * What to share is chosen in the browser's own dialog (getDisplayMedia), which
+   * opens only on a click; the app cannot list the windows and screens itself.
+   */
+  browserScreenPicker: boolean;
+  /** The app chooses the screen encoder (hardware or software, H.264 or AV1); a browser encodes on its own. */
+  screenEncoderChoice: boolean;
+  /** Bots that run tools on this computer. */
+  localExecution: boolean;
+  /** Bot screens and the storage they keep on this device. */
+  botScreens: boolean;
+  /** Friends and direct messages. */
+  directMessages: boolean;
+  /** Soundboard sounds and stickers. */
+  mediaFolders: boolean;
+  /**
+   * Media comes from a folder the user picks. Without it (browsers lacking the
+   * File System Access API), "choose folder" adds files to the browser's storage.
+   */
+  mediaFolderPicker: boolean;
+  /** Several files saved one by one into a chosen folder; otherwise they come together in a ZIP. */
+  folderDownloads: boolean;
+  /** Bots may save a sound into the soundboard folder (downloads from any https address). */
+  botSoundDownloads: boolean;
+  /**
+   * The identity survives anything short of deleting it in the app. In a
+   * browser, clearing the site's data also deletes it, so a copy is urged.
+   */
+  durableIdentity: boolean;
+  /**
+   * Servers reached over plain `ws://` on another machine. A page served over
+   * HTTPS may only open `wss://` or this machine (mixed content).
+   */
+  plainRemoteServers: boolean;
+}
+
+/**
+ * What the app page may ask of its platform. On the desktop it is the preload,
+ * where a member typed `Invoke<channel>` or `Subscribe<event>` is exactly that
+ * channel of the contract in @monky/shared (`IpcInvokeChannels`/`IpcEvents`);
+ * on the web, `platform/web/webPlatform.ts`.
+ */
+export interface PlatformApi {
+  capabilities: PlatformCapabilities;
+  /** Returns the URL of a document only the miniapp's own frame may load. */
   createBotScreenDocument: Invoke<'bot-screen-document:create'>;
   removeBotScreenDocument: Invoke<'bot-screen-document:remove'>;
+  /** How the documents of `createBotScreenDocument` are isolated and loaded. */
+  botScreenDocuments: BotScreenDocumentHost;
   botStorage: BotStorageApi;
   nativeScreenCommand: Invoke<'native-screen:invoke'>;
   nativeScreenReply: Invoke<'native-screen:reply'>;
@@ -79,11 +172,20 @@ export interface ElectronApi {
   cancelDesktopSourcePreviews: Invoke<'screen-share:cancel-previews'>;
   prepareScreenShareWindow: Invoke<'screen-share:prepare-window'>;
   ensureScreenPermission: Invoke<'screen-share:ensure-permission'>;
+  /**
+   * Opens the browser's own dialog to choose what to share (`browserScreenPicker`), asking for at
+   * most `video`; resolves null when the person closed it without choosing.
+   */
+  captureDisplay: (request: { audio: boolean; video: NativeScreenVideoProfile }) => Promise<BrowserDisplayCapture | null>;
+  /** The share of `sourceId` ended: a browser capture stops; a desktop source needs nothing. */
+  releaseScreenCapture: (sourceId: string) => void;
   selectImageDialog: Invoke<'dialog:select-image'>;
   selectImagesDialog: Invoke<'dialog:select-images'>;
   selectSoundFile: Invoke<'dialog:select-sound-file'>;
   selectSoundboardFolder: Invoke<'dialog:select-soundboard-folder'>;
   getDefaultSoundboardFolder: Invoke<'soundboard:default-folder'>;
+  /** How a soundboard or sticker folder is shown to the user. */
+  describeMediaFolder: (folder: string) => string;
   /** The preload adds whether a direct user action asked for it (D4). */
   listSoundboardSounds: (folderPath: string) => Promise<SoundboardSoundEntry[]>;
   readSoundboardSound: Invoke<'soundboard:read-sound'>;
@@ -116,6 +218,8 @@ export interface ElectronApi {
   setLocalExecutionConnection: Invoke<'local-execution:set-connection'>;
   onLocalExecutionTaskFailed: Subscribe<'local-execution:task-failed'>;
   selectStickersFolder: Invoke<'dialog:select-stickers-folder'>;
+  /** Where stickers go when no folder was chosen, or null when the user must pick one. */
+  getDefaultStickersFolder: () => Promise<string | null>;
   /** The preload adds whether a direct user action asked for it (D4). */
   listStickers: (folderPath: string) => Promise<StickerEntry[]>;
   readSticker: Invoke<'stickers:read'>;

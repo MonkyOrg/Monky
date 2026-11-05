@@ -5,7 +5,7 @@ import {
   type NativeScreenVideoProfile, type SfuConsumedPayload, type SfuProducerClosedPayload,
   type SfuProducersListPayload, type SfuRouterRtpCapabilitiesPayload, type SfuWebRtcTransportCreatedPayload,
 } from '@monky/shared';
-import { BrowserScreenCodecError, h264MaxReceiveLevel, supportsBrowserAv1Level } from './browserScreenCodecs';
+import { BrowserScreenCodecError, av1ReceiveLevel, h264MaxReceiveLevel, supportsBrowserAv1Level } from './browserScreenCodecs';
 
 export type BrowserScreenRpc = <T>(method: NativeScreenRpcMethod, payload: Record<string, unknown>) => Promise<T>;
 type RouterResponse = Omit<SfuRouterRtpCapabilitiesPayload, 'rtpCapabilities'> & { rtpCapabilities: SfuTypes.RtpCapabilities };
@@ -149,6 +149,12 @@ export class BrowserScreenSfu {
     const selected = () => !this.stopping && this.producers.get(producer.producerId) === entry;
     const capabilities = structuredClone(this.device.rtpCapabilities);
     const selectedMime = `video/${this.options.source.codec ?? 'h264'}`;
+    // Like the P2P answer: the AV1 level the decoder probe admitted, not libwebrtc's default.
+    for (const codec of capabilities.codecs ?? []) {
+      const level = selectedMime === 'video/av1' && codec.mimeType.toLowerCase() === 'video/av1'
+        ? av1ReceiveLevel(codec.parameters ?? {}, this.options.profile) : null;
+      if (level !== null) codec.parameters = { ...codec.parameters, 'level-idx': level };
+    }
     const selectedCodecs = capabilities.codecs?.filter(codec => codec.mimeType.toLowerCase() === selectedMime
       && (selectedMime !== 'video/av1' || supportsBrowserAv1Level(this.options.profile, codec.parameters ?? {})));
     if (selectedMime === 'video/av1' && !selectedCodecs?.length)

@@ -57,7 +57,8 @@ function launch(t, userData = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-ident
   const keyrings = [];
   const service = load(mainSource('identityService.ts'), {
     crypto, electron, fs, path, '@monky/shared': shared, './atomicFile': atomicFile, './secretEnvelope': envelope,
-    './dm/dmCrypto': { DmKeyring: class { constructor(publicKey) { this.identityPublicKey = publicKey; keyrings.push(publicKey); } } },
+    '@monky/dm': { DmKeyring: class { constructor(publicKey) { this.identityPublicKey = publicKey; keyrings.push(publicKey); } } },
+    './dm/nodeDmBackend': {},
   }, { console: quiet });
   const file = path.join(userData, 'identity.json');
   return { service, safeStorage, logged, userData, file, relaunch: () => launch(t, userData) };

@@ -5,7 +5,7 @@ import { rrulestr } from 'rrule';
 import {
   createServerInviteLink, eventOccurrenceStart, eventTimeInZone, type EventCalendarExport,
 } from '@monky/shared';
-import { createEventCalendar } from '../src/main/serverEventCalendar';
+import { createEventCalendar } from '../src/renderer/utils/eventCalendar';
 
 function fixture(repeat: EventCalendarExport['event']['repeat'] = 'none', timeZone = 'UTC', start = '2026-01-31T10:00'): EventCalendarExport {
   const startsAt = eventTimeInZone(start, timeZone);

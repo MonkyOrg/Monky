@@ -4,13 +4,13 @@ import {
   type CommandSoundDownloadCancelPayload, type SlashCommand,
   type SoundDownloadResult, type SoundboardDownloadProgress,
 } from '@monky/shared';
-import type { ElectronApi } from '../../preload/api';
+import type { PlatformApi } from '../platform/api';
 import type { ChatStore, BotInvocation } from '../stores/chatStore';
 import type { ServerStore } from '../stores/serverStore';
 import type { NetworkClient } from './NetworkClient';
 import type { SoundDownloadApproval, SoundDownloadConfirmationDetails } from '../utils/soundDownloadConfirmation';
 
-type DownloadApi = Pick<ElectronApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'>;
+type DownloadApi = Pick<PlatformApi, 'authorizeSoundDownload' | 'downloadSound' | 'cancelSoundDownload' | 'onSoundDownloadProgress'>;
 interface AuthorizedInvocation {
   client: NetworkClient;
   store: ChatStore;

@@ -91,9 +91,10 @@ async function saveSticker(url: string, fileName: string): Promise<void> {
 
   // `no-folder` covers both "never picked one" and "the main process has not
   // seen the user confirm this folder in this run" — it only writes to folders
-  // chosen through its own dialog. Either way, asking is the right answer.
+  // chosen through its own dialog. Either way, asking is the right answer,
+  // unless the platform keeps stickers in one place of its own (the browser).
   if (!result.ok && result.reason === 'no-folder') {
-    const folder = await window.api?.selectStickersFolder?.();
+    const folder = await window.api?.getDefaultStickersFolder?.() ?? await window.api?.selectStickersFolder?.();
     if (!folder) return;
     settingsStore.stickersFolderPath = folder;
     settingsStore.save();

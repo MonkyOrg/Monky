@@ -9,26 +9,47 @@ const fmtpParameters = (value: string): Record<string, string> => Object.fromEnt
   return at === -1 ? [] : [[part.slice(0, at).trim(), part.slice(at + 1).trim()]];
 }));
 
-export function supportsBrowserAv1Level(
-  video: Readonly<NativeScreenVideoProfile>, parameters: Readonly<Record<string, unknown>>,
-): boolean {
+interface Av1Parameters { profile: number; level: number; tier: number }
+
+function av1Parameters(parameters: Readonly<Record<string, unknown>>): Av1Parameters | null {
   const integer = (key: string, fallback: number, maximum: number): number | null => {
     const raw = parameters[key];
     const value = raw === undefined ? fallback : typeof raw === 'number' ? raw
       : typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : NaN;
     return Number.isSafeInteger(value) && value >= 0 && value <= maximum ? value : null;
   };
-  // AV1 RTP §7.2 defaults: profile=0, level-idx=5 (3.1), tier=0. Never inflate Chromium's advertised level.
+  // AV1 RTP §7.2 defaults: profile=0, level-idx=5 (3.1), tier=0.
   const profile = integer('profile', 0, 2), level = integer('level-idx', 5, 23), tier = integer('tier', 0, 1);
-  return profile !== null && level !== null && tier !== null && level >= getScreenAv1MinimumLevelIndex(video);
+  return profile === null || level === null || tier === null ? null : { profile, level, tier };
+}
+
+export function supportsBrowserAv1Level(
+  video: Readonly<NativeScreenVideoProfile>, parameters: Readonly<Record<string, unknown>>,
+): boolean {
+  const av1 = av1Parameters(parameters);
+  return av1 !== null && av1.level >= getScreenAv1MinimumLevelIndex(video);
+}
+
+/**
+ * The AV1 `level-idx` a receiver advertises for a screen profile, or null when
+ * the level it already offers covers it. Chromium always advertises libwebrtc's
+ * default, level 3.1, although its decoder (dav1d) decodes the higher levels
+ * that `mediaCapabilities` reports, 1080p60 included. Like `h264MaxReceiveLevel`,
+ * it is raised only after that WebRTC decoder probe admitted the profile.
+ */
+export function av1ReceiveLevel(parameters: Readonly<Record<string, unknown>>, video: Readonly<NativeScreenVideoProfile>): number | null {
+  const av1 = av1Parameters(parameters);
+  const minimum = getScreenAv1MinimumLevelIndex(video);
+  return av1 !== null && av1.level < minimum ? minimum : null;
 }
 
 export async function supportsBrowserScreenCodec(
   profile: Readonly<NativeScreenVideoProfile>, selected: ScreenCodec = 'h264',
 ): Promise<boolean> {
+  // For AV1 the advertised level is only a default: the decoder probe below decides.
   const main = RTCRtpReceiver.getCapabilities('video')?.codecs.some(codec =>
     selected === 'av1' ? codec.mimeType.toLowerCase() === 'video/av1'
-      && supportsBrowserAv1Level(profile, fmtpParameters(codec.sdpFmtpLine ?? ''))
+      && av1Parameters(fmtpParameters(codec.sdpFmtpLine ?? ''))?.profile === 0
       : codec.mimeType.toLowerCase() === 'video/h264'
       && /(?:^|;)\s*profile-level-id=4d[0-9a-f]{4}(?:;|$)/i.test(codec.sdpFmtpLine ?? '')
       && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(codec.sdpFmtpLine ?? ''));
@@ -105,8 +126,12 @@ export function withBrowserScreenReceiveParameters(
     }));
     const maxReceiveLevel = selected === 'h264' && media === 'video' && kind === 'h264'
       ? h264MaxReceiveLevel(parameters.get('profile-level-id'), profile) : null;
+    const av1Level = selected === 'av1' && media === 'video' && kind === 'av1'
+      ? av1ReceiveLevel(Object.fromEntries(parameters), profile) : null;
     if (maxReceiveLevel) {
       parameters.set('max-recv-level', maxReceiveLevel);
+    } else if (av1Level !== null) {
+      parameters.set('level-idx', String(av1Level));
     } else if (media === 'audio' && kind === 'opus' && stereo) {
       parameters.set('stereo', '1');
     } else return line;

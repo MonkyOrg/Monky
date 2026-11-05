@@ -21,12 +21,11 @@ import {
   type DmResult,
   type UserSummary,
 } from '@monky/shared';
-import { DmKeyring, newDmId, verifyDmCertificate } from '../src/main/dm/dmCrypto';
-import { DmHistory, monthOf } from '../src/main/dm/dmHistory';
-import { DAY_MS, SELF_REPEAT_WINDOW_MS, messageFingerprint, type StoredMessage } from '../src/main/dm/dmModel';
-import { OUTBOX_MESSAGE_TTL_MS } from '../src/main/dm/dmOutbox';
-import { DmPersistence } from '../src/main/dm/dmPersistence';
-import { DmError, DmService, DM_DOWNLOAD_STALL_MS, DM_FILE_CHUNK_BYTES, DM_FILE_TRANSFER_IDLE_MS } from '../src/main/dm/dmService';
+import {
+  DAY_MS, DM_DOWNLOAD_STALL_MS, DM_FILE_CHUNK_BYTES, DM_FILE_TRANSFER_IDLE_MS, DmError, DmHistory, DmKeyring, DmPersistence, DmService,
+  OUTBOX_MESSAGE_TTL_MS, SELF_REPEAT_WINDOW_MS, messageFingerprint, monthOf, newDmId, verifyDmCertificate, type DmFileStore, type StoredMessage,
+} from '@monky/dm';
+import { nodeDmFileStore, writeDmAttachmentFile } from '../src/main/dm/nodeDmBackend';
 import { DmTransport, type DmRelayApi } from '../src/renderer/core/DmTransport';
 import { sessionManager, type ServerSession } from '../src/renderer/core/SessionManager';
 
@@ -51,6 +50,7 @@ interface Device {
   /** How many of `events` the relay already looked at for dispatches the device raised on its own. */
   dispatched: number;
   dir: string;
+  store: DmFileStore;
   online: boolean;
 }
 
@@ -65,15 +65,16 @@ function createDevice(
   fileCacheMaxBytes?: number
 ): Device {
   const events: DmEvent[] = [];
+  const store = nodeDmFileStore(dir);
   const service = new DmService({
     keyring: new DmKeyring(identity.publicKey, identity.privateKey),
-    dir,
+    store,
     now,
     onEvent: (event) => events.push(event),
     fileCacheMaxBytes,
   });
   service.setSelfNickname(name);
-  return { name, identity, service, events, dispatched: 0, dir, online: true };
+  return { name, identity, service, events, dispatched: 0, dir, store, online: true };
 }
 
 /**
@@ -524,7 +525,7 @@ test('files transfer in encrypted chunks and respect the receiver limit', () => 
   const received = bob.service.getConversation(alice.identity.publicKey).messages[0];
   assert.equal(received.attachments[0].state, 'ready');
   const file = bob.service.readAttachment(alice.identity.publicKey, received.id, received.attachments[0].fileId);
-  assert.ok(file.data.equals(content));
+  assert.ok(Buffer.from(file.data).equals(content));
   assert.equal(file.name, 'foto.png');
 
   const onDisk = fs.readdirSync(path.join(bob.dir, 'files'));
@@ -574,7 +575,7 @@ test('interrupted downloads resume from the received offset', () => {
   relay(devices, bob, bob.service.outgoing([alice.identity.publicKey], true));
   const message = bob.service.getConversation(alice.identity.publicKey).messages[0];
   assert.equal(message.attachments[0].state, 'ready');
-  assert.ok(bob.service.readAttachment(alice.identity.publicKey, message.id, message.attachments[0].fileId).data.equals(content));
+  assert.ok(Buffer.from(bob.service.readAttachment(alice.identity.publicKey, message.id, message.attachments[0].fileId).data).equals(content));
 });
 
 test('state persists encrypted and reloads; export restores friends and history', () => {
@@ -805,7 +806,7 @@ test('attachments can be written to a file path only when they are on this devic
   assert.equal(pending.attachments[0].state, 'pending');
   const pendingTarget = path.join(outDir, 'pendente.bin');
   await assert.rejects(
-    bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, pendingTarget),
+    writeDmAttachmentFile(bob.service, aliceKey, pending.id, fileId, pendingTarget),
     (error: unknown) => error instanceof DmError && error.code === 'not-found'
   );
   assert.equal(fs.existsSync(pendingTarget), false);
@@ -814,35 +815,35 @@ test('attachments can be written to a file path only when they are on this devic
   const own = alice.service.getConversation(bobKey).messages[0];
   const ownTarget = path.join(outDir, 'enviado.bin');
   fs.writeFileSync(ownTarget, 'conteúdo antigo bem mais longo que nada');
-  await alice.service.writeAttachmentTo(bobKey, own.id, fileId, ownTarget);
+  await writeDmAttachmentFile(alice.service, bobKey, own.id, fileId, ownTarget);
   assert.ok(fs.readFileSync(ownTarget).equals(content));
 
   // Once downloaded, the receiver can write it too, decrypted.
   for (const request of requests) relay(devices, bob, request);
   assert.equal(bob.service.getConversation(aliceKey).messages[0].attachments[0].state, 'ready');
   const receivedTarget = path.join(outDir, 'recebido.bin');
-  await bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, receivedTarget);
+  await writeDmAttachmentFile(bob.service, aliceKey, pending.id, fileId, receivedTarget);
   assert.ok(fs.readFileSync(receivedTarget).equals(content));
 
   await assert.rejects(
-    bob.service.writeAttachmentTo(aliceKey, newDmId(), fileId, path.join(outDir, 'x.bin')),
+    writeDmAttachmentFile(bob.service, aliceKey, newDmId(), fileId, path.join(outDir, 'x.bin')),
     (error: unknown) => error instanceof DmError && error.code === 'not-found'
   );
   await assert.rejects(
-    bob.service.writeAttachmentTo(aliceKey, pending.id, newDmId(), path.join(outDir, 'y.bin')),
+    writeDmAttachmentFile(bob.service, aliceKey, pending.id, newDmId(), path.join(outDir, 'y.bin')),
     (error: unknown) => error instanceof DmError && error.code === 'not-found'
   );
   await assert.rejects(
-    bob.service.writeAttachmentTo('nao-e-uma-chave', pending.id, fileId, path.join(outDir, 'z.bin')),
+    writeDmAttachmentFile(bob.service, 'nao-e-uma-chave', pending.id, fileId, path.join(outDir, 'z.bin')),
     (error: unknown) => error instanceof DmError
   );
-  await assert.rejects(bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, 'relativo.bin'), /absolute file path/);
-  await assert.rejects(bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, ''), /absolute file path/);
+  await assert.rejects(writeDmAttachmentFile(bob.service, aliceKey, pending.id, fileId, 'relativo.bin'), /absolute file path/);
+  await assert.rejects(writeDmAttachmentFile(bob.service, aliceKey, pending.id, fileId, ''), /absolute file path/);
   assert.equal(fs.existsSync('relativo.bin'), false);
 
   relay(devices, alice, alice.service.deleteMessage(bobKey, own.id));
   await assert.rejects(
-    bob.service.writeAttachmentTo(aliceKey, pending.id, fileId, path.join(outDir, 'apagado.bin')),
+    writeDmAttachmentFile(bob.service, aliceKey, pending.id, fileId, path.join(outDir, 'apagado.bin')),
     (error: unknown) => error instanceof DmError && error.code === 'not-found'
   );
 });
@@ -857,7 +858,7 @@ function deliverLosingAcks(from: Device, to: Device, dispatch: DmDispatch): DmDi
 }
 
 function storeOf(device: Device): DmPersistence {
-  return new DmPersistence(device.dir, new DmKeyring(device.identity.publicKey, device.identity.privateKey).storageKey());
+  return new DmPersistence(nodeDmFileStore(device.dir), new DmKeyring(device.identity.publicKey, device.identity.privateKey).storageKey());
 }
 
 type RawMessage = Record<string, unknown>;
@@ -1040,7 +1041,7 @@ test('a download whose last step fails can be tried again instead of staying "do
   assert.ok(request, 'Bob asks for the file');
   // Then the finished file cannot be written (a full disk behaves the same: the write throws).
   const target = path.join(bob.dir, 'files', `${fileId}.mkdm`);
-  fs.mkdirSync(target);
+  fs.mkdirSync(target, { recursive: true });
   relay(devices, bob, { peers: { [aliceKey]: [request] } });
   const failed = bob.service.getConversation(aliceKey).messages[0];
   assert.equal(failed.attachments[0].state, 'failed', 'The failure is visible and offers "try again"');
@@ -1050,7 +1051,7 @@ test('a download whose last step fails can be tried again instead of staying "do
   relay(devices, bob, bob.service.retryAttachment(aliceKey, failed.id, fileId));
   const ready = bob.service.getConversation(aliceKey).messages[0];
   assert.equal(ready.attachments[0].state, 'ready');
-  assert.ok(bob.service.readAttachment(aliceKey, ready.id, fileId).data.equals(content));
+  assert.ok(Buffer.from(bob.service.readAttachment(aliceKey, ready.id, fileId).data).equals(content));
 });
 
 test('a partial download torn by a crash resumes from its last intact chunk, or completes when all of it is there', () => {
@@ -1094,7 +1095,7 @@ test('a partial download torn by a crash resumes from its last intact chunk, or 
   for (const { message, fileId } of [torn, whole]) {
     const view = restarted.service.getConversation(aliceKey).messages.find((entry) => entry.id === message.id)!;
     assert.equal(view.attachments[0].state, 'ready');
-    assert.ok(restarted.service.readAttachment(aliceKey, message.id, fileId).data.equals(content));
+    assert.ok(Buffer.from(restarted.service.readAttachment(aliceKey, message.id, fileId).data).equals(content));
   }
 });
 test('edits that arrive out of order still leave both friends with the last text', () => {
@@ -1248,7 +1249,7 @@ test('a download touches its part file once to put it together, and shows progre
 
   const message = bob.service.getConversation(aliceKey).messages[0];
   assert.equal(message.attachments[0].state, 'ready');
-  assert.ok(bob.service.readAttachment(aliceKey, message.id, message.attachments[0].fileId).data.equals(content));
+  assert.ok(Buffer.from(bob.service.readAttachment(aliceKey, message.id, message.attachments[0].fileId).data).equals(content));
   // Before, every chunk read the whole part file twice: O(n²) bytes read for an n-chunk file.
   assert.deepEqual(partReads, ['open'], 'The part file is read once, when the file is put together');
   const events = bob.events.slice(eventsBefore);
@@ -1264,7 +1265,7 @@ test('a download touches its part file once to put it together, and shows progre
 test('putting a download together checks size and hash before anything is published', () => {
   const identity = createIdentity();
   const dir = fs.mkdtempSync(path.join(tempRoot, 'part-'));
-  const store = new DmPersistence(dir, new DmKeyring(identity.publicKey, identity.privateKey).storageKey());
+  const store = new DmPersistence(nodeDmFileStore(dir), new DmKeyring(identity.publicKey, identity.privateKey).storageKey());
   const content = Buffer.alloc(DM_FILE_CHUNK_BYTES * 2 + 10, 9);
   const sha256 = createHash('sha256').update(content).digest('hex');
   const fileId = newDmId();
@@ -1277,7 +1278,7 @@ test('putting a download together checks size and hash before anything is publis
   assert.deepEqual(fs.readdirSync(path.join(dir, 'files')).filter((name) => name.endsWith('.tmp')), [],
     'A refused file leaves nothing half written behind');
   assert.equal(store.completePart(fileId, content.length, sha256), true);
-  assert.ok(store.readAttachment(fileId)?.equals(content));
+  assert.ok(Buffer.from(store.readAttachment(fileId) ?? []).equals(content));
 });
 
 test('a friend that stops sending a file is asked again within seconds, not at the next outbox round', (context) => {
@@ -1306,7 +1307,7 @@ test('a friend that stops sending a file is asked again within seconds, not at t
   relay(devices, bob, { peers: { [aliceKey]: retry } });
   const message = bob.service.getConversation(aliceKey).messages[0];
   assert.equal(message.attachments[0].state, 'ready');
-  assert.ok(bob.service.readAttachment(aliceKey, message.id, message.attachments[0].fileId).data.equals(content));
+  assert.ok(Buffer.from(bob.service.readAttachment(aliceKey, message.id, message.attachments[0].fileId).data).equals(content));
 
   // With nothing left to download, the timer is gone too.
   context.mock.timers.tick(DM_DOWNLOAD_STALL_MS * 4);
@@ -1340,10 +1341,11 @@ test('quick retries stop after a few silent rounds and start over when the frien
 /** Counts the attachments one device decrypts whole from its disk. */
 function countAttachmentReads(context: TestContext, device: Device): string[] {
   const reads: string[] = [];
-  const readAttachment = DmPersistence.prototype.readAttachment;
-  context.mock.method(DmPersistence.prototype, 'readAttachment', function (this: DmPersistence, fileId: string) {
-    if (this.dir === device.dir) reads.push(fileId);
-    return readAttachment.call(this, fileId);
+  const read = device.store.read;
+  context.mock.method(device.store, 'read', (name: string) => {
+    const attachment = /^files\/(.+)\.mkdm$/.exec(name);
+    if (attachment) reads.push(attachment[1]);
+    return read.call(device.store, name);
   });
   return reads;
 }
@@ -1383,7 +1385,7 @@ test('two files that do not fit in memory together are sent one after the other,
   assert.deepEqual(message().attachments.map((entry) => entry.state), ['ready', 'ready']);
   assert.deepEqual(reads, [first, second], 'Each file was decrypted once, not once per window');
   files.forEach((file, index) => {
-    assert.ok(bob.service.readAttachment(aliceKey, message().id, message().attachments[index].fileId).data.equals(file.data));
+    assert.ok(Buffer.from(bob.service.readAttachment(aliceKey, message().id, message().attachments[index].fileId).data).equals(file.data));
   });
 });
 
@@ -1486,7 +1488,7 @@ test('a file downloads whole while another device of the sender, which only has 
   relay(devices, bob, { peers: { [aliceKey]: [request] } });
   const received = bob.service.getConversation(aliceKey).messages[0];
   assert.equal(received.attachments[0].state, 'ready');
-  assert.ok(bob.service.readAttachment(aliceKey, received.id, received.attachments[0].fileId).data.equals(file.data));
+  assert.ok(Buffer.from(bob.service.readAttachment(aliceKey, received.id, received.attachments[0].fileId).data).equals(file.data));
   const answers = opened(copyAnswers, copy, bob).filter((answer) => answer.type.startsWith('file-'));
   assert.ok(answers.length > 0 && answers.every((answer) => answer.type === 'file-absent'),
     `The device without the file only says it is not there: ${JSON.stringify(answers.map((answer) => answer.type))}`);
@@ -1519,7 +1521,7 @@ test('when no device of the sender has the file, the download ends as unavailabl
   const pending = bob.service.getConversation(aliceKey).messages[0];
   relay(devices, bob, bob.service.retryAttachment(aliceKey, pending.id, pending.attachments[0].fileId));
   assert.equal(state(), 'ready');
-  assert.ok(bob.service.readAttachment(aliceKey, pending.id, pending.attachments[0].fileId).data.equals(file.data));
+  assert.ok(Buffer.from(bob.service.readAttachment(aliceKey, pending.id, pending.attachments[0].fileId).data).equals(file.data));
 });
 
 test('a friend without the file does not end a download, while no answer at all keeps it waiting', (context) => {
@@ -1603,7 +1605,7 @@ test('a file waiting its turn behind a long transfer is not given up on, whateve
   }
   const received = bob.service.getConversation(aliceKey).messages[0];
   assert.equal(received.attachments[0].state, 'ready');
-  assert.ok(bob.service.readAttachment(aliceKey, received.id, received.attachments[0].fileId).data.equals(file.data));
+  assert.ok(Buffer.from(bob.service.readAttachment(aliceKey, received.id, received.attachments[0].fileId).data).equals(file.data));
   assert.equal(senderReads.length, 2, 'Each file was decrypted once');
   assert.deepEqual(copyReads, []);
 });
@@ -1713,7 +1715,7 @@ test('a file reaches Bob through the server of the device that has it, even when
   }
   assert.equal(state(), 'ready', 'Bob also asked through the server where the device that has the file is');
   const received = bob.service.getConversation(aliceKey).messages[0];
-  assert.ok(bob.service.readAttachment(aliceKey, received.id, received.attachments[0].fileId).data.equals(file.data));
+  assert.ok(Buffer.from(bob.service.readAttachment(aliceKey, received.id, received.attachments[0].fileId).data).equals(file.data));
 });
 
 test('a device on two servers with the friend answers one copy of a file request, not each', () => {
@@ -2145,7 +2147,7 @@ test('months leave the memory past the limit, but never one still waiting to be 
 test('the fingerprint of each day is what earlier versions compute, so own devices on either version agree', () => {
   const identity = createIdentity();
   const peerKey = createIdentity().publicKey;
-  const store = new DmPersistence(fs.mkdtempSync(path.join(tempRoot, 'history-')),
+  const store = new DmPersistence(nodeDmFileStore(fs.mkdtempSync(path.join(tempRoot, 'history-'))),
     new DmKeyring(identity.publicKey, identity.privateKey).storageKey());
   const history = new DmHistory(store, identity.publicKey);
   const base = Date.UTC(2026, 4, 30, 22);

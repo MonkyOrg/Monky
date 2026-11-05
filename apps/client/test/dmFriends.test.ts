@@ -5,11 +5,8 @@ import path from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { test } from 'node:test';
 import type { DmDispatch, DmEvent, DmRelayItem } from '@monky/shared';
-import { DmKeyring, newDmId } from '../src/main/dm/dmCrypto';
-import { DmFriends } from '../src/main/dm/dmFriends';
-import { DmLedger } from '../src/main/dm/dmLedger';
-import { DmOutbox } from '../src/main/dm/dmOutbox';
-import { DmPersistence } from '../src/main/dm/dmPersistence';
+import { DmFriends, DmKeyring, DmLedger, DmOutbox, DmPersistence, newDmId } from '@monky/dm';
+import { nodeDmFileStore } from '../src/main/dm/nodeDmBackend';
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-dm-friends-test-'));
 process.on('exit', () => fs.rmSync(tempRoot, { recursive: true, force: true }));
@@ -28,7 +25,7 @@ function side(name: string): Side {
     publicKey.export({ format: 'der', type: 'spki' }).toString('hex'),
     privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
   );
-  const store = new DmPersistence(fs.mkdtempSync(path.join(tempRoot, `${name}-`)), keyring.storageKey());
+  const store = new DmPersistence(nodeDmFileStore(fs.mkdtempSync(path.join(tempRoot, `${name}-`))), keyring.storageKey());
   const events: DmEvent[] = [];
   const ledger = new DmLedger(keyring.identityPublicKey, store, Date.now, (event) => events.push(event));
   const outbox = new DmOutbox(ledger, keyring);

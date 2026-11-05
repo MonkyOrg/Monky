@@ -1,6 +1,9 @@
 import { eventCalendarExportSchema, type EventCalendarExport } from '@monky/shared';
 import { tzlib_get_ical_block } from 'timezones-ical-library';
 
+// Shared by the desktop's main process and the web version (#858): both save the same .ics.
+const utf8 = new TextEncoder();
+
 const text = (value: string): string => value.replace(/\\/g, '\\\\').replace(/\r\n|\r|\n/g, '\\n').replace(/;/g, '\\;').replace(/,/g, '\\,');
 const utc = (value: number): string => {
   const formatted = new Date(value).toISOString();
@@ -21,7 +24,7 @@ function fold(line: string): string {
   const lines: string[] = [];
   let current = '', bytes = 0;
   for (const character of line) {
-    const length = Buffer.byteLength(character, 'utf8');
+    const length = utf8.encode(character).length;
     if (bytes + length > 75) { lines.push(current); current = ' '; bytes = 1; }
     current += character;
     bytes += length;

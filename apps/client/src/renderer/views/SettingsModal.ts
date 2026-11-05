@@ -20,6 +20,8 @@ import { AboutTab } from './settings/tabs/AboutTab';
 import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
 import { renderSettingsTabButtons, renderSettingsTabLabel, selectSettingsTab, type SettingsTabEntry } from './settings/settingsLayout';
 import { showLogoutDialog } from './LogoutDialog';
+import { isDesktopOnly, isShown, lockedPanel, type DesktopFeature } from '../utils/desktopOnly';
+import type { PlatformCapabilities } from '../platform/api';
 
 type SettingsTabId = 'account' | 'voice_video' | 'soundboard' | 'stickers' | 'keybinds' | 'notifications'
   | 'quality' | 'local_tools' | 'logs' | 'about';
@@ -34,6 +36,8 @@ interface SettingsTab extends SettingsTabEntry {
   /** The tab came on screen, or left it. */
   show?(root: HTMLElement): void;
   hide?(): void;
+  /** What it needs of the platform (#858); without it, its panel is shown read-only, naming `feature`. */
+  requires?: { capability: keyof PlatformCapabilities; feature: DesktopFeature };
 }
 
 export class SettingsModal {
@@ -53,7 +57,7 @@ export class SettingsModal {
   private logsTab = new LogsTab();
   private aboutTab = new AboutTab();
 
-  private readonly tabs: readonly SettingsTab[] = [
+  private readonly allTabs: readonly SettingsTab[] = [
     {
       id: 'account', icon: 'person', label: 'settings.tabAccount',
       render: () => this.accountTab.renderHtml(),
@@ -92,18 +96,18 @@ export class SettingsModal {
       hide: () => this.voiceVideoTab.deactivate(),
     },
     {
-      id: 'soundboard', icon: 'music_note', label: 'settings.tabSoundboard',
+      id: 'soundboard', icon: 'music_note', label: 'settings.tabSoundboard', requires: { capability: 'mediaFolders', feature: 'mediaLibrary' },
       render: () => this.soundboardTab.renderHtml(),
       attach: (root) => this.soundboardTab.attachEvents(root),
       cleanup: () => this.soundboardTab.cleanup(),
     },
     {
-      id: 'stickers', icon: 'mood', label: 'settings.tabStickers',
+      id: 'stickers', icon: 'mood', label: 'settings.tabStickers', requires: { capability: 'mediaFolders', feature: 'mediaLibrary' },
       render: () => this.stickersTab.renderHtml(),
       attach: (root) => this.stickersTab.attachEvents(root),
     },
     {
-      id: 'keybinds', icon: 'keyboard', label: 'settings.tabKeybinds',
+      id: 'keybinds', icon: 'keyboard', label: 'settings.tabKeybinds', requires: { capability: 'globalShortcuts', feature: 'globalShortcuts' },
       render: () => this.keybindsTab.renderHtml(),
       attach: (root) => this.keybindsTab.attachEvents(root),
     },
@@ -122,7 +126,7 @@ export class SettingsModal {
       hide: () => this.qualityTab.deactivate(),
     },
     {
-      id: 'local_tools', icon: 'build', label: 'settings.tabLocalTools',
+      id: 'local_tools', icon: 'build', label: 'settings.tabLocalTools', requires: { capability: 'localExecution', feature: 'localTools' },
       render: () => this.localToolsTab.renderHtml(),
       attach: (root) => this.localToolsTab.attachEvents(root),
       cleanup: () => this.localToolsTab.cleanup(),
@@ -140,12 +144,31 @@ export class SettingsModal {
     },
   ];
 
+  /**
+   * Every tab the desktop has, in its place (#858): one this platform cannot use
+   * stays selectable and shows its content read-only, offering the desktop app.
+   */
+  private get tabs(): readonly SettingsTab[] {
+    return this.allTabs.filter(entry => !entry.requires || isShown(entry.requires.capability))
+      .map(entry => entry.requires && isDesktopOnly(entry.requires.capability) ? this.locked(entry, entry.requires) : entry);
+  }
+
+  /** The tab as a read-only panel: its own content under the notice, never bound, so nothing it reads is asked of the platform. */
+  private locked(entry: SettingsTab, requires: NonNullable<SettingsTab['requires']>): SettingsTab {
+    return {
+      id: entry.id, icon: entry.icon, label: entry.label, separated: entry.separated, desktopOnly: true,
+      render: () => lockedPanel(requires.capability, requires.feature, entry.render()),
+      attach: () => {},
+    };
+  }
+
   public async open(
     tab?: 'voice_video' | 'local_tools',
     section?: 'camera' | 'noise-suppression' | 'local-tools-storage' | 'local-tools-tools' | 'local-tools-permissions' | 'local-tools-tasks',
   ): Promise<void> {
     this.close();
     if (tab) this.activeTab = tab;
+    if (!this.tabs.some(entry => entry.id === this.activeTab)) this.activeTab = 'account';
     const active = this.tab(this.activeTab);
 
     const shell = openModal({
@@ -170,7 +193,7 @@ export class SettingsModal {
           </div>
 
           <div class="settings-content-body">
-            ${this.tabs.map(entry => html`<div class="settings-tab-panel" id="tab-panel-${entry.id}" ${entry.id === this.activeTab ? null : html`hidden`}>
+            ${this.tabs.map(entry => html`<div class="settings-tab-panel" id="tab-panel-${entry.id}" data-desktop-only-notice-area ${entry.id === this.activeTab ? null : html`hidden`}>
               ${trustedHtml(entry.render())}
             </div>`)}
           </div>

@@ -1,0 +1,191 @@
+/* Desktop-only features in the web version (#858): visible, locked, still focusable. */
+[data-desktop-only][aria-disabled='true'] {
+  cursor: not-allowed;
+}
+
+[data-desktop-only]:not(.desktop-only-panel) {
+  opacity: 0.55;
+}
+
+/* Dimmed once: a locked control inside a locked group keeps the group's look. */
+[data-desktop-only] [data-desktop-only] {
+  opacity: 1;
+}
+
+[data-desktop-only]:not(.desktop-only-panel):focus-visible,
+[data-desktop-only]:not(.desktop-only-panel):focus-within {
+  opacity: 0.8;
+}
+
+.desktop-only-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--accent-primary);
+  border-radius: 999px;
+  color: var(--accent-primary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  line-height: 1.5;
+  text-transform: uppercase;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.desktop-only-block {
+  position: relative;
+}
+
+.desktop-only-block > .desktop-only-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+}
+
+.desktop-only-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-md, 8px);
+  background: color-mix(in srgb, var(--accent-primary) 10%, transparent);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.desktop-only-notice > .material-symbols-outlined {
+  color: var(--accent-primary);
+}
+
+.desktop-only-notice__text {
+  flex: 1;
+}
+
+.desktop-only-notice__download,
+.desktop-only-dialog__actions .btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.desktop-only-panel {
+  opacity: 0.6;
+  user-select: none;
+}
+
+.desktop-only-dialog {
+  width: min(92vw, 420px);
+  max-width: 420px;
+}
+
+.desktop-only-dialog__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.desktop-only-dialog__title > .material-symbols-outlined {
+  color: var(--accent-primary);
+}
+
+.desktop-only-dialog__message {
+  margin: 0 0 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.desktop-only-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* A badge at the end of a row-like control: a settings tab, a card title. */
+.settings-tab-btn > .desktop-only-badge {
+  margin-left: auto;
+  padding: 0 5px;
+  font-size: 9px;
+}
+
+label > .desktop-only-badge,
+.audio-input-mode-option span > .desktop-only-badge,
+strong > .desktop-only-badge,
+.input-mode-card-title > .desktop-only-badge,
+#add-server-lan-heading > .desktop-only-badge,
+.btn > .desktop-only-badge {
+  margin-left: 6px;
+}
+
+/*
+ * A locked control suggests no action (#858): no hover or press feedback, no
+ * motion and no live state. Each rule restates the control's resting look,
+ * above the theme's own :hover/:active rules.
+ */
+[data-desktop-only],
+[data-desktop-only] :is(button, label, .btn, .toggle-slider) {
+  transition: none !important;
+  animation: none !important;
+}
+
+:is([data-desktop-only], [data-desktop-only] *):is(:hover, :active) {
+  transform: none !important;
+}
+
+:is(.btn-primary[data-desktop-only], [data-desktop-only] .btn-primary):is(:hover, :active) {
+  background-color: var(--accent-primary) !important;
+}
+
+:is(.btn-secondary[data-desktop-only], [data-desktop-only] .btn-secondary):is(:hover, :active) {
+  background-color: var(--bg-card) !important;
+}
+
+:is(.btn-danger[data-desktop-only], [data-desktop-only] .btn-danger):is(:hover, :active) {
+  background-color: var(--danger) !important;
+}
+
+:is(.btn-icon[data-desktop-only], [data-desktop-only] .btn-icon):is(:hover, :active, .active, .broadcasting-pulse) {
+  background-color: var(--bg-card) !important;
+  color: var(--text-secondary) !important;
+  box-shadow: none !important;
+}
+
+.add-server-option[data-desktop-only]:is(:hover, :active) {
+  border-color: var(--border-color) !important;
+  background: var(--bg-card) !important;
+}
+
+.onboarding-option-card[data-desktop-only]:is(:hover, :active) {
+  border-color: var(--border-color) !important;
+  background: var(--bg-secondary) !important;
+}
+
+.audio-input-mode-option[data-desktop-only]:is(:hover, :active, :focus-visible) {
+  background: transparent !important;
+  color: var(--text-secondary) !important;
+}
+
+.chat-sticker-save[data-desktop-only]:is(:hover, :active) {
+  background-color: rgba(0, 0, 0, 0.6) !important;
+}
+
+.sb-btn-add-shortcut[data-desktop-only]:is(:hover, :active) {
+  border-color: var(--border-color) !important;
+  color: var(--text-muted) !important;
+  background: transparent !important;
+}
+
+.sb-shortcut-badge[data-desktop-only]:is(:hover, :active) {
+  border-color: rgba(88, 101, 242, 0.4) !important;
+  background: rgba(88, 101, 242, 0.15) !important;
+}
+/* A dialog card without padding of its own (the soundboard window) gives its notice the content's margins. */
+.soundboard-modal-card > .desktop-only-notice {
+  margin: 12px 20px 0;
+}
