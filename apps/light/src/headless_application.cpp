@@ -112,6 +112,7 @@ const char* mediaEventName(media::EventKind kind) {
     case media::EventKind::stats: return "media-stats";
     case media::EventKind::warning: return "media-warning";
     case media::EventKind::devices: return "audio-device-selected";
+    case media::EventKind::speaking: return "speaking";
   }
   throw std::logic_error("Unknown media event");
 }
@@ -347,6 +348,7 @@ class Application final {
     result.muted = session_.policy().suppressMicrophone() ||
                    (audio_.requestMicrophoneAccess && !microphoneAuthorized_);
     result.deafened = session_.policy().suppressPlayback();
+    result.transmit = !settings_.pushToTalk || pushToTalkActive_;
     return result;
   }
 
@@ -429,6 +431,11 @@ class Application final {
       const auto bytes = event.stats.dump().size();
       loop_.post([this, generation, event = std::move(event)] {
         if (generation != session_.generation() || generation != activeGeneration_) return;
+        if (event.kind == media::EventKind::speaking) {
+          output({{"event", "speaking"}, {"generation", generation}, {"sessionId", event.session_id},
+                  {"speaking", event.stats.at("speaking")}});
+          return;
+        }
         output({{"event", mediaEventName(event.kind)}, {"generation", generation},
                 {"channelId", event.channel_id}, {"sessionId", event.session_id},
                 {"detail", event.detail}, {"stats", event.stats}});
@@ -512,6 +519,39 @@ class Application final {
     if (active_) active_->select_devices(devicePreference());
   }
 
+  void setInputMode(const Json& value) {
+    const auto mode = value.at("mode").get<std::string>();
+    if (mode != "voice_activity" && mode != "push_to_talk") {
+      throw std::invalid_argument("mode must be voice_activity or push_to_talk");
+    }
+    auto settings = settings_;
+    settings.pushToTalk = mode == "push_to_talk";
+    try {
+      identity_.saveSettings(settings);
+    } catch (const std::invalid_argument&) {
+      throw;
+    } catch (const std::exception& error) {
+      throw std::invalid_argument(std::string("Could not save input mode: ") + error.what());
+    }
+    settings_ = std::move(settings);
+    // A key held while switching modes must not keep transmitting later.
+    pushToTalkActive_ = false;
+    applyAudioPolicy();
+  }
+
+  // The key itself is the controller's business (a global hotkey in the tray
+  // app); the core only gates transmission.
+  void pushToTalk(bool active) {
+    if (!settings_.pushToTalk) throw std::invalid_argument("Push-to-talk is not the input mode");
+    if (pushToTalkActive_ == active) return;
+    pushToTalkActive_ = active;
+    applyAudioPolicy();
+  }
+
+  void applyAudioPolicy() {
+    if (active_ && activeGeneration_ == session_.generation()) active_->update_policy(audioPolicy());
+  }
+
   void stopWatchingDevices() {
     if (!stopWatchingDevices_) return;
     auto stop = std::move(stopWatchingDevices_);
@@ -567,10 +607,12 @@ class Application final {
         break;
       case SessionEventKind::teardown:
         if (active_ && activeGeneration_ < event.generation) retireVoice();
+        // Like the full client, a key held across calls does not carry over.
+        pushToTalkActive_ = false;
         output({{"event", "voice-left"}, {"generation", event.generation}});
         break;
       case SessionEventKind::policyChanged:
-        if (active_ && activeGeneration_ == session_.generation()) active_->update_policy(audioPolicy());
+        applyAudioPolicy();
         authorizeMicrophone();
         if (!closing_) output({{"event", "voice-policy"}, {"policy", event.payload}});
         break;
@@ -716,6 +758,8 @@ class Application final {
                 {"voiceMode", session_.voiceMode() == VoiceMode::sfu ? "sfu" : "p2p"},
                 {"mediaActive", active_ != nullptr}, {"retiringMedia", retired_.size()},
                 {"policy", session_.policy().describe()},
+                {"inputMode", settings_.pushToTalk ? "push_to_talk" : "voice_activity"},
+                {"pushToTalkActive", pushToTalkActive_},
                 {"audioDevice", audio_.diagnostics ? audio_.diagnostics() : Json(nullptr)}};
     result["microphoneAccessPending"] = microphoneRequestPending_;
     result["channelId"] = session_.admission() ? Json(session_.admission()->channelId) : Json(nullptr);
@@ -752,6 +796,8 @@ class Application final {
       if (name.starts_with("fixture-") && audio_.fixtureCommand) audio_.fixtureCommand(value);
       else if (name == "set-input") selectDevice(true, value);
       else if (name == "set-output") selectDevice(false, value);
+      else if (name == "set-input-mode") setInputMode(value);
+      else if (name == "ptt") pushToTalk(value.at("active").get<bool>());
       else if (name == "join") session_.join(value.at("channelId").get<std::string>(), Clock::now());
       else if (name == "leave") session_.leave();
       else if (name == "mute") session_.setMuted(value.at("enabled").get<bool>());
@@ -759,7 +805,7 @@ class Application final {
       else if (name == "reconnect") restartConnection();
       else if (name != "quit") {
         throw std::invalid_argument("Unknown command; use join, leave, mute, deafen, devices, set-input, "
-                                    "set-output, stats, channels, reconnect or quit");
+                                    "set-output, set-input-mode, ptt, stats, channels, reconnect or quit");
       }
       output({{"event", "command-accepted"}, {"id", id}, {"command", name}});
       if (name == "quit") quit();
@@ -799,6 +845,7 @@ class Application final {
   const bool outputIsConsole_ = standardOutputIsConsole();
   bool microphoneAuthorized_ = false;
   bool microphoneRequestPending_ = false;
+  bool pushToTalkActive_ = false;
   CancelMicrophoneAccess cancelMicrophoneAccess_;
   std::function<void(const Json&)> observer_;
   int exitCode_ = 0;
@@ -826,6 +873,8 @@ int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio)
                    "{\"command\":\"deafen\",\"enabled\":false}\n"
                    "{\"command\":\"devices\"} / {\"command\":\"set-input\",\"deviceId\":\"...\"|null}\n"
                    "{\"command\":\"set-output\",\"deviceId\":\"...\"|null}\n"
+                   "{\"command\":\"set-input-mode\",\"mode\":\"voice_activity\"|\"push_to_talk\"}\n"
+                   "{\"command\":\"ptt\",\"active\":true|false}\n"
                    "{\"command\":\"stats\"} / {\"command\":\"channels\"}\n"
                    "{\"command\":\"leave\"} / {\"command\":\"reconnect\"} / {\"command\":\"quit\"}\n"
                    "EOF and Ctrl+C release the connection and media resources.\n"

@@ -82,6 +82,8 @@ Enter one JSON object per line in the terminal, using the received channel ID:
 {"command":"devices"}
 {"command":"set-input","deviceId":"DEVICE-ID"}
 {"command":"set-output","deviceId":null}
+{"command":"set-input-mode","mode":"push_to_talk"}
+{"command":"ptt","active":true}
 {"command":"stats","id":"my-query"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -128,6 +130,33 @@ audio. While permission is pending, receiving audio, leaving the call, and
 quitting remain available. Denial keeps the microphone muted and emits
 `microphone-error`; it does not try to bypass system settings. The macOS
 permission flow still requires execution on a Mac.
+
+### Speaking indicator and push-to-talk
+
+During a call, the core emits `speaking` with `sessionId` and
+`speaking:true|false` whenever someone, including the local user, starts or
+stops speaking. As in the full client, this is **not** published to the server:
+each client derives who is speaking from the audio.
+
+- **Remote participants:** the level comes from the RTP header (RFC 6464) the
+  sender already includes, read every 100 ms. Nothing is decoded or measured
+  separately. While the user is deafened, no one is shown speaking.
+- **Local user:** the level is measured on raw capture, before echo
+  cancellation and noise suppression. Loud, steady background noise can count
+  as speech.
+- The threshold is -40 dBov (the 0.01 `audioLevel` the full client uses), and
+  speech ends only after 400 ms of silence so it does not flicker between words.
+- Sampling exists only during a call; outside one, no thread wakes up.
+
+`set-input-mode` selects `voice_activity` (default: always transmitting) or
+`push_to_talk` and saves the choice in the profile. In push-to-talk, `ptt` with
+`active:true`/`false` opens and closes transmission. The core does not capture
+keys: the global hotkey belongs to whatever controls the process; the tray has
+no global shortcuts yet. Capture stays open while the key is released, so a press takes
+effect immediately. The track sends silence, and the local user is not shown
+speaking. Mute, deafen, and server restrictions still apply while the key is
+held. Switching modes or leaving the call releases the key. `ptt` outside
+push-to-talk mode is rejected.
 
 ## Tray interface
 
@@ -226,7 +255,7 @@ require explicit recovery, never silent replacement. Directories containing
 another application's files are rejected.
 
 `monky-light-settings.json` stores only user preferences (currently audio
-devices) and never participates in identity validation. It is replaced
+devices and the input mode) and never participates in identity validation. It is replaced
 atomically under the profile lock. Invalid or unreadable settings emit a
 `warning`, fall back to defaults, and are replaced by the next save; an
 interrupted settings write does not require recovery.

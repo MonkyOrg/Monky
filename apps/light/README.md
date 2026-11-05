@@ -82,6 +82,8 @@ Digite um objeto JSON por linha no terminal, usando o ID recebido:
 {"command":"devices"}
 {"command":"set-input","deviceId":"ID-DO-DISPOSITIVO"}
 {"command":"set-output","deviceId":null}
+{"command":"set-input-mode","mode":"push_to_talk"}
+{"command":"ptt","active":true}
 {"command":"stats","id":"minha-consulta"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -129,6 +131,33 @@ precisa transmitir. Enquanto a permissão está pendente, é possível receber
 áudio, sair da chamada e encerrar o aplicativo. Uma recusa mantém o microfone
 mutado e gera `microphone-error`; não tenta contornar as configurações do sistema.
 O fluxo de permissão do macOS ainda requer execução em um Mac.
+
+### Indicador de fala e push-to-talk
+
+Durante uma chamada, o núcleo emite `speaking` com `sessionId` e
+`speaking:true|false` sempre que alguém, inclusive o próprio usuário, começa ou
+para de falar. Como no cliente completo, isso **não** é publicado no servidor:
+cada cliente deduz quem fala a partir do áudio.
+
+- **Participantes remotos:** o nível vem do cabeçalho RTP (RFC 6464) que o
+  remetente já envia, consultado a cada 100 ms. Nada é decodificado ou medido
+  à parte. Enquanto o usuário está em deafen, ninguém aparece falando.
+- **Próprio usuário:** o nível é medido na captura bruta, antes do cancelamento
+  de eco e da supressão de ruído. Ruído de fundo alto e constante pode contar
+  como fala.
+- O limiar é -40 dBov (o `audioLevel` 0,01 usado pelo cliente completo), e a
+  fala só termina após 400 ms de silêncio, para não piscar entre palavras.
+- A amostragem só existe durante a chamada; fora dela nenhuma thread acorda.
+
+`set-input-mode` escolhe `voice_activity` (padrão: transmite sempre) ou
+`push_to_talk` e salva a escolha no perfil. Em push-to-talk, `ptt` com
+`active:true`/`false` abre e fecha a transmissão. O núcleo não captura teclas:
+o atalho global é responsabilidade de quem controla o processo; a bandeja
+ainda não tem atalhos globais. A captura continua aberta enquanto a tecla está solta, então
+pressionar tem efeito imediato. A faixa envia silêncio, e o próprio usuário não
+aparece falando. Mute, deafen e restrições do servidor continuam valendo mesmo
+com a tecla pressionada. Trocar de modo ou sair da chamada solta a tecla.
+`ptt` fora do modo push-to-talk é recusado.
 
 ## Interface de bandeja
 
@@ -226,7 +255,7 @@ componentes da identidade exigem recuperação explícita, nunca recriação sil
 Diretórios com arquivos de outros aplicativos são recusados.
 
 `monky-light-settings.json` guarda apenas preferências do usuário (hoje, os
-dispositivos de áudio) e nunca participa da validação da identidade. É
+dispositivos de áudio e o modo de entrada) e nunca participa da validação da identidade. É
 substituído de forma atômica sob o lock do perfil. Configurações inválidas ou
 ilegíveis geram `warning`, usam os padrões e são substituídas no próximo
 salvamento; uma gravação interrompida das configurações não exige recuperação.

@@ -203,6 +203,47 @@ for (const voiceMode of ['p2p', 'sfu']) {
   });
 }
 
+for (const voiceMode of ['p2p', 'sfu']) {
+  test(`headless clients report ${voiceMode} speech and gate it with push-to-talk`, { timeout: 60_000 }, async t => {
+    const fixture = await createServerFixture(t, { voiceMode });
+    const alice = new NativeClient(fixture, { nickname: 'Light Alice' });
+    const bob = new NativeClient(fixture, { nickname: 'Light Bob' });
+    const auth = await alice.wait('authenticated');
+    await bob.wait('authenticated');
+    const channelId = auth.channels.find(channel => channel.type === 'VOICE').id;
+    await alice.join(channelId);
+    await bob.join(channelId);
+    // The synthetic microphone plays a constant tone, so both sides see Alice speak.
+    const speech = async (speaking, action) => {
+      const since = [alice.events.length, bob.events.length];
+      if (action) await action();
+      await Promise.all([alice, bob].map((client, index) => client.wait(event => event.event === 'speaking' &&
+        event.sessionId === auth.sessionId && event.speaking === speaking, since[index])));
+    };
+    await speech(true);
+
+    assert.equal((await alice.command('ptt', { active: true })).event, 'command-error',
+      'Push-to-talk must not be accepted in voice-activity mode');
+    await speech(false, () => alice.command('set-input-mode', { mode: 'push_to_talk' }));
+    const gated = await alice.state();
+    assert.equal(gated.inputMode, 'push_to_talk');
+    assert.equal(gated.pushToTalkActive, false);
+    assert.equal(gated.audioDevice.recording, true, 'Push-to-talk keeps capture open so a press is immediate');
+
+    await speech(true, () => alice.command('ptt', { active: true }));
+    await speech(false, () => alice.command('ptt', { active: false }));
+    await speech(true, () => alice.command('ptt', { active: true }));
+    await speech(false, () => alice.command('mute', { enabled: true }));
+    await speech(true, () => alice.command('mute', { enabled: false }));
+    await alice.command('set-input-mode', { mode: 'voice_activity' });
+    const restored = await alice.state();
+    assert.equal(restored.inputMode, 'voice_activity');
+    assert.equal(restored.pushToTalkActive, false, 'Switching modes releases a held key');
+    await alice.close();
+    await bob.close();
+  });
+}
+
 test('native calls survive both live P2P/SFU topology transitions and preserve moderation', { timeout: 60_000 }, async t => {
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');

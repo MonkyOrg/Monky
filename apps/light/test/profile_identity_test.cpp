@@ -399,9 +399,10 @@ void settingsBesideIdentity(const fs::path& root) {
     ProfileIdentity identity(profile.path);
     publicKey = identity.publicKeyHex();
     const auto defaults = identity.loadSettings();
-    require(!defaults.inputDeviceId && !defaults.outputDeviceId, "Missing settings did not yield defaults");
+    require(!defaults.inputDeviceId && !defaults.outputDeviceId && !defaults.pushToTalk,
+            "Missing settings did not yield defaults");
     identity.saveSettings({std::string("input-\xc3\xa1"), std::nullopt});
-    identity.saveSettings({std::string("input-\xc3\xa1"), std::string("output")});
+    identity.saveSettings({std::string("input-\xc3\xa1"), std::string("output"), true});
     require(!fs::exists(profile.path / "monky-light-settings.json.pending"), "Settings write left its marker");
     requireFailure([&] { identity.saveSettings({std::string(), std::nullopt}); },
                    "An empty device ID was saved");
@@ -418,12 +419,23 @@ void settingsBesideIdentity(const fs::path& root) {
     require(identity.publicKeyHex() == publicKey, "Settings changed the profile identity");
     const auto loaded = identity.loadSettings();
     require(loaded.inputDeviceId == std::optional<std::string>("input-\xc3\xa1") &&
-            loaded.outputDeviceId == std::optional<std::string>("output"), "Settings did not round-trip");
+            loaded.outputDeviceId == std::optional<std::string>("output") && loaded.pushToTalk,
+            "Settings did not round-trip");
     identity.saveSettings({std::nullopt, std::string("output")});
     require(!fs::exists(profile.path / "monky-light-settings.json.pending"),
             "Settings write did not replace an interrupted marker");
   }
+  // Profiles saved before push-to-talk existed keep voice activity.
+  writeFile(settingsPath, "{\"format\":\"monky-light-settings\",\"version\":1,\"inputDeviceId\":\"mic\"}");
+  {
+    ProfileIdentity identity(profile.path);
+    const auto legacy = identity.loadSettings();
+    require(legacy.inputDeviceId == std::optional<std::string>("mic") && !legacy.pushToTalk,
+            "Settings without an input mode did not default to voice activity");
+  }
   for (const auto* invalid : {"", "{", "[]", "{\"format\":\"monky-light-settings\",\"version\":2}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"inputMode\":\"always\"}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"inputMode\":true}",
                               "{\"format\":\"other\",\"version\":1}",
                               "{\"format\":\"monky-light-settings\",\"version\":1,\"inputDeviceId\":7}",
                               "{\"format\":\"monky-light-settings\",\"version\":1,\"inputDeviceId\":{}}"}) {
