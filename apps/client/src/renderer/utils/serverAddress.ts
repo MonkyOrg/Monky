@@ -57,6 +57,12 @@ export function isLoopbackHost(host: string): boolean {
   return LOOPBACK_HOSTS.has(normalizeHost(host));
 }
 
+/** An IPv4 or IPv6 address written out, as opposed to a name resolved by DNS. */
+export function isIpLiteralHost(host: string): boolean {
+  const bare = normalizeHost(host);
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(bare) || bare.includes(':');
+}
+
 /**
  * Host as written in a URL: IPv6 between brackets. The case is kept, because
  * URLs already persisted (server icons) were built with it.

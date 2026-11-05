@@ -1098,6 +1098,63 @@ test('remote WebRTC output changes keep default voice separate from screen speak
   assert.equal(closingRouter.getVoiceAudioLevel('closing'), null, 'A retired graph has no activity sample');
 });
 
+test('without AudioContext.setSinkId (Safari) remote voice still plays on the default output (#883)', async (t) => {
+  let plays = 0;
+  class SafariAudioElement extends AudioElement {
+    sinkId = '';
+    async setSinkId(id: string) { this.sinkId = id; }
+    override async play() { plays++; }
+  }
+  // WebKit accepts `{ sinkId }` in the constructor, ignores it and has no setSinkId.
+  class SafariContext {
+    state = 'suspended';
+    destination = {};
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; }
+    createAnalyser() {
+      return { context: this, fftSize: 1024, connect() {}, disconnect() {}, getFloatTimeDomainData(values: Float32Array) { values.fill(0); } };
+    }
+    async resume() { this.state = 'running'; }
+    async close() { this.state = 'closed'; }
+  }
+  const restoreMediaGlobals: Array<() => void> = [];
+  for (const [key, value] of Object.entries({
+    document: { createElement: () => new SafariAudioElement(), body: { appendChild() {} } },
+    MediaStream: Stream, AudioContext: SafariContext,
+  })) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    restoreMediaGlobals.push(() => { if (previous) Object.defineProperty(globalThis, key, previous); else Reflect.deleteProperty(globalThis, key); });
+  }
+  const previousSettings = {
+    selectedSpeakerId: settingsStore.selectedSpeakerId,
+    advancedAudioOutputs: settingsStore.advancedAudioOutputs,
+    userVolumes: settingsStore.userVolumes,
+  };
+  const warnings = t.mock.method(console, 'warn', () => {});
+  const router = new RemoteMediaRouter(() => new ParticipantManager());
+  t.after(() => {
+    try {
+      router.closeAllMedia();
+      Object.assign(settingsStore, previousSettings);
+    } finally {
+      for (const restore of restoreMediaGlobals.reverse()) restore();
+    }
+  });
+  settingsStore.selectedSpeakerId = '';
+  settingsStore.advancedAudioOutputs = false;
+  settingsStore.userVolumes = {};
+  const microphone = { id: 'microphone', kind: 'audio', stop() {} } as MediaStreamTrack;
+  router.ensureVoiceAudioElement('peer', new MediaStream([microphone]));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(warnings.mock.callCount(), 0, String(warnings.mock.calls[0]?.arguments));
+  assert.equal(plays, 1);
+  assert.equal(router['audioContexts'].get('voice')?.state, 'running');
+  await assert.rejects(router.setOutputDeviceIds('headphones', 'headphones'), /unavailable/,
+    'a specific speaker is refused, so the selection rolls back instead of going silent');
+});
+
 test('screen audio opt-in and 0–200% volume stay independent of voice deafen in the shared P2P/SFU router', (t) => {
   const gains: Array<{ gain: { value: number }; connect: () => void; disconnect: () => void }> = [];
   class Context {
