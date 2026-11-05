@@ -3488,7 +3488,9 @@ async function* regression(locale, inviteModule) {
   const missingPostTitle = document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])');
   check(root.querySelector('.forum-composer form').noValidate
     && missingPostTitle?.textContent.includes(t('validation.required', { field: t('forum.postTitle') }))
-    && composerTitle.getAttribute('aria-invalid') === 'true' && calls.length === composerCalls,
+    // Slow runners can still deliver the previous step's FORUM_LIST refresh; only a publish breaks the rule.
+    && composerTitle.getAttribute('aria-invalid') === 'true'
+    && !calls.slice(composerCalls).some(call => call.type === 'FORUM_CREATE_POST'),
   `A new topic without a title is explained in the alert toast, in the app language, and is not published ${JSON.stringify({
     noValidate: root.querySelector('.forum-composer form').noValidate, toast: missingPostTitle?.textContent ?? null,
     invalid: composerTitle.getAttribute('aria-invalid'), calls: calls.slice(composerCalls).map(call => call.type),
