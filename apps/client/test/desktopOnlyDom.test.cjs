@@ -374,10 +374,24 @@ async function setup(language) {
     },
   });
   window.qa = qa;
+  // The last events that move a tooltip, so a failure on a CI runner says what happened instead of only "null".
+  const trail = [];
+  const note = (...values) => {
+    trail.push([Math.round(performance.now()), ...values, document.activeElement?.id || '', document.hasFocus()]);
+    if (trail.length > 40) trail.shift();
+  };
+  for (const type of ['focusin', 'focusout', 'keydown', 'pointerover', 'pointerout', 'pointerdown', 'scroll']) {
+    document.addEventListener(type, (event) => note(type, event.target?.id || event.target?.className || '', event.key || ''), true);
+  }
+  window.addEventListener('blur', () => note('window-blur'));
+  document.addEventListener('visibilitychange', () => note('visibility', document.visibilityState));
+  const tip = document.querySelector('.monky-tooltip');
+  new MutationObserver(() => note('tooltip', tip.hidden ? 'hidden' : 'shown', tip.textContent))
+    .observe(tip, { attributes: true, attributeFilter: ['hidden'], childList: true, characterData: true, subtree: true });
   window.qaState = () => ({
     active: document.activeElement?.id || document.activeElement?.className, ownRuns: qa.ownRuns, changes: qa.changes,
     opened: qa.opened, dialogs: document.querySelectorAll('.desktop-only-dialog').length,
     tooltip: document.querySelector('.monky-tooltip:not([hidden])')?.textContent ?? null, panelRuns: qa.panelRuns,
-    footerIcons: qa.footerIcons,
+    footerIcons: qa.footerIcons, trail: trail.slice(-25),
   });
 }
