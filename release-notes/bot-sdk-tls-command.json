@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "O SDK de bots ganhou o comando tls enable, tls disable e tls status. Quem hospeda um bot pode ativar HTTPS para os serviços do bot, reutilizando o certificado do servidor Monky quando ele existir na mesma máquina.",
+  "en": "The bot SDK now has the tls enable, tls disable and tls status commands. Bot hosts can turn on HTTPS for their bot services, reusing the Monky server certificate when it exists on the same machine."
+}
