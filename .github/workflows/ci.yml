@@ -167,7 +167,9 @@ jobs:
       - name: Prepare the SFU worker for real voice transport tests
         run: npm rebuild mediasoup
       - name: Build shared contracts
-        run: npm run build --workspace=packages/shared
+        run: |
+          npm run build --workspace=packages/shared
+          npm run build --workspace=packages/dm
       - name: Test bot contracts and SDK
         run: |
           node scripts/test-versioning.js
