@@ -744,7 +744,10 @@ jobs:
         run: |
           npx --yes vercel@latest pull --yes --environment=production --token="$VERCEL_TOKEN"
           npx --yes vercel@latest build --prod --token="$VERCEL_TOKEN"
-          npx --yes vercel@latest deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+          url=$(npx --yes vercel@latest deploy --prebuilt --prod --token="$VERCEL_TOKEN" | tail -n 1)
+          # The app links to MONKY_WEB_APP_URL: pin that domain, or fail instead of publishing links to another site.
+          domain=$(node -p "new URL(require('./packages/shared').MONKY_WEB_APP_URL).host")
+          npx --yes vercel@latest alias set "$url" "$domain" --scope="$VERCEL_ORG_ID" --token="$VERCEL_TOKEN"
 
   miniapps:
     name: Deploy miniapps site (Vercel)
@@ -779,10 +782,16 @@ jobs:
           npm run build:miniapps --workspace=apps/client
 
       - name: Deploy
-        working-directory: apps/client/dist-miniapps
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        # Outside the repository: inside it the Vercel CLI climbs to apps/client/package.json and builds the whole app.
         run: |
+          domain=$(node -p "new URL(require('./packages/shared').MONKY_MINIAPPS_URL).host")
+          site="$RUNNER_TEMP/miniapps-site"
+          cp -R apps/client/dist-miniapps "$site"
+          cd "$site"
           npx --yes vercel@latest pull --yes --environment=production --token="$VERCEL_TOKEN"
           npx --yes vercel@latest build --prod --token="$VERCEL_TOKEN"
-          npx --yes vercel@latest deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+          url=$(npx --yes vercel@latest deploy --prebuilt --prod --token="$VERCEL_TOKEN" | tail -n 1)
+          # The web app frames MONKY_MINIAPPS_URL: pin that domain, or fail instead of serving miniapps elsewhere.
+          npx --yes vercel@latest alias set "$url" "$domain" --scope="$VERCEL_ORG_ID" --token="$VERCEL_TOKEN"

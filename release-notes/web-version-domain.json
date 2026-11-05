@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A versão web agora abre no endereço certo (monkyweb.vercel.app): convites e telas de bots apontam para ela, e as prévias de links voltam a aparecer no chat do navegador.",
+  "en": "The web version now opens at the right address (monkyweb.vercel.app): invitations and bot screens point to it, and link previews show up again in the browser chat."
+}

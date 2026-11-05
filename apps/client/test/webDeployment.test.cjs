@@ -28,3 +28,16 @@ test('a miniapps URL becomes the CSP source of every document it serves', () => 
   assert.equal(miniappsFrameSource('https://{id}.miniapps.example.com/'), 'https://*.miniapps.example.com');
   assert.throws(() => miniappsFrameSource('https://miniapps.{id}.example.com/'));
 });
+
+test('the site functions compile as the CommonJS they import, as Vercel builds them (#858)', () => {
+  const ts = require('typescript');
+  const entry = path.join(root, 'api', 'link-preview.ts');
+  const program = ts.createProgram([entry], {
+    module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    target: ts.ScriptTarget.ES2022, strict: true, skipLibCheck: true, noEmit: true,
+  });
+  const errors = ts.getPreEmitDiagnostics(program).map((diagnostic) =>
+    ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
+  assert.deepEqual(errors, [], 'an ESM function cannot import the extensionless CommonJS it reuses');
+  assert.equal(program.getSourceFile(entry).impliedNodeFormat, ts.ModuleKind.CommonJS);
+});
