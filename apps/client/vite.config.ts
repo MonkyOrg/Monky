@@ -4,7 +4,8 @@ import { readFileSync } from 'fs';
 import { thirdPartyNotices } from './scripts/thirdPartyNotices.cjs';
 import { embeddedReleasesPlugin } from './scripts/embeddedReleases.mjs';
 import { MINIAPPS_DEV_URL, WEB_DEV_PORT } from './scripts/buildMiniapps.mjs';
-import { MONKY_MINIAPPS_URL, miniappsFrameSource } from '@monky/shared';
+import { webPreviewPlugin } from './scripts/webPreview.mjs';
+import { MONKY_MINIAPPS_URL, MONKY_WEB_APP_URL, miniappsFrameSource } from '@monky/shared';
 
 // The release writes its version here before building (release.yml).
 const packageJson: { version: string } = JSON.parse(readFileSync(path.resolve(__dirname, 'package.json'), 'utf8'));
@@ -25,7 +26,7 @@ export default defineConfig(({ mode, command }) => {
       name: 'monky-web-miniapps-csp',
       // The page's CSP admits the desktop's miniapp scheme; the site frames the miniapps site instead.
       transformIndexHtml: (html: string) => html.replace('monky-miniapp:', miniappsFrameSource(miniappsUrl)),
-    }] : [])],
+    }, webPreviewPlugin(MONKY_WEB_APP_URL)] : [])],
     define: { __MONKY_VERSION__: JSON.stringify(version), __MONKY_MINIAPPS_URL__: JSON.stringify(miniappsUrl) },
     worker: {
       format: 'es' as const,

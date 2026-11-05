@@ -1,10 +1,12 @@
 /**
- * Gera as imagens de prévia (Open Graph) do site a partir de `template.html`.
+ * Gera as imagens de prévia (Open Graph) a partir de `template.html`: as da
+ * documentação e as da versão web, que reutilizam o mesmo visual.
  *
- * Rode `node docs-site/og/gerar.mjs` depois de mudar o modelo e commite os
- * JPEGs de `docs-site/public/og/` junto. Elas são estáticas de propósito: o
- * build do site não depende de navegador, e a mesma imagem serve a todas as
- * páginas de uma seção (`.vitepress/config.ts` escolhe qual).
+ * Rode `node docs-site/og/gerar.mjs` depois de mudar o modelo e commite as
+ * imagens geradas junto (`docs-site/public/og/` e `apps/client/web/`). Elas
+ * são estáticas de propósito: nenhum build depende de navegador, e a mesma
+ * imagem serve a todas as páginas de uma seção (`.vitepress/config.ts`
+ * escolhe qual; a web usa `apps/client/scripts/webPreview.mjs`).
  *
  * Usa o Chrome ou o Edge instalado, pelo protocolo DevTools, porque só ele
  * entrega JPEG — o `--screenshot` da linha de comando salva PNG, e os apps de
@@ -19,12 +21,17 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const output = resolve(here, '..', 'public', 'og');
+const docs = resolve(here, '..', 'public', 'og');
+const web = resolve(here, '..', '..', 'apps', 'client', 'web');
 const template = pathToFileURL(join(here, 'template.html')).href;
-const variants = ['home', 'download', 'guias', 'bots'];
-const languages = ['pt', 'en'];
-const width = 1200;
-const height = 630;
+const card = { width: 1200, height: 630, format: 'jpeg' };
+const outputs = [
+  ...['home', 'download', 'guias', 'bots'].flatMap(variant => ['pt', 'en'].map(language =>
+    ({ ...card, variant, language, file: join(docs, `${variant}-${language}.jpg`) }))),
+  // A web tem um endereço só, e o app abre em português.
+  { ...card, variant: 'web', language: 'pt', file: join(web, 'og.jpg') },
+  { width: 180, height: 180, format: 'png', variant: 'touch-icon', language: 'pt', file: join(web, 'apple-touch-icon.png') },
+];
 
 function findBrowser() {
   const candidates = [
@@ -97,20 +104,21 @@ function connect(url) {
   });
 }
 
-async function render(page, variant, language) {
+async function render(page, { variant, language, width, height, format }) {
+  await page.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   const loaded = page.once('Page.loadEventFired');
   await page.send('Page.navigate', { url: `${template}?variant=${variant}&lang=${language}` });
   await loaded;
   // O load não espera as fontes: sem isto os ícones saem como o nome em texto.
   const { result, exceptionDetails } = await page.send('Runtime.evaluate', {
     expression: `document.fonts.ready.then(() => Promise.all([...document.images].map(image => image.decode())))
-      .then(() => [...document.fonts].filter(font => font.status !== 'loaded').map(font => font.family))`,
+      .then(() => [...document.fonts].filter(font => font.status === 'error').map(font => font.family))`,
     awaitPromise: true,
     returnByValue: true,
   });
   if (exceptionDetails) throw new Error(`O modelo falhou em ${variant}/${language}: ${exceptionDetails.text}`);
   if (result.value.length) throw new Error(`Fontes não carregadas: ${result.value.join(', ')}. Rode npm ci.`);
-  const { data } = await page.send('Page.captureScreenshot', { format: 'jpeg', quality: 88 });
+  const { data } = await page.send('Page.captureScreenshot', format === 'jpeg' ? { format, quality: 88 } : { format });
   return Buffer.from(data, 'base64');
 }
 
@@ -121,15 +129,11 @@ try {
   const target = targets.find(item => item.type === 'page');
   const page = await connect(target.webSocketDebuggerUrl);
   await page.send('Page.enable');
-  await page.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
-  mkdirSync(output, { recursive: true });
-  for (const variant of variants) {
-    for (const language of languages) {
-      const file = join(output, `${variant}-${language}.jpg`);
-      const image = await render(page, variant, language);
-      writeFileSync(file, image);
-      console.log(`${file} (${Math.round(image.length / 1024)} KB)`);
-    }
+  for (const output of outputs) {
+    const image = await render(page, output);
+    mkdirSync(dirname(output.file), { recursive: true });
+    writeFileSync(output.file, image);
+    console.log(`${output.file} (${Math.round(image.length / 1024)} KB)`);
   }
   page.close();
 } finally {

@@ -56,6 +56,8 @@ function buildMiniapps(serve) {
     { key: 'X-Content-Type-Options', value: 'nosniff' },
     { key: 'Referrer-Policy', value: 'no-referrer' },
     { key: 'Cache-Control', value: 'no-store' },
+    // Only the app frames this site; it is not a page to find or share.
+    { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
   ];
 
   fs.rmSync(output, { recursive: true, force: true });

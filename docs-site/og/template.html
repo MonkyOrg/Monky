@@ -1,9 +1,10 @@
 <!doctype html>
 <!--
-  Modelo das imagens de prévia (Open Graph) do site. Não é publicado: o
-  `gerar.mjs` desta pasta abre este arquivo num Chrome/Edge headless, uma vez
-  por variante e idioma (`?variant=home&lang=pt`), e salva o JPEG em
-  `docs-site/public/og/`. As cores repetem os tokens do app
+  Modelo das imagens de prévia (Open Graph) da documentação e da versão web.
+  Não é publicado: o `gerar.mjs` desta pasta abre este arquivo num Chrome/Edge
+  headless, uma vez por variante e idioma (`?variant=home&lang=pt`), e salva a
+  imagem onde cada site a publica. `?variant=touch-icon` desenha o ícone de
+  tela inicial da versão web. As cores repetem os tokens do app
   (`apps/client/src/renderer/styles/theme.css`).
 -->
 <html>
@@ -139,6 +140,12 @@
   .code .k { color: #a2a8ff; }
   .code .s { color: #7ee2a8; }
   .code .p { color: var(--text-secondary); }
+  /* Ícone de tela inicial (apple-touch-icon): só o mascote, sem transparência. */
+  html.touch-icon, html.touch-icon body { width: 180px; height: 180px; }
+  html.touch-icon body { background: radial-gradient(circle at 50% 45%, rgb(88 101 242 / 35%), var(--bg-app) 75%); }
+  html.touch-icon .mascot { left: 18px; top: 18px; width: 144px; height: 144px; border: 0; background: none; box-shadow: none; }
+  html.touch-icon .mascot img { left: 0; top: 0; width: 144px; height: 144px; }
+  html.touch-icon .badge, html.touch-icon .content { display: none; }
 </style>
 </head>
 <body>
@@ -186,11 +193,22 @@
       code: '<span class="k">bot</span>.command({\n  name: <span class="s">\'ping\'</span>,\n'
         + '  handler: (ctx) <span class="p">=&gt;</span> ctx.reply(<span class="s">\'pong\'</span>),\n});',
     },
+    web: {
+      badge: 'language',
+      subtitle: { pt: 'Direto do navegador', en: 'Right in your browser' },
+      chips: [
+        ['chat', { pt: 'Chat', en: 'Chat' }],
+        ['mic', { pt: 'Voz', en: 'Voice' }],
+        ['videocam', { pt: 'Vídeo', en: 'Video' }],
+      ],
+    },
+    'touch-icon': { badge: '', subtitle: { pt: '', en: '' } },
   };
 
   const params = new URLSearchParams(location.search);
   const lang = params.get('lang') === 'en' ? 'en' : 'pt';
   const variant = variants[params.get('variant')];
+  document.documentElement.classList.toggle('touch-icon', params.get('variant') === 'touch-icon');
   if (!variant) throw new Error(`Variante desconhecida: ${params.get('variant')}`);
 
   document.documentElement.lang = lang === 'en' ? 'en' : 'pt-BR';
