@@ -56,6 +56,22 @@ export class BrowserScreenSubscription {
     this.options.onError(error);
   }
 
+  /**
+   * The first frame never came. Video that arrived yet never decoded is the browser's decoder refusing the
+   * stream (Firefox accepts AV1 in its capability probe and then decodes none of a screen), not the network.
+   */
+  private async startupExpired(message: string): Promise<void> {
+    let undecoded = false;
+    try {
+      (await this.stats())?.forEach(report => {
+        if (report.type === 'inbound-rtp' && report.kind === 'video' && report.packetsReceived > 0 && !report.framesDecoded)
+          undecoded = true;
+      });
+    } catch { /* The stats only refine the reason. */ }
+    this.fail(undecoded ? new BrowserScreenCodecError(`${message} Its video arrived, but this browser decoded none of it.`)
+      : new Error(message));
+  }
+
   public start(): Promise<void> {
     if (this.starting) return this.starting;
     if (this.stopping) return Promise.reject(new DOMException('Screen Watch was retired.', 'AbortError'));
@@ -77,7 +93,7 @@ export class BrowserScreenSubscription {
       }
       if (this.stopping) throw new DOMException('Screen Watch was retired during codec discovery.', 'AbortError');
       this.started = true;
-      this.startupTimer = setTimeout(() => this.fail(new Error('The browser screen did not present its first frame.')), 30000);
+      this.startupTimer = setTimeout(() => { void this.startupExpired('The browser screen did not present its first frame.'); }, 30000);
       await this.options.send(this.envelope({ action: 'watch', backend: 'browser', quality: this.options.quality }));
     })();
     return this.starting;
@@ -139,7 +155,7 @@ export class BrowserScreenSubscription {
       else if (signal.capture.mode === 'game' && !this.isPlaying && !this.gameStartupWait) {
         this.gameStartupWait = true;
         if (this.startupTimer) clearTimeout(this.startupTimer);
-        this.startupTimer = setTimeout(() => this.fail(new Error('Game Capture and its Normal fallback did not produce a frame.')),
+        this.startupTimer = setTimeout(() => { void this.startupExpired('Game Capture and its Normal fallback did not produce a frame.'); },
           NATIVE_SCREEN_GAME_STARTUP_TIMEOUT_MS);
       }
       return;

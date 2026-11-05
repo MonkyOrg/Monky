@@ -130,19 +130,22 @@ AccessUnitInfo InspectAccessUnit(std::span<const std::uint8_t> bytes) {
 
 void ValidateSps(const sv::H264Sps& sps, NegotiatedH264 negotiated,
                  std::uint32_t maximum_width, std::uint32_t maximum_height) {
+  // Under Main SDP, browsers' software encoder (OpenH264) sends Main-compatible Constrained Baseline.
+  const bool main_compatible_baseline = negotiated.profile == sv::H264Profile::Main &&
+      sps.profileIdc == 66 && sv::DecodesAsH264Profile(sps, negotiated.profile);
   if (!sps.progressive || sps.width < 16 || sps.height < 16 ||
       sps.width > 3840 || sps.height > 2160 ||
       sps.width > maximum_width || sps.height > maximum_height ||
       ((sps.width | sps.height | sps.cropLeft | sps.cropTop) & 1) ||
       !IsSupportedLevel(sps.levelIdc) || sps.levelIdc > negotiated.level ||
-      !sv::MatchesH264Profile(sps, negotiated.profile) ||
+      !sv::DecodesAsH264Profile(sps, negotiated.profile) ||
       (sps.profileIdc == 66 && !(sps.compatibility & 0x40)) ||
       !sv::IsBt709LimitedCompatible(sps)) {
     throw AdapterError("ERR_RTC_NEGOTIATED_SPS",
                        "Actual SPS violates negotiated profile/level, geometry, or BT.709-limited input");
   }
   const auto actual = webrtc::ParseH264ProfileLevelId(sps.ProfileLevelId().c_str());
-  const auto expected = negotiated.profile == sv::H264Profile::Main
+  const auto expected = negotiated.profile == sv::H264Profile::Main && !main_compatible_baseline
       ? webrtc::H264Profile::kProfileMain : webrtc::H264Profile::kProfileConstrainedBaseline;
   // Pinned AMF emits this Main SPS byte pattern, outside WebRTC's SDP table.
   // Retain the original SPS; validate geometry and I/P pictures independently
@@ -178,7 +181,9 @@ std::optional<sv::DecoderConfig> PlanDecoderSession(
           config.maxInFlight > 256ull * 1024 * 1024)
     throw AdapterError("ERR_RTC_DECODER_MODE",
                        "Actual SPS does not fit configured MF rate/bitrate hints or GPU budget");
-  sv::H264Bitstream initial(sps.width, sps.height, sps.levelIdc, negotiated.profile);
+  // Qualify the IDR by what the SPS declares: Main, or the Main-compatible Constrained Baseline ValidateSps admitted.
+  const auto declared = sv::MatchesH264Profile(sps, negotiated.profile) ? negotiated.profile : sv::H264Profile::ConstrainedBaseline;
+  sv::H264Bitstream initial(sps.width, sps.height, sps.levelIdc, declared);
   const auto checked = initial.Convert(packet);
   if (!checked.hasPicture || !checked.keyFrame)
     throw AdapterError("ERR_RTC_INITIAL_IDR", "The replacement session requires a complete qualified IDR");

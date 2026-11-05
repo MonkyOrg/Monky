@@ -19,10 +19,34 @@ export const WEB_DEV_PORT = 5174;
 export const MINIAPPS_DEV_URL = 'http://localhost:5175/';
 
 /** Runs inside the miniapp frame before the document replaces the page. */
-function loader(origins, messages) {
+export function loader(origins, messages) {
   const token = location.hash.slice(1);
   const host = window.parent;
   if (host === window || !/^[0-9a-f-]{36}$/.test(token)) return;
+  // This page is HTTPS: the browser blocks the miniapp's plain http/ws calls (mixed content) beyond the
+  // user's own machine. The calls go on unchanged; the app only learns which service was refused, once.
+  const reported = new Set();
+  const watch = (value) => {
+    try {
+      const url = new URL(String(value instanceof Request ? value.url : value), location.href);
+      if ((url.protocol !== 'http:' && url.protocol !== 'ws:')
+        || ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || reported.has(url.origin)) return;
+      reported.add(url.origin);
+      host.postMessage({ type: messages.insecure, token, origin: url.origin }, '*');
+    } catch { /* Not a URL: the call fails on its own. */ }
+  };
+  const fetch = window.fetch;
+  window.fetch = function (input, init) { watch(input); return fetch.call(this, input, init); };
+  const open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) { watch(url); return open.call(this, method, url, ...rest); };
+  for (const name of ['WebSocket', 'EventSource']) {
+    const Native = window[name];
+    if (typeof Native !== 'function') continue;
+    const Watched = function (url, ...rest) { watch(url); return new Native(url, ...rest); };
+    Watched.prototype = Native.prototype;
+    Object.setPrototypeOf(Watched, Native);
+    window[name] = Watched;
+  }
   const receive = (event) => {
     const data = event.data;
     if (event.source !== host || !origins.includes(event.origin) || !data || data.type !== messages.document ||

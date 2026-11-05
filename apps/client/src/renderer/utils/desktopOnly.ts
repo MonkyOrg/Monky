@@ -49,6 +49,16 @@ export function desktopFeatureName(feature: DesktopFeature): string {
   return t(FEATURE_NAMES[feature]);
 }
 
+/** Features a browser lacks for a reason worth naming: this browser, not the web version, cannot do them. */
+const FEATURE_REASONS: Partial<Readonly<Record<DesktopFeature, TranslationKey>>> = {
+  screenShare: 'desktopOnly.reason.screenShare',
+};
+
+/** The tooltip of a locked `feature`: why it is locked, or just where it works. */
+function lockedTooltip(feature: DesktopFeature): string {
+  return t(FEATURE_REASONS[feature] ?? 'desktopOnly.tooltip');
+}
+
 /** Whether `capability` is shown locked here, rather than working or hidden. */
 export function isDesktopOnly(capability: keyof PlatformCapabilities): boolean {
   return featureAvailability(capability) === 'desktop-only';
@@ -61,7 +71,7 @@ export function isShown(capability: keyof PlatformCapabilities): boolean {
 
 /** Attributes of one locked control. Never `disabled`: it would block hover, focus and click. */
 export function desktopOnlyAttributes(feature: DesktopFeature): string {
-  return `aria-disabled="true" data-desktop-only="${feature}" data-tooltip="${escapeHtml(t('desktopOnly.tooltip'))}"`;
+  return `aria-disabled="true" data-desktop-only="${feature}" data-tooltip="${escapeHtml(lockedTooltip(feature))}"`;
 }
 
 /** `desktopOnlyAttributes` when `capability` is locked here, nothing otherwise. */
@@ -167,7 +177,7 @@ export function setDesktopOnly(control: HTMLElement, feature: DesktopFeature | n
   }
   control.setAttribute('aria-disabled', 'true');
   control.dataset.desktopOnly = feature;
-  control.dataset.tooltip = t('desktopOnly.tooltip');
+  control.dataset.tooltip = lockedTooltip(feature);
   if (!badge) badgeHost.insertAdjacentHTML('beforeend', desktopOnlyBadge());
 }
 
@@ -192,7 +202,8 @@ export function showDesktopOnly(feature: DesktopFeature, returnFocus?: Element):
         </div>
         <button type="button" class="modal-close-btn" data-modal-close aria-label="${escapeHtml(t('common.close'))}">&times;</button>
       </div>
-      <p class="desktop-only-dialog__message">${escapeHtml(t('desktopOnly.message', { feature: desktopFeatureName(feature) }))}</p>
+      <p class="desktop-only-dialog__message">${escapeHtml(FEATURE_REASONS[feature] ? lockedTooltip(feature)
+        : t('desktopOnly.message', { feature: desktopFeatureName(feature) }))}</p>
       <div class="desktop-only-dialog__actions">
         <button type="button" class="btn btn-primary" data-action="download">
           <span class="material-symbols-outlined md-16" aria-hidden="true">download</span>${escapeHtml(t('desktopOnly.download'))}

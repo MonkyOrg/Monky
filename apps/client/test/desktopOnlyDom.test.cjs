@@ -160,6 +160,13 @@ if (!process.versions.electron) {
           'The block names its own feature');
         await closeOffer();
 
+        // A feature this browser lacks for a reason explains that reason, not only where it works.
+        await evaluate('import("/utils/desktopOnly.ts").then(({ showDesktopOnly }) => showDesktopOnly("screenShare"))');
+        await waitFor(`${dialogs} === 1`, 'The screen-sharing offer opens');
+        await check(`document.querySelector(".modal-backdrop:not([data-ui-closing]) .desktop-only-dialog__message").textContent
+          === window.qa.t("desktopOnly.reason.screenShare")`, 'The screen-sharing offer names why this browser cannot share');
+        await closeOffer();
+
         // Keyboard: Enter and Space offer the app; Tab moves past. Focus events only reach a focused page, and an
         // unshown window on a CI runner is not one: the shared helper shows and focuses it, and waits until it is.
         await focusTooltipPreview(browser);
@@ -253,6 +260,10 @@ if (!process.versions.electron) {
           'Only the control with text carries the badge');
         await check(`window.qa.footerIcons.every((icon) => icon.locked && !icon.badge && !icon.pulse)`,
           'The icon-only buttons of the call footer are locked without a badge or a live state');
+        // A browser that cannot share screens says why, rather than sending everyone to the desktop app.
+        await check(`window.qa.footerIcons[0].tooltip === window.qa.t('desktopOnly.reason.screenShare')
+          && window.qa.footerIcons[1].tooltip === window.qa.t('desktopOnly.tooltip')`,
+          'Screen sharing locked by this browser names the reason in its tooltip');
 
         // Inside a dialog, locked options never stack the offer: a partly locked settings tab explains them with a short notice.
         const summary = (scope) => `document.querySelector(${JSON.stringify(`${scope} .desktop-only-notice[data-desktop-only-summary]`)})`;
@@ -382,6 +393,7 @@ async function setup(language) {
   qa.footerIcons = ['#media-btn-screen', '#media-btn-soundboard'].map((selector) => {
     const button = footer.querySelector(selector);
     return { locked: button?.getAttribute('data-desktop-only') ?? null, badge: !!button?.querySelector('.desktop-only-badge'),
+      tooltip: button?.getAttribute('data-tooltip') ?? null,
       pulse: !!button?.classList.contains('broadcasting-pulse') || !!button?.classList.contains('active') };
   });
   window.api = { ...window.api, capabilities: { ...window.api.capabilities, screenShare: true, mediaFolders: true } };

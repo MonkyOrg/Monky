@@ -247,6 +247,17 @@ void VerifyAdaptiveDecoderSessions() {
   Check(amf_plan && amf_plan->profileLevelId == "4d0433" && amf_info.sps->compatibility == 0x04,
         "AMF constrained Main SPS must be admitted without rewriting its original bytes");
   Reject([&] { plan(std::nullopt, amf_info, amf_packet); }, "ERR_RTC_NEGOTIATED_SPS");
+  // A browser's software encoder answers Main SDP with Main-compatible Constrained Baseline (42c0).
+  const auto browser_plan = policy::PlanDecoderSession(std::nullopt, small_info, smaller,
+      {screen_video::H264Profile::Main, 51}, 1920, 1080, 8, options);
+  Check(browser_plan && browser_plan->profileLevelId == "42c033",
+        "A Main receiver must admit the Main-compatible Constrained Baseline of browser software encoders");
+  auto plain_baseline = small_sps;
+  plain_baseline[2] = 0x80;
+  const auto plain_packet = ParserPacket(plain_baseline);
+  Reject([&] { policy::PlanDecoderSession(std::nullopt, policy::InspectAccessUnit(plain_packet), plain_packet,
+                                         {screen_video::H264Profile::Main, 51}, 1920, 1080, 8, options); },
+         "ERR_RTC_NEGOTIATED_SPS");
   for (const auto flags : {0x08, 0x0c, 0x20, 0x80}) {
     auto unsupported = *amf_info.sps;
     unsupported.compatibility = static_cast<std::uint8_t>(flags);

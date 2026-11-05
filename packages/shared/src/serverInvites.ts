@@ -239,7 +239,11 @@ export function miniappsFrameSource(url: string): string {
 }
 /** The page of the miniapps site that receives a document from the app and shows it. */
 export const MINIAPP_LOADER_PAGE = 'frame.html';
-export const MINIAPP_LOADER_MESSAGES = { ready: 'monky-miniapp-loader', document: 'monky-miniapp-document' } as const;
+export const MINIAPP_LOADER_MESSAGES = {
+  ready: 'monky-miniapp-loader', document: 'monky-miniapp-document',
+  // The miniapp reached for a plain http/ws service, which a page served over HTTPS may not use.
+  insecure: 'monky-miniapp-insecure',
+} as const;
 
 /** Opens the invitation in the web version, which reads it from the fragment as the app link does. */
 export function createServerInviteWebAppLink(invite: ServerInvite): string {

@@ -14,6 +14,9 @@ import {
 } from '../src/renderer/platform/web/webScreen/screenP2pPublisherPeer';
 import type { ScreenMediaBinding } from '../src/renderer/platform/web/webScreen/screenSdp';
 import { planBrowserAudio, type LiveScreens } from '../src/renderer/views/screenShare/captureRules';
+import { webScreenCapabilities } from '../src/renderer/platform/web/webScreen/webScreenRuntime';
+import { webCapabilities } from '../src/renderer/platform/web/webPlatform';
+import { browserReceivesScreenCodec } from '../src/renderer/core/webrtc/browserScreenCodecs';
 
 const INSTANCE = '3dfbff6f-6556-49cb-be32-1a6699d242a1';
 const CONNECTION = '74439c45-0865-42d3-9577-d4e451504e8c';
@@ -213,6 +216,62 @@ test('a browser screen sender offers only H.264 Main and its retransmission (#85
     ['level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f', 'video/rtx']);
   assert.equal(isScreenH264(codecs[2]), false);
   assert.deepEqual(screenSenderCodecs(codecs.slice(0, 4)), []);
+});
+
+/** What Firefox's WebRTC lists: H.264 only as Constrained Baseline, through OpenH264. */
+const FIREFOX_VIDEO_CODECS = [
+  { mimeType: 'video/VP8', sdpFmtpLine: 'max-fs=12288;max-fr=60' },
+  { mimeType: 'video/H264', sdpFmtpLine: 'profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1' },
+  { mimeType: 'video/AV1' },
+];
+const CHROMIUM_VIDEO_CODECS = [
+  { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f' },
+  { mimeType: 'video/rtx' },
+  { mimeType: 'video/AV1', sdpFmtpLine: 'level-idx=5;profile=0;tier=0' },
+];
+
+/** Runs `body` as a browser tab with `codecs` in its WebRTC sender and receiver. */
+function inBrowser(t: TestContext, codecs: readonly { mimeType: string; sdpFmtpLine?: string }[], body: () => void): void {
+  const descriptors = ['window', 'navigator', 'RTCRtpSender', 'RTCRtpReceiver']
+    .map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
+  t.after(() => {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else Reflect.deleteProperty(globalThis, name);
+    }
+  });
+  const capabilities = { getCapabilities: () => ({ codecs, headerExtensions: [] }) };
+  const define = (name: string, value: unknown): void => { Object.defineProperty(globalThis, name, { value, configurable: true, writable: true }); };
+  define('window', globalThis);
+  define('navigator', { mediaDevices: { getDisplayMedia: () => Promise.reject(new Error('unused')), getSupportedConstraints: () => ({}) } });
+  define('RTCRtpSender', capabilities);
+  define('RTCRtpReceiver', capabilities);
+  body();
+}
+
+test('a browser without an H.264 Main encoder shows screen sharing locked, as its runtime refuses it (#858)', (t: TestContext) => {
+  inBrowser(t, FIREFOX_VIDEO_CODECS, () => {
+    assert.deepEqual({ capture: webScreenCapabilities().capture, reason: webScreenCapabilities().reason }, { capture: false, reason: 'encoder' });
+    // One rule: the button follows what the runtime would do with the click.
+    assert.equal(webCapabilities().screenShare, false);
+  });
+});
+
+test('a Chromium browser with an H.264 Main encoder shares screens (#858)', (t: TestContext) => {
+  inBrowser(t, CHROMIUM_VIDEO_CODECS, () => {
+    assert.equal(webScreenCapabilities().capture, true);
+    assert.equal(webCapabilities().screenShare, true);
+  });
+});
+
+test('a browser without the H.264 Main receiver is told it cannot watch H.264 screens at all (#858)', (t: TestContext) => {
+  inBrowser(t, FIREFOX_VIDEO_CODECS, () => {
+    assert.equal(browserReceivesScreenCodec('h264'), false);
+    assert.equal(browserReceivesScreenCodec('av1'), true);
+  });
+  inBrowser(t, CHROMIUM_VIDEO_CODECS, () => {
+    assert.equal(browserReceivesScreenCodec('h264'), true);
+  });
 });
 
 test('the sent screen stream is renamed after its instance and read back as its binding (#858)', () => {

@@ -46,6 +46,9 @@ H264Sps ParseBaselineSps(std::span<const std::uint8_t> nal);
 H264Sps ParseH264Sps(std::span<const std::uint8_t> nal);
 H264Sps ParseProfileLevelId(const std::string& value);
 bool MatchesH264Profile(const H264Sps& sps, H264Profile profile);
+// What a receiver of the negotiated profile decodes: the profile itself and, for Main, the Constrained
+// Baseline that declares Main conformance (constraint_set1, H.264 A.2.1), as browsers' OpenH264 sends.
+bool DecodesAsH264Profile(const H264Sps& sps, H264Profile negotiated);
 bool IsBt709LimitedCompatible(const H264Sps& sps);
 
 class H264Bitstream {

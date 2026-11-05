@@ -11,6 +11,7 @@
     "src/main/serverDataDir.ts",
     "src/main/net/addressPolicy.ts",
     "src/renderer/*.d.ts",
+    "src/renderer/platform/web/*.d.ts",
     "src/renderer/utils/**/*",
     "src/renderer/platform/capabilities.ts",
     "src/renderer/core/EventBus.ts",
