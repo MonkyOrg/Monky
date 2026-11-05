@@ -93,6 +93,7 @@ export async function runConfiguredBot(env: NodeJS.ProcessEnv = process.env): Pr
   process.argv[1] = entry;
   for (const key of plan.clear) delete process.env[key];
   Object.assign(process.env, plan.values);
+  process.env.MONKY_BOT_TLS_STATE_DIR = path.join(homeDir, 'tls');
   await dynamicImport(pathToFileURL(entry).href);
 }
 

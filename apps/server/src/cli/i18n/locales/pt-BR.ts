@@ -520,6 +520,7 @@ export const ptBR = {
   'tls.checking': 'Pedindo à Let\'s Encrypt um certificado de teste para conferir se a porta {port} está acessível pela internet. Isso leva alguns segundos...',
   'tls.askGrant': 'O Linux não deixa o servidor abrir a porta {port} sem permissão. Liberar agora com sudo? (executa: {command})',
   'tls.enabledNow': 'Conexão segura ativada. O servidor também aceita {address}.',
+  'tls.enabledReused': 'Conexão segura ativada com o certificado já compartilhado nesta máquina. O servidor também aceita {address}.',
   'tls.notEnabled': 'A conexão segura não foi ativada.',
   'tls.disabledNow': 'Conexão segura desativada. O servidor aceita apenas ws://.',
   'tls.restartNow': 'O servidor está rodando. Reiniciar agora para aplicar a conexão segura?',
@@ -534,5 +535,5 @@ export const ptBR = {
   'tls.error.rateLimited': 'A Let\'s Encrypt pediu para esperar antes de emitir outro certificado. Tente de novo mais tarde.',
   'tls.error.rejected': 'A Let\'s Encrypt recusou o pedido. Veja os logs do servidor para o motivo.',
   'tls.error.network': 'Não foi possível falar com a Let\'s Encrypt. Confira a conexão com a internet.',
-  'tls.error.storage': 'Não foi possível gravar o certificado na pasta de dados do servidor.',
+  'tls.error.storage': 'Não foi possível gravar o certificado na pasta compartilhada de certificados (~/.monky/tls ou MONKY_TLS_DIR).',
 } as const;

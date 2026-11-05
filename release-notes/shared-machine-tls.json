@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Servidor e bots da mesma máquina agora compartilham uma única conexão segura (TLS). Ative em qualquer um e o certificado existente é reutilizado, com renovação automática. Assim, os miniapps dos bots também funcionam na versão web.",
+  "en": "The server and the bots on the same machine now share a single secure connection (TLS). Turn it on in any of them and the existing certificate is reused, with automatic renewal. This lets bot miniapps work on the web version too."
+}

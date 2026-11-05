@@ -13,14 +13,10 @@ import type { AutoTlsStatus } from '@monky/shared';
 import { MonkyServer } from './server';
 import { Logger } from './infrastructure/logger/Logger';
 import { closeHttpServer, listenHttpServer } from './infrastructure/lifecycle/httpLifecycle';
-import { AcmeChallenges } from './infrastructure/tls/AcmeChallenges';
-import { AcmeClient } from './infrastructure/tls/AcmeClient';
-import { AutoTlsFailure, AutoTlsService, type CertificateIssuer, type IssuedCertificate } from './infrastructure/tls/AutoTlsService';
-import { CertificateStore } from './infrastructure/tls/CertificateStore';
-import { createIpCsr } from './infrastructure/tls/Csr';
-import { ipAddressBytes } from './infrastructure/tls/der';
+import { AcmeChallenges, AcmeClient, AutoTlsFailure, AutoTlsService, CertificateStore, FileLock, LetsEncryptIssuer, TlsSettingsStore, inspectCertificate, type CertificateIssuer, type IssuedCertificate } from '@monky/shared/dist/tls';
+import { createIpCsr } from '@monky/shared/dist/tls/Csr';
+import { ipAddressBytes } from '@monky/shared/dist/tls/der';
 import { DualProtocolListener } from './infrastructure/tls/DualProtocolListener';
-import { LetsEncryptIssuer } from './infrastructure/tls/LetsEncryptIssuer';
 import { createTestCertificate, readCsr } from './testFixtures/certificates';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -411,15 +407,18 @@ class FakeIssuer implements CertificateIssuer {
 function service(t: TestContext, directory: string, issuer: FakeIssuer, ip: { value: string | null }) {
   const installs: Array<tls.SecureContext | null> = [];
   const grants: number[] = [];
+  const store = new CertificateStore(path.join(directory, 'shared'));
   const instance = new AutoTlsService({
-    store: new CertificateStore(directory),
+    store,
+    settings: new TlsSettingsStore(path.join(directory, 'tls')),
+    legacyDirectory: path.join(directory, 'tls'),
     issuer,
     publicIp: async () => ip.value,
     install: (context) => installs.push(context),
     grantPortPermission: async () => { grants.push(Date.now()); },
   });
   t.after(() => instance.dispose());
-  return { instance, installs, grants };
+  return { instance, installs, grants, store };
 }
 
 test('automatic TLS turns on only after the CA proved it reaches the host', async (t) => {
@@ -458,7 +457,7 @@ test('automatic TLS turns on only after the CA proved it reaches the host', asyn
   assert.equal(disabled.enabled, false);
   assert.equal(disabled.active, false);
   assert.equal(installs.at(-1), null, 'turning it off leaves ws:// only');
-  assert.equal(fs.existsSync(path.join(directory, 'tls', 'certificate.json')), false);
+  assert.equal(fs.existsSync(path.join(directory, 'shared', 'certificate.json')), true, 'the certificate stays shared for the others');
 
   ip.value = '192.168.0.10';
   await assert.rejects(instance.enable(), (error) => error instanceof AutoTlsFailure && error.code === 'address-not-public');
@@ -550,6 +549,155 @@ test('a restarted server serves its saved certificate at once', async (t) => {
 
 // ---------------------------------------------------------------------------
 
+function savedCertificate(ip: string, notAfterFromNow: number) {
+  const issued = createTestCertificate({ ip, notBefore: Date.now() - 60_000, notAfter: Date.now() + notAfterFromNow });
+  return inspectCertificate(ip, issued.certificatePem, issued.privateKeyPem);
+}
+
+test('shared certificate: a valid one is reused without asking the CA', async (t) => {
+  const directory = temporaryDirectory(t);
+  const ip: { value: string | null } = { value: PUBLIC_IP };
+  const { instance, installs, store } = service(t, directory, new FakeIssuer(), ip);
+  const shared = savedCertificate(PUBLIC_IP, 5 * DAY);
+  store.writeCertificate(shared);
+  const issuer = new FakeIssuer();
+  const other = service(t, directory, issuer, ip);
+
+  const status = await other.instance.enable();
+  assert.equal(other.instance.reusedSharedCertificate, true);
+  assert.equal(status.active, true);
+  assert.equal(status.validUntil, shared.notAfter);
+  assert.deepEqual([issuer.prechecks, issuer.issues], [[], []]);
+  assert.ok(other.installs.at(-1));
+  assert.equal(installs.length, 0);
+  assert.equal(instance.status().enabled, false, 'each process opts in on its own');
+});
+
+test('shared certificate: issued once when absent, then every process reuses it', async (t) => {
+  const directory = temporaryDirectory(t);
+  const ip: { value: string | null } = { value: PUBLIC_IP };
+  const first = new FakeIssuer();
+  const a = service(t, directory, first, ip);
+  await a.instance.enable();
+  assert.equal(a.instance.reusedSharedCertificate, false);
+  assert.deepEqual([first.prechecks.length, first.issues.length], [1, 1]);
+  assert.equal(a.store.findUsable(PUBLIC_IP)?.ip, PUBLIC_IP);
+
+  const second = new FakeIssuer();
+  const b = service(t, path.join(directory, 'other-process'), second, ip);
+  const sharedStore = new CertificateStore(path.join(directory, 'shared'));
+  assert.ok(sharedStore.findUsable(PUBLIC_IP));
+  const c = new AutoTlsService({
+    store: sharedStore, settings: new TlsSettingsStore(path.join(directory, 'another-tls')),
+    issuer: second, publicIp: async () => ip.value, install: () => {},
+  });
+  t.after(() => c.dispose());
+  await c.enable();
+  assert.equal(c.reusedSharedCertificate, true);
+  assert.deepEqual(second.issues, []);
+  assert.equal(b.instance.status().enabled, false);
+});
+
+test('shared certificate: an expired one or one for another IP is not trusted', async (t) => {
+  const directory = temporaryDirectory(t);
+  const ip: { value: string | null } = { value: PUBLIC_IP };
+  const issuer = new FakeIssuer();
+  const { instance, store } = service(t, directory, issuer, ip);
+
+  store.writeCertificate(savedCertificate(PUBLIC_IP, -1000));
+  assert.equal(store.findUsable(PUBLIC_IP), null, 'expired');
+  store.writeCertificate(savedCertificate('8.8.8.8', 5 * DAY));
+  assert.equal(store.findUsable(PUBLIC_IP), null, 'another IP');
+
+  await instance.enable();
+  assert.equal(instance.reusedSharedCertificate, false);
+  assert.deepEqual(issuer.issues, [PUBLIC_IP]);
+  assert.equal(store.findUsable(PUBLIC_IP)?.ip, PUBLIC_IP, 'the new certificate replaces the stale one');
+
+  const damaged = savedCertificate(PUBLIC_IP, 5 * DAY);
+  fs.writeFileSync(store.file('certificate.json'), JSON.stringify({ ip: PUBLIC_IP, certificatePem: damaged.certificatePem, privateKeyPem: 'nope' }));
+  assert.equal(store.readCertificate(), null, 'a mismatched pair is ignored');
+});
+
+test('shared certificate: a server\'s own certificate from before sharing is adopted once', async (t) => {
+  const directory = temporaryDirectory(t);
+  const ip: { value: string | null } = { value: PUBLIC_IP };
+  const legacy = savedCertificate(PUBLIC_IP, 5 * DAY);
+  fs.mkdirSync(path.join(directory, 'tls'), { recursive: true });
+  fs.writeFileSync(path.join(directory, 'tls', 'certificate.json'), JSON.stringify(legacy));
+  fs.writeFileSync(path.join(directory, 'tls', 'settings.json'), JSON.stringify({ enabled: true, lastError: null }));
+
+  const issuer = new FakeIssuer();
+  const { instance, installs, store } = service(t, directory, issuer, ip);
+  assert.equal(store.readCertificate()?.certificatePem, legacy.certificatePem, 'copied into the shared folder');
+  instance.start();
+  assert.equal(instance.status().active, true, 'the opt-in is kept');
+  assert.ok(installs[0]);
+  await flush();
+  assert.deepEqual(issuer.issues, []);
+
+  await instance.disable();
+  assert.equal(fs.existsSync(path.join(directory, 'tls', 'certificate.json')), false, 'the per-server copy is gone');
+  assert.ok(store.readCertificate(), 'the shared one remains');
+
+  const newer = savedCertificate(PUBLIC_IP, 6 * DAY);
+  store.writeCertificate(newer);
+  fs.writeFileSync(path.join(directory, 'tls', 'certificate.json'), JSON.stringify(legacy));
+  const again = service(t, directory, issuer, ip);
+  assert.equal(again.store.readCertificate()?.certificatePem, newer.certificatePem, 'a valid shared certificate is not overwritten');
+});
+
+test('shared certificate: while another process renews, this one waits and picks up the result', async (t) => {
+  quiet(t);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.UTC(2030, 0, 1) });
+  const directory = temporaryDirectory(t);
+  const ip: { value: string | null } = { value: PUBLIC_IP };
+  const issuer = new FakeIssuer();
+  const { instance, installs, store } = service(t, directory, issuer, ip);
+  const enabled = await instance.enable();
+  assert.equal(issuer.issues.length, 1);
+  const installsBefore = installs.length;
+
+  t.mock.timers.setTime(enabled.nextRenewalAt!);
+  const otherProcess = new FileLock(store.file('renew.lock'));
+  const release = otherProcess.tryAcquire();
+  assert.ok(release, 'another process is renewing');
+
+  t.mock.timers.tick(0);
+  await flush();
+  assert.equal(issuer.issues.length, 1, 'the lock keeps this process from renewing too');
+  assert.equal(instance.status().lastError, null, 'waiting is not a failure');
+
+  const renewed = savedCertificate(PUBLIC_IP, 6 * DAY);
+  store.writeCertificate(renewed);
+  release();
+  instance.syncFromDisk();
+  assert.equal(instance.status().validUntil, renewed.notAfter, 'the renewed certificate is served');
+  assert.equal(installs.length, installsBefore + 1);
+  assert.equal(issuer.issues.length, 1);
+
+  t.mock.timers.tick(AutoTlsService.LOCK_RETRY_MS);
+  await flush();
+  assert.equal(issuer.issues.length, 1, 'nothing left to renew');
+});
+
+test('shared certificate: the lock is released after issuing and a dead holder does not block', async (t) => {
+  const directory = temporaryDirectory(t);
+  const lock = new FileLock(path.join(directory, 'renew.lock'));
+  const first = lock.tryAcquire();
+  assert.ok(first);
+  assert.equal(new FileLock(path.join(directory, 'renew.lock')).tryAcquire(), null);
+  first();
+  const second = lock.tryAcquire();
+  assert.ok(second);
+  second();
+
+  fs.writeFileSync(path.join(directory, 'renew.lock'), JSON.stringify({ id: 'x', pid: 2 ** 22 - 3, at: Date.now() }));
+  const taken = new FileLock(path.join(directory, 'renew.lock')).tryAcquire();
+  assert.ok(taken, 'a lock whose process is gone is taken over');
+  taken();
+});
+
 test('a hosted server turns on wss:// on its own port and the invitation marks the secure address', async (t) => {
   quiet(t);
   const validationPort = await freePort();
@@ -566,6 +714,8 @@ test('a hosted server turns on wss:// on its own port and the invitation marks t
   process.env.MONKY_ACME_PUBLIC_IP = PUBLIC_IP;
 
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-auto-tls-server-'));
+  process.env.MONKY_TLS_DIR = path.join(dataDir, 'shared-tls');
+  t.after(() => { delete process.env.MONKY_TLS_DIR; });
   const server = await MonkyServer.create({ port: 0, dataDir, serverName: 'TLS fixture' });
   t.after(async () => {
     await server.stop();
@@ -583,7 +733,7 @@ test('a hosted server turns on wss:// on its own port and the invitation marks t
   assert.equal(status.active, true);
   assert.deepEqual(ca.orders.map((order) => order.profile), ['shortlived', 'shortlived'], 'staging precheck, then the real one');
 
-  const certificate = JSON.parse(fs.readFileSync(path.join(dataDir, 'tls', 'certificate.json'), 'utf8')) as { certificatePem: string };
+  const certificate = JSON.parse(fs.readFileSync(path.join(dataDir, 'shared-tls', 'certificate.json'), 'utf8')) as { certificatePem: string };
   // The certificate names the stand-in public IP, so only the chain is checked over loopback.
   const handshake = tls.connect({ host: '127.0.0.1', port, ca: certificate.certificatePem, checkServerIdentity: () => undefined });
   await once(handshake, 'secureConnect');

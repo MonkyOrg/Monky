@@ -4,6 +4,7 @@ import { askCliChoice, askCliText, askCliValue, type CliChoice } from './prompts
 import { CliError, cliText, languageCommand } from './locale';
 import { configCommand, logsCommand, restartCommand, startCommand, statusCommand, stopCommand } from './commands/lifecycle';
 import { setupCommand } from './commands/setup';
+import { tlsCommand } from './commands/tls';
 import { autoUpdateCommand, updateCommand } from './commands/update';
 import { consentCommand } from './consent';
 import { configEnvCommand, declaredVariables, printDeclaredVariables, readProfileEnvironment } from './profileEnvironment';
@@ -158,6 +159,24 @@ export async function configurationMenu(context: CliContext): Promise<void> {
   }
 }
 
+async function tlsMenu(context: CliContext): Promise<void> {
+  while (true) {
+    await tlsCommand(context, ['status']);
+    const action = await askCliChoice(context.locale, cliText(context.locale, 'TLS automático', 'Automatic TLS'), [
+      choice(context, 'enable', 'Ativar (reusa ou emite o certificado compartilhado)', 'Enable (reuses or issues the shared certificate)'),
+      choice(context, 'disable', 'Desativar para este bot', 'Disable for this bot'),
+      choice(context, 'back', 'Voltar', 'Back'),
+    ]);
+    if (action === 'back') return;
+    try {
+      await tlsCommand(context, [action]);
+    } catch (error: unknown) {
+      if (!(error instanceof CliError)) throw error;
+      console.error(cliText(context.locale, error.portuguese, error.english));
+    }
+  }
+}
+
 export async function botCliMenu(context: CliContext): Promise<void> {
   while (true) {
     const action = await askCliChoice(context.locale, context.displayName, [
@@ -166,6 +185,7 @@ export async function botCliMenu(context: CliContext): Promise<void> {
       choice(context, 'status', 'Estado do bot', 'Bot status'), choice(context, 'logs', 'Logs recentes', 'Recent logs'),
       choice(context, 'doctor', 'Verificar se o bot pode operar (doctor)', 'Check whether the bot can operate (doctor)'),
       choice(context, 'requirements', 'Portas e configurações necessárias', 'Required ports and settings'),
+      choice(context, 'tls', 'TLS automático (https/wss)', 'Automatic TLS (https/wss)'),
       choice(context, 'config', 'Configuração', 'Configuration'), choice(context, 'language', 'Idioma / Language', 'Idioma / Language'),
       choice(context, 'exit', 'Sair do menu (mantém o bot)', 'Exit menu (keep the bot running)'),
     ]);
@@ -185,6 +205,7 @@ export async function botCliMenu(context: CliContext): Promise<void> {
         console.error(cliText(context.locale, error.portuguese, error.english));
       }
     } else if (action === 'requirements') requirementsCommand(context, [], readConfig(context));
+    else if (action === 'tls') await tlsMenu(context);
     else if (action === 'config') await configurationMenu(context);
     else await languageCommand(context, []);
   }

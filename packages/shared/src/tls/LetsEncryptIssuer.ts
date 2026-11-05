@@ -1,11 +1,8 @@
 import { generateKeyPairSync, createPrivateKey, createPublicKey, type KeyObject } from 'node:crypto';
-import {
-  AUTO_TLS_LOW_PORT_SYSCTL, AUTO_TLS_LOW_PORT_SYSCTL_FILE, AUTO_TLS_VALIDATION_PORT,
-} from '@monky/shared';
-import { detectElevation, runPrivileged } from '../security/privileged';
+import { AUTO_TLS_VALIDATION_PORT } from '../autoTls';
 import { AcmeClient } from './AcmeClient';
 import type { AcmeChallenges } from './AcmeChallenges';
-import { AutoTlsFailure, type CertificateIssuer, type IssuedCertificate } from './AutoTlsService';
+import { AutoTlsFailure, type CertificateIssuer, type IssuedCertificate } from './errors';
 import type { CertificateStore } from './CertificateStore';
 import { createIpCsr } from './Csr';
 
@@ -33,8 +30,8 @@ export function acmeTestOverrides(env: NodeJS.ProcessEnv = process.env): {
 export interface LetsEncryptIssuerOptions {
   store: CertificateStore;
   challenges: AcmeChallenges;
-  /** The server's own port: when it is the validation port, it already answers the challenge. */
-  serverPort: number;
+  /** The server's own port: when it is the validation port, it already answers the challenge. Bots omit it. */
+  serverPort?: number;
   /**
    * Test servers such as Pebble (`MONKY_ACME_DIRECTORY`). Used for the
    * precheck as well, so a test never reaches Let's Encrypt.
@@ -104,17 +101,4 @@ export class LetsEncryptIssuer implements CertificateIssuer {
     }
     return privateKey;
   }
-}
-
-/**
- * Lets unprivileged processes open port 80 on Linux, persistently, through
- * root or passwordless sudo. Only called after the owner agreed to it.
- */
-export async function allowValidationPort(): Promise<void> {
-  const elevation = detectElevation();
-  if (!elevation) throw new AutoTlsFailure('privilege-unavailable', 'No root or passwordless sudo is available.');
-  const persist = await runPrivileged(elevation,
-    ['sh', '-c', `printf '%s\\n' '${AUTO_TLS_LOW_PORT_SYSCTL}' > ${AUTO_TLS_LOW_PORT_SYSCTL_FILE}`], 15_000);
-  const apply = persist.ok ? await runPrivileged(elevation, ['sysctl', '-w', AUTO_TLS_LOW_PORT_SYSCTL], 15_000) : persist;
-  if (!apply.ok) throw new AutoTlsFailure('privilege-unavailable', apply.detail);
 }

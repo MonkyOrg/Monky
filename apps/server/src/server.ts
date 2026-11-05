@@ -67,11 +67,9 @@ import { publicRoutes } from './infrastructure/http/publicRoutes';
 import { attachmentRoutes } from './infrastructure/http/attachmentRoutes';
 import { resolveServerVersion } from './runtimeVersion';
 import { describeServerInvite } from './infrastructure/discovery/inviteInfo';
-import { AcmeChallenges } from './infrastructure/tls/AcmeChallenges';
-import { AutoTlsService, type AutoTlsEnableOptions } from './infrastructure/tls/AutoTlsService';
-import { CertificateStore } from './infrastructure/tls/CertificateStore';
+import { AcmeChallenges, AutoTlsService, LetsEncryptIssuer, acmeTestOverrides, allowValidationPort, type AutoTlsEnableOptions } from '@monky/shared/dist/tls';
 import { DualProtocolListener } from './infrastructure/tls/DualProtocolListener';
-import { LetsEncryptIssuer, acmeTestOverrides, allowValidationPort } from './infrastructure/tls/LetsEncryptIssuer';
+import { acmeRoutes, serverTlsStorage } from './infrastructure/tls/sharedTls';
 
 export interface ServerConfig {
   port: number;
@@ -459,7 +457,7 @@ export class MonkyServer {
     // because Node derives it from requestTimeout and would turn it off as well (S-WS-11).
     const httpServer = http.createServer({ requestTimeout: 0, headersTimeout: 60_000 }, createHttpRequestListener([
       ...publicRoutes({ avatars: avatarStorage, preview: describePreview, inviteInfo: describeInvite }),
-      ...acmeChallenges.routes(),
+      ...acmeRoutes(acmeChallenges),
       ...attachmentRoutes({
         attachments: attachmentService,
         storage: attachmentStorage,
@@ -472,11 +470,11 @@ export class MonkyServer {
     // Plain and TLS connections share the port (#860); it stops accepting before the HTTP side drains.
     const listener = new DualProtocolListener(httpServer);
     resources.defer('TLS listener', () => listener.close());
-    const tlsStore = new CertificateStore(config.dataDir);
+    const tlsStorage = serverTlsStorage(config.dataDir);
     const autoTls = new AutoTlsService({
-      store: tlsStore,
+      ...tlsStorage,
       issuer: new LetsEncryptIssuer({
-        store: tlsStore,
+        store: tlsStorage.store,
         challenges: acmeChallenges,
         serverPort: config.port,
         directoryOverride: acmeOverrides.directoryOverride,

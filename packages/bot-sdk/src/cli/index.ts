@@ -32,6 +32,7 @@ ${color('COMANDOS', ANSI.bold)}
   restart [--fresh]             Reinicia usando a configuração salva
   status                        Mostra estado do processo e configuração
   doctor [--local]              Verifica se o bot pode operar e o que falta
+  tls [status|enable|disable]   TLS automático (https/wss) com certificado compartilhado na máquina
   requirements                  Lista portas para liberar e configurações do bot
   consent [--accept FP|--revoke] Revisa a autorização de quem hospeda
   logs [--lines N] [--no-follow]
@@ -80,6 +81,7 @@ ${color('COMMANDS', ANSI.bold)}
   restart [--fresh]             Restart using the saved configuration
   status                        Show the process state and configuration
   doctor [--local]              Check whether the bot can operate and what is missing
+  tls [status|enable|disable]   Automatic TLS (https/wss) with a certificate shared on this machine
   requirements                  List the bot's ports to allow and its settings
   consent [--accept FP|--revoke] Review the host operator authorization
   logs [--lines N] [--no-follow]
@@ -191,6 +193,11 @@ async function dispatchBotCli(context: CliContext, args: string[], explicitLocal
   if (command === 'doctor') {
     const { doctorCommand } = await import('./commands/doctor');
     await doctorCommand(context, rest);
+    return;
+  }
+  if (command === 'tls') {
+    const { tlsCommand } = await import('./commands/tls');
+    await tlsCommand(context, rest);
     return;
   }
   if (command === 'requirements') {
