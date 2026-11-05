@@ -1,4 +1,7 @@
-import { getScreenShareProfile, nativeScreenVideoProfileSchema, type NativeScreenVideoProfile } from '@monky/shared';
+import {
+  browserScreenFormatSchema, getScreenShareProfile, nativeScreenVideoProfileSchema,
+  type BrowserScreenFormat, type NativeScreenVideoProfile,
+} from '@monky/shared';
 
 /** What a captured video track reports of itself (`MediaStreamTrack.getSettings()`). */
 export interface CapturedVideoSettings {
@@ -38,18 +41,27 @@ export interface CodecCapability {
 const fmtp = (codec: CodecCapability, key: string): string | undefined =>
   codec.sdpFmtpLine?.split(';').map(part => part.trim().split('=')).find(([name]) => name === key)?.[1];
 
-/** H.264 Main in non-interleaved mode: what every screen receiver, native or browser, decodes. */
-export function isScreenH264(codec: CodecCapability): boolean {
-  return codec.mimeType.toLowerCase() === 'video/h264' && /^4d[0-9a-f]{4}$/i.test(fmtp(codec, 'profile-level-id') ?? '')
+/**
+ * Whether a sender codec encodes a browser format (#858): H.264 in non-interleaved mode, as Constrained
+ * Baseline (42e0..) for `compatible`, which every receiver decodes, or as Main (4d..) for `main`.
+ */
+export function isScreenCodec(codec: CodecCapability, format: BrowserScreenFormat): boolean {
+  const profile = format === 'main' ? /^4d[0-9a-f]{4}$/i : /^42e0[0-9a-f]{2}$/i;
+  return codec.mimeType.toLowerCase() === 'video/h264' && profile.test(fmtp(codec, 'profile-level-id') ?? '')
     && fmtp(codec, 'packetization-mode') === '1';
 }
 
 /**
- * The video codecs a browser screen sender offers, in order: H.264 Main and its retransmission. Viewers
- * accept nothing else for a source announced as H.264, so an empty list means this browser cannot share.
+ * The video codecs a browser screen sender offers for `format`, in order: the format's codec and its
+ * retransmission. An empty list means this browser cannot share in that format.
  */
-export function screenSenderCodecs<T extends CodecCapability>(codecs: readonly T[]): T[] {
-  const h264 = codecs.filter(isScreenH264);
-  if (!h264.length) return [];
-  return [...h264, ...codecs.filter(codec => codec.mimeType.toLowerCase() === 'video/rtx')];
+export function screenSenderCodecs<T extends CodecCapability>(codecs: readonly T[], format: BrowserScreenFormat): T[] {
+  const matching = codecs.filter(codec => isScreenCodec(codec, format));
+  if (!matching.length) return [];
+  return [...matching, ...codecs.filter(codec => codec.mimeType.toLowerCase() === 'video/rtx')];
+}
+
+/** The formats this browser can share in, the compatible one first. */
+export function browserScreenFormats(codecs: readonly CodecCapability[]): BrowserScreenFormat[] {
+  return browserScreenFormatSchema.options.filter(format => screenSenderCodecs(codecs, format).length > 0);
 }

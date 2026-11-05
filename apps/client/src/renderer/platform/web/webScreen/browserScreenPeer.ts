@@ -1,10 +1,12 @@
-import type { NativeScreenCall } from '@monky/shared';
+import type { BrowserScreenFormat, NativeScreenCall } from '@monky/shared';
 import { screenSenderCodecs } from './browserScreenProfile';
 import { sentMediaBinding, withScreenStreamId, type ScreenMediaBinding } from './screenSdp';
 import type { ScreenIceCandidate, ScreenMediaKind, ScreenPeerPort } from './screenP2pPublisherPeer';
 
 export interface BrowserScreenPeerOptions {
   readonly iceServers: NativeScreenCall['iceServers'];
+  /** The only video codecs this connection may send (#858). */
+  readonly format: BrowserScreenFormat;
   /** The screen's instance: the stream id viewers group its video and sound by. */
   readonly streamId: string;
   readonly video: MediaStreamTrack;
@@ -33,10 +35,10 @@ export class BrowserScreenPeer implements ScreenPeerPort {
       direction: 'sendonly', streams: [this.stream],
       sendEncodings: [{ active: false, maxBitrate: options.maxBitrateBps, maxFramerate: options.maxFramerate }],
     });
-    const codecs = screenSenderCodecs(RTCRtpSender.getCapabilities('video')?.codecs ?? []);
+    const codecs = screenSenderCodecs(RTCRtpSender.getCapabilities('video')?.codecs ?? [], options.format);
     if (!codecs.length) {
       this.peer.close();
-      throw new Error('This browser cannot send the H.264 Main video screen viewers receive.');
+      throw new Error(`This browser cannot send screens in the ${options.format} format.`);
     }
     video.setCodecPreferences(codecs);
     this.transceivers.set('video', video);

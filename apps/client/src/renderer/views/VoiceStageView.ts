@@ -14,7 +14,7 @@ import { settingsStore } from '../stores/settingsStore';
 import { voiceStore, VoiceStore } from '../stores/voiceStore';
 import { videoService } from '../core/VideoService';
 import { webRtcManager } from '../core/WebRtcManager';
-import { browserReceivesScreenCodec } from '../core/webrtc/browserScreenCodecs';
+import { browserScreenRefusal } from '../core/webrtc/browserScreenCodecs';
 import type { NativeScreenWatchState } from '../core/webrtc/NativeScreenController';
 import { getAvatarUrl } from '../utils/avatar';
 import { screenShareFailureMessage } from '../utils/screenShareFailure';
@@ -1226,12 +1226,12 @@ export class VoiceStageView {
     // Choosing the native receiver exists only where the platform has one (the desktop).
     if (platformSupports('nativeScreenAudio')) return `${failure} ${t('screenShare.chromiumReceiverSettingsHint')}`;
     const codec = webRtcManager.getNativeScreenSource(sessionId, shareId)?.codec ?? 'h264';
-    // The publisher can help only a browser that receives H.264, by switching another codec to it.
-    if (codec !== 'h264' && browserReceivesScreenCodec('h264')) return `${failure} ${t('screenShare.browserReceiverHint')}`;
-    // Without the share's codec, or with nothing to switch to (Firefox and Safari have no H.264 Main receiver).
-    if (!browserReceivesScreenCodec(codec) || !browserReceivesScreenCodec('h264'))
-      return t('screenShare.browserCannotReceive', { codec: codec === 'av1' ? 'AV1' : 'H.264' });
-    return failure;
+    switch (browserScreenRefusal(codec)) {
+      case 'main': return t('screenShare.browserCannotReceiveMain');
+      case 'switch': return `${failure} ${t('screenShare.browserReceiverHint')}`;
+      case 'codec': return t('screenShare.browserCannotReceive', { codec: codec === 'av1' ? 'AV1' : 'H.264' });
+      default: return failure;
+    }
   }
 
   private refreshNativeScreenState(): void {

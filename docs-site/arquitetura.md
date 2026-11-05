@@ -284,12 +284,19 @@ opcional dessas telas, quando escolhido nas configurações
 Na versão web, o mesmo contrato de comandos e eventos da fonte nativa é
 respondido por `src/renderer/platform/web/webScreen`: a captura vem da janela
 do próprio navegador (`getDisplayMedia`), cada perfil pedido é uma cópia da
-captura reduzida pelo navegador, e o envio é H.264 Main por conexões próprias
+captura reduzida pelo navegador, e o envio é H.264 por conexões próprias
 para cada espectador em P2P ou por um par de producers de tela no SFU, com o
 mesmo protocolo `monky-native-screen-p2p` e os mesmos dados de rendição. O
+formato padrão é o Constrained Baseline (`42e0..`, packetization-mode 1), que
+todo receptor decodifica, inclusive o Firefox e o Safari; quem publica pode
+escolher o H.264 Main, de imagem melhor, que só o Chrome, o Edge e o desktop
+assistem. O codec fica fixo pelo `setCodecPreferences` em P2P e pelo codec do
+producer no SFU, mesmo quando o navegador usaria o encoder de hardware. O
 renderer acima dele não muda; o seletor é a janela do navegador
 (`views/screenShare/BrowserScreenSharePicker.ts`), e a versão web assiste
-sempre com o receptor Chromium.
+sempre com o receptor do navegador. Um navegador sem o perfil ou o codec da
+transmissão (o Firefox diante do H.264 Main ou do AV1) recebe uma mensagem que
+nomeia o formato, e não a falha genérica de conexão.
 
 O seletor só usa a captura nativa e explica o motivo quando ela não está
 disponível: não existe alternativa pela captura do Chromium. Fechar o seletor

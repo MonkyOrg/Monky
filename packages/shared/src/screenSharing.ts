@@ -19,6 +19,13 @@ export const screenCodecSchema = z.enum(['h264', 'av1']);
 export type ScreenCodec = z.infer<typeof screenCodecSchema>;
 export const screenCodecPreferenceSchema = z.enum(['auto', 'h264', 'av1']);
 export type ScreenCodecPreference = z.infer<typeof screenCodecPreferenceSchema>;
+/**
+ * How a browser encodes the screens it shares (#858), always as H.264: `compatible` is Constrained Baseline,
+ * which every receiver decodes (Firefox and Safari included); `main` looks better, but only receivers with an
+ * H.264 Main decoder (Chromium, the desktop app) can watch it.
+ */
+export const browserScreenFormatSchema = z.enum(['compatible', 'main']);
+export type BrowserScreenFormat = z.infer<typeof browserScreenFormatSchema>;
 export const screenEncoderSchema = z.enum([
   'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264',
   'av1_texture_amf', 'obs_nvenc_av1_tex', 'monky_aom_av1',
