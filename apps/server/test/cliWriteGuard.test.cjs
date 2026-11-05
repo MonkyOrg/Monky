@@ -365,17 +365,7 @@ test('a declined or unnecessary port restart leaves PM2 alone', async (t) => {
 test('the built CLI refuses to write while a real server process holds the data directory', { timeout: 30_000 }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-cli-guard-process-'));
   const dataDir = path.join(root, 'server data');
-  const preload = path.join(root, 'loopback.cjs');
-  fs.writeFileSync(preload, `
-    const http = require('node:http');
-    const listen = http.Server.prototype.listen;
-    http.Server.prototype.listen = function () {
-      this.once('listening', () => process.send({ qaPort: this.address().port }));
-      return listen.call(this, 0, '127.0.0.1');
-    };
-    require(${JSON.stringify(path.resolve(__dirname, '../dist/infrastructure/discovery/LanBroadcaster.js'))})
-      .LanBroadcaster.prototype.start = async () => {};
-  `);
+  const preload = path.join(__dirname, 'loopbackServerPreload.cjs');
   // Only Node on PATH: the CLI must not reach a real PM2 daemon from a test.
   const env = { ...process.env, MONKY_HOME: path.join(root, 'cli profile'), PM2_HOME: path.join(root, 'pm2'), PATH: path.dirname(process.execPath) };
   delete env.MONKY_LANG;

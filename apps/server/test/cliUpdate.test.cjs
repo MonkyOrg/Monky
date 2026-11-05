@@ -33,17 +33,7 @@ const artifact = {
 for (const reason of ['stopped', 'update']) {
   test(`the real CLI consumes ${reason} intent and notifies clients before PM2 IPC shutdown`, { timeout: 20000 }, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-cli-shutdown-'));
-    const preload = path.join(root, 'loopback.cjs');
-    fs.writeFileSync(preload, `
-      const http = require('node:http');
-      const listen = http.Server.prototype.listen;
-      http.Server.prototype.listen = function () {
-        this.once('listening', () => process.send({ qaPort: this.address().port }));
-        return listen.call(this, 0, '127.0.0.1');
-      };
-      require(${JSON.stringify(path.resolve(__dirname, '../dist/infrastructure/discovery/LanBroadcaster.js'))})
-        .LanBroadcaster.prototype.start = async () => {};
-    `);
+    const preload = path.join(__dirname, 'loopbackServerPreload.cjs');
     const child = fork(path.resolve(__dirname, '../dist/index.js'), ['--data', root], {
       execArgv: ['--require', preload],
       env: { ...process.env, MONKY_HOME: path.join(root, 'isolated-cli') },
