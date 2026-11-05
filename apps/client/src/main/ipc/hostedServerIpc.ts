@@ -17,6 +17,14 @@ export function registerHostedServerIpc(registry: IpcRegistry, serverManager: Se
     if (isPort(port)) serverManager.clearLogs(port);
   });
   registry.handle('server-host:stats', 'main', async (_event, port) => isPort(port) ? serverManager.getStats(port) : null);
+  registry.handle('server-host:auto-tls-status', 'main', async (_event, port) =>
+    isPort(port) ? serverManager.getAutoTlsStatus(port) : null);
+  registry.handle('server-host:auto-tls-enable', 'main', async (_event, port, grantPortPermission) => {
+    if (!isPort(port) || typeof grantPortPermission !== 'boolean') return { ok: false, code: 'rejected' };
+    return serverManager.enableAutoTls(port, grantPortPermission);
+  });
+  registry.handle('server-host:auto-tls-disable', 'main', async (_event, port) =>
+    isPort(port) ? serverManager.disableAutoTls(port) : null);
   // Removing a server from "Meus Servidores" has to take its data with it (#364).
   registry.handle('server-host:delete-data', 'main', async (_event, serverId) => {
     if (typeof serverId !== 'string') return { success: false };

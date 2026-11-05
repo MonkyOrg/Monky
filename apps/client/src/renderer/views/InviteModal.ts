@@ -22,7 +22,8 @@ function isNetworkInterface(value: unknown): value is ServerNetworkInterface {
     && 'address' in value && typeof value.address === 'string'
     && 'description' in value && typeof value.description === 'string'
     && 'family' in value && (value.family === 'IPv4' || value.family === 'IPv6')
-    && 'type' in value && (value.type === 'public' || value.type === 'lan' || value.type === 'vpn' || value.type === 'loopback');
+    && 'type' in value && (value.type === 'public' || value.type === 'lan' || value.type === 'vpn' || value.type === 'loopback')
+    && (!('secure' in value) || value.secure === undefined || value.secure === true);
 }
 
 function parseInviteInfo(value: unknown): ServerInviteInfoPayload {
@@ -335,7 +336,10 @@ export class InviteModal {
       opt.value = iface.address;
       opt.setAttribute('data-type', iface.type);
       opt.setAttribute('data-desc', iface.description);
-      opt.textContent = `${getIconForType(iface.type)} ${iface.address} — ${iface.description}`;
+      // Covered by the server's automatic TLS certificate: the invitation goes out as wss:// (#860).
+      opt.textContent = iface.secure
+        ? `🔐 wss://${iface.address} — ${iface.description}`
+        : `${getIconForType(iface.type)} ${iface.address} — ${iface.description}`;
       selectEl.appendChild(opt);
     }
 
@@ -379,6 +383,10 @@ export class InviteModal {
     }
 
     const iface = this.networkInterfaces.find((i) => i.address === selectedAddress);
+    if (iface?.secure) {
+      tipText.innerHTML = t('invite.tipSecure', { port: this.selectedPort });
+      return;
+    }
     const type = iface ? iface.type : 'custom';
 
     switch (type) {
@@ -434,7 +442,9 @@ export class InviteModal {
       if (this.isLoading || shell.closed) return;
       let link: string;
       try {
-        const tls = selectIp?.value === TLS_OPTION ? this.tlsAddress : null;
+        const secure = this.networkInterfaces.some((iface) => iface.secure && iface.address === this.selectedIp);
+        const tls = selectIp?.value === TLS_OPTION ? this.tlsAddress
+          : secure ? { host: this.selectedIp, port: this.selectedPort } : null;
         link = createServerInviteLink({
           v: 1, name: this.serverName, host: tls?.host ?? this.selectedIp, port: tls?.port ?? this.selectedPort,
           ...(tls ? { tls: true as const } : {}),

@@ -1094,6 +1094,8 @@ export interface ServerNetworkInterface {
   type: 'public' | 'lan' | 'vpn' | 'loopback';
   /** Portuguese label kept for older clients; current clients translate from `type`/`name`. */
   description: string;
+  /** Covered by the server's automatic TLS certificate (#860): invitations to it use `wss://`. */
+  secure?: true;
 }
 
 /** `name` of the entry for the internet IP the server discovered, as opposed to an adapter. */

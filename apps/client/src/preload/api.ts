@@ -72,8 +72,12 @@ export interface ElectronApi {
   hostServerClearLogs: Invoke<'server-host:clear-logs'>;
   hostServerStats: Invoke<'server-host:stats'>;
   hostServerDeleteData: Invoke<'server-host:delete-data'>;
+  hostServerAutoTlsStatus: Invoke<'server-host:auto-tls-status'>;
+  hostServerAutoTlsEnable: Invoke<'server-host:auto-tls-enable'>;
+  hostServerAutoTlsDisable: Invoke<'server-host:auto-tls-disable'>;
   onHostServerLog: Subscribe<'server-host:log'>;
   onHostServerStatusChanged: Subscribe<'server-host:status-changed'>;
+  onHostServerAutoTlsProblem: Subscribe<'server-host:auto-tls-problem'>;
   getDesktopSources: Invoke<'screen-share:get-sources'>;
   getDesktopSourcePreviews: Invoke<'screen-share:get-previews'>;
   cancelDesktopSourcePreviews: Invoke<'screen-share:cancel-previews'>;

@@ -111,6 +111,7 @@ test('identity, backup, hosting, media files, downloads, auto-start and global i
     'backup:encrypt', 'backup:decrypt', 'backup:save-file', 'backup:open-file',
     'server-host:start', 'server-host:stop', 'server-host:status', 'server-host:logs',
     'server-host:clear-logs', 'server-host:stats', 'server-host:delete-data', 'lan:start', 'lan:stop',
+    'server-host:auto-tls-status', 'server-host:auto-tls-enable', 'server-host:auto-tls-disable',
     'soundboard:list-sounds', 'soundboard:read-sound', 'dialog:select-sound-file',
     'stickers:list', 'stickers:read', 'stickers:save', 'dialog:select-stickers-folder',
     'app:download-file', 'app:save-csv-file', 'app:get-auto-start', 'app:set-auto-start',

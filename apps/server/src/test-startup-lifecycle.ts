@@ -57,7 +57,7 @@ async function fixture(t: TestContext, options: Partial<ServerConfig> = {}) {
   data.cleanup.push(() => server.stop());
   t.mock.method(server['lanBroadcaster'], 'start', async () => {});
   t.mock.method(server['attachmentService'], 'reconcile', async () => {});
-  const listener = server['httpServer'];
+  const listener = server['listener'].listener;
   const nativeListen = listener.listen.bind(listener);
   // Even positive startup scenarios can bind only a fresh loopback port.
   t.mock.method(listener, 'listen', (_port: number, _host: string) => nativeListen(0, '127.0.0.1'));
@@ -65,7 +65,7 @@ async function fixture(t: TestContext, options: Partial<ServerConfig> = {}) {
 }
 
 function assertReleased(server: MonkyServer): void {
-  assert.equal(server['httpServer'].listening, false);
+  assert.equal(server['listener'].listener.listening, false);
   assert.equal(server['rateLimiter']['cleanupTimer'], null);
   assert.equal(server['wsServer']['heartbeatTimer'], undefined);
   assert.equal(server['wsServer']['reconnectTimers'].size, 0);
@@ -200,7 +200,7 @@ test('the native factory-start-cleanup-retry contract releases a rejected candid
   assertReleased(f.server);
   const retry = await MonkyServer.create({ port: 0, dataDir: f.directory });
   f.cleanup.push(() => retry.stop());
-  const listener = retry['httpServer'];
+  const listener = retry['listener'].listener;
   const nativeListen = listener.listen.bind(listener);
   t.mock.method(listener, 'listen', (_port: number, _host: string) => nativeListen(0, '127.0.0.1'));
   t.mock.method(retry['lanBroadcaster'], 'start', async () => {});
@@ -594,7 +594,7 @@ test('a late setup commit failure waits for SFU warmup cleanup and releases ever
     assert.equal(settled, false);
     assert.equal(closedWorkers, 0);
     assert.equal(captured['wsServer']['heartbeatTimer'], undefined);
-    assert.equal(captured['httpServer'].listening, false);
+    assert.equal(captured['listener'].listener.listening, false);
   } finally {
     gate.resolve();
   }
