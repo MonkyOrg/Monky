@@ -47,6 +47,9 @@ constexpr char kSettingsFile[] = "monky-light-settings.json";
 constexpr char kSettingsPendingFile[] = "monky-light-settings.json.pending";
 constexpr char kSettingsFormat[] = "monky-light-settings";
 constexpr std::size_t kMaxSettingsBytes = 16 * 1024;
+// Same names as the full client's settings.
+constexpr char kVoiceActivity[] = "voice_activity";
+constexpr char kPushToTalk[] = "push_to_talk";
 constexpr std::size_t kMaxDeviceIdBytes = 1024;
 // server-key-auth (#821): the identity key pinned for each server this profile signed in to.
 constexpr char kServerKeysFile[] = "monky-light-servers.json";
@@ -550,7 +553,12 @@ ProfileSettings parseSettings(const std::string& contents) {
       !data.contains("version") || !data["version"].is_number_integer() || data["version"] != 1) {
     throw std::runtime_error("Profile settings have an unsupported format or version");
   }
-  return {settingsDevice(data, "inputDeviceId"), settingsDevice(data, "outputDeviceId")};
+  // Absent in profiles saved before push-to-talk existed.
+  const auto mode = data.value("inputMode", Json(kVoiceActivity));
+  if (mode != kVoiceActivity && mode != kPushToTalk) {
+    throw std::runtime_error("Profile settings contain an invalid input mode");
+  }
+  return {settingsDevice(data, "inputDeviceId"), settingsDevice(data, "outputDeviceId"), mode == kPushToTalk};
 }
 
 std::string encodeSettings(const ProfileSettings& settings) {
@@ -566,7 +574,8 @@ std::string encodeSettings(const ProfileSettings& settings) {
   try {
     result = Json{{"format", kSettingsFormat}, {"version", 1},
                   {"inputDeviceId", optional(settings.inputDeviceId)},
-                  {"outputDeviceId", optional(settings.outputDeviceId)}}.dump(2) + "\n";
+                  {"outputDeviceId", optional(settings.outputDeviceId)},
+                  {"inputMode", settings.pushToTalk ? kPushToTalk : kVoiceActivity}}.dump(2) + "\n";
   } catch (const Json::exception&) {
     throw std::invalid_argument("Audio device ID must be valid UTF-8");
   }

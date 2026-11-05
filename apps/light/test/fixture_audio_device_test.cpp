@@ -442,6 +442,9 @@ void CheckDeviceSelection() {
   Require(policy->SetPolicy(true, true) == 0 && policy->StartRecording() == 0 &&
               policy->StartPlayout() == 0 && transport.WaitFor(3, 3),
           "Selected devices start");
+  // The synthetic tone is a 2048-amplitude sine: RMS 20*log10(1448/32768) = -27 dBov.
+  const auto level = policy->TakeInputLevel();
+  Require(level >= 26 && level <= 28, "The policy device measures capture before forwarding it");
 
   Require(policy->SelectDevices({std::string("mic-a"), std::string("out-b")}) == 0 &&
               device->Recording() && device->Playing() &&
@@ -462,12 +465,36 @@ void CheckDeviceSelection() {
           "A reconnected preferred device is selected again");
 
   Require(policy->SetPolicy(false, true) == 0 && !device->Recording(), "Mute stops capture");
+  static_cast<void>(policy->TakeInputLevel());
+  Require(policy->TakeInputLevel() == media::kSilentLevel, "Stopped capture reports silence");
   Require(policy->SelectDevices({std::string("mic-b"), std::string("out-b")}) == 0 &&
               !device->Recording() && device->Snapshot().selected_input == "mic-b",
           "Switching the input while muted must not reopen capture");
   Require(policy->SetPolicy(true, true) == 0 && device->Recording(), "Unmute resumes on the new device");
   Require(policy->SetPolicy(false, false) == 0 && policy->Terminate() == 0, "Release the selection device");
   Require(policy->RegisterAudioCallback(nullptr) == 0, "Detach the policy transport");
+}
+
+void CheckSpeechActivity() {
+  const std::array<int16_t, 4> silent{};
+  const std::array<int16_t, 4> full{32767, -32768, 32767, -32768};
+  Require(media::LevelOf(silent.data(), silent.size()) == media::kSilentLevel &&
+              media::LevelOf(full.data(), full.size()) == 0 &&
+              media::LevelOf(full.data(), 0) == media::kSilentLevel,
+          "Levels use the RFC 6464 -dBov scale");
+  media::SpeechDetector detector;
+  Require(!detector.Sample(media::kSilentLevel) && detector.Sample(media::kSpeechLevel) == true &&
+              !detector.Sample(media::kSpeechLevel + 1) && !detector.Sample(media::kSilentLevel) &&
+              !detector.Sample(media::kSilentLevel) && !detector.Sample(10),
+          "Speech starts at the threshold and survives short gaps");
+  for (unsigned index = 1; index < media::kSpeechHoldSamples; ++index) {
+    Require(!detector.Sample(media::kSilentLevel), "Speech holds through the quiet window");
+  }
+  Require(detector.Sample(media::kSilentLevel) == false && !detector.speaking(),
+          "Speech ends after the quiet window");
+  Require(detector.Sample(0) == true && detector.Silence() == false && !detector.Silence() &&
+              !detector.Sample(media::kSilentLevel),
+          "Silence ends speech at once and reports only one change");
 }
 
 void CheckFailures() {
@@ -545,6 +572,7 @@ int main() {
     CheckInflightStopAndTerminate(false);
     CheckInflightStopAndTerminate(true);
     CheckDeviceSelection();
+    CheckSpeechActivity();
     CheckFailures();
     CheckDestruction();
     CheckTransportDestructionAfterRemoval();

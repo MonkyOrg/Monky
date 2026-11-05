@@ -16,6 +16,7 @@ namespace monky::light {
 struct ProfileSettings {
   std::optional<std::string> inputDeviceId;   // nullopt: system default
   std::optional<std::string> outputDeviceId;  // nullopt: system default
+  bool pushToTalk = false;                    // false: voice activity
 };
 
 // Owns the signing key and exclusive profile lock for its entire lifetime.

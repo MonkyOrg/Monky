@@ -20,6 +20,7 @@
 #include <rtc_base/crypto_random.h>
 #include <rtc_base/ssl_adapter.h>
 #include <rtc_base/thread.h>
+#include <rtc_base/time_utils.h>
 #if defined(WEBRTC_WIN)
 #include <rtc_base/win32_socket_init.h>
 #endif
@@ -355,6 +356,7 @@ struct VoiceEngine::Impl : std::enable_shared_from_this<VoiceEngine::Impl> {
   std::set<std::string> failed_producers;
   std::map<std::string, std::string> sfu_transport_states;
   Json applied_devices;
+  std::map<std::string, SpeechDetector> speech;
   bool initialized = false;
   // The server refused the microphone: the call only receives, with capture
   // stopped, until the next policy change tries again.
@@ -540,6 +542,9 @@ struct VoiceEngine::Impl : std::enable_shared_from_this<VoiceEngine::Impl> {
   void Consume(const std::string &id);
   void CloseConsumer(const std::string &id);
   void Stats();
+  void ScheduleSpeech();
+  void SampleSpeech();
+  void ReportSpeech(const std::string &session, std::optional<bool> change);
 };
 
 struct VoiceEngine::Impl::Peer : webrtc::PeerConnectionObserver,
@@ -875,6 +880,7 @@ void VoiceEngine::Impl::EnsureMicrophone() {
   microphone = factory->CreateAudioTrack("monky-microphone", source.get());
   if (!microphone)
     throw std::runtime_error("Could not create microphone track");
+  microphone->set_enabled(config.policy.transmit);
   for (auto &[id, peer] : peers)
     if (!peer->mic_transceiver->sender()->SetTrack(microphone.get()))
       throw std::runtime_error("Could not attach microphone to peer " + id);
@@ -938,6 +944,12 @@ void VoiceEngine::Impl::ApplyPolicy() {
     StopMicrophone(true);
   else
     EnsureMicrophone();
+  if (microphone)
+    microphone->set_enabled(config.policy.transmit);
+  // Report gated speech now instead of after the quiet hold.
+  if (muted || !config.policy.transmit)
+    ReportSpeech(config.self_session_id,
+                 speech[config.self_session_id].Silence());
   for (auto &[id, peer] : peers)
     ConfigureTracks(*peer);
   for (auto &[id, consumer] : consumers) {
@@ -1042,6 +1054,7 @@ std::string VoiceEngine::Impl::Cleanup() {
   }
   environment.reset();
   applied_devices = nullptr;
+  speech.clear();
   initialized = false;
   publish_refused = false;
   sfu_recovery_pending = false;
@@ -1094,6 +1107,7 @@ void VoiceEngine::Impl::Join(JoinConfig value,
   }
   token->CheckActive();
   initialized = true;
+  ScheduleSpeech();
   Emit(EventKind::initialized,
        peers.empty() && consumers.empty()
            ? "Voice initialized; no remote microphone connected"
@@ -1782,6 +1796,77 @@ void VoiceEngine::Impl::Stats() {
              : "",
          consumer->GetStats());
   }
+}
+
+// Polling at a human-perceptible rate is cheaper than per-frame sinks and keeps
+// all speech state on media control. Remote levels are the RFC 6464 values
+// the sender put in each RTP header, so nothing is decoded or measured here.
+constexpr auto kSpeechSampleInterval = std::chrono::milliseconds(100);
+// Opus DTX still sends a packet every 400 ms; older sources mean no stream.
+constexpr std::int64_t kSpeechSourceAgeMs = 500;
+
+void VoiceEngine::Impl::ScheduleSpeech() {
+  auto weak = weak_from_this();
+  PostAfter(kSpeechSampleInterval, [weak, call = token] {
+    auto self = weak.lock();
+    if (!self || !self->Current(call))
+      return;
+    self->SampleSpeech();
+    self->ScheduleSpeech();
+  });
+}
+
+void VoiceEngine::Impl::SampleSpeech() {
+  std::map<std::string, std::uint8_t> levels;
+  const bool deafened = token->deafened.load();
+  // Always drain the meter so audio captured while gated is never reported.
+  const auto local = adm->TakeInputLevel();
+  const bool transmitting = microphone && config.policy.transmit &&
+                            !token->muted.load() && !deafened;
+  levels[config.self_session_id] = transmitting ? local : kSilentLevel;
+  const auto now = webrtc::TimeMillis();
+  const auto remote = [&](const std::string &session,
+                          webrtc::RtpReceiverInterface *receiver) {
+    auto &level = levels.try_emplace(session, kSilentLevel).first->second;
+    // Deafened users hear no one; SFU consumers are paused anyway.
+    if (!receiver || deafened)
+      return;
+    for (const auto &source : receiver->GetSources())
+      if (source.audio_level() &&
+          now - source.timestamp().ms() <= kSpeechSourceAgeMs)
+        level = std::min(level, *source.audio_level());
+  };
+  for (const auto &[id, peer] : peers)
+    if (peer->mic_transceiver &&
+        peer->participant.user_id != config.self_user_id)
+      remote(id, peer->mic_transceiver->receiver().get());
+  for (const auto &[id, consumer] : consumers)
+    if (const auto found = known_producers.find(id);
+        found != known_producers.end())
+      remote(Text(found->second, "producerSessionId"),
+             consumer->GetRtpReceiver());
+  // Whoever left the call stops speaking at once.
+  for (auto entry = speech.begin(); entry != speech.end();) {
+    if (roster.contains(entry->first)) {
+      ++entry;
+      continue;
+    }
+    ReportSpeech(entry->first, entry->second.Silence());
+    entry = speech.erase(entry);
+  }
+  for (const auto &[session, level] : levels)
+    if (roster.contains(session))
+      ReportSpeech(session, speech[session].Sample(level));
+  for (auto &[session, detector] : speech)
+    if (!levels.contains(session))
+      ReportSpeech(session, detector.Sample(kSilentLevel));
+}
+
+void VoiceEngine::Impl::ReportSpeech(const std::string &session,
+                                     std::optional<bool> change) {
+  if (change)
+    Emit(EventKind::speaking, *change ? "Speaking" : "Silent", session,
+         {{"speaking", *change}});
 }
 
 struct VoiceEngine::Owner {

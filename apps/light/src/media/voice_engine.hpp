@@ -25,6 +25,9 @@ struct AudioPolicy {
   // These are EFFECTIVE values, including server restrictions.
   bool muted = false;
   bool deafened = false;
+  // Push-to-talk gate. The device keeps capturing so a press takes effect
+  // at once; the track sends silence and local speech is not reported.
+  bool transmit = true;
   bool echo_cancellation = true;
   bool automatic_gain = true;
   NoiseSuppression noise_suppression = NoiseSuppression::moderate;
@@ -80,7 +83,11 @@ enum class EventKind {
   stats,
   warning,
   // `stats` carries the effective input/output device selection.
-  devices
+  devices,
+  // A participant (self included) started or stopped speaking; `stats` holds
+  // {"speaking": bool}. Sampled only during a call, never published to the
+  // server: receivers derive it from audio, as the Chromium client does.
+  speaking
 };
 struct Event {
   EventKind kind;

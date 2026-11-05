@@ -1,6 +1,7 @@
 #pragma once
 
 #include "audio_devices.hpp"
+#include "speech_activity.hpp"
 
 #include <api/audio/audio_device.h>
 #include <api/scoped_refptr.h>
@@ -54,6 +55,18 @@ public:
   }
   const AudioDeviceSelection &input_selection() const { return input_; }
   const AudioDeviceSelection &output_selection() const { return output_; }
+  // Safe from any thread: loudest raw capture level since the last read.
+  std::uint8_t TakeInputLevel() { return meter_.Take(); }
+
+  int32_t RegisterAudioCallback(webrtc::AudioTransport *callback) override {
+    if (!callback) {
+      const auto result = native_->RegisterAudioCallback(nullptr);
+      meter_.SetTarget(nullptr);
+      return result;
+    }
+    meter_.SetTarget(callback);
+    return native_->RegisterAudioCallback(&meter_);
+  }
 
   int32_t InitRecording() override {
     return capture_allowed_ ? native_->InitRecording() : 0;
@@ -91,8 +104,6 @@ public:
 #define MONKY_ADM_CONST(result, name, parameters, arguments)                   \
   result name parameters const override { return native_->name arguments; }
   MONKY_ADM_CONST(int32_t, ActiveAudioLayer, (AudioLayer * layer), (layer))
-  MONKY_ADM_FORWARD(int32_t, RegisterAudioCallback,
-                    (webrtc::AudioTransport * callback), (callback))
   MONKY_ADM_FORWARD(int32_t, Init, (), ())
   MONKY_ADM_FORWARD(int32_t, Terminate, (), ())
   MONKY_ADM_CONST(bool, Initialized, (), ())
@@ -232,6 +243,7 @@ private:
   }
 
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> native_;
+  InputLevelMeter meter_;
   AudioDeviceSelection input_;
   AudioDeviceSelection output_;
   // The first selection always applies, even for the default device.
