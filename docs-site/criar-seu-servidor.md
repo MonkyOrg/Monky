@@ -55,6 +55,7 @@ Ao criar ou administrar o servidor, você escolhe o modo de voz e vídeo:
 - **Porta TCP principal:** Libere a porta `3000` (ou a escolhida) no firewall e configure o port forwarding no roteador.
 - **Portas para o SFU (mediasoup):** Se usar o modo SFU, libere também a porta `40000` — em UDP e em TCP — no roteador/firewall (quem já liberou a faixa `40000-49151` não precisa mudar nada). Numa VPS, veja [Abrindo as portas do Modo SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu).
 - **Sem mexer no roteador:** É possível usar uma VPN como Radmin VPN, Hamachi, ZeroTier ou Tailscale.
+- **Conexão segura (wss://) sem domínio:** Com IP público e porta aberta, clique com o botão direito no ícone do servidor e abra **Conexão segura automática**. O servidor obtém e renova sozinho um certificado da Let's Encrypt para o seu IP; para isso, a porta `80` (TCP) também precisa estar aberta e redirecionada para este computador. Não funciona por VPN, CGNAT ou só rede local. Veja [`monky tls`](/cli#monky-tls).
 - **Atrás de um proxy reverso ou túnel:** Clique com o botão direito no ícone do servidor e abra **Proxy reverso** para informar os endereços dos seus proxies. Sem isso, todos dividem o mesmo limite de tentativas de login. Veja [Atrás de um proxy reverso](/hospedar-em-vps#atras-de-um-proxy-reverso).
 
 ## Administrar

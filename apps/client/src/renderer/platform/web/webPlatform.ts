@@ -410,6 +410,11 @@ export function createWebPlatformApi(): PlatformApi {
     hostServerDeleteData: unsupported('Hosting a server'),
     onHostServerLog: never,
     onHostServerStatusChanged: never,
+    // Automatic TLS belongs to a server this browser cannot host.
+    hostServerAutoTlsStatus: unsupported('Hosting a server'),
+    hostServerAutoTlsEnable: unsupported('Hosting a server'),
+    hostServerAutoTlsDisable: unsupported('Hosting a server'),
+    onHostServerAutoTlsProblem: never,
 
     // Screens: captured through the browser's own dialog and sent by the web screen runtime;
     // remote screens play in the browser receiver, never in a native presentation.

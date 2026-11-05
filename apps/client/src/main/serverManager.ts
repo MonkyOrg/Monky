@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { app, BrowserWindow } from 'electron';
 import type { MonkyServer, ServerConfig } from '@monky/server';
-import { LIMITS, parseTrustedProxies, type HostedUpdateServer, type HostServerOptions, type HostServerStatus, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
+import { LIMITS, isAutoTlsErrorCode, parseTrustedProxies, type AutoTlsEnableResult, type AutoTlsStatus, type HostedUpdateServer, type HostServerOptions, type HostServerStatus, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
 import { mt, type MainTranslationKey } from './i18n';
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from './serverDataDir';
 import { HostedServerCleanupError, HostedServerConflictError, HostedServerLifecycle } from './hostedServerLifecycle';
@@ -193,8 +193,16 @@ export class ServerManager {
     }
     for (const [port, server] of live) {
       if (this.logForwarders.has(port)) continue;
-      const unsubscribe = server.subscribeLogs((entry: LogEntry) => this.broadcast('server-host:log', port, entry));
-      this.logForwarders.set(port, { server, unsubscribe });
+      const unsubscribeLogs = server.subscribeLogs((entry: LogEntry) => this.broadcast('server-host:log', port, entry));
+      // A renewal that fails reaches the owner as a notice, once per failure (#860).
+      let reportedAt = server.getAutoTlsStatus().lastError?.at ?? null;
+      const unsubscribeTls = server.subscribeAutoTls((status: AutoTlsStatus) => {
+        const error = status.lastError;
+        if (!error || error.at === reportedAt || status.busy) return;
+        reportedAt = error.at;
+        if (status.enabled) this.broadcast('server-host:auto-tls-problem', port, error);
+      });
+      this.logForwarders.set(port, { server, unsubscribe: () => { unsubscribeLogs(); unsubscribeTls(); } });
     }
   }
 
@@ -209,6 +217,26 @@ export class ServerManager {
   public async getStats(port: number): Promise<ServerStats | null> {
     const server = this.lifecycle.getServer(port);
     return server ? server.getStats() : null;
+  }
+
+  public getAutoTlsStatus(port: number): AutoTlsStatus | null {
+    return this.lifecycle.getServer(port)?.getAutoTlsStatus() ?? null;
+  }
+
+  /** The precheck and issuance take seconds; a failure leaves the feature off and says why (#860). */
+  public async enableAutoTls(port: number, grantPortPermission: boolean): Promise<AutoTlsEnableResult> {
+    const server = this.lifecycle.getServer(port);
+    if (!server) return { ok: false, code: 'rejected' };
+    try {
+      return { ok: true, status: await server.enableAutoTls({ grantPortPermission }) };
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : null;
+      return { ok: false, code: isAutoTlsErrorCode(code) ? code : 'rejected' };
+    }
+  }
+
+  public async disableAutoTls(port: number): Promise<AutoTlsStatus | null> {
+    return (await this.lifecycle.getServer(port)?.disableAutoTls()) ?? null;
   }
 
   public getUpdateInventory(signal?: AbortSignal): Promise<HostedUpdateServer[]> {

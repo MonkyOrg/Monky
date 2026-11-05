@@ -54,6 +54,7 @@ When creating or managing a server, you choose the media topology:
 - **Primary TCP Port:** Allow port `3000` (or your chosen port) in your firewall and configure router port forwarding.
 - **Ports for SFU (mediasoup):** If using SFU mode, also forward/allow port `40000` — on UDP and on TCP (if you already opened the `40000-49151` range, nothing needs to change). On a VPS, see [Opening the SFU mode ports](/en/hospedar-em-vps#opening-the-sfu-mode-ports).
 - **Without touching the router:** Use a virtual network/VPN such as Radmin VPN, Hamachi, ZeroTier, or Tailscale.
+- **Secure connection (wss://) without a domain:** With a public IP and an open port, right-click the server's icon and open **Automatic secure connection**. The server gets and renews a Let's Encrypt certificate for your IP by itself; port `80` (TCP) must also be open and forwarded to this computer. It does not work over a VPN, CGNAT or a local network only. See [`monky tls`](/en/cli#monky-tls).
 - **Behind a reverse proxy or tunnel:** Right-click the server's icon and open **Reverse proxy** to list your proxies' addresses. Without it, everyone shares the same login attempt limit. See [Behind a reverse proxy](/en/hospedar-em-vps#behind-a-reverse-proxy).
 
 ## Administer

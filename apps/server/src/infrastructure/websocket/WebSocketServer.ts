@@ -22,7 +22,9 @@ import {
   localBotIdentitySchema,
   localOperationNegotiated,
   type BotCapability,
+  type ServerInviteInfoPayload,
 } from '@monky/shared';
+import { describeServerInvite } from '../discovery/inviteInfo';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
 import { ChannelService } from '../../application/services/ChannelService';
@@ -123,6 +125,8 @@ export interface WebSocketServerDeps {
   botStorageService?: BotStorageService;
   /** Proxies whose `X-Forwarded-For`/`Forwarded` name the client (#829); none by default. */
   trustedProxies?: readonly string[];
+  /** What the invite screen offers; by default the addresses of this host and the port it listens on. */
+  inviteInfo?: () => Promise<ServerInviteInfoPayload>;
 }
 
 /** What the modules of the server use of it, each through its own part of it. */
@@ -214,6 +218,7 @@ export class WebSocketServer {
   private readonly recentSoundCache?: RecentSoundCacheService;
   private readonly audit?: ServerAuditService;
   private readonly isTrustedProxy: (address: string) => boolean;
+  private readonly inviteInfo: () => Promise<ServerInviteInfoPayload>;
 
   constructor(deps: WebSocketServerDeps) {
     this.httpServer = deps.httpServer;
@@ -239,6 +244,10 @@ export class WebSocketServer {
     this.recentSoundCache = deps.recentSoundCache;
     this.audit = deps.audit;
     this.isTrustedProxy = createTrustedProxyMatcher(deps.trustedProxies ?? []);
+    this.inviteInfo = deps.inviteInfo ?? (() => describeServerInvite({ serverRepo: this.serverRepo, port: () => {
+      const address = this.httpServer.address();
+      return address && typeof address === 'object' ? address.port : null;
+    } }));
     // Built before anything else starts: a message type answered by two routes
     // stops the server here, instead of on the first frame a client sends.
     this.messageRouter = this.buildRouter();
@@ -597,7 +606,7 @@ export class WebSocketServer {
       get visibility() { return server.visibility; },
       get screens() { return server.screens; },
       get channelAdmin() { return server.channelAdmin; },
-      get httpServer() { return server.httpServer; },
+      describeInvite: () => server.inviteInfo(),
       get auth() { return server.authService; },
       get coturn() { return server.coturnManager; },
       get recentSoundCache() { return server.recentSoundCache; },

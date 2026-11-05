@@ -33,6 +33,7 @@ import { setConfigCommand, showConfig } from './cli/commands/config';
 import { cliLanguageCommand, cliSettingsMenu } from './cli/commands/cliSettings';
 import { updateCommand, getLocalVersion } from './cli/commands/update';
 import { destroyCommand } from './cli/commands/destroy';
+import { tlsCommand } from './cli/commands/tls';
 import {
   getCliLanguage,
   initCliI18n,
@@ -80,6 +81,7 @@ ${color('CONFIGURAÇÃO', ANSI.bold)}
   config                   Abre Configurações (exibe o servidor em scripts)
   config language [pt-BR|en-US]  Consulta ou altera o idioma do CLI
   config set <chave> [valor]  Altera uma configuração
+  tls [status|enable|disable]  Conexão segura automática (wss://) pelo IP público
 
 ${color('OPÇÕES GLOBAIS', ANSI.bold)}
   --version, -v            Exibe a versão instalada do Monky CLI
@@ -136,6 +138,7 @@ ${color('SETTINGS', ANSI.bold)}
   config                   Open Settings (show server configuration in scripts)
   config language [pt-BR|en-US]  Show or change the CLI language
   config set <key> [value] Change a setting
+  tls [status|enable|disable]  Automatic secure connection (wss://) over the public IP
 
 ${color('GLOBAL OPTIONS', ANSI.bold)}
   --version, -v            Show installed Monky CLI version
@@ -172,7 +175,7 @@ async function runDataCommand(
 
 const COMMANDS = new Set([
   'create', 'bootstrap', 'list', 'ls', 'start', 'stop', 'restart', 'logs',
-  'status', 'update', 'destroy', 'members', 'admin', 'roles', 'config',
+  'status', 'update', 'destroy', 'members', 'admin', 'roles', 'config', 'tls',
 ]);
 
 const SUBCOMMANDS = new Map<string, readonly string[]>([
@@ -180,6 +183,7 @@ const SUBCOMMANDS = new Map<string, readonly string[]>([
   ['admin', ['add', 'remove']],
   ['roles', ['list', 'create', 'assign', 'unassign', 'delete']],
   ['config', ['show', 'set', 'language']],
+  ['tls', ['status', 'enable', 'disable']],
 ]);
 
 function commandKind(args: string[]): 'help' | 'version' | 'command' {
@@ -331,6 +335,11 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
       return;
     }
     await runDataCommand(globalArgs, (dataDir) => withReadOnlyContext(dataDir, showConfig));
+    return;
+  }
+
+  if (section === 'tls') {
+    await tlsCommand(globalArgs, action);
     return;
   }
 

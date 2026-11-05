@@ -34,6 +34,7 @@ import type {
   LocalTaskFailureEvent,
 } from './localExecution.js';
 import type { UserActivity } from './models.js';
+import type { AutoTlsEnableResult, AutoTlsError, AutoTlsStatus } from './autoTls.js';
 import type { DmEvent, DmExportMode, DmInvokeChannels } from './directMessages.js';
 import {
   botDeviceStorageGrantSchema, botDeviceStorageScopeSchema,
@@ -1029,6 +1030,10 @@ export interface IpcInvokeChannels extends DmInvokeChannels {
   'server-host:start': { args: [options: HostServerOptions]; returnType: { success: boolean; error?: string } };
   'server-host:stop': { args: [port: number]; returnType: { success: boolean } };
   'server-host:status': { args: []; returnType: HostServerStatus };
+  /** Automatic TLS of a server this app hosts (#860); null when it is not running. */
+  'server-host:auto-tls-status': { args: [port: number]; returnType: AutoTlsStatus | null };
+  'server-host:auto-tls-enable': { args: [port: number, grantPortPermission: boolean]; returnType: AutoTlsEnableResult };
+  'server-host:auto-tls-disable': { args: [port: number]; returnType: AutoTlsStatus | null };
   'server-host:logs': { args: [port: number]; returnType: LogEntry[] };
   'server-host:clear-logs': { args: [port: number]; returnType: void };
   'server-host:stats': { args: [port: number]; returnType: ServerStats | null };
@@ -1167,6 +1172,8 @@ export interface IpcEvents {
   'updater:error': [message: string];
   'server-host:log': [port: number, entry: LogEntry];
   'server-host:status-changed': [status: HostServerStatus];
+  /** Renewing the automatic TLS certificate of a hosted server failed; it keeps serving ws:// (#860). */
+  'server-host:auto-tls-problem': [port: number, error: AutoTlsError];
 
   /** Jogo detectado mudou — `null` quando nada está rodando (#675). */
   'game-presence:changed': [activity: UserActivity | null];

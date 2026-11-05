@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Servidores com IP público e porta aberta agora podem ativar a conexão segura automática: o servidor obtém e renova sozinho um certificado gratuito da Let's Encrypt para o próprio IP, sem domínio nem proxy. Ative com o botão direito no servidor que você hospeda, ou pelo CLI.",
+  "en": "Servers with a public IP and an open port can now turn on the automatic secure connection: the server gets and renews a free Let's Encrypt certificate for its own IP, with no domain or proxy. Turn it on by right-clicking the server you host, or from the CLI."
+}
