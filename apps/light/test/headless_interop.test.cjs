@@ -203,6 +203,63 @@ for (const voiceMode of ['p2p', 'sfu']) {
   });
 }
 
+for (const voiceMode of ['p2p', 'sfu']) {
+  test(`participant volume scales ${voiceMode} playback and is kept in the profile`, { timeout: 60_000 }, async t => {
+    const fixture = await createServerFixture(t, { voiceMode });
+    const alice = new NativeClient(fixture, { nickname: 'Light Alice' });
+    const bob = new NativeClient(fixture, { nickname: 'Light Bob', muted: true });
+    const aliceAuth = await alice.wait('authenticated');
+    await bob.wait('authenticated');
+    const channelId = aliceAuth.channels.find(channel => channel.type === 'VOICE').id;
+    await alice.join(channelId);
+    await bob.join(channelId);
+    // Only Alice transmits, so Bob's playout is exactly her scaled stream.
+    await bob.untilState(value => value.audioDevice.nonzeroPlayoutCallbacks >= 25, 'Bob did not hear Alice');
+    const window = async () => {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      const start = (await bob.state()).audioDevice;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const end = (await bob.state()).audioDevice;
+      const callbacks = end.playoutCallbacks - start.playoutCallbacks;
+      return { nonzero: end.nonzeroPlayoutCallbacks - start.nonzeroPlayoutCallbacks,
+        energy: (end.outputEnergy - start.outputEnergy) / callbacks };
+    };
+    const normal = await window();
+    const setVolume = async volume => {
+      const since = bob.events.length;
+      assert.equal((await bob.command('set-volume', { sessionId: aliceAuth.sessionId, volume })).event,
+        'command-accepted');
+      await bob.wait(event => event.event === 'participant-volume' && event.sessionId === aliceAuth.sessionId &&
+        event.volume === volume, since);
+    };
+    await setVolume(0);
+    assert.ok((await window()).nonzero <= 2, 'Volume 0 must silence that participant');
+    await setVolume(200);
+    const loud = await window();
+    assert.ok(loud.energy > normal.energy * 2.5,
+      `Volume 200 must amplify (${loud.energy} vs ${normal.energy})`);
+    assert.equal((await bob.state()).userVolumes[aliceAuth.sessionId], 200);
+    for (const invalid of [{ volume: 201 }, { volume: 1.5 }, { volume: -1 }]) {
+      assert.equal((await bob.command('set-volume', { sessionId: aliceAuth.sessionId, ...invalid })).event,
+        'command-error');
+    }
+
+    // A new call, even after a restart, applies the saved volume from the start.
+    await bob.close();
+    const again = new NativeClient(fixture, { nickname: 'Light Bob', muted: true, profile: bob.profile });
+    await again.wait('authenticated');
+    await again.command('set-volume', { sessionId: aliceAuth.sessionId, volume: 0 });
+    await again.join(channelId);
+    await again.untilState(value => value.userVolumes[aliceAuth.sessionId] === 0 && value.audioDevice.playoutCallbacks > 100,
+      'Saved volume was not reported for the new call');
+    assert.ok((await again.state()).audioDevice.nonzeroPlayoutCallbacks <= 2, 'Saved volume 0 was not applied on join');
+    await again.command('set-volume', { sessionId: aliceAuth.sessionId, volume: 100 });
+    assert.deepEqual((await again.state()).userVolumes, {}, 'Volume 100 must free its stored entry');
+    await again.close();
+    await alice.close();
+  });
+}
+
 test('native calls survive both live P2P/SFU topology transitions and preserve moderation', { timeout: 60_000 }, async t => {
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');

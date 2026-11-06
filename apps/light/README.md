@@ -82,6 +82,7 @@ Digite um objeto JSON por linha no terminal, usando o ID recebido:
 {"command":"devices"}
 {"command":"set-input","deviceId":"ID-DO-DISPOSITIVO"}
 {"command":"set-output","deviceId":null}
+{"command":"set-volume","sessionId":"ID-DA-SESSAO","volume":150}
 {"command":"stats","id":"minha-consulta"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -129,6 +130,20 @@ precisa transmitir. Enquanto a permissão está pendente, é possível receber
 áudio, sair da chamada e encerrar o aplicativo. Uma recusa mantém o microfone
 mutado e gera `microphone-error`; não tenta contornar as configurações do sistema.
 O fluxo de permissão do macOS ainda requer execução em um Mac.
+
+### Volume por participante
+
+`set-volume` ajusta de 0 a 200% o volume com que você ouve uma sessão de voz
+(`sessionId` da lista de participantes), como o controle deslizante do cliente
+completo. É uma preferência local: o servidor e os outros participantes não
+sabem dela. A escolha é salva no perfil, vale imediatamente na chamada atual e
+nas próximas, inclusive em P2P e SFU, e gera `participant-volume`. `stats` traz
+em `userVolumes` os volumes diferentes de 100 das sessões da chamada atual.
+
+O ganho é aplicado pelo próprio WebRTC ao fluxo decodificado, antes da mixagem:
+não há processamento extra, e 100% não custa nada. Voltar a 100 apaga a entrada.
+O perfil guarda até 256 sessões com volume alterado; acima disso, `set-volume`
+é recusado até que alguma volte a 100.
 
 ## Interface de bandeja
 
@@ -226,7 +241,7 @@ componentes da identidade exigem recuperação explícita, nunca recriação sil
 Diretórios com arquivos de outros aplicativos são recusados.
 
 `monky-light-settings.json` guarda apenas preferências do usuário (hoje, os
-dispositivos de áudio) e nunca participa da validação da identidade. É
+dispositivos de áudio e o volume de cada participante) e nunca participa da validação da identidade. É
 substituído de forma atômica sob o lock do perfil. Configurações inválidas ou
 ilegíveis geram `warning`, usam os padrões e são substituídas no próximo
 salvamento; uma gravação interrompida das configurações não exige recuperação.

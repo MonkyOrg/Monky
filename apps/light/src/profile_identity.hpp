@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -16,7 +17,16 @@ namespace monky::light {
 struct ProfileSettings {
   std::optional<std::string> inputDeviceId;   // nullopt: system default
   std::optional<std::string> outputDeviceId;  // nullopt: system default
+  // Playback volume per voice session, 0-200 percent like the full client.
+  // 100 is the default and is never stored.
+  std::map<std::string, int> userVolumes;
 };
+
+constexpr int kDefaultUserVolume = 100;
+constexpr int kMaxUserVolume = 200;
+// Bounds the settings file; setting a volume back to 100 frees its entry.
+constexpr std::size_t kMaxUserVolumes = 256;
+constexpr std::size_t kMaxVolumeSessionBytes = 256;
 
 // Owns the signing key and exclusive profile lock for its entire lifetime.
 // Requires an absolute path and an existing parent; creates only the profile leaf.

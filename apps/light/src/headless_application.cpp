@@ -451,6 +451,7 @@ class Application final {
     config.admitted_participants = roster();
     config.policy = audioPolicy();
     config.devices = devicePreference();
+    for (const auto& [session, volume] : settings_.userVolumes) config.volumes.emplace(session, volume / 100.0);
     config.network_ignore_mask = audio_.networkIgnoreMask;
     if (auth.iceServers) {
       for (const auto& value : *auth.iceServers) {
@@ -510,6 +511,29 @@ class Application final {
     }
     settings_ = std::move(settings);
     if (active_) active_->select_devices(devicePreference());
+  }
+
+  // Same scale and key as the full client: 0-200 percent per voice session.
+  void setVolume(const Json& value) {
+    const auto session = value.at("sessionId").get<std::string>();
+    const auto& level = value.at("volume");
+    if (!level.is_number_integer() || level.get<int>() < 0 || level.get<int>() > kMaxUserVolume) {
+      throw std::invalid_argument("volume must be an integer from 0 to 200");
+    }
+    const auto volume = level.get<int>();
+    auto settings = settings_;
+    if (volume == kDefaultUserVolume) settings.userVolumes.erase(session);
+    else settings.userVolumes[session] = volume;
+    try {
+      identity_.saveSettings(settings);
+    } catch (const std::invalid_argument&) {
+      throw;
+    } catch (const std::exception& error) {
+      throw std::invalid_argument(std::string("Could not save participant volume: ") + error.what());
+    }
+    settings_ = std::move(settings);
+    if (active_) active_->set_volume(session, volume / 100.0);
+    output({{"event", "participant-volume"}, {"sessionId", session}, {"volume", volume}});
   }
 
   void stopWatchingDevices() {
@@ -720,6 +744,15 @@ class Application final {
     result["microphoneAccessPending"] = microphoneRequestPending_;
     result["channelId"] = session_.admission() ? Json(session_.admission()->channelId) : Json(nullptr);
     result["participants"] = session_.admission() ? session_.admission()->participants.size() : 0;
+    // Only the current call's sessions: the profile may remember many more.
+    auto volumes = Json::object();
+    if (session_.admission()) {
+      for (const auto& [session, participant] : session_.admission()->participants) {
+        const auto found = settings_.userVolumes.find(session);
+        if (found != settings_.userVolumes.end()) volumes[session] = found->second;
+      }
+    }
+    result["userVolumes"] = std::move(volumes);
     result["channels"] = session_.authentication() ? session_.authentication()->server.at("channels") : Json(nullptr);
     return result;
   }
@@ -752,6 +785,7 @@ class Application final {
       if (name.starts_with("fixture-") && audio_.fixtureCommand) audio_.fixtureCommand(value);
       else if (name == "set-input") selectDevice(true, value);
       else if (name == "set-output") selectDevice(false, value);
+      else if (name == "set-volume") setVolume(value);
       else if (name == "join") session_.join(value.at("channelId").get<std::string>(), Clock::now());
       else if (name == "leave") session_.leave();
       else if (name == "mute") session_.setMuted(value.at("enabled").get<bool>());
@@ -759,7 +793,7 @@ class Application final {
       else if (name == "reconnect") restartConnection();
       else if (name != "quit") {
         throw std::invalid_argument("Unknown command; use join, leave, mute, deafen, devices, set-input, "
-                                    "set-output, stats, channels, reconnect or quit");
+                                    "set-output, set-volume, stats, channels, reconnect or quit");
       }
       output({{"event", "command-accepted"}, {"id", id}, {"command", name}});
       if (name == "quit") quit();
@@ -826,6 +860,7 @@ int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio)
                    "{\"command\":\"deafen\",\"enabled\":false}\n"
                    "{\"command\":\"devices\"} / {\"command\":\"set-input\",\"deviceId\":\"...\"|null}\n"
                    "{\"command\":\"set-output\",\"deviceId\":\"...\"|null}\n"
+                   "{\"command\":\"set-volume\",\"sessionId\":\"...\",\"volume\":0-200}\n"
                    "{\"command\":\"stats\"} / {\"command\":\"channels\"}\n"
                    "{\"command\":\"leave\"} / {\"command\":\"reconnect\"} / {\"command\":\"quit\"}\n"
                    "EOF and Ctrl+C release the connection and media resources.\n"

@@ -46,7 +46,7 @@ constexpr std::size_t kMaxMetadataBytes = 4096;
 constexpr char kSettingsFile[] = "monky-light-settings.json";
 constexpr char kSettingsPendingFile[] = "monky-light-settings.json.pending";
 constexpr char kSettingsFormat[] = "monky-light-settings";
-constexpr std::size_t kMaxSettingsBytes = 16 * 1024;
+constexpr std::size_t kMaxSettingsBytes = 64 * 1024;
 constexpr std::size_t kMaxDeviceIdBytes = 1024;
 // server-key-auth (#821): the identity key pinned for each server this profile signed in to.
 constexpr char kServerKeysFile[] = "monky-light-servers.json";
@@ -533,12 +533,34 @@ std::optional<std::string> settingsDevice(const Json& data, const char* field) {
   return found->get<std::string>();
 }
 
+bool validUserVolume(const std::string& session, int volume) {
+  return !session.empty() && session.size() <= kMaxVolumeSessionBytes && volume >= 0 &&
+         volume <= kMaxUserVolume && volume != kDefaultUserVolume;
+}
+
+std::map<std::string, int> settingsVolumes(const Json& data) {
+  std::map<std::string, int> result;
+  const auto found = data.find("userVolumes");
+  if (found == data.end() || found->is_null()) return result;
+  if (!found->is_object() || found->size() > kMaxUserVolumes) {
+    throw std::runtime_error("Profile settings contain invalid participant volumes");
+  }
+  for (const auto& [session, volume] : found->items()) {
+    if (!volume.is_number_integer() || !validUserVolume(session, volume.get<int>())) {
+      throw std::runtime_error("Profile settings contain invalid participant volumes");
+    }
+    result.emplace(session, volume.get<int>());
+  }
+  return result;
+}
+
 ProfileSettings parseSettings(const std::string& contents) {
   Json data;
   try {
+    // Only the participant-volume map nests, one level deep.
     data = Json::parse(contents, [](int depth, Json::parse_event_t event, Json&) {
       if (event == Json::parse_event_t::array_start ||
-          (event == Json::parse_event_t::object_start && depth != 0)) {
+          (event == Json::parse_event_t::object_start && depth > 1)) {
         throw std::runtime_error("Profile settings must be a flat JSON object");
       }
       return true;
@@ -550,13 +572,26 @@ ProfileSettings parseSettings(const std::string& contents) {
       !data.contains("version") || !data["version"].is_number_integer() || data["version"] != 1) {
     throw std::runtime_error("Profile settings have an unsupported format or version");
   }
-  return {settingsDevice(data, "inputDeviceId"), settingsDevice(data, "outputDeviceId")};
+  for (const auto& [key, value] : data.items()) {
+    if (value.is_object() && key != "userVolumes") {
+      throw std::runtime_error("Profile settings must be a flat JSON object");
+    }
+  }
+  return {settingsDevice(data, "inputDeviceId"), settingsDevice(data, "outputDeviceId"), settingsVolumes(data)};
 }
 
 std::string encodeSettings(const ProfileSettings& settings) {
   for (const auto* id : {&settings.inputDeviceId, &settings.outputDeviceId}) {
     if (*id && ((*id)->empty() || (*id)->size() > kMaxDeviceIdBytes)) {
       throw std::invalid_argument("Audio device ID must be a nonempty string of at most 1024 bytes");
+    }
+  }
+  if (settings.userVolumes.size() > kMaxUserVolumes) {
+    throw std::invalid_argument("Too many participant volumes are stored; reset some to 100");
+  }
+  for (const auto& [session, volume] : settings.userVolumes) {
+    if (!validUserVolume(session, volume)) {
+      throw std::invalid_argument("Participant volume must be 0-200 for a session ID of at most 256 bytes");
     }
   }
   const auto optional = [](const std::optional<std::string>& value) {
@@ -566,9 +601,10 @@ std::string encodeSettings(const ProfileSettings& settings) {
   try {
     result = Json{{"format", kSettingsFormat}, {"version", 1},
                   {"inputDeviceId", optional(settings.inputDeviceId)},
-                  {"outputDeviceId", optional(settings.outputDeviceId)}}.dump(2) + "\n";
+                  {"outputDeviceId", optional(settings.outputDeviceId)},
+                  {"userVolumes", Json(settings.userVolumes)}}.dump(2) + "\n";
   } catch (const Json::exception&) {
-    throw std::invalid_argument("Audio device ID must be valid UTF-8");
+    throw std::invalid_argument("Audio device and session IDs must be valid UTF-8");
   }
   if (result.size() > kMaxSettingsBytes) throw std::invalid_argument("Profile settings exceed their size limit");
   return result;
