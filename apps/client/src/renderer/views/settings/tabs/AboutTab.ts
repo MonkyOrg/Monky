@@ -100,6 +100,18 @@ export class AboutTab {
           </div>
           ${renderSwitch({ id: 'checkbox-ask-shutdown', label: t('settings.askShutdownOnLastLeave'), checked: settingsStore.askShutdownOnLastLeave })}
         </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);"${lockedAttributes('hostServer', 'hostServer')}>
+          <div>
+            <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-warn-hosted-reach">
+              <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">vpn_lock</span>
+              ${t('settings.warnHostedServerReach')}${lockedBadge('hostServer')}
+            </label>
+            <div style="font-size: 11px; color: var(--text-muted);">
+              ${t('settings.warnHostedServerReachDesc')}
+            </div>
+          </div>
+          ${renderSwitch({ id: 'checkbox-warn-hosted-reach', label: t('settings.warnHostedServerReach'), checked: settingsStore.warnHostedServerReach })}
+        </div>
       </div>
 
       <div data-settings-section="license" data-settings-label="${escapeHtml(t('settings.licenseSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
@@ -175,6 +187,7 @@ export class AboutTab {
     const checkboxAutoStart = container.querySelector<HTMLInputElement>('#checkbox-auto-start');
     const checkboxMinimizeToTray = container.querySelector<HTMLInputElement>('#checkbox-minimize-to-tray');
     const checkboxAskShutdown = container.querySelector<HTMLInputElement>('#checkbox-ask-shutdown');
+    const checkboxWarnHostedReach = container.querySelector<HTMLInputElement>('#checkbox-warn-hosted-reach');
     const btnSupport = container.querySelector<HTMLButtonElement>('#btn-support-project');
     const btnSuggest = container.querySelector<HTMLButtonElement>('#btn-suggest-idea');
     const btnVote = container.querySelector<HTMLButtonElement>('#btn-vote-ideas');
@@ -273,6 +286,11 @@ export class AboutTab {
 
     checkboxAskShutdown?.addEventListener('change', () => {
       settingsStore.askShutdownOnLastLeave = checkboxAskShutdown.checked;
+      settingsStore.save();
+    });
+
+    checkboxWarnHostedReach?.addEventListener('change', () => {
+      settingsStore.warnHostedServerReach = checkboxWarnHostedReach.checked;
       settingsStore.save();
     });
 

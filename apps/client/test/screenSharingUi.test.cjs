@@ -392,7 +392,7 @@ for (const language of ['pt-BR', 'en']) {
     t.after(() => f.close());
     const root = f.mountQuality();
     const codec = control(f, 'select-video-codec');
-    assert.deepEqual(codec.querySelectorAll('option').map(option => option.value), ['h264', 'av1']);
+    assert.deepEqual(codec.querySelectorAll('option').filter(option => !option.hidden).map(option => option.value), ['h264', 'av1']);
     const av1 = codec.querySelector('option[value="av1"]');
     assert.equal(av1.disabled, false);
     assert.equal(av1.textContent.includes(f.i18n.t('screenShare.comingSoon')), false);
@@ -1913,7 +1913,8 @@ test('screen codec selection saves only verified choices and offers no camera-on
   assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
   assert.equal(f.saves, 2);
   assert.equal(codec.querySelector('option[value="auto"]'), null);
-  assert.equal(codec.querySelector('option[value=""]'), null);
+  const placeholder = codec.querySelector('option[value=""]');
+  assert.ok(placeholder === null || (placeholder.disabled && placeholder.hidden), 'An empty codec value must never be selectable.');
 });
 
 test('a late codec error cannot open a dialog after quality settings cleanup', async t => {
@@ -2319,6 +2320,24 @@ for (const codec of ['h264', 'av1']) {
     assert.equal(f.saves, 0);
   });
 }
+
+test('the codec field says Loading while Automatic resolves and Unavailable without a codec, never blank', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const check = deferred();
+  f.controls.encoding = () => check.promise;
+  f.mountQuality();
+  await flush();
+  const field = control(f, 'select-video-codec');
+  assert.equal(field.value, '');
+  assert.equal(field.querySelector('#screen-codec-placeholder').textContent, f.i18n.t('common.loading'));
+  check.resolve({ selection: null, hardware: { available: false, reason: 'No encoder' }, fallback: false, reason: 'No encoder' });
+  await flush();
+  assert.equal(field.value, '');
+  assert.equal(field.querySelector('#screen-codec-placeholder').textContent, f.i18n.t('screenShare.unavailable'));
+  assert.deepEqual([...field.querySelectorAll('option')].filter(option => !option.hidden).map(option => option.value), ['h264', 'av1'],
+    'The placeholder is never offered as a choice.');
+});
 
 test('An old unsupported Manual combination is disabled without saving it again; Automatic rediscovers hardware', async t => {
   const f = fixture();

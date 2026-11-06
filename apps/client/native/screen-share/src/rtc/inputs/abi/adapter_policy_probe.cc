@@ -247,6 +247,20 @@ void VerifyAdaptiveDecoderSessions() {
   Check(amf_plan && amf_plan->profileLevelId == "4d0433" && amf_info.sps->compatibility == 0x04,
         "AMF constrained Main SPS must be admitted without rewriting its original bytes");
   Reject([&] { plan(std::nullopt, amf_info, amf_packet); }, "ERR_RTC_NEGOTIATED_SPS");
+  // AMF baseline (compatible format) also sets constraint_set5; it must still decode as Constrained Baseline.
+  for (const auto flags : std::initializer_list<std::uint8_t>{0x44, 0x48, 0x4c, 0xc4}) {
+    auto amf_baseline = small_sps;
+    amf_baseline[2] = flags;
+    const auto amf_baseline_packet = ParserPacket(amf_baseline);
+    const auto amf_baseline_info = policy::InspectAccessUnit(amf_baseline_packet);
+    const auto amf_baseline_plan = plan(std::nullopt, amf_baseline_info, amf_baseline_packet);
+    Check(amf_baseline_plan && amf_baseline_info.sps->compatibility == flags &&
+          amf_baseline_plan->profileLevelId == amf_baseline_info.sps->ProfileLevelId(),
+          "AMF Constrained Baseline with constraint_set4/5 must be admitted without rewriting its original bytes");
+    Check(policy::PlanDecoderSession(std::nullopt, amf_baseline_info, amf_baseline_packet,
+              {screen_video::H264Profile::Main, 51}, 1920, 1080, 8, options).has_value(),
+          "A Main receiver must admit AMF Constrained Baseline with constraint_set4/5");
+  }
   // A browser's software encoder answers Main SDP with Main-compatible Constrained Baseline (42c0).
   const auto browser_plan = policy::PlanDecoderSession(std::nullopt, small_info, smaller,
       {screen_video::H264Profile::Main, 51}, 1920, 1080, 8, options);

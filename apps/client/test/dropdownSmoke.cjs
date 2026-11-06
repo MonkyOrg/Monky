@@ -433,7 +433,7 @@ async function runDropdownSmoke() {
     fixture.innerHTML = quality.renderHtml();
   } finally { settings.screenEncodingStrategy = strategy; }
   const codec = fixture.querySelector('#select-video-codec');
-  check(!codec.disabled && [...codec.options].map(option => option.value).join(',') === 'h264,av1',
+  check(!codec.disabled && [...codec.options].filter(option => !option.hidden).map(option => option.value).join(',') === 'h264,av1',
     'Trusted codec input uses the editable Manual H.264/AV1 control, not read-only Automatic mode');
   codec.value = 'h264';
   fixture.insertAdjacentHTML('beforeend', '<button type="button" class="btn btn-secondary">Next control</button>');

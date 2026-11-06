@@ -218,6 +218,28 @@ for (const failure of ['initial-exception', 'candidate-exception', 'initial-erro
   });
 }
 
+test('a machine without a usable graphics card says so once, instead of asking to retry every encoder', async t => {
+  const f = fixture('pt-BR');
+  t.after(() => f.close());
+  configure(f);
+  const probes = [];
+  f.controls.encoding = async input => {
+    probes.push(`${input.encodingMode}:${input.codec}:${input.video.fps}`);
+    // What Main's IPC rejection carries when adapter 0 is only the software renderer of a virtual machine.
+    throw new Error('Error invoking remote method \'native-screen:invoke\': Error: The selected encoder is not supported on capture adapter 0'
+      + ' [monky-screen-failure {"codes":["ERR_SCREEN_CAPTURE_NO_GPU"]}]');
+  };
+  f.mountQuality();
+  for (let turn = 0; turn < 5; turn++) await flush();
+  assert.deepEqual(probes, ['hardware:h264:120']);
+  assert.equal(f.saves, 0);
+  const status = control(f, 'screen-encoding-status').textContent;
+  assert.equal(status, f.i18n.t('screenShare.failure.no-gpu'));
+  assert.notEqual(status, f.i18n.t('settings.screenEncodingProbeFailed'));
+  assert.equal(control(f, 'select-video-codec').disabled, true);
+  assert.doesNotMatch(f.document.body.textContent, /ERR_|monky-screen-failure|adapter 0/);
+});
+
 test('no supported lower profile leaves preferences unchanged with localized unavailable status', async t => {
   const f = fixture('pt-BR');
   t.after(() => f.close());

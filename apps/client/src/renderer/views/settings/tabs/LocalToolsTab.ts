@@ -141,6 +141,16 @@ export class LocalToolsTab {
   private tasks = new Map<string, HTMLElement>();
   private readonly storageList = new BotDeviceStorageList();
 
+  /** What bots keep in this browser or on this computer: on the web, it stays usable beside the read-only tab (#861). */
+  public static botStorageHtml(): string {
+    return sectionHtml('local-tools-bot-storage', 'botStorage.localTitle', BotDeviceStorageList.html());
+  }
+
+  public attachBotStorage(container: HTMLElement): void {
+    const storageRoot = container.querySelector<HTMLElement>('[data-bot-storage-list]');
+    if (storageRoot) this.storageList.attach(storageRoot);
+  }
+
   public renderHtml(): string {
     // Shown read-only where bots cannot run here (#858): nothing loads, so it shows the empty state.
     const locked = isDesktopOnly('localExecution');
@@ -174,7 +184,7 @@ export class LocalToolsTab {
         <p data-local-empty="permissions" style="color: var(--text-muted);" ${emptyHidden}>${escapeHtml(t('localExecution.noPermissions'))}</p>
         <div data-local-list="permissions"></div>
       `)}
-      ${sectionHtml('local-tools-bot-storage', 'botStorage.localTitle', BotDeviceStorageList.html())}
+      ${locked ? '' : LocalToolsTab.botStorageHtml()}
       ${sectionHtml('local-tools-tasks', 'localExecution.tasks', `
         <p data-local-empty="tasks" style="color: var(--text-muted);" ${emptyHidden}>${escapeHtml(t('localExecution.noTasks'))}</p>
         <div data-local-list="tasks"></div>
@@ -222,8 +232,7 @@ export class LocalToolsTab {
     root.addEventListener('click', click);
     root.addEventListener('change', change);
     this.unbind.push(() => root.removeEventListener('click', click), () => root.removeEventListener('change', change));
-    const storageRoot = root.querySelector<HTMLElement>('[data-bot-storage-list]');
-    if (storageRoot) this.storageList.attach(storageRoot);
+    this.attachBotStorage(root);
     this.initialLoad = this.subscribe(root, generation) ? this.refreshState(root, generation) : Promise.resolve();
     return this.initialLoad;
   }

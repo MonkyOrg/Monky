@@ -96,8 +96,8 @@ async function runQualitySettingsSmoke() {
     encodingRequests.push(command);
     const automatic = command.encodingStrategy === 'automatic';
     const mode = automatic ? hardwareAvailable ? 'hardware' : 'software' : command.encodingMode;
-    // What Main does: the compatible format (#858) considers only H.264 encoders.
-    const codec = command.screenFormat === 'compatible' ? 'h264' : automatic ? mode === 'hardware' ? 'av1' : 'h264' : command.codec;
+    // What Main does: the format is an H.264 profile and never narrows the codec (#890).
+    const codec = automatic ? mode === 'hardware' ? 'av1' : 'h264' : command.codec;
     const hardwareSupported = hardwareAvailable && !(limitFourKH264 && codec === 'h264'
       && (command.video.width >= 3840 || command.video.height >= 2160) && command.video.fps > 60);
     const unavailable = !automatic && mode === 'hardware' && !hardwareSupported;
@@ -196,7 +196,7 @@ async function runQualitySettingsSmoke() {
       check(!av1.disabled && av1.textContent === language.t('settings.codecAv1')
         && !av1.textContent.includes(language.t('screenShare.comingSoon')),
       'AV1 must be enabled and localized as an implemented screen codec.');
-      check([...quality.querySelectorAll('#select-video-codec option')].map(option => option.value).join(',') === 'h264,av1',
+      check([...quality.querySelectorAll('#select-video-codec option')].filter(option => !option.hidden).map(option => option.value).join(',') === 'h264,av1',
         'Manual codec selection must offer exact H.264 and AV1 only.');
       for (const codec of ['h264', 'av1'])
         check(!quality.querySelector(`#select-video-codec option[value="${codec}"]`).disabled,
@@ -239,24 +239,18 @@ async function runQualitySettingsSmoke() {
       'Automatic fields must be read-only and show resolved Hardware/AV1 without overwriting manual choices.');
       check(encodingStatus.textContent === language.t('settings.screenEncodingReady', { codec: 'AV1' }),
         'Available encoding must show the concise localized status.');
+      const formatSection = quality.querySelector('#screen-format-section');
       const formatCards = quality.querySelector('#screen-format-choice');
       const formatCard = value => formatCards.querySelector(`[data-screen-format="${value}"]`);
+      const formatShown = () => !formatSection.hidden && !formatSection.hasAttribute('data-ui-closing');
       check(formatCard('main').getAttribute('aria-pressed') === 'true' && formatCard('compatible').getAttribute('aria-pressed') === 'false'
         && formatCard('compatible').textContent.includes(language.t('screenShare.formatCompatible'))
         && formatCard('main').textContent.includes(language.t('screenShare.formatMainDescription')),
       'The desktop keeps the better-quality format by default, beside the compatible one (#858).');
-      formatCard('compatible').click();
-      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false'
-        && encodingRequests.at(-1)?.screenFormat === 'compatible', `${locale}/compatible format`);
-      check(settingsStore.screenFormat === 'compatible' && formatCard('compatible').getAttribute('aria-pressed') === 'true'
-        && screenCodec.disabled && screenCodec.value === 'h264' && screenCodec.querySelector('[value="av1"]').disabled
-        && encodingStatus.textContent === language.t('settings.screenEncodingReady', { codec: 'H264' }),
-      'The compatible format checks and shows only H.264 (#858).');
-      formatCard('main').click();
-      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false'
-        && encodingRequests.at(-1)?.screenFormat === 'main', `${locale}/main format`);
-      check(settingsStore.screenFormat === 'main' && screenCodec.value === 'av1' && settingsStore.preferredScreenCodec === 'h264',
-        'Back in better quality, Automatic resolves AV1 again without touching the manual codec.');
+      check(formatSection.hidden && !encodingRequests.some(command => 'screenFormat' in command)
+        && !!(screenCodec.closest('[data-settings-section="screen-encoding"]').compareDocumentPosition(formatSection)
+          & Node.DOCUMENT_POSITION_FOLLOWING),
+      'The H.264 format sits below the screen encoding and stays hidden while Automatic sends AV1 (#890).');
       automatic.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
       const choicesStatus = quality.querySelector('#screen-encoding-choices');
       const encodingSettled = () => encodingStatus.getAttribute('aria-busy') === 'false'
@@ -264,6 +258,24 @@ async function runQualitySettingsSmoke() {
       await settled(() => settingsStore.screenEncodingStrategy === 'manual' && encodingSettled(), `${locale}/manual selection`);
       check(settingsStore.screenEncodingStrategy === 'manual' && screenCodec.value === 'h264',
         'Manual restores the saved exact choices and unlocks the encoding and codec controls.');
+      await settled(formatShown, `${locale}/H.264 format shown`);
+      formatCard('compatible').click();
+      check(settingsStore.screenFormat === 'compatible' && formatCard('compatible').getAttribute('aria-pressed') === 'true'
+        && !screenCodec.disabled && !screenCodec.querySelector('[value="av1"]').disabled,
+      'The compatible format never locks the codec choice (#890).');
+      screenCodec.value = 'av1';
+      screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
+      await settled(() => encodingSettled() && formatSection.hidden, `${locale}/AV1 hides the format`);
+      check(settingsStore.preferredScreenCodec === 'av1' && screenCodec.value === 'av1' && settingsStore.screenFormat === 'compatible'
+        && encodingStatus.textContent === language.t('settings.screenEncodingReady', { codec: 'AV1' }),
+      'Manual AV1 works with any saved format and hides the H.264-only format (#890).');
+      screenCodec.value = 'h264';
+      screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
+      await settled(() => encodingSettled() && formatShown(), `${locale}/H.264 shows the format`);
+      formatCard('main').click();
+      check(settingsStore.screenFormat === 'main' && settingsStore.preferredScreenCodec === 'h264'
+        && !encodingRequests.some(command => 'screenFormat' in command),
+      'Back in H.264 the format shows again; it never reaches encoder discovery (#890).');
       hardwareAvailable = false;
       screenCodec.value = 'av1';
       screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
@@ -447,6 +459,8 @@ async function runQualitySettingsSmoke() {
       preset.value = 'CUSTOM';
       preset.dispatchEvent(new Event('change', { bubbles: true }));
       await settled(() => quality.querySelectorAll('[data-bitrate-help]').length === 3, `${locale}/custom preset`);
+      // Opening Custom unfolds its panel and then reveals it; scrolling to a help button before that ends is undone.
+      await settleMotion(root.querySelector('.settings-content-body'), `${locale}/custom preset reveal`);
       check(quality.querySelector('#checkbox-screen-telemetry') === toggle,
         'Changing quality presets must not recreate or detach telemetry controls.');
       check(quality.querySelector('#checkbox-screen-preview-focus') === preview,

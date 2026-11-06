@@ -7,6 +7,30 @@ import weightsUrl from '../../assets/camera-effects/rvm-mobilenetv3.bin?url';
 import { CameraEffectError, needsPersonSegmentation, type CameraEffectSettings } from '../../utils/cameraEffects';
 import { CameraGpuCompositor } from './CameraGpuCompositor';
 
+const MODEL_OUTPUTS = ['fgr', 'pha', 'r1o', 'r2o', 'r3o', 'r4o'];
+let modForwarded = false;
+
+// WebGL has no CPU path for FloorMod, so RVM's tiny padding math ran on the GPU and
+// was read back synchronously. Computing it on the CPU avoids those stalls and keeps
+// the padding valid while compiling only (where GPU outputs are never written).
+function forwardShapeModToCpu(): void {
+  const original = tf.getKernel(tf.Mod, 'webgl');
+  if (modForwarded || !original) return;
+  modForwarded = true;
+  tf.unregisterKernel(tf.Mod, 'webgl');
+  tf.registerKernel({
+    kernelName: tf.Mod, backendName: 'webgl', kernelFunc: args => {
+      const { backend, inputs: { a, b } } = args;
+      if (!(backend instanceof MathBackendWebGL) || !a || !b || a.dtype !== 'int32' || b.dtype !== 'int32'
+        || a.shape.join() !== b.shape.join() || !backend.shouldExecuteOnCPU([a, b])) return original.kernelFunc(args);
+      const x = backend.readSync(a.dataId);
+      const y = backend.readSync(b.dataId);
+      if (!(x instanceof Int32Array) || !(y instanceof Int32Array) || y.includes(0)) return original.kernelFunc(args);
+      return backend.makeTensorInfo(a.shape, 'int32', x.map((value, i) => ((value % y[i]) + y[i]) % y[i]));
+    },
+  });
+}
+
 export class RvmPersonMatting {
   private recurrent: tf.Tensor[] = [];
   private ratio: tf.Scalar | null = null;
@@ -21,6 +45,7 @@ export class RvmPersonMatting {
       if (!tf.findBackendFactory('webgl')) tf.registerBackend('webgl', () => new MathBackendWebGL(), 2);
       if (!await tf.setBackend('webgl')) throw new CameraEffectError('unsupported');
       await tf.ready();
+      forwardShapeModToCpu();
       const backend = tf.backend();
       if (!(backend instanceof MathBackendWebGL)) throw new CameraEffectError('unsupported');
       model = await loadGraphModel(new URL(modelUrl, self.location.href).href, {
@@ -66,6 +91,27 @@ export class RvmPersonMatting {
     } finally { clearTimeout(timer); }
   }
 
+  // The first inference would compile ~370 WebGL programs one at a time, which
+  // dominated the first blur (#878). Compile-only mode queues them all so the
+  // driver can link them in parallel (KHR_parallel_shader_compile), off the frame path.
+  private async warmUp(width: number, height: number, ratio: tf.Scalar): Promise<void> {
+    const owned: tf.Tensor[] = [tf.zeros([1, height, width, 3])];
+    try {
+      tf.env().set('ENGINE_COMPILE_ONLY', true);
+      try {
+        const result = await this.model.executeAsync({
+          src: owned[0], downsample_ratio: ratio,
+          r1i: this.recurrent[0], r2i: this.recurrent[1], r3i: this.recurrent[2], r4i: this.recurrent[3],
+        }, MODEL_OUTPUTS);
+        owned.push(...(Array.isArray(result) ? result : [result]));
+      } finally { tf.env().set('ENGINE_COMPILE_ONLY', false); }
+      await this.backend.checkCompileCompletionAsync();
+      this.backend.getUniformLocations();
+    } catch {
+      // The real inference compiles whatever is still missing.
+    } finally { tf.dispose(owned); }
+  }
+
   public async render(bitmap: ImageBitmap, settings: CameraEffectSettings, background: ImageBitmap | null): Promise<ImageBitmap> {
     if (this.disposed || !needsPersonSegmentation(settings.mode)) throw new CameraEffectError('processing');
     const size = `${bitmap.width}x${bitmap.height}`;
@@ -73,6 +119,7 @@ export class RvmPersonMatting {
       this.reset();
       this.ratio = tf.scalar(Math.min(1, 480 / Math.max(bitmap.width, bitmap.height)));
       this.size = size;
+      await this.warmUp(bitmap.width, bitmap.height, this.ratio);
     }
     if (!this.ratio) throw new CameraEffectError('processing');
     let source: tf.Tensor | undefined;
@@ -84,7 +131,7 @@ export class RvmPersonMatting {
       const result = await this.model.executeAsync({
         src: source, downsample_ratio: this.ratio,
         r1i: this.recurrent[0], r2i: this.recurrent[1], r3i: this.recurrent[2], r4i: this.recurrent[3],
-      }, ['fgr', 'pha', 'r1o', 'r2o', 'r3o', 'r4o']);
+      }, MODEL_OUTPUTS);
       results = Array.isArray(result) ? result : [result];
       if (results.length !== 6) throw new CameraEffectError('processing');
       const [foreground, alpha, ...next] = results;

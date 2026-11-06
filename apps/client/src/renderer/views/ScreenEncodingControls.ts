@@ -11,6 +11,7 @@ import { FPS_OPTIONS } from './settings/qualityOptions';
 import { showInfoToast } from './CopyToast';
 import { platformSupports } from '../platform/capabilities';
 import { isDesktopOnly, lockedBlock } from '../utils/desktopOnly';
+import { isNoGpuScreenFailure } from '../utils/screenShareFailure';
 
 type CheckedProfile = {
   profile: NativeScreenVideoProfile;
@@ -45,6 +46,8 @@ export class ScreenEncodingControls {
   private captureKnown: boolean | null = null;
   // Without native capture there is no encoder to check; the controls say so instead.
   private captureUnavailable = false;
+  // Why capture is unavailable, when a check found out (no usable graphics card); empty for the generic reason.
+  private captureUnavailableReason = '';
 
   constructor(private readonly profile: () => NativeScreenVideoProfile | null,
     private readonly changed: () => void = () => {},
@@ -89,6 +92,7 @@ export class ScreenEncodingControls {
         <label for="select-video-codec">${t('settings.videoCodecSection')}</label>
         <select id="select-video-codec" aria-describedby="screen-codec-description screen-encoding-status screen-encoding-choices"
           ${settingsStore.screenEncodingStrategy === 'automatic' && !locked ? 'disabled' : ''}>
+          <option value="" disabled hidden id="screen-codec-placeholder">${t('common.loading')}</option>
           <option value="h264" ${settingsStore.preferredScreenCodec === 'h264' ? 'selected' : ''}>${t('settings.codecH264')}</option>
           <option value="av1" ${settingsStore.preferredScreenCodec === 'av1' ? 'selected' : ''}>${t('settings.codecAv1')}</option>
         </select>
@@ -183,19 +187,26 @@ export class ScreenEncodingControls {
     }, { signal: this.events?.signal });
   }
 
-  // The compatible format is always H.264 (#858): the codec choice waits for the better-quality format.
   private savedPreferences(): ScreenEncodingPreferences {
-    return { encodingStrategy: settingsStore.screenEncodingStrategy, encodingMode: settingsStore.screenEncodingMode,
-      codec: settingsStore.screenFormat === 'compatible' ? 'h264' : settingsStore.preferredScreenCodec };
+    return { encodingStrategy: settingsStore.screenEncodingStrategy,
+      encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec };
   }
 
-  private preferences(): ScreenEncodingPreferences {
-    const preferences = this.requested ?? this.savedPreferences();
-    return settingsStore.screenFormat === 'compatible' ? { ...preferences, codec: 'h264' } : preferences;
+  private preferences(): ScreenEncodingPreferences { return this.requested ?? this.savedPreferences(); }
+
+  /**
+   * The codec screens are sent in, as these controls show it: the manual choice, what Automatic resolved, or
+   * H.264 where the browser encodes. Null while Automatic is still resolving or nothing can be encoded (#890).
+   */
+  get transmittedCodec(): ScreenCodec | null {
+    if (isDesktopOnly('screenEncoderChoice')) return 'h264';
+    const preferences = this.preferences();
+    if (preferences.encodingStrategy === 'manual') return preferences.codec;
+    return this.pending ? null : this.availability?.selection?.codec ?? null;
   }
 
   private key(profile = this.profile(), preferences = this.preferences()): string {
-    return JSON.stringify([profile, settingsStore.screenFormat, preferences.encodingStrategy,
+    return JSON.stringify([profile, preferences.encodingStrategy,
       ...(preferences.encodingStrategy === 'automatic' ? [] : [preferences.encodingMode, preferences.codec])]);
   }
 
@@ -370,6 +381,15 @@ export class ScreenEncodingControls {
       checkedCurrent = true;
       console.warn('[ScreenEncoding] Encoder verification failed:', error);
       this.availability = null;
+      if (profile && isNoGpuScreenFailure(error)) {
+        // No encoder can run here, so retrying or checking alternatives would only fail again.
+        this.captureKnown = false;
+        this.captureUnavailable = true;
+        this.captureUnavailableReason = t('screenShare.failure.no-gpu');
+        this.settleWithoutCapture(profile, applyRequested);
+        this.clearToast = showInfoToast(this.captureUnavailableReason);
+        return;
+      }
       this.error = t('settings.screenEncodingProbeFailed');
       if (!automatic) this.choices.set(`${mode}:${codec}`, { error: this.error });
       this.requested = !automatic && this.savedPreferences().encodingStrategy === 'automatic' ? preferences : null;
@@ -425,7 +445,7 @@ export class ScreenEncodingControls {
 
   private async discoverChoices(probe: AbortController): Promise<void> {
     const profile = this.profile();
-    if (!profile) return;
+    if (!profile || this.captureUnavailable) return;
     const profileKey = JSON.stringify(profile), key = this.key(profile), saved = JSON.stringify(this.savedPreferences());
     if (this.choicesProfile !== profileKey) {
       this.choices.clear();
@@ -444,8 +464,7 @@ export class ScreenEncodingControls {
     this.render();
     try {
       for (const mode of ['hardware', 'software'] as const) {
-        // The compatible format has no AV1 to check (#858).
-        for (const codec of settingsStore.screenFormat === 'compatible' ? ['h264'] as const : ['h264', 'av1'] as const) {
+        for (const codec of ['h264', 'av1'] as const) {
           if (!current() || defer()) return;
           if (this.choice(mode, codec)) continue;
           let result: CheckedEncoding;
@@ -504,15 +523,13 @@ export class ScreenEncodingControls {
     }
     const codec = this.container?.querySelector<HTMLSelectElement>('#select-video-codec');
     if (codec) {
-      const compatible = settingsStore.screenFormat === 'compatible';
-      codec.disabled = unavailable || automatic || compatible;
-      codec.setAttribute('aria-readonly', String(unavailable || automatic || compatible));
+      codec.disabled = unavailable || automatic;
+      codec.setAttribute('aria-readonly', String(unavailable || automatic));
       for (const value of ['h264', 'av1'] as const) {
         const option = codec.querySelector<HTMLOptionElement>(`option[value="${value}"]`);
         if (!option) continue;
         const choice = this.choice(preferences.encodingMode, value);
-        option.disabled = (compatible && value !== 'h264')
-          || (!automatic && !!choice && !('error' in choice) && !choice.availability.selection);
+        option.disabled = !automatic && !!choice && !('error' in choice) && !choice.availability.selection;
         const label = t(value === 'av1' ? 'settings.codecAv1' : 'settings.codecH264');
         const explanation = automatic ? '' : this.choiceText(preferences.encodingMode, value, choice);
         option.textContent = !automatic && (!choice || 'error' in choice || !choice.availability.selection)
@@ -521,8 +538,12 @@ export class ScreenEncodingControls {
             ? t('settings.screenEncodingRetry') : t('screenShare.unavailable')}` : label;
         option.title = explanation;
       }
-      codec.value = compatible ? 'h264' : automatic ? selection?.codec ?? '' : preferences.codec;
+      codec.value = automatic ? selection?.codec ?? '' : preferences.codec;
       if (!automatic && codec.querySelector<HTMLOptionElement>(`option[value="${preferences.codec}"]`)?.disabled) codec.value = '';
+      // Without a codec to show, the field says why instead of staying blank.
+      const placeholder = codec.querySelector<HTMLOptionElement>('#screen-codec-placeholder');
+      const placeholderText = t(this.pending ? 'common.loading' : 'screenShare.unavailable');
+      if (placeholder && placeholder.textContent !== placeholderText) placeholder.textContent = placeholderText;
     }
     for (const mode of ['hardware', 'software'] as const) {
       const label = this.container?.querySelector(`#screen-encoding-${mode}-choice`);
@@ -543,7 +564,8 @@ export class ScreenEncodingControls {
     const status = this.container?.querySelector<HTMLElement>('#screen-encoding-status');
     if (status) {
       status.setAttribute('aria-busy', String(this.pending));
-      status.textContent = this.pending ? t('common.loading') : unavailable ? t('settings.screenEncodingCaptureUnavailable') : this.error
+      status.textContent = this.pending ? t('common.loading') : unavailable
+        ? this.captureUnavailableReason || t('settings.screenEncodingCaptureUnavailable') : this.error
         ? this.error
         : !selection ? t('settings.screenEncodingProfileUnavailable', {
           codec: settingsStore.preferredScreenCodec.toUpperCase(),

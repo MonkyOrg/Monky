@@ -1,15 +1,22 @@
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { openModal } from '../utils/modalShell';
-import { reportError } from '../utils/feedback';
+import { openExternalUrl, reportError } from '../utils/feedback';
 
 type DialogVariant = 'info' | 'warning' | 'danger' | 'success';
+
+/** A page that explains the dialog further, opened in the browser while the dialog stays. */
+interface DialogLink {
+  label: string;
+  url: string;
+}
 
 interface AlertOptions {
   title?: string;
   message: string;
   okLabel?: string;
   variant?: DialogVariant;
+  link?: DialogLink;
 }
 
 interface ConfirmOptions {
@@ -17,6 +24,7 @@ interface ConfirmOptions {
   message: string;
   /** A short remark below the message. */
   note?: string;
+  link?: DialogLink;
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: DialogVariant;
@@ -77,6 +85,7 @@ function buildDialog(params: {
   choices?: DialogChoices<string>;
   /** A short remark below the message, e.g. what was already decided elsewhere. */
   note?: string;
+  link?: DialogLink;
   signal?: AbortSignal;
   requireUserGesture?: boolean;
   focusCancel?: boolean;
@@ -103,6 +112,10 @@ function buildDialog(params: {
       </div>
       ${params.message ? `<div class="dialog-message" style="white-space: pre-line;">${escapeHtml(params.message)}</div>` : ''}
       ${params.note ? `<p class="dialog-note">${escapeHtml(params.note)}</p>` : ''}
+      ${params.link ? `<p class="dialog-link-row"><button type="button" class="btn btn-secondary dialog-link" data-action="open-link">
+        <span class="material-symbols-outlined md-16" aria-hidden="true">menu_book</span>${escapeHtml(params.link.label)}
+        <span class="material-symbols-outlined md-14" aria-hidden="true">open_in_new</span>
+      </button></p>` : ''}
       ${params.choices ? `<div class="dialog-choices">
         <p class="dialog-choices-legend" id="${inputId}-choices">${escapeHtml(params.choices.legend)}</p>
         ${params.choices.description ? `<p class="dialog-option-hint" id="${inputId}-choices-hint">${escapeHtml(params.choices.description)}</p>` : ''}
@@ -210,12 +223,22 @@ function buildDialog(params: {
       settle(false);
       return;
     }
+    if (e.target instanceof HTMLElement && e.target.dataset.action === 'open-link') {
+      e.target.click();
+      return;
+    }
     settle(true);
   }
 
   confirmButton?.addEventListener('click', (event) => {
     if (!params.requireUserGesture || event.isTrusted) settle(true);
   }, { signal: shell.signal });
+  const link = params.link;
+  if (link) {
+    card.querySelector('[data-action="open-link"]')?.addEventListener('click', () => {
+      void openExternalUrl(link.url, t('settings.linkOpenFailed', { url: link.url }));
+    }, { signal: shell.signal });
+  }
   inputs.forEach(field => field.addEventListener('input', () => validateInput('changes'), { signal: shell.signal }));
 
   if (shell.closed) return;
@@ -236,6 +259,7 @@ export function showAlert(options: AlertOptions): Promise<void> {
       confirmLabel: options.okLabel ?? t('common.ok'),
       cancelLabel: '',
       confirmClass: options.variant === 'danger' ? 'btn-danger' : 'btn-primary',
+      link: options.link,
       onResolve: () => resolve(),
     });
   });
@@ -249,6 +273,7 @@ export function showConfirm(options: ConfirmOptions): Promise<boolean> {
       focusCancel: options.focusCancel,
       message: options.message,
       note: options.note,
+      link: options.link,
       variant: options.variant ?? 'warning',
       showCancel: true,
       confirmLabel: options.confirmLabel ?? t('common.confirm'),
@@ -298,6 +323,8 @@ export function showConfirmWithOption(
     buildDialog({
       title: options.title ?? t('dialog.confirmTitle'),
       message: options.message,
+      note: options.note,
+      link: options.link,
       variant: options.variant ?? 'warning',
       showCancel: true,
       confirmLabel: options.confirmLabel ?? t('common.confirm'),

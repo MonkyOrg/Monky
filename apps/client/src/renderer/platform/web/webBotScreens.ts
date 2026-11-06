@@ -5,6 +5,7 @@ import {
 import type { BotScreenDocumentHost } from '../api';
 import { t } from '../../i18n';
 import { reportError } from '../../utils/feedback';
+import { bindWebBotScreenStorage, releaseWebBotScreenStorage } from './webBotStorage';
 
 /**
  * Bot miniapps on the web (#858). The app's own origin and CSP must never run a
@@ -80,26 +81,35 @@ const deliver = (event: MessageEvent<unknown>): void => {
     entry.origin === 'null' ? '*' : entry.origin);
 };
 
-export function createWebBotScreenDocument(html: string, consent: BotScreenDocumentConsent): Promise<string> {
+export async function createWebBotScreenDocument(html: string, consent: BotScreenDocumentConsent): Promise<string> {
   if (typeof html !== 'string' || !html || new TextEncoder().encode(html).byteLength > BOT_SCREEN_DOCUMENT_MAX_BYTES) {
-    return Promise.reject(new Error('Invalid miniapp document request.'));
+    throw new Error('Invalid miniapp document request.');
   }
-  if (!botScreenDocumentConsentSchema.safeParse(consent).success) {
-    return Promise.reject(new Error('Current, instance-bound miniapp consent is required.'));
-  }
-  if (documents.size >= MAX_DOCUMENTS) return Promise.reject(new Error('Close another miniapp before opening this one.'));
+  const parsed = botScreenDocumentConsentSchema.safeParse(consent);
+  if (!parsed.success) throw new Error('Current, instance-bound miniapp consent is required.');
+  if (documents.size >= MAX_DOCUMENTS) throw new Error('Close another miniapp before opening this one.');
   const token = crypto.randomUUID();
   const { url, origin } = documentUrl(token);
+  // Reserved before the storage choice is applied, so two openings at once cannot pass the limit.
   documents.set(url, { token, origin, html, refused: false });
   if (!listening) {
     listening = true;
     window.addEventListener('message', deliver);
   }
-  return Promise.resolve(url);
+  if (parsed.data.storage) {
+    try {
+      await bindWebBotScreenStorage(url, parsed.data.storage);
+    } catch (error) {
+      await removeWebBotScreenDocument(url);
+      throw error;
+    }
+  }
+  return url;
 }
 
 export function removeWebBotScreenDocument(url: string): Promise<void> {
   documents.delete(url);
+  releaseWebBotScreenStorage(url);
   if (documents.size === 0 && listening) {
     listening = false;
     window.removeEventListener('message', deliver);

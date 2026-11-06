@@ -526,7 +526,9 @@ class Host {
           description.AdapterLuid.LowPart;
       return;
     }
-    throw ContractError(IsSoftware(arguments_.encoder) ? "ERR_SCREEN_CAPTURE_DEVICE" : "ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED",
+    // A software encoder accepts any real adapter 0, so reaching here means there is none: only the
+    // software renderer of a virtual machine or a machine without a graphics driver.
+    throw ContractError(IsSoftware(arguments_.encoder) ? "ERR_SCREEN_CAPTURE_NO_GPU" : "ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED",
         "The selected encoder is not supported on capture adapter 0; cross-adapter or unrequested software fallback is forbidden");
   }
   void CheckDevice() {

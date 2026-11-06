@@ -19,7 +19,7 @@ disponíveis dependem do seu acesso.
 | Aba | Para que serve |
 | --- | --- |
 | Geral | Nome, imagem e banner, habilitação de eventos, limites, modo de voz e informações do processo servidor |
-| Segurança | Senha de entrada |
+| Segurança | Senha de entrada: se está ativa, mostrar, copiar, alterar ou remover |
 | Recursos de Voz e Vídeo | Permissão de Soundboard, cache de áudios recentes, relay de mensagens diretas, canal AFK e relay TURN integrado |
 | Armazenamento | Limites e uso de anexos |
 | Notificações | Menções, edição de mensagens e avisos publicados no chat |
@@ -29,8 +29,11 @@ disponíveis dependem do seu acesso.
 
 ### Aplicação imediata
 
-Switches e seleções aplicam imediatamente. Nomes, senhas e limites aplicam
-ao terminar a edição, ao sair do campo ou pressionar `Enter`. **Pronto**
+Switches e seleções aplicam imediatamente. Nomes e limites aplicam
+ao terminar a edição, ao sair do campo ou pressionar `Enter`. Uma nova senha
+é digitada duas vezes e aplica em **Salvar senha**; removê-la pede
+confirmação. **Mostrar** e **Copiar** só funcionam num aparelho que conhece a
+senha, como o que entrou com ela ou o que hospeda o servidor. **Pronto**
 apenas fecha a janela; não desfaz o que já foi confirmado.
 
 Enquanto houver uma operação pendente, o fechamento fica bloqueado. Um

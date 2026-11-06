@@ -241,8 +241,8 @@ export class WebScreenRuntime {
       throw new Error('The capture kind does not match what the browser captured.');
     if (command.audio && (!capture.audioTrack || !capabilities.captureAudio))
       throw new Error('The browser did not share sound with this capture.');
-    // The compatible format unless the publisher chose a better one this browser encodes; both are H.264.
-    const format = command.screenFormat ?? 'compatible';
+    // The better-quality format unless the publisher chose the compatible one (#890); both are H.264.
+    const format = command.screenFormat ?? 'main';
     if (!capabilities.browserFormats?.includes(format)) throw new Error(`This browser cannot share in the ${format} format.`);
     call.admitting.add(command.shareId);
     try {

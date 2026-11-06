@@ -90,6 +90,12 @@ delas, ativar o item abre esse convite. Uma regra só decide isso, `featureAvail
 `utils/desktopOnly.ts`. Só a barra de título e os botões da janela do desktop
 somem na web.
 
+Quando um recurso existe nas duas, a regra fica num motor só e cada plataforma
+fornece o armazenamento. As mensagens diretas usam `packages/dm`. O armazenamento
+dos miniapps no aparelho usa `botDeviceStorageEngine.ts`, em `packages/shared`: o
+desktop grava arquivos pelo processo main, e a web grava no IndexedDB da origem do
+app, nunca na dos miniapps.
+
 Três barreiras protegem essa ponte. A Content-Security-Policy do `index.html`
 só executa scripts do próprio app, então um HTML injetado por engano não roda;
 um recurso de tipo novo (outro iframe, worker ou origem) precisa entrar nessa
@@ -287,10 +293,10 @@ do próprio navegador (`getDisplayMedia`), cada perfil pedido é uma cópia da
 captura reduzida pelo navegador, e o envio é H.264 por conexões próprias
 para cada espectador em P2P ou por um par de producers de tela no SFU, com o
 mesmo protocolo `monky-native-screen-p2p` e os mesmos dados de rendição. O
-formato padrão é o Constrained Baseline (`42e0..`, packetization-mode 1), que
-todo receptor decodifica, inclusive o Firefox e o Safari; quem publica pode
-escolher o H.264 Main, de imagem melhor, que só o Chrome, o Edge e o desktop
-assistem. O codec fica fixo pelo `setCodecPreferences` em P2P e pelo codec do
+formato padrão é o H.264 Main, de imagem melhor, que só o Chrome, o Edge e o
+desktop assistem; quem publica pode escolher o Constrained Baseline (`42e0..`,
+packetization-mode 1), que todo receptor decodifica, inclusive o Firefox e o
+Safari. O codec fica fixo pelo `setCodecPreferences` em P2P e pelo codec do
 producer no SFU, mesmo quando o navegador usaria o encoder de hardware. O
 renderer acima dele não muda; o seletor é a janela do navegador
 (`views/screenShare/BrowserScreenSharePicker.ts`), e a versão web assiste
@@ -299,8 +305,10 @@ transmissão (o Firefox diante do H.264 Main ou do AV1) recebe uma mensagem que
 nomeia o formato, e não a falha genérica de conexão.
 
 O app desktop oferece o mesmo par de formatos em Qualidade e compartilhamento,
-com Melhor qualidade (H.264 Main ou AV1) como padrão. No Compatível, o Main
-escolhe só encoders H.264 e passa `--h264-profile=constrained-baseline` ao host
+com Melhor qualidade como padrão. O formato é um perfil H.264 e não restringe o
+codec: o Automático continua escolhendo o AV1 quando disponível. Quando a tela
+sai em H.264 no Compatível, o Main
+passa `--h264-profile=constrained-baseline` ao host
 de captura: x264, NVENC e AMF usam o perfil `baseline` do OBS, e o VideoToolbox
 usa `H264_ConstrainedBaseline_AutoLevel`. O host e o motor marcam o
 `constraint_set1` de um SPS Baseline sem grupos de slices nem imagens
@@ -481,9 +489,10 @@ A validação dos payloads usa **zod**, com os schemas em `packages/shared` —
 os mesmos que o cliente usa para validar antes de enviar.
 
 ::: warning Compatibilidade negociada, nunca um downgrade irrestrito
-O protocolo **26** negocia pisos independentes: **26 para clientes** e **24 para
-bots**, além de recursos em `AUTH_CONNECT`/`AUTH_SUCCESS`. O contrato nativo de
-tela 4K/80 Mbps exige atualizar cliente e servidor; clientes 24/25 não são
+Desde o protocolo **26**, os pisos de clientes e de bots são independentes. Hoje
+são **35 para clientes** (`MIN_CLIENT_PROTOCOL`) e **24 para bots**
+(`MIN_BOT_PROTOCOL`), além de recursos em `AUTH_CONNECT`/`AUTH_SUCCESS`. O contrato nativo de
+tela 4K/80 Mbps exige atualizar cliente e servidor; clientes mais antigos não são
 rebaixados silenciosamente. Bots 24 continuam usando seu contrato anterior de
 áudio e comandos. Blocos de mensagem e configuração de limite só são habilitados
 com as capacidades correspondentes. O SDK pode repetir a autenticação uma vez

@@ -190,13 +190,14 @@ A câmera mantém o teto de 120 FPS, ou 60 FPS em 4K.
 Ela usa a captura do Chromium e os modos oferecidos pela webcam, um caminho
 diferente da captura nativa de tela.
 
-O **Formato do vídeo** decide quem consegue assistir à tela. **Melhor qualidade**,
-o padrão do app desktop, usa o codec escolhido (H.264 Main ou AV1), que o Chrome,
-o Edge e o app desktop assistem. **Compatível**, o padrão da versão web, usa
-H.264 Constrained Baseline, que todos assistem, inclusive o Firefox e o Safari.
-No Compatível, a tela sai sempre em H.264, e um 4K acima de 64 FPS é reduzido,
-porque o Firefox decodifica esse perfil só até o nível 5.2. A escolha vale a
-partir do próximo compartilhamento.
+O **Formato do vídeo** aparece abaixo de **Codificação de tela** só quando a tela
+sai em H.264, e decide quem consegue assistir. **Melhor qualidade**, o padrão no
+app desktop e na versão web, usa o H.264 Main, que o Chrome, o Edge e o app
+desktop assistem. **Compatível** usa H.264 Constrained Baseline, que todos
+assistem, inclusive o Firefox e o Safari; um 4K acima de 64 FPS é reduzido,
+porque o Firefox decodifica esse perfil só até o nível 5.2. O formato não muda o
+codec: o Automático continua escolhendo o AV1 quando disponível, e com AV1 a
+opção some e não tem efeito. A escolha vale a partir do próximo compartilhamento.
 
 Qualquer alteração de qualidade — preset, resolução, FPS, bitrate, codec ou
 Hardware/Software — valida a combinação antes de aplicá-la. Se necessário, o

@@ -1,15 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { ipcMain, protocol, type Session, type WebContents } from 'electron';
-import { BOT_SCREEN_DOCUMENT_IPC, BOT_SCREEN_DOCUMENT_MAX_BYTES, botScreenDocumentConsentSchema, type BotDeviceStorageScope } from '@monky/shared';
-import { botDeviceStorageScopeId, type BotDeviceStorage } from './botStorage/BotDeviceStorage';
-
-/** Storage on this computer that one opened miniapp document may reach. */
-export interface BotScreenStorageBinding {
-  scopeId: string;
-  scope: BotDeviceStorageScope;
-  /** "Only this session": lasts while this document exists; reopening asks again. */
-  session: boolean;
-}
+import {
+  BOT_SCREEN_DOCUMENT_IPC, BOT_SCREEN_DOCUMENT_MAX_BYTES, bindBotScreenStorage, botScreenDocumentConsentSchema,
+  type BotScreenStorageBinding,
+} from '@monky/shared';
+import type { BotDeviceStorage } from './botStorage/BotDeviceStorage';
 
 const scheme = 'monky-miniapp';
 const documents = new Map<string, { owner: WebContents; session: Session; html: string; storage: BotScreenStorageBinding | null }>();
@@ -64,23 +59,7 @@ export function bindBotScreenDocuments(isOwner: (contents: WebContents) => boole
     }
     const owner = event.sender;
     const html = args[0];
-    let binding: BotScreenStorageBinding | null = null;
-    if (consent.data.storage && storage) {
-      const { scope, grant } = consent.data.storage;
-      const scopeId = botDeviceStorageScopeId(scope);
-      let session = grant === 'session';
-      if (grant === 'always') {
-        try {
-          // "Always" is remembered, but never overrides a "Never" chosen in the bot settings.
-          if (await storage.decision(scopeId) === 'ask') await storage.setDecision(scope, 'always');
-        } catch (error) {
-          // The person allowed it: that holds for this view, and each storage operation reports its own failure.
-          console.warn('[Bot storage] Could not remember the storage decision; it applies to this view only.', error);
-          session = true;
-        }
-      }
-      binding = { scopeId, scope, session };
-    }
+    const binding = consent.data.storage && storage ? await bindBotScreenStorage(storage, consent.data.storage) : null;
     if (owner.isDestroyed() || !isOwner(owner)) throw new Error('The miniapp window closed.');
     if ([...documents.values()].filter(entry => entry.owner === owner).length >= 2) {
       throw new Error('Close another miniapp before opening this one.');

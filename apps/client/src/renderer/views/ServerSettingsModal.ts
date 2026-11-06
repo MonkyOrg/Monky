@@ -58,6 +58,7 @@ export class ServerSettingsModal {
   private domEvents = new AbortController();
   private bindings: FieldBinding[] = [];
   private generalTab = new ServerGeneralTab();
+  private securityTab = new ServerSecurityTab();
   private storageTab = new ServerStorageTab();
   private rolesTab = new ServerRolesTab();
   private botsTab = new ServerBotsTab();
@@ -102,7 +103,7 @@ export class ServerSettingsModal {
 
     const tabs: Array<SettingsTabEntry & { permission: Permission | undefined; html: string }> = [
       { id: 'general', icon: 'tune', label: 'serverSettings.tabGeneral', permission: undefined, html: this.generalTab.renderHtml(this.communitySettings) },
-      { id: 'security', icon: 'lock', label: 'serverSettings.tabSecurity', permission: Permission.MANAGE_SERVER, html: new ServerSecurityTab().renderHtml() },
+      { id: 'security', icon: 'lock', label: 'serverSettings.tabSecurity', permission: Permission.MANAGE_SERVER, html: this.securityTab.renderHtml() },
       { id: 'voice_video', icon: 'music_note', label: 'serverSettings.tabVoiceVideo', permission: Permission.MANAGE_SERVER, html: new ServerVoiceVideoTab().renderHtml() },
       { id: 'storage', icon: 'cloud', label: 'serverSettings.tabStorage', permission: Permission.MANAGE_SERVER, html: this.storageTab.renderHtml() },
       { id: 'notifications', icon: 'notifications', label: 'serverSettings.tabNotifications', permission: undefined, html: new ServerNotificationsTab().renderHtml() },
@@ -208,8 +209,8 @@ export class ServerSettingsModal {
       () => String(details()?.maxMessageLength || LIMITS.MAX_MESSAGE_LENGTH), messageLimitPatch);
     this.bindSetting('#input-server-name', 'name', 'serverSettings.nameLabel',
       () => details()?.name ?? '', (value) => ({ name: value.trim() }));
-    this.bindSetting('#input-server-pass', 'password', 'invite.passwordLabel', () => '',
-      (value) => value ? { password: value } : null);
+    this.securityTab.attach(root, context,
+      (password) => this.applyPatch('password', t('serverSettings.passwordSection'), { password }), this.domEvents.signal);
     const memberPatch = (): ServerUpdateSettingsPayload => {
       const limited = root.querySelector<HTMLInputElement>('#checkbox-limit-members')?.checked;
       const value = Number(root.querySelector<HTMLInputElement>('#input-max-users')?.value);
@@ -277,9 +278,6 @@ export class ServerSettingsModal {
     const inputName = root.querySelector<HTMLInputElement>('#input-server-name');
     const emojiButton = root.querySelector<HTMLButtonElement>('#btn-emoji-server-name');
     if (inputName && emojiButton) this.unbind.push(attachInputEmojiPicker(inputName, emojiButton));
-    root.querySelector('#btn-remove-pass')?.addEventListener('click', () => {
-      this.applyPatch('password', t('invite.passwordLabel'), { password: null });
-    }, options);
     root.querySelector('#server-icon-wrapper')?.addEventListener('click', () => {
       if (context.operations.isPending('icon')) return;
       void context.operations.run('icon', t('serverSettings.iconAlt'), Permission.MANAGE_SERVER, async () => {
@@ -362,10 +360,11 @@ export class ServerSettingsModal {
     }, options);
   }
 
-  private applyPatch(key: string, label: string, patch: ServerUpdateSettingsPayload): void {
+  /** Resolves whether the edit went through: declined, refused and failed edits resolve false. */
+  private applyPatch(key: string, label: string, patch: ServerUpdateSettingsPayload): Promise<boolean> {
     const context = this.context;
-    if (!context) return;
-    void context.operations.run(key, label, Permission.MANAGE_SERVER, async () => {
+    if (!context) return Promise.resolve(false);
+    return context.operations.run(key, label, Permission.MANAGE_SERVER, async () => {
       const persisted = context.store.serverDetails;
       if (!persisted) throw new Error(t('serverSettings.sessionChanged'));
       const error = serverSettingsValidationError(patch, persisted, context.store.knownMembers.size);
@@ -377,7 +376,7 @@ export class ServerSettingsModal {
           confirmLabel: t('serverSettings.voiceModeDisconnectConfirm'),
           cancelLabel: t('common.cancel'), variant: 'warning',
         });
-        if (!confirmed) return;
+        if (!confirmed) return false;
       }
       // Turning the AFK channel off deletes the room and drops whoever is in it.
       if (patch.afkChannelEnabled === false && afkChannelIdOf(persisted)) {
@@ -387,7 +386,17 @@ export class ServerSettingsModal {
           confirmLabel: t('serverSettings.afkDisableConfirm'),
           cancelLabel: t('common.cancel'), variant: 'danger',
         });
-        if (!confirmed) return;
+        if (!confirmed) return false;
+      }
+      // Removing the password lets anyone with the address in.
+      if (patch.password === null && persisted.hasPassword) {
+        const confirmed = await showConfirm({
+          title: t('serverSettings.removePasswordTitle'),
+          message: t('serverSettings.removePasswordMessage'),
+          confirmLabel: t('serverSettings.removePassword'),
+          cancelLabel: t('common.cancel'), variant: 'danger',
+        });
+        if (!confirmed) return false;
       }
       const stopProgress = patch.turnEnabled && !persisted.turnAvailability?.supported
         ? this.trackInstallProgress(context) : null;
@@ -400,7 +409,8 @@ export class ServerSettingsModal {
       } finally {
         stopProgress?.();
       }
-    });
+      return true;
+    }).then((result) => result.ok && result.value);
   }
 
   private refreshState(): void {
@@ -472,21 +482,7 @@ export class ServerSettingsModal {
     const icon = root.querySelector<HTMLImageElement>('#server-icon-preview');
     if (icon) icon.src = s.iconUrl ? getAvatarUrl(s.iconUrl) : logoUrl;
     root.querySelector('#server-icon-wrapper')?.setAttribute('aria-busy', String(operations.isPending('icon')));
-    const removePassword = root.querySelector<HTMLButtonElement>('#btn-remove-pass');
-    if (removePassword) removePassword.hidden = !s.hasPassword;
-    const passwordTitle = root.querySelector('#password-status-title');
-    if (passwordTitle) passwordTitle.textContent = t(s.hasPassword ? 'serverSettings.statusProtected' : 'serverSettings.statusOpen');
-    const passwordDescription = root.querySelector('#password-status-desc');
-    if (passwordDescription) passwordDescription.textContent = t(s.hasPassword ? 'serverSettings.statusProtectedDesc' : 'serverSettings.statusOpenDesc');
-    const passwordLabel = root.querySelector('#label-password-field');
-    if (passwordLabel) passwordLabel.textContent = t(s.hasPassword ? 'serverSettings.changePasswordLabel' : 'serverSettings.setPasswordLabel');
-    const password = root.querySelector<HTMLInputElement>('#input-server-pass');
-    if (password) password.placeholder = t(s.hasPassword ? 'serverSettings.changePasswordPlaceholder' : 'serverSettings.setPasswordPlaceholder');
-    const passwordIcon = root.querySelector<HTMLElement>('#password-status-icon');
-    if (passwordIcon) {
-      passwordIcon.textContent = s.hasPassword ? 'lock' : 'lock_open';
-      passwordIcon.style.color = s.hasPassword ? '#f0b232' : '#23a55a';
-    }
+    this.securityTab.refreshState(root, context);
     const memberCount = root.querySelector('#server-settings-member-count');
     if (memberCount) memberCount.textContent = t('serverSettings.membersCount', { count: store.knownMembers.size });
     const memberLimitHint = root.querySelector('#server-settings-member-limit-hint');

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quando o microfone não inicia ao entrar numa chamada, o aviso agora explica o motivo no idioma do app (nenhum microfone encontrado, microfone em uso ou permissão negada), sem a mensagem técnica do navegador.",
+  "en": "When the microphone fails to start as you join a call, the notice now explains why in the app language (no microphone found, microphone in use or permission denied) instead of the browser's technical message."
+}

@@ -11829,6 +11829,18 @@ button.member-live-badge:focus-visible {
   overflow-wrap: anywhere;
 }
 
+/* A docs page that explains the dialog further; it opens outside and the dialog stays. */
+.dialog-link-row {
+  margin: 12px 0 0;
+}
+
+.dialog-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
 /* Mutually exclusive choice inside a confirmation, as selectable cards. */
 .dialog-choices {
   margin-top: 16px;

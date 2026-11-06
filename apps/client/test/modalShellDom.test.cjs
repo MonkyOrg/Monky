@@ -246,6 +246,27 @@ async function runRegression(language) {
   await contract('Alert', () => showAlert({ message: 'Notice' }));
   check(await contract('Confirmation', () => showConfirm({ message: 'Sure?' })) === false, 'Escape cancels a confirmation');
 
+  // A docs link opens outside the app and keeps the dialog open; Enter on it opens the link instead of confirming (#874, #877).
+  const opened = [];
+  const previousApi = window.api;
+  window.api = { ...previousApi, openExternal: async url => { opened.push(url); return { success: true }; } };
+  let linkedDone = false;
+  const linked = showConfirm({ message: 'Reach it', link: { label: 'How to', url: 'https://docs.example/reach' } });
+  void linked.then(() => { linkedDone = true; });
+  const docsLink = await until(() => document.querySelector('.modal-backdrop:not([data-ui-closing]) [data-action="open-link"]'), 'The docs link did not render');
+  check(docsLink.textContent.includes('How to') && docsLink.tagName === 'BUTTON', 'The link is a labelled button');
+  docsLink.click();
+  await until(() => opened.length === 1, 'Clicking the link did not open it');
+  docsLink.focus();
+  key('Enter');
+  await until(() => opened.length === 2, 'Enter on the link did not open it');
+  check(!linkedDone && docsLink.isConnected && opened.every(url => url === 'https://docs.example/reach'),
+    'Opening the docs keeps the dialog open, unanswered');
+  docsLink.closest('.modal-card').querySelector('[data-action="confirm"]').click();
+  check(await linked === true, 'The dialog still confirms after opening the docs');
+  window.api = previousApi;
+  await settled();
+
   // Typing only marks a refused value; the reason goes to the shared alert toast.
   const naming = showConfirmWithText({ message: 'Name it', textInput: { label: 'Name', value: 'ok', validate: value => value.includes('/') ? 'No slashes' : undefined } });
   let namingDone = false;

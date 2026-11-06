@@ -15,6 +15,7 @@ import { stopLocalScreenShares } from './screenShareControls';
 import { afkChannelIdOf } from '../utils/voiceRooms';
 import { showInfoToast } from '../views/CopyToast';
 import { announceCallJoined, announceCallLeft } from './callCues';
+import { microphoneFailureReason } from './AudioDeviceService';
 
 interface ClientIdentity {
   publicKey: string;
@@ -378,7 +379,7 @@ export async function joinCallOnSession(
     webRtcManager.setCurrentSessionId(mySessionId);
 
     let audioTrack: MediaStreamTrack | null = null;
-    let microphoneError: Error | null = null;
+    let microphoneError: string | null = null;
     try {
       const stream = await audioProcessor.startMicrophone();
       if (!isCurrent()) {
@@ -386,7 +387,12 @@ export async function joinCallOnSession(
         assertCurrent();
       }
       audioTrack = stream.getAudioTracks()[0] ?? null;
-      if (!audioTrack || audioTrack.readyState !== 'live') throw new Error(t('voiceJoin.noAudioTrack'));
+      if (!audioTrack || audioTrack.readyState !== 'live') {
+        audioTrack = null;
+        audioProcessor.stopMicrophone();
+        microphoneError = t('voiceJoin.noAudioTrack');
+        clientLog.warn('AUDIO', 'Admitted to voice without a microphone', { error: 'no live audio track' });
+      }
     } catch (error) {
       assertCurrent();
       if (error instanceof Error && error.name === 'AbortError') {
@@ -395,8 +401,8 @@ export async function joinCallOnSession(
       } else {
         audioTrack = null;
         audioProcessor.stopMicrophone();
-        microphoneError = error instanceof Error ? error : new Error(String(error));
-        clientLog.warn('AUDIO', 'Admitted to voice without a microphone', { error: microphoneError.message });
+        microphoneError = microphoneFailureReason(error);
+        clientLog.warn('AUDIO', 'Admitted to voice without a microphone', { error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) });
       }
     }
     webRtcManager.resumeAfterVoiceReconnect();
@@ -414,7 +420,7 @@ export async function joinCallOnSession(
     }
     assertCurrent();
     announceCallJoined(sessionKey, channelId);
-    if (microphoneError) appEvents.emit('voice.microphone_failed', { error: microphoneError.message });
+    if (microphoneError) appEvents.emit('voice.microphone_failed', { error: microphoneError });
     if (reconnect) appEvents.emit('voice.mode_switched', { mode: 'p2p' });
   } catch (error) {
     if (!isCurrent()) throw cancelled();

@@ -52,8 +52,16 @@ export class QualityTab {
   private released = false;
   private appliedEncoding = '';
   private readonly encoding = new ScreenEncodingControls(() => nativeScreenProfile(this.qualityProfile()),
-    undefined, profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest(),
+    () => this.renderScreenFormat(), profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest(),
     () => this.settleReleasedRequest());
+
+  /** The format is an H.264 profile (#890): it shows only while screens go out in H.264, below the encoding. */
+  private renderScreenFormat(): void {
+    const section = this.container?.querySelector<HTMLElement>('#screen-format-section');
+    const codec = this.encoding.transmittedCodec;
+    // While Automatic resolves, the section keeps what it showed instead of flickering.
+    if (section && codec) setSurfaceVisible(section, codec === 'h264');
+  }
 
   private qualityProfile(): QualityProfile {
     return this.requestedQuality?.profile ?? (settingsStore.qualityPreset === 'CUSTOM'
@@ -100,7 +108,7 @@ export class QualityTab {
   }
 
   private commitQualityChanges(preset: QualityPresetType, customProfile?: QualityProfile, persist = true,
-    confirm = false): void {
+    confirm = false): Promise<number | null> {
     const previousPreset = settingsStore.qualityPreset, previousCustom = settingsStore.customProfile;
     const profile = preset === 'CUSTOM' ? customProfile ?? previousCustom : QUALITY_PRESETS[preset];
     webRtcManager.assertScreenSharingSettings(profile);
@@ -116,6 +124,7 @@ export class QualityTab {
     if (persist) settingsStore.save();
     void this.encoding.refresh();
     if (confirm) this.confirmQualityChange(profile, applied);
+    return applied;
   }
 
   // Active shares confirm only after their replacement source is live; failures are reported by the share.
@@ -138,11 +147,15 @@ export class QualityTab {
     // A clamp notice or FPS adjustment already explains the applied value; never replace it.
     const confirm = !!this.requestedQuality && !this.requestedQuality.noticeShown && !adjusted;
     const encoding = this.encodingKey();
+    const encodingChanged = this.appliedEncoding !== encoding;
     this.requestedQuality = null;
     try {
-      this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined,
+      const applied = this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined,
         persist, confirm);
       this.appliedEncoding = encoding;
+      if (encodingChanged && !confirm) void applied.then(shares => {
+        if (shares) showSuccessToast(t('settings.screenEncodingAppliedLive'), 5000);
+      });
     } catch (error) {
       this.renderQualityDetails();
       throw error;
@@ -162,13 +175,14 @@ export class QualityTab {
     // Reopening while a request is still being verified shows that request, not the old value.
     const preset = this.requestedQuality?.preset ?? settingsStore.qualityPreset;
     return `
-      <div class="form-group" data-settings-section="screen-format" data-settings-label="${escapeHtml(t('screenShare.format'))}">
+      ${ScreenEncodingControls.html()}
+      <div id="screen-format-section" class="form-group" data-settings-section="screen-format"
+        data-settings-label="${escapeHtml(t('screenShare.format'))}" ${this.encoding.transmittedCodec === 'h264' ? '' : 'hidden'}>
         <label>${t('screenShare.format')}</label>
         ${renderChoiceCards({ id: 'screen-format-choice', label: t('screenShare.format'), attribute: 'data-screen-format',
           selected: settingsStore.screenFormat, choices: screenFormatSchema.options.map(screenFormatChoice) })}
         <p id="screen-format-apply" class="audio-device-status">${t('settings.screenFormatApply')}</p>
       </div>
-      ${ScreenEncodingControls.html()}
       ${lockedBlock('nativeScreenAudio', 'screenReceiver', `<div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
         <label>${t('settings.screenReceiverSection')}</label>
         <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenReceiverSection'))}" aria-describedby="screen-receiver-warning screen-receiver-apply">
