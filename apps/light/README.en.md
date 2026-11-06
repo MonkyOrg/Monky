@@ -84,6 +84,7 @@ Enter one JSON object per line in the terminal, using the received channel ID:
 {"command":"set-output","deviceId":null}
 {"command":"set-input-mode","mode":"push_to_talk"}
 {"command":"ptt","active":true}
+{"command":"set-volume","sessionId":"SESSION-ID","volume":150}
 {"command":"stats","id":"my-query"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -157,6 +158,20 @@ effect immediately. The track sends silence, and the local user is not shown
 speaking. Mute, deafen, and server restrictions still apply while the key is
 held. Switching modes or leaving the call releases the key. `ptt` outside
 push-to-talk mode is rejected.
+
+### Per-participant volume
+
+`set-volume` sets, from 0 to 200%, how loud you hear one voice session
+(`sessionId` from the participant list), like the full client's slider. It is a
+local preference: neither the server nor the other participants know about it.
+The choice is saved in the profile, applies at once to the current call and to
+later ones, in both P2P and SFU, and emits `participant-volume`. `stats` lists in
+`userVolumes` the non-default volumes of the current call's sessions.
+
+WebRTC applies the gain to the decoded stream before mixing: there is no extra
+processing, and 100% costs nothing. Setting 100 again removes the entry. The
+profile keeps up to 256 sessions with a changed volume; beyond that, `set-volume`
+is rejected until one is set back to 100.
 
 ## Tray interface
 
@@ -255,7 +270,7 @@ require explicit recovery, never silent replacement. Directories containing
 another application's files are rejected.
 
 `monky-light-settings.json` stores only user preferences (currently audio
-devices and the input mode) and never participates in identity validation. It is replaced
+devices, the input mode, and each participant's volume) and never participates in identity validation. It is replaced
 atomically under the profile lock. Invalid or unreadable settings emit a
 `warning`, fall back to defaults, and are replaced by the next save; an
 interrupted settings write does not require recovery.

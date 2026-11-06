@@ -313,6 +313,15 @@ std::vector<SdpSection> Sections(const std::string &sdp) {
 }
 } // namespace
 
+// A remote audio source scales its decoded stream before the mixer; nothing
+// is added to the audio path and the default gain costs nothing.
+void SetGain(webrtc::MediaStreamTrackInterface *track, double gain) {
+  if (!track || track->kind() != webrtc::MediaStreamTrackInterface::kAudioKind)
+    return;
+  if (auto *source = static_cast<webrtc::AudioTrackInterface *>(track)->GetSource())
+    source->SetVolume(gain);
+}
+
 struct VoiceEngine::Impl : std::enable_shared_from_this<VoiceEngine::Impl> {
   struct Peer;
   struct SfuListener;
@@ -545,6 +554,11 @@ struct VoiceEngine::Impl : std::enable_shared_from_this<VoiceEngine::Impl> {
   void ScheduleSpeech();
   void SampleSpeech();
   void ReportSpeech(const std::string &session, std::optional<bool> change);
+  double Volume(const std::string &session) const {
+    const auto found = config.volumes.find(session);
+    return found == config.volumes.end() ? 1.0 : found->second;
+  }
+  void ApplyVolume(const std::string &session);
 };
 
 struct VoiceEngine::Impl::Peer : webrtc::PeerConnectionObserver,
@@ -1278,8 +1292,11 @@ void VoiceEngine::Impl::ConfigureTracks(Peer &peer) {
                         peer.participant.user_id != config.self_user_id &&
                         !peer.participant.suppressed &&
                         !token->deafened.load();
-    if (auto track = transceiver->receiver()->track())
+    if (auto track = transceiver->receiver()->track()) {
       track->set_enabled(listen);
+      if (listen)
+        SetGain(track.get(), Volume(peer.participant.session_id));
+    }
     if (transceiver->media_type() == webrtc::MediaType::VIDEO) {
       if (!transceiver->stopped())
         Check(transceiver->StopStandard(), "Reject video transceiver");
@@ -1718,6 +1735,7 @@ void VoiceEngine::Impl::Consume(const std::string &id) {
     // The transport keeps a pointer to it until it is closed: listed at once,
     // whatever happens next, it is closed with the call.
     auto &owned = consumers.emplace(id, std::move(consumer)).first->second;
+    SetGain(owned->GetTrack(), Volume(session));
     if (token->deafened.load()) {
       owned->Pause();
       Notify(msg::SFU_CONSUMER_SET_PAUSED, {{"channelId", config.channel_id},
@@ -2053,6 +2071,32 @@ void VoiceEngine::update_policy(AudioPolicy policy) {
       engine.ApplyPolicy();
     });
   }
+}
+
+void VoiceEngine::Impl::ApplyVolume(const std::string &session) {
+  if (const auto peer = peers.find(session);
+      peer != peers.end() && peer->second->mic_transceiver)
+    SetGain(peer->second->mic_transceiver->receiver()->track().get(),
+            Volume(session));
+  for (const auto &[id, consumer] : consumers)
+    if (const auto found = known_producers.find(id);
+        found != known_producers.end() &&
+        Text(found->second, "producerSessionId") == session)
+      SetGain(consumer->GetTrack(), Volume(session));
+}
+
+void VoiceEngine::set_volume(std::string session_id, double gain) {
+  if (!(gain >= 0.0 && gain <= 2.0))
+    throw std::invalid_argument("Participant gain must be between 0 and 2");
+  auto self = owner_->impl;
+  if (auto call = self->Ingress())
+    self->ForCall(call, [session = std::move(session_id), gain](Impl &engine) {
+      if (gain == 1.0)
+        engine.config.volumes.erase(session);
+      else
+        engine.config.volumes[session] = gain;
+      engine.ApplyVolume(session);
+    });
 }
 
 void VoiceEngine::select_devices(AudioDevicePreference devices) {
