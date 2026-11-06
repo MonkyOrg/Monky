@@ -535,6 +535,27 @@ for (const screenFormat of ['compatible', 'main']) {
   });
 }
 
+for (const [setting, field, value] of [['preferredScreenCodec', 'codec', 'av1'], ['screenEncodingMode', 'encodingMode', 'software'],
+  ['screenEncodingStrategy', 'encodingStrategy', 'manual'], ['screenFormat', 'screenFormat', 'main']]) {
+  test(`changing only ${setting} replaces the share on air with the new encoding; an unchanged one stays`, async t => {
+    const f = fixture(t), old = await f.local();
+    await f.controller.applyQuality(profile());
+    const additions = () => f.commands.filter(command => command.action === 'source-add');
+    const before = f.captures.get(old.shareId).source.instanceId;
+    await f.controller.applyQuality(profile());
+    assert.equal(additions().length, 2, 'Same quality and encoding keep the source as is');
+    f.settings[setting] = value;
+    await f.controller.applyQuality(profile());
+    assert.equal(additions().length, 3);
+    const replacement = additions().at(-1);
+    assert.equal(replacement[field], value);
+    assert.equal(replacement.replacesSourceInstanceId, before);
+    assert.equal(f.commands.some(command => command.action === 'source-remove'), false, 'The share never leaves the call');
+    await f.controller.applyQuality(profile());
+    assert.equal(additions().length, 3, 'The new encoding is remembered by the replacement');
+  });
+}
+
 for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
   test(`source-start audio handoff gates preview on exact old retirement (${failure ?? 'success'})`, async t => {
     const f = fixture(t, { capabilities: {

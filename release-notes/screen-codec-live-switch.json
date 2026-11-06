@@ -1,0 +1,5 @@
+{
+  "group": "melhorias",
+  "pt-BR": "Agora dá para trocar o codec e o formato da transmissão de tela enquanto você está transmitindo: o Monky reinicia a transmissão com a nova configuração. Enquanto os codecs carregam, o campo mostra \"Carregando\" em vez de ficar vazio.",
+  "en": "You can now change the screen sharing codec and format while you are sharing: Monky restarts the stream with the new settings. While codecs load, the field shows \"Loading\" instead of staying blank."
+}

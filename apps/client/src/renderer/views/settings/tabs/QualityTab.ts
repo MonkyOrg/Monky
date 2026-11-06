@@ -108,7 +108,7 @@ export class QualityTab {
   }
 
   private commitQualityChanges(preset: QualityPresetType, customProfile?: QualityProfile, persist = true,
-    confirm = false): void {
+    confirm = false): Promise<number | null> {
     const previousPreset = settingsStore.qualityPreset, previousCustom = settingsStore.customProfile;
     const profile = preset === 'CUSTOM' ? customProfile ?? previousCustom : QUALITY_PRESETS[preset];
     webRtcManager.assertScreenSharingSettings(profile);
@@ -124,6 +124,7 @@ export class QualityTab {
     if (persist) settingsStore.save();
     void this.encoding.refresh();
     if (confirm) this.confirmQualityChange(profile, applied);
+    return applied;
   }
 
   // Active shares confirm only after their replacement source is live; failures are reported by the share.
@@ -146,11 +147,15 @@ export class QualityTab {
     // A clamp notice or FPS adjustment already explains the applied value; never replace it.
     const confirm = !!this.requestedQuality && !this.requestedQuality.noticeShown && !adjusted;
     const encoding = this.encodingKey();
+    const encodingChanged = this.appliedEncoding !== encoding;
     this.requestedQuality = null;
     try {
-      this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined,
+      const applied = this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined,
         persist, confirm);
       this.appliedEncoding = encoding;
+      if (encodingChanged && !confirm) void applied.then(shares => {
+        if (shares) showSuccessToast(t('settings.screenEncodingAppliedLive'), 5000);
+      });
     } catch (error) {
       this.renderQualityDetails();
       throw error;

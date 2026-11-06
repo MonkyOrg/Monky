@@ -92,6 +92,7 @@ export class ScreenEncodingControls {
         <label for="select-video-codec">${t('settings.videoCodecSection')}</label>
         <select id="select-video-codec" aria-describedby="screen-codec-description screen-encoding-status screen-encoding-choices"
           ${settingsStore.screenEncodingStrategy === 'automatic' && !locked ? 'disabled' : ''}>
+          <option value="" disabled hidden id="screen-codec-placeholder">${t('common.loading')}</option>
           <option value="h264" ${settingsStore.preferredScreenCodec === 'h264' ? 'selected' : ''}>${t('settings.codecH264')}</option>
           <option value="av1" ${settingsStore.preferredScreenCodec === 'av1' ? 'selected' : ''}>${t('settings.codecAv1')}</option>
         </select>
@@ -539,6 +540,10 @@ export class ScreenEncodingControls {
       }
       codec.value = automatic ? selection?.codec ?? '' : preferences.codec;
       if (!automatic && codec.querySelector<HTMLOptionElement>(`option[value="${preferences.codec}"]`)?.disabled) codec.value = '';
+      // Without a codec to show, the field says why instead of staying blank.
+      const placeholder = codec.querySelector<HTMLOptionElement>('#screen-codec-placeholder');
+      const placeholderText = t(this.pending ? 'common.loading' : 'screenShare.unavailable');
+      if (placeholder && placeholder.textContent !== placeholderText) placeholder.textContent = placeholderText;
     }
     for (const mode of ['hardware', 'software'] as const) {
       const label = this.container?.querySelector(`#screen-encoding-${mode}-choice`);

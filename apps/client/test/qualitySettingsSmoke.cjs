@@ -196,7 +196,7 @@ async function runQualitySettingsSmoke() {
       check(!av1.disabled && av1.textContent === language.t('settings.codecAv1')
         && !av1.textContent.includes(language.t('screenShare.comingSoon')),
       'AV1 must be enabled and localized as an implemented screen codec.');
-      check([...quality.querySelectorAll('#select-video-codec option')].map(option => option.value).join(',') === 'h264,av1',
+      check([...quality.querySelectorAll('#select-video-codec option')].filter(option => !option.hidden).map(option => option.value).join(',') === 'h264,av1',
         'Manual codec selection must offer exact H.264 and AV1 only.');
       for (const codec of ['h264', 'av1'])
         check(!quality.querySelector(`#select-video-codec option[value="${codec}"]`).disabled,
