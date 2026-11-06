@@ -523,6 +523,17 @@ int main(int argc, char** argv) {
       TestSpsOptions flagged = plain;
       flagged.constraints = 0xc0;
       check(NormalizeConstrainedBaseline(ParameterSets(baseline, flagged), baseline).empty());
+      // AMF baseline sets constraint_set5, which WebRTC receivers refuse as Constrained Baseline.
+      constexpr std::pair<std::uint8_t, std::uint8_t> amfFlags[]{{0x04, 0x40}, {0x44, 0x40}, {0x48, 0x40}, {0xcc, 0xc0}};
+      for (const auto& [emitted, declared] : amfFlags) {
+        TestSpsOptions amf = plain;
+        amf.constraints = emitted;
+        const auto emittedSets = ParameterSets(baseline, amf);
+        const auto declaredSets = NormalizeConstrainedBaseline(emittedSets, baseline);
+        check(declaredSets.size() == emittedSets.size() && emittedSets[5] == emitted && declaredSets[5] == declared &&
+            std::equal(declaredSets.begin() + 6, declaredSets.end(), emittedSets.begin() + 6));
+        check(InspectAnnexB(declaredSets, baseline).sps);
+      }
       check(NormalizeConstrainedBaseline(plainBaseline, mainVideo).empty());
       check(NormalizeConstrainedBaseline(ParameterSets(mainVideo), mainVideo).empty());
       rejects([&] { InspectAnnexB(plainBaseline, mainVideo); });

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Quem transmite a tela com placa AMD no formato Compatível voltou a ser assistido: antes, quem tentava assistir pelo app desktop ficava carregando para sempre.",
+  "en": "Screen shares from AMD GPUs in the Compatible format can be watched again: viewers on the desktop app used to be stuck loading forever."
+}

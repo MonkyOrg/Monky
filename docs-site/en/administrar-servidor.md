@@ -19,7 +19,7 @@ depend on your access.
 | Tab | Purpose |
 | --- | --- |
 | General | Name, image and banner, event activation, limits, voice mode and server process information |
-| Security | Entry password |
+| Security | Entry password: whether it is active, show, copy, change or remove it |
 | Voice & Video | Soundboard access, recent audio cache, direct-message relay, the AFK channel and the integrated TURN relay |
 | Storage | Attachment limits and usage |
 | Notifications | Mentions, message editing and notices published in chat |
@@ -29,8 +29,11 @@ depend on your access.
 
 ### Immediate application
 
-Switches and selections apply immediately. Names, passwords and limits
-apply when you finish editing, leave the field or press `Enter`. **Done**
+Switches and selections apply immediately. Names and limits
+apply when you finish editing, leave the field or press `Enter`. A new
+password is typed twice and applies with **Save password**; removing it asks
+for confirmation. **Show** and **Copy** only work on a device that knows the
+password, such as the one that connected with it or hosts the server. **Done**
 only closes the window; it does not undo confirmed changes.
 
 Closing is blocked while an operation is pending. A TURN download at 100%

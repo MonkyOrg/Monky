@@ -9,8 +9,6 @@ export interface ScreenEncodingRequest {
   readonly strategy: ScreenEncodingStrategy;
   /** Whether a software request also reports hardware availability, as Settings asks. */
   readonly inspectHardware: boolean;
-  /** The compatible format (#858): only H.264 encoders, whatever the codec preference. */
-  readonly h264Only?: boolean;
 }
 
 interface Entry {
@@ -109,9 +107,9 @@ export class ScreenEncodingCache {
   }
 }
 
-function cacheKey({ video, mode, codec, strategy, inspectHardware, h264Only = false }: ScreenEncodingRequest): string {
+function cacheKey({ video, mode, codec, strategy, inspectHardware }: ScreenEncodingRequest): string {
   // Automatic discovery ignores dormant manual fields, and hardware discovery always inspects hardware.
   const automatic = strategy === 'automatic';
-  return JSON.stringify([strategy, automatic ? 'hardware' : mode, h264Only ? 'h264' : automatic ? 'auto' : codec,
+  return JSON.stringify([strategy, automatic ? 'hardware' : mode, automatic ? 'auto' : codec,
     automatic || mode === 'hardware' || inspectHardware, video.width, video.height, video.fps, video.maxBitrateKbps]);
 }

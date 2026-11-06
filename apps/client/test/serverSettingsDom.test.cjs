@@ -309,8 +309,19 @@ async function* runRegression(language, sharedModule) {
   network.setActiveNetworkClient(client);
   const community = new CommunityFeed(client, store);
   await community.load();
+  const { connectionStore } = await import('/stores/connectionStore.ts');
   const originalGetActive = sessionManager.getActive;
-  sessionManager.getActive = () => ({ community });
+  // A hosted server of this device, so the saved and created entries carry the password (#881).
+  connectionStore.saveCreatedServer({ id: 'password-test-hosted', name: 'Server A', port: 47123, voiceChannel: 'Voz',
+    textChannel: 'geral', createdAt: 1, lastStarted: 1 });
+  const activeSession = { community, client, host: '127.0.0.1', port: 47123 };
+  const storedPasswords = () => ({
+    saved: connectionStore.findSavedServer(activeSession)?.password,
+    created: connectionStore.createdServers.find((server) => server.id === 'password-test-hosted')?.password,
+    persisted: JSON.parse(localStorage.getItem('monky_saved_servers') || '[]')
+      .find((server) => server.host === '127.0.0.1' && server.port === 47123)?.password,
+  });
+  sessionManager.getActive = () => activeSession;
   const modal = new ServerSettingsModal();
   const field = (id) => [...document.querySelectorAll(id)].find(element => !element.closest('[data-ui-closing]'));
   const change = (id, value) => {
@@ -650,16 +661,93 @@ async function* runRegression(language, sharedModule) {
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
   tab('security');
+  // #881: the password is a status card with Show, Copy, Change and Remove, never an open field.
+  const passwordForm = () => field('#server-password-form');
+  const passwordFormClosed = () => passwordForm().hidden || passwordForm().hasAttribute('data-ui-closing');
+  const unsentPassword = () => !requests.some((request) => !request.done && request.type === 'SERVER_UPDATE_SETTINGS');
+  check(field('#server-password-card').dataset.state === 'off'
+    && field('#password-status-title').textContent === t('serverSettings.statusOpen')
+    && !field('#btn-password-set').hidden && field('#btn-password-change').hidden && field('#btn-password-remove').hidden
+    && field('#btn-password-reveal').hidden && field('#server-password-value-row').hidden && passwordFormClosed()
+    && !field('#server-password-card input[type="checkbox"]'),
+  'Without a password the card says so and only offers to set one');
+  field('#btn-password-set').click();
+  await flush();
+  check(!passwordFormClosed() && field('#btn-password-set').getAttribute('aria-expanded') === 'true',
+    'Set password expands the inline form');
+  clearToasts();
+  const beforeMismatch = requests.length;
   change('#input-server-pass', 'New access secret');
+  change('#input-server-pass-confirm', 'New access secrex');
+  field('#btn-password-save').click();
   await flush();
+  check(requests.length === beforeMismatch && failed(t('serverSettings.passwordMismatch'))
+    && field('#input-server-pass-confirm').getAttribute('aria-invalid') === 'true',
+  'Mismatched confirmation is refused in the shared alert without sending');
+  change('#input-server-pass-confirm', 'New access secret');
+  field('#btn-password-save').click();
+  await flush();
+  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.password === 'New access secret' && locked()
+    && field('#btn-password-save').disabled, 'Saving a confirmed password applies it with the acknowledgement guard');
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
-  check(store.serverDetails.hasPassword && !field('#btn-remove-pass').hidden && field('#input-server-pass').value === '', 'Password blur applies and clears secret text after acknowledgement');
-  field('#btn-remove-pass').click();
+  check(store.serverDetails.hasPassword && field('#server-password-card').dataset.state === 'on'
+    && field('#password-status-title').textContent === t('serverSettings.statusProtected')
+    && passwordFormClosed() && field('#input-server-pass').value === '' && field('#input-server-pass-confirm').value === ''
+    && activeSession.password === 'New access secret' && !field('#btn-password-change').hidden && !field('#btn-password-remove').hidden
+    && field('#btn-password-set').hidden, 'The acknowledged password turns the card on and clears the secret fields');
+  check(Object.values(storedPasswords()).every((password) => password === 'New access secret'),
+    'The saved and hosted server entries keep the new password, so the next start signs in with it');
+  check(field('#server-password-value').textContent !== 'New access secret' && !field('#btn-password-reveal').disabled
+    && field('#server-password-unknown').hidden, 'The known password starts masked');
+  field('#btn-password-reveal').click();
+  check(field('#server-password-value').textContent === 'New access secret'
+    && field('#btn-password-reveal').getAttribute('aria-pressed') === 'true'
+    && field('#btn-password-reveal [data-label]').textContent === t('serverSettings.passwordHide'), 'Show reveals the password');
+  field('#btn-password-reveal').click();
+  check(field('#server-password-value').textContent !== 'New access secret'
+    && field('#btn-password-reveal').getAttribute('aria-pressed') === 'false', 'Hide masks it again');
+  field('#btn-password-copy').click();
   await flush();
-  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.password === null && locked(), 'Password removal is immediate and acknowledged');
+  check(copiedVersions.at(-1) === 'New access secret', 'Copy writes the password to the clipboard');
+  delete activeSession.password;
+  activeSession.host = 'password-test.invalid';
+  appEvents.emit('server.updated');
+  await flush();
+  check(field('#btn-password-reveal').disabled && field('#btn-password-copy').disabled && !field('#server-password-unknown').hidden
+    && !field('#btn-password-change').disabled, 'A password this device does not know cannot be shown or copied, only changed');
+  activeSession.host = '127.0.0.1';
+  field('#btn-password-change').click();
+  await flush();
+  change('#input-server-pass', 'Second secret');
+  change('#input-server-pass-confirm', 'Second secret');
+  field('#input-server-pass-confirm').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await flush();
+  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.password === 'Second secret', 'Enter in the form saves the changed password');
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
+  check(activeSession.password === 'Second secret' && passwordFormClosed() && !field('#btn-password-copy').disabled
+    && Object.values(storedPasswords()).every((password) => password === 'Second secret'),
+  'The changed password becomes the known and stored one');
+  field('#btn-password-remove').click();
+  await flush();
+  check(locked() && document.querySelector('.dialog-card'), 'Removing the password first asks for confirmation');
+  document.querySelector('.dialog-card [data-action="cancel"]').click();
+  await flush();
+  check(!locked() && store.serverDetails.hasPassword && unsentPassword(), 'Declining keeps the password');
+  field('#btn-password-remove').click();
+  await flush();
+  document.querySelector('.dialog-card [data-action="confirm"]').click();
+  await flush();
+  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.password === null && locked(), 'Confirming removes the password');
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  check(!store.serverDetails.hasPassword && field('#server-password-card').dataset.state === 'off'
+    && activeSession.password === undefined && !field('#btn-password-set').hidden, 'The card returns to no password');
+  check(Object.values(storedPasswords()).every((password) => password === undefined),
+    'Removal also empties the saved and hosted server password');
+  connectionStore.removeCreatedServer('password-test-hosted');
+  connectionStore.removeSavedServer('127.0.0.1', 47123);
   tab('general');
   field('#server-icon-wrapper').click();
   await flush();

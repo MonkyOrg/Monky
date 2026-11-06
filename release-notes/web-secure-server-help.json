@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Na versão web, entrar num servidor sem conexão segura agora explica o motivo, em vez de dizer que ele está offline, e mostra o link de como o dono pode liberar o acesso.",
+  "en": "In the web version, joining a server without a secure connection now explains why, instead of calling it offline, and links to how its owner can open access."
+}

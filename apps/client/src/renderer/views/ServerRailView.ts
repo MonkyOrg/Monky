@@ -17,6 +17,8 @@ import {
 } from '../stores/connectionStore';
 import { showConfirm, showAlert, showTextForm } from './Dialog';
 import { reportError } from '../utils/feedback';
+import { insecureServerError } from '../utils/secureServer';
+import { showSecureServerHelp } from '../utils/secureServerHelp';
 import { checkServerOnline, fetchServerPreview } from '../utils/serverStatus';
 import {
   confirmStopHostedServer,
@@ -1188,6 +1190,7 @@ export class ServerRailView {
     try {
       await this.runConnectToSavedServer(server, isCurrent);
     } catch (error: unknown) {
+      if (await showSecureServerHelp(error)) return;
       await showAlert({
         title: t('main.serverOfflineTitle'),
         message: error instanceof Error && error.message ? error.message : t('connection.connectError'),
@@ -1200,6 +1203,9 @@ export class ServerRailView {
 
   private async runConnectToSavedServer(server: SavedServer, isCurrent: () => boolean): Promise<void> {
     assertServerBrowseAvailable(server.host, server.port);
+    // The web cannot even ask a server without TLS whether it is online (#874).
+    const insecure = insecureServerError(server.host, server.port);
+    if (insecure) throw insecure;
     // Probe without changing the visible session or the ongoing call.
     const online = await checkServerOnline(server.host, server.port);
     if (!isCurrent()) return;
@@ -1253,6 +1259,7 @@ export class ServerRailView {
         lastConnected: Date.now(),
       });
     } catch (err: unknown) {
+      if (await showSecureServerHelp(err)) return;
       const message = err instanceof Error && err.message
         ? err.message
         : t('main.serverOfflineMessage', { name: server.name || server.host });

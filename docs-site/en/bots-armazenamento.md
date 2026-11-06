@@ -118,6 +118,10 @@ decision between **Ask**, **Always** and **Never**, sets the limit (50 MB by
 default, from 1 MB to 100 GB) and deletes the data. Changes apply at once,
 including to an open miniapp.
 
+The web version follows the same rules. The data stays in the browser, on
+Monky's origin and not on the miniapp's, which only reaches it through
+`monkyScreen.storage`. Logging out of the web version deletes this data.
+
 | API | Behavior |
 |-----|----------|
 | `status` | `'granted'`, `'denied'` or `'unavailable'` |

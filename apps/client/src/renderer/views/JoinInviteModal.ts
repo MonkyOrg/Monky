@@ -7,6 +7,7 @@ import { t } from '../i18n';
 import { openModal, type ModalCloseReason } from '../utils/modalShell';
 import { escapeHtml } from '../utils/html';
 import { errorMessage, reportError, validateForm } from '../utils/feedback';
+import { showSecureServerHelp } from '../utils/secureServerHelp';
 import { nicknameError } from '../utils/nickname';
 import { setServerTransport } from '../utils/serverAddress';
 
@@ -152,7 +153,8 @@ export class JoinInviteModal {
         await window.api.maximize?.().catch(() => clientLog.warn('APP', 'Could not maximize after joining the invited server'));
       } catch (error: unknown) {
         clientLog.warn('CONNECTION', 'Could not join the invited server');
-        if (!shell.closed) reportError(errorMessage(error, t('connection.connectError')));
+        if (shell.closed) return;
+        if (!(await showSecureServerHelp(error))) reportError(errorMessage(error, t('connection.connectError')));
       } finally {
         connecting = false;
         if (!shell.closed) {

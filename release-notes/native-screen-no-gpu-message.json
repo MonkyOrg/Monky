@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Em computadores sem placa de vídeo compatível, como máquinas virtuais, o app agora explica por que não dá para transmitir a tela, em vez de pedir para tentar de novo cada formato.",
+  "en": "On computers without a compatible graphics card, such as virtual machines, the app now explains why screen sharing is unavailable instead of asking you to retry every format."
+}

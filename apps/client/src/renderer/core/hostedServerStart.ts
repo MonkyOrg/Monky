@@ -13,6 +13,14 @@ export function findOwnedServer(host: string, port: number): CreatedServer | und
 }
 
 /**
+ * The server never sends its password back. This device only knows the one it
+ * connected with, or the one its own hosted server was created with.
+ */
+export function knownServerPassword(session: { host: string; port: number; password?: string }): string | undefined {
+  return session.password || findOwnedServer(session.host, session.port)?.password || undefined;
+}
+
+/**
  * Several of the user's servers may run side by side, each on its own port.
  * Starting never replaces another hosted instance: a port held by a different
  * server, or this server already running elsewhere, is reported instead.

@@ -99,8 +99,6 @@ const screenCommandSchema = (sourceId: z.ZodString) => z.discriminatedUnion('act
     action: z.literal('probe-encoding'), video: nativeScreenVideoProfileSchema,
     probeId: uuid, encodingMode: screenEncodingModeSchema, codec: screenCodecPreferenceSchema,
     encodingStrategy: screenEncodingStrategySchema.default('automatic'),
-    /** The compatible format checks only H.264 encoders (#858). */
-    screenFormat: screenFormatSchema.optional(),
   }).strict(),
   z.object({ action: z.literal('cancel-encoding-probe'), probeId: uuid }).strict(),
   nativeScreenCallSchema.extend({ action: z.literal('join') }).strict(),
@@ -122,7 +120,7 @@ const screenCommandSchema = (sourceId: z.ZodString) => z.discriminatedUnion('act
     video: nativeScreenVideoProfileSchema, audio: z.boolean(), audioBitrateKbps: nativeScreenAudioBitrateSchema,
     encodingMode: screenEncodingModeSchema.optional(), codec: screenCodecPreferenceSchema.optional(),
     encodingStrategy: screenEncodingStrategySchema.default('automatic'),
-    /** The H.264 the screen is shared in; absent means the platform's default. Compatible is always H.264. */
+    /** The H.264 profile the screen is shared in; absent means Main. It has no effect on an AV1 screen (#890). */
     screenFormat: screenFormatSchema.optional(),
   }).strict(),
   callScope.extend({ action: z.literal('source-remove'), shareId: screenShareIdSchema }).strict(),

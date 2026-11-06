@@ -953,16 +953,20 @@ inline AmfColorNormalization NormalizeAmfBt709(std::span<const std::uint8_t> byt
 
 // A Baseline encoder (AMF and NVENC "baseline", x264) emits no slice groups or redundant pictures, which is
 // Constrained Baseline (H.264 A.2.1); some leave constraint_set1 clear. The compatible format (#858) declares it,
-// so receivers that admit only Constrained Baseline accept the stream. The flag byte follows profile_idc (never
-// zero), so no emulation prevention depends on it. Empty means no rewrite.
+// so receivers that admit only Constrained Baseline accept the stream. AMF also sets constraint_set5, which has no
+// meaning for Baseline (7.4.2.1.1) but takes the SPS out of WebRTC's Constrained Baseline table, so receivers
+// refused it; constraint_set4/5 are cleared. The flag byte follows profile_idc (never zero), so no emulation
+// prevention depends on it. Empty means no rewrite.
 inline std::vector<std::uint8_t> NormalizeConstrainedBaseline(std::span<const std::uint8_t> bytes,
     const VideoConfiguration& video) {
   std::vector<std::uint8_t> result;
   if (!video.constrainedBaseline) return result;
   VisitAnnexB(bytes, [&](std::span<const std::uint8_t> nal, std::size_t begin, std::size_t) {
-    if ((nal.front() & 0x1fu) != 7 || nal.size() < 4 || nal[1] != 66 || (nal[2] & 0x40u)) return;
+    if ((nal.front() & 0x1fu) != 7 || nal.size() < 4 || nal[1] != 66) return;
+    const auto declared = static_cast<std::uint8_t>((nal[2] | 0x40u) & ~0x0cu);
+    if (declared == nal[2]) return;
     if (result.empty()) result.assign(bytes.begin(), bytes.end());
-    result[begin + 2] = static_cast<std::uint8_t>(result[begin + 2] | 0x40u);
+    result[begin + 2] = declared;
   });
   return result;
 }

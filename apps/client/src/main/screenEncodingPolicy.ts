@@ -1,12 +1,22 @@
 import {
   nativeErrorCodes, type ScreenCodec, type ScreenCodecPreference, type ScreenEncoder, type ScreenEncodingAvailability,
-  type ScreenEncodingMode, type ScreenEncodingSelection, type ScreenEncodingStrategy,
+  type ScreenEncodingMode, type ScreenEncodingSelection, type ScreenEncodingStrategy, type ScreenFormat,
 } from '@monky/shared';
+import type { NativeScreenH264Profile } from '@monky/screen-share';
 
 const hardwareEncoders: Readonly<Record<ScreenCodec, readonly ScreenEncoder[]>> = {
   av1: ['av1_texture_amf', 'obs_nvenc_av1_tex'],
   h264: ['h264_texture_amf', 'obs_nvenc_h264_tex', 'apple_vt_h264'],
 };
+
+/**
+ * The H.264 profile a screen format asks for (#858). The format never chooses the codec (#890): an AV1 screen
+ * has no H.264 profile, so the pipeline receives none.
+ */
+export function screenH264Profile(codec: ScreenCodec, format: ScreenFormat | undefined): NativeScreenH264Profile | undefined {
+  if (codec !== 'h264') return undefined;
+  return format === 'compatible' ? 'constrained-baseline' : 'main';
+}
 
 /** Only a positive unsupported diagnosis permits falling back to software. */
 export function isUnsupportedScreenEncoder(error: unknown): boolean {
@@ -33,12 +43,9 @@ export async function selectScreenEncoding(
   (selection, _error, outcome) => {
     console.warn(`[ScreenShare] Hardware encoder probe failed (${outcome}):`, selection.encoder);
   },
-  h264Only = false,
 ): Promise<ScreenEncodingAvailability> {
-  if (strategy === 'manual' && preference === 'auto' && !h264Only) throw new Error('Manual encoding requires an exact codec.');
+  if (strategy === 'manual' && preference === 'auto') throw new Error('Manual encoding requires an exact codec.');
   if (strategy === 'automatic') { mode = 'hardware'; preference = 'auto'; }
-  // The compatible format is H.264 Constrained Baseline (#858): AV1 is never a candidate.
-  if (h264Only) preference = 'h264';
   let hardware: ScreenEncodingSelection | null = null;
   let hardwareError = false;
   let hardwareFailure: Error | null = null;

@@ -72,6 +72,7 @@ export * from './localExecution.js';
 export * from './localExecutionProtocol.js';
 export * from './botPermissions.js';
 export * from './botStorage.js';
+export * from './botDeviceStorageEngine.js';
 export * from './protocolCompatibility.js';
 export * from './botDiagnostics.js';
 export * from './botAuth.js';

@@ -173,6 +173,13 @@ custo do provedor que você escolher.
 
 O aplicativo está disponível para Windows e macOS. Veja o [Download](/download).
 
+Também existe a versão web, em
+[monkyweb.vercel.app](https://monkyweb.vercel.app/), que roda no navegador sem
+instalar nada. Ela só entra em servidores com conexão segura (`wss://`), como
+os que ativaram a [conexão segura automática](/cli#monky-tls). Criar o próprio
+servidor, overlay, push-to-talk, atalhos globais e servidores na rede local
+continuam só no aplicativo.
+
 ### Onde peço ajuda ou relato um problema?
 
 - Consulte a [Solução de problemas](/solucao-de-problemas).

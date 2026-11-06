@@ -144,7 +144,11 @@ void ValidateSps(const sv::H264Sps& sps, NegotiatedH264 negotiated,
     throw AdapterError("ERR_RTC_NEGOTIATED_SPS",
                        "Actual SPS violates negotiated profile/level, geometry, or BT.709-limited input");
   }
-  const auto actual = webrtc::ParseH264ProfileLevelId(sps.ProfileLevelId().c_str());
+  // constraint_set4/5 carry no meaning for Baseline (H.264 7.4.2.1.1), yet AMF sets constraint_set5 and WebRTC's
+  // table then refuses its Constrained Baseline. Senders that predate clearing it are still admitted.
+  auto declared = sps;
+  if (sps.profileIdc == 66) declared.compatibility = static_cast<std::uint8_t>(sps.compatibility & ~0x0cu);
+  const auto actual = webrtc::ParseH264ProfileLevelId(declared.ProfileLevelId().c_str());
   const auto expected = negotiated.profile == sv::H264Profile::Main && !main_compatible_baseline
       ? webrtc::H264Profile::kProfileMain : webrtc::H264Profile::kProfileConstrainedBaseline;
   // Pinned AMF emits this Main SPS byte pattern, outside WebRTC's SDP table.

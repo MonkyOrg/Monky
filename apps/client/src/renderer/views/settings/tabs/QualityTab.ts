@@ -52,8 +52,16 @@ export class QualityTab {
   private released = false;
   private appliedEncoding = '';
   private readonly encoding = new ScreenEncodingControls(() => nativeScreenProfile(this.qualityProfile()),
-    undefined, profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest(),
+    () => this.renderScreenFormat(), profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest(),
     () => this.settleReleasedRequest());
+
+  /** The format is an H.264 profile (#890): it shows only while screens go out in H.264, below the encoding. */
+  private renderScreenFormat(): void {
+    const section = this.container?.querySelector<HTMLElement>('#screen-format-section');
+    const codec = this.encoding.transmittedCodec;
+    // While Automatic resolves, the section keeps what it showed instead of flickering.
+    if (section && codec) setSurfaceVisible(section, codec === 'h264');
+  }
 
   private qualityProfile(): QualityProfile {
     return this.requestedQuality?.profile ?? (settingsStore.qualityPreset === 'CUSTOM'
@@ -162,13 +170,14 @@ export class QualityTab {
     // Reopening while a request is still being verified shows that request, not the old value.
     const preset = this.requestedQuality?.preset ?? settingsStore.qualityPreset;
     return `
-      <div class="form-group" data-settings-section="screen-format" data-settings-label="${escapeHtml(t('screenShare.format'))}">
+      ${ScreenEncodingControls.html()}
+      <div id="screen-format-section" class="form-group" data-settings-section="screen-format"
+        data-settings-label="${escapeHtml(t('screenShare.format'))}" ${this.encoding.transmittedCodec === 'h264' ? '' : 'hidden'}>
         <label>${t('screenShare.format')}</label>
         ${renderChoiceCards({ id: 'screen-format-choice', label: t('screenShare.format'), attribute: 'data-screen-format',
           selected: settingsStore.screenFormat, choices: screenFormatSchema.options.map(screenFormatChoice) })}
         <p id="screen-format-apply" class="audio-device-status">${t('settings.screenFormatApply')}</p>
       </div>
-      ${ScreenEncodingControls.html()}
       ${lockedBlock('nativeScreenAudio', 'screenReceiver', `<div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
         <label>${t('settings.screenReceiverSection')}</label>
         <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenReceiverSection'))}" aria-describedby="screen-receiver-warning screen-receiver-apply">

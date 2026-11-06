@@ -61,6 +61,15 @@ export function audioDeviceError(error: unknown): string {
   return t('audioDevices.selectionFailed');
 }
 
+/** Why the call started without a microphone, in the user's language rather than Chromium's. */
+export function microphoneFailureReason(error: unknown): string {
+  if (error instanceof DOMException && error.name === 'NotFoundError' && !settingsStore.selectedMicrophoneId) {
+    return t('voiceJoin.noMicrophoneFound');
+  }
+  if (error instanceof DOMException && error.name === 'NotReadableError') return t('voiceJoin.microphoneBusy');
+  return audioDeviceError(error);
+}
+
 export async function selectAudioDevice(kind: AudioDeviceKind, deviceId: string, signal?: AbortSignal): Promise<void> {
   if (kind === 'output') {
     const next = copyAudioOutputPreferences(settingsStore);

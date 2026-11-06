@@ -175,7 +175,7 @@ export class EncoderDiscovery {
    */
   encoding(request: ScreenEncodingRequest, signal?: AbortSignal, refresh = false): Promise<ScreenEncodingAvailability> {
     if (this.retirementFailure) return Promise.reject(this.retirementFailure);
-    const { video, mode, codec, strategy, inspectHardware, h264Only = false } = request;
+    const { video, mode, codec, strategy, inspectHardware } = request;
     const abort = signal ? AbortSignal.any([this.abortController.signal, signal]) : this.abortController.signal;
     const remembered = refresh ? null : this.cache.get(request, this.host.displayGeneration());
     if (remembered) return Promise.resolve().then(() => {
@@ -244,7 +244,7 @@ export class EncoderDiscovery {
           encoder: selection.encoder, codec: selection.codec, encodingMode: selection.mode, refusal: outcome,
           retirementConfirmed: true, continuingHardwareDiscovery: outcome === 'next-candidate',
         }, outcome === 'failed' ? 'WARN' : 'INFO');
-      }, h264Only);
+      });
       this.cache.set(request, displayGeneration, availability, skipped);
       return availability;
     });

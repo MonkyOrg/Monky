@@ -17,7 +17,9 @@ encaminha as respostas.
 
 - Use **Node.js 22 ou 24** e npm.
 - Tenha um servidor Monky de teste e acesso para gerenciar seus bots.
-- Cliente, servidor e SDK de bots precisam usar o mesmo `PROTOCOL_VERSION`.
+- O servidor aceita bots a partir do protocolo 24 (`MIN_BOT_PROTOCOL`) e só
+  habilita os recursos que os dois lados anunciam. Um recurso novo do SDK
+  exige um servidor que também o ofereça.
 - Confira `monky-compatibility-<versão>.json` na release escolhida antes de
   conectar. O assistente não muda o protocolo nem atualiza seu servidor.
 

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Na versão web, os miniapps dos bots agora guardam dados no navegador, com o mesmo consentimento e limite do desktop. Sair da conta apaga tudo o que eles guardaram.",
+  "en": "In the web version, bot miniapps can now keep data in the browser, with the same consent and limits as the desktop. Logging out deletes everything they kept."
+}

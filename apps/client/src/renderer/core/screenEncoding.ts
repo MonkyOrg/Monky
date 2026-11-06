@@ -31,7 +31,7 @@ export async function probeScreenEncoding(
   try {
     const result = await window.api.nativeScreenCommand({
       action: 'probe-encoding', probeId, video,
-      ...preferences, screenFormat: settingsStore.screenFormat,
+      ...preferences,
     });
     signal.throwIfAborted();
     if (result.kind !== 'encoding') throw new Error('Invalid screen encoder discovery response.');
