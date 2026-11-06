@@ -524,7 +524,8 @@ int main(int argc, char** argv) {
       flagged.constraints = 0xc0;
       check(NormalizeConstrainedBaseline(ParameterSets(baseline, flagged), baseline).empty());
       // AMF baseline sets constraint_set5, which WebRTC receivers refuse as Constrained Baseline.
-      constexpr std::pair<std::uint8_t, std::uint8_t> amfFlags[]{{0x04, 0x40}, {0x44, 0x40}, {0x48, 0x40}, {0xcc, 0xc0}};
+      struct ConstraintFlags { std::uint8_t emitted; std::uint8_t declared; };
+      constexpr ConstraintFlags amfFlags[]{{0x04, 0x40}, {0x44, 0x40}, {0x48, 0x40}, {0xcc, 0xc0}};
       for (const auto& [emitted, declared] : amfFlags) {
         TestSpsOptions amf = plain;
         amf.constraints = emitted;

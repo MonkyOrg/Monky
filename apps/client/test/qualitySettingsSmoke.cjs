@@ -459,6 +459,8 @@ async function runQualitySettingsSmoke() {
       preset.value = 'CUSTOM';
       preset.dispatchEvent(new Event('change', { bubbles: true }));
       await settled(() => quality.querySelectorAll('[data-bitrate-help]').length === 3, `${locale}/custom preset`);
+      // Opening Custom unfolds its panel and then reveals it; scrolling to a help button before that ends is undone.
+      await settleMotion(root.querySelector('.settings-content-body'), `${locale}/custom preset reveal`);
       check(quality.querySelector('#checkbox-screen-telemetry') === toggle,
         'Changing quality presets must not recreate or detach telemetry controls.');
       check(quality.querySelector('#checkbox-screen-preview-focus') === preview,

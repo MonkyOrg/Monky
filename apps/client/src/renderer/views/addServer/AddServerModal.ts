@@ -552,7 +552,7 @@ class AddServerModal {
       clientLog.warn('CONNECTION', 'Could not join the server from the add-server modal', {
         error: error instanceof Error ? error.message : String(error),
       });
-      if (!this.modalEl || await showSecureServerHelp(error)) return;
+      if (!this.modalEl || showSecureServerHelp(error)) return;
       this.showError(errorMessage(error, t('connection.connectError')));
     } finally {
       this.setConnectionPending(false);

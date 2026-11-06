@@ -6,11 +6,11 @@ import { SecureServerRequiredError } from './secureServer';
 /**
  * Shows the friendly explanation, with the docs link, when the failure was a
  * missing secure connection (#874). Returns false for any other error, which
- * the caller reports as before.
+ * the caller reports as before, in the same tick.
  */
-export async function showSecureServerHelp(error: unknown): Promise<boolean> {
+export function showSecureServerHelp(error: unknown): boolean {
   if (!(error instanceof SecureServerRequiredError)) return false;
-  await showAlert({
+  void showAlert({
     title: t('network.secureRequiredTitle'),
     message: error.message,
     variant: 'warning',

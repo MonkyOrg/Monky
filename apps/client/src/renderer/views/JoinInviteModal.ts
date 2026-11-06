@@ -153,8 +153,7 @@ export class JoinInviteModal {
         await window.api.maximize?.().catch(() => clientLog.warn('APP', 'Could not maximize after joining the invited server'));
       } catch (error: unknown) {
         clientLog.warn('CONNECTION', 'Could not join the invited server');
-        if (shell.closed) return;
-        if (!(await showSecureServerHelp(error))) reportError(errorMessage(error, t('connection.connectError')));
+        if (!shell.closed && !showSecureServerHelp(error)) reportError(errorMessage(error, t('connection.connectError')));
       } finally {
         connecting = false;
         if (!shell.closed) {

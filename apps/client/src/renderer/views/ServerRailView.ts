@@ -1190,7 +1190,7 @@ export class ServerRailView {
     try {
       await this.runConnectToSavedServer(server, isCurrent);
     } catch (error: unknown) {
-      if (await showSecureServerHelp(error)) return;
+      if (showSecureServerHelp(error)) return;
       await showAlert({
         title: t('main.serverOfflineTitle'),
         message: error instanceof Error && error.message ? error.message : t('connection.connectError'),
@@ -1259,7 +1259,7 @@ export class ServerRailView {
         lastConnected: Date.now(),
       });
     } catch (err: unknown) {
-      if (await showSecureServerHelp(err)) return;
+      if (showSecureServerHelp(err)) return;
       const message = err instanceof Error && err.message
         ? err.message
         : t('main.serverOfflineMessage', { name: server.name || server.host });
