@@ -229,9 +229,12 @@ if(MONKY_LIGHT_WITH_RTC)
     target_compile_definitions(monky_light_ui PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   else()
     find_library(MONKY_APPKIT_FRAMEWORK AppKit REQUIRED)
+    # AXIsProcessTrusted: push-to-talk needs Accessibility to see keys.
+    find_library(MONKY_APPLICATION_SERVICES_FRAMEWORK ApplicationServices REQUIRED)
     add_library(monky_light_ui STATIC src/ui/tray_macos.mm)
     set_source_files_properties(src/ui/tray_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(monky_light_ui PUBLIC "${MONKY_APPKIT_FRAMEWORK}")
+    target_link_libraries(monky_light_ui PUBLIC "${MONKY_APPKIT_FRAMEWORK}"
+      "${MONKY_APPLICATION_SERVICES_FRAMEWORK}")
   endif()
   target_include_directories(monky_light_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(monky_light_ui PUBLIC monky_light_json)

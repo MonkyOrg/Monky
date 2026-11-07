@@ -404,7 +404,7 @@ void settingsBesideIdentity(const fs::path& root) {
             "Missing settings did not yield defaults");
     identity.saveSettings({std::string("input-\xc3\xa1"), std::nullopt});
     identity.saveSettings({std::string("input-\xc3\xa1"), std::string("output"), true,
-                           {{"user:device-a", 0}, {"user:device-b", 200}}});
+                           {{"user:device-a", 0}, {"user:device-b", 200}}, std::string("RightControl")});
     require(!fs::exists(profile.path / "monky-light-settings.json.pending"), "Settings write left its marker");
     requireFailure([&] { identity.saveSettings({std::string(), std::nullopt}); },
                    "An empty device ID was saved");
@@ -424,6 +424,8 @@ void settingsBesideIdentity(const fs::path& root) {
     }
     requireFailure([&] { identity.saveSettings({std::nullopt, std::nullopt, false, crowded}); },
                    "Unbounded participant volumes were saved");
+    requireFailure([&] { identity.saveSettings({std::nullopt, std::nullopt, false, {}, std::string("CapsLock")}); },
+                   "An unknown push-to-talk key was saved");
   }
   const auto saved = readFile(settingsPath);
   // An interrupted settings write is not identity state and must not block the profile.
@@ -434,7 +436,8 @@ void settingsBesideIdentity(const fs::path& root) {
     const auto loaded = identity.loadSettings();
     require(loaded.inputDeviceId == std::optional<std::string>("input-\xc3\xa1") &&
             loaded.outputDeviceId == std::optional<std::string>("output") && loaded.pushToTalk &&
-            loaded.userVolumes == std::map<std::string, int>{{"user:device-a", 0}, {"user:device-b", 200}},
+            loaded.userVolumes == std::map<std::string, int>{{"user:device-a", 0}, {"user:device-b", 200}} &&
+            loaded.pushToTalkKey == std::optional<std::string>("RightControl"),
             "Settings did not round-trip");
     identity.saveSettings({std::nullopt, std::string("output")});
     require(!fs::exists(profile.path / "monky-light-settings.json.pending"),
@@ -458,7 +461,9 @@ void settingsBesideIdentity(const fs::path& root) {
                               "{\"format\":\"monky-light-settings\",\"version\":1,\"userVolumes\":{\"s\":201}}",
                               "{\"format\":\"monky-light-settings\",\"version\":1,\"userVolumes\":{\"s\":\"50\"}}",
                               "{\"format\":\"monky-light-settings\",\"version\":1,\"userVolumes\":{\"s\":{}}}",
-                              "{\"format\":\"monky-light-settings\",\"version\":1,\"other\":{}}"}) {
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"other\":{}}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"pushToTalkKey\":\"Esc\"}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"pushToTalkKey\":13}"}) {
     writeFile(settingsPath, invalid);
     ProfileIdentity identity(profile.path);
     require(identity.publicKeyHex() == publicKey, "Invalid settings affected identity validation");

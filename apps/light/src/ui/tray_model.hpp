@@ -1,10 +1,13 @@
 #pragma once
 
+#include "push_to_talk_key.hpp"
 #include "ui/tray_strings.hpp"
 
 #include <json.hpp>
 
 #include <algorithm>
+#include <array>
+#include <set>
 #include <optional>
 #include <string>
 #include <utility>
@@ -21,6 +24,17 @@ struct MenuEntry {
   std::string name;
   bool selected = false;
 };
+
+// Someone else in the current call, with the volume this profile hears them at.
+struct Person {
+  std::string sessionId;
+  std::string name;
+  int volume = 100;
+  bool speaking = false;
+};
+
+// The volumes a native menu offers. A slider belongs to the future panels.
+inline constexpr std::array<int, 7> kVolumePresets{0, 25, 50, 75, 100, 150, 200};
 
 // Everything the native interface draws, already localized. Platform code only
 // maps these fields onto menu items, so this is the one place where interface
@@ -43,6 +57,14 @@ struct Presentation {
   bool deafenEnabled = false;
   std::string muteLabel;
   std::string deafenLabel;
+  // The local user is speaking in an established call.
+  bool speaking = false;
+  bool pushToTalkChecked = false;
+  std::string pushToTalkLabel;
+  // The key the interface must watch, only while push-to-talk can transmit: a
+  // global hook costs nothing when it is not installed.
+  std::optional<PushToTalkKey> hotkey;
+  std::vector<Person> people;
 };
 
 // Rebuilds the interface state from the events the console consumer already
@@ -61,6 +83,8 @@ class TrayModel final {
     if (name == "authenticating") return relink(Link::authenticating);
     if (name == "authenticated") {
       serverName_ = stringAt(event, "serverName");
+      selfSession_ = stringAt(event, "sessionId");
+      applyInput(event);
       applyChannels(event);
       // The list is only enumerated on demand; ask once the session is usable.
       refreshDevices_ = true;
@@ -68,6 +92,36 @@ class TrayModel final {
       return true;
     }
     if (name == "state") return applyState(event);
+    if (name == "input-mode") {
+      pushToTalk_ = stringAt(event, "mode") == "push_to_talk";
+      return true;
+    }
+    if (name == "push-to-talk-key") {
+      pushToTalkKey_ = idAt(event, "key");
+      return true;
+    }
+    if (name == "participants") {
+      applyMembers(event);
+      return true;
+    }
+    if (name == "participant-volume") {
+      const auto session = stringAt(event, "sessionId");
+      const auto volume = event.find("volume");
+      for (auto& person : members_) {
+        if (person.sessionId == session && volume != event.end() && volume->is_number_integer()) {
+          person.volume = volume->get<int>();
+        }
+      }
+      // Only the menu shows volumes, and it is rebuilt when it opens.
+      return false;
+    }
+    if (name == "speaking") {
+      const auto session = stringAt(event, "sessionId");
+      if (boolAt(event, "speaking")) speakers_.insert(session);
+      else speakers_.erase(session);
+      // Only the local user's speech changes the icon; the menu reads the rest when it opens.
+      return session == selfSession_;
+    }
     if (name == "channels-changed") {
       applyChannels(event);
       return true;
@@ -79,6 +133,8 @@ class TrayModel final {
     if (name == "stopped") {
       mediaConnected_ = false;
       channelId_.reset();
+      members_.clear();
+      speakers_.clear();
       return relink(Link::disconnected);
     }
     if (name == "voice-admitted") {
@@ -88,6 +144,8 @@ class TrayModel final {
     if (name == "voice-left") {
       channelId_.reset();
       mediaConnected_ = false;
+      members_.clear();
+      speakers_.clear();
       return true;
     }
     if (name == "voice-policy") return applyPolicy(event);
@@ -155,6 +213,25 @@ class TrayModel final {
                                                    : permissionMuted_ ? text_.noPermissionToSpeak
                                                                       : nullptr);
     result.deafenLabel = label(text_.deafen, serverDeafened_ ? text_.byServer : nullptr);
+    result.speaking = result.inCall && speakers_.contains(selfSession_);
+    result.pushToTalkChecked = pushToTalk_;
+    const auto key = pushToTalkKey_ ? parsePushToTalkKey(*pushToTalkKey_) : std::nullopt;
+    const bool usable = key && hotkeyUsable(*key);
+    result.pushToTalkLabel = label(text_.pushToTalk, nullptr);
+    if (!key) result.pushToTalkLabel += " (" + std::string(text_.noPushToTalkKey) + ")";
+    else {
+      result.pushToTalkLabel += " (" + std::string(text_.key) + ": " + key->name;
+      if (!usable) result.pushToTalkLabel += ", " + std::string(text_.keyUnavailable);
+      result.pushToTalkLabel += ")";
+    }
+    if (pushToTalk_ && usable && channelId_) result.hotkey = key;
+    for (const auto& member : members_) {
+      if (member.sessionId == selfSession_) continue;
+      auto person = member;
+      person.speaking = speakers_.contains(member.sessionId);
+      if (person.name.empty()) person.name = text_.participant;
+      result.people.push_back(std::move(person));
+    }
     return result;
   }
 
@@ -166,6 +243,40 @@ class TrayModel final {
 
  private:
   enum class Link { connecting, authenticating, ready, reconnecting, disconnected };
+
+  // macOS reports no key code for some names a Windows profile may hold.
+  static bool hotkeyUsable(const PushToTalkKey& key) {
+#ifdef __APPLE__
+    return key.mac.has_value();
+#else
+    return key.windows != 0;
+#endif
+  }
+
+  void applyInput(const Json& event) {
+    if (event.contains("inputMode")) pushToTalk_ = stringAt(event, "inputMode") == "push_to_talk";
+    if (event.contains("pushToTalkKey")) pushToTalkKey_ = idAt(event, "pushToTalkKey");
+  }
+
+  void applyMembers(const Json& event) {
+    const auto found = event.find("members");
+    if (found == event.end() || !found->is_array()) return;
+    members_.clear();
+    std::set<std::string> present;
+    for (const auto& value : *found) {
+      if (!value.is_object()) continue;
+      Person person;
+      person.sessionId = stringAt(value, "sessionId");
+      if (person.sessionId.empty()) continue;
+      person.name = stringAt(value, "name");
+      const auto volume = value.find("volume");
+      if (volume != value.end() && volume->is_number_integer()) person.volume = volume->get<int>();
+      present.insert(person.sessionId);
+      members_.push_back(std::move(person));
+    }
+    // Someone who left cannot still be speaking.
+    std::erase_if(speakers_, [&](const std::string& session) { return !present.contains(session); });
+  }
 
   static std::string stringAt(const Json& value, const char* key) {
     const auto found = value.find(key);
@@ -243,6 +354,8 @@ class TrayModel final {
     // mediaActive only means an engine exists; it never promotes a pending call.
     if (!boolAt(event, "mediaActive")) mediaConnected_ = false;
     applyChannels(event);
+    applyInput(event);
+    applyMembers(event);
     applyPolicy(event);
     return true;
   }
@@ -368,6 +481,11 @@ class TrayModel final {
   std::optional<std::string> unavailableOutput_;
   std::optional<std::string> alert_;
   bool refreshDevices_ = false;
+  std::string selfSession_;
+  bool pushToTalk_ = false;
+  std::optional<std::string> pushToTalkKey_;
+  std::vector<Person> members_;
+  std::set<std::string> speakers_;
 };
 
 }  // namespace monky::light::ui

@@ -197,6 +197,9 @@ rendering between activations. It carries:
 - the server voice channels, with the current one marked, and `Leave the channel`;
 - mute and deafen, marked and disabled when the server imposed them or the
   channel does not allow speaking;
+- `Push-to-talk`, which switches the input mode and shows the key;
+- `In the call`, with each participant, who is speaking, and the volume, in
+  presets from 0 to 200%;
 - `Audio devices`, with input, output, and `System default`;
 - `Reconnect now` and `Quit Monky Light`.
 
@@ -206,8 +209,9 @@ and the switch of the web interface. Actual switches and cards belong to the
 panels, which are not part of this milestone.
 
 The icon reports the state with the same colours as the full client: grey
-disconnected, accent connected without a call, green in a call, and red with a
-diagonal bar when muted or deafened. It is drawn at runtime and does **not**
+disconnected, accent connected without a call, green in a call, light green
+while you speak, and red with a diagonal bar when muted or deafened. Only your
+own speech redraws the icon; other people's appears in the menu when it opens. It is drawn at runtime and does **not**
 reuse the full Monky icon, because one edition must not pass for the other; the
 Light's own identity belongs to distribution, which is not implemented yet. On
 macOS the icon is a template system symbol, which follows the menu bar
@@ -229,8 +233,31 @@ The language follows the operating system, between Portuguese and English.
 Choosing the language inside the Light depends on the settings panel, which does
 not exist yet.
 
-There are still no native panels, global shortcuts, connection screen, or
-installer: the tray starts with the same command-line options as the core.
+### Push-to-talk shortcut
+
+The key is chosen with `--ptt-key` and saved in the profile: `A`–`Z`, `0`–`9`,
+`F1`–`F24`, `Mouse4`, `Mouse5` (side buttons), `RightControl`, `RightAlt`,
+`RightShift`, `Backquote`, `Insert`, or `Pause`. There is no default key, so it
+never takes one the user plays with; without a key, the menu row says how to
+choose one. Caps Lock and Num Lock are left out because holding them changes
+their system state. macOS reports neither `F21`–`F24` nor `Pause`; the menu says so.
+
+The shortcut is watched **only while it can transmit**: in a call, in
+push-to-talk mode. Otherwise nothing is installed and nothing is spent. The key
+is never consumed, so it keeps working in the foreground application, and
+keyboard auto-repeat becomes a single press.
+
+- **Windows:** a low-level keyboard hook or, for `Mouse4`/`Mouse5`, a mouse
+  hook, installed on the interface thread. The mouse hook is called on every
+  pointer movement, so it exists only when the key is a button.
+- **macOS:** an AppKit global event monitor. The system only delivers keys to an
+  application allowed under *System Settings › Privacy & Security ›
+  Accessibility*; the Light asks once and shows the notice in the menu. Mouse
+  buttons need no such permission. The macOS shortcut still requires
+  qualification on a Mac.
+
+There are still no native panels, connection screen, or installer: the tray
+starts with the same command-line options as the core.
 
 ## Shared contracts
 

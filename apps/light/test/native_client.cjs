@@ -13,7 +13,7 @@ class NativeClient {
   ended = false;
   expectedPeerFailures = new Set();
 
-  constructor(fixture, { nickname, profile, password, server, synthetic = true, microphoneAccess, defaultProcessing = false, muted = false, deafened = false, tray = false, pseudoConsole = false } = {}) {
+  constructor(fixture, { nickname, profile, password, server, synthetic = true, microphoneAccess, defaultProcessing = false, muted = false, deafened = false, tray = false, pseudoConsole = false, pushToTalkKey } = {}) {
     this.nickname = nickname;
     this.profile = profile ?? path.join(fixture.directory, `native-${randomUUID()}`);
     const env = { ...process.env };
@@ -32,6 +32,7 @@ class NativeClient {
     }
     if (muted) args.push('--muted');
     if (deafened) args.push('--deafened');
+    if (pushToTalkKey) args.push('--ptt-key', pushToTalkKey);
     if (tray) {
       // The fixture's interface has the tray's threads, not its icon.
       assert.ok(synthetic, 'The real tray would show an icon; tests use the fixture interface');

@@ -2,8 +2,10 @@
 #include "ui/tray_controller.hpp"
 
 #import <AppKit/AppKit.h>
+#import <ApplicationServices/ApplicationServices.h>
 #import <Foundation/Foundation.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -24,6 +26,17 @@ constexpr NSInteger kReconnect = 5;
 constexpr NSInteger kJoin = 6;
 constexpr NSInteger kInput = 7;
 constexpr NSInteger kOutput = 8;
+constexpr NSInteger kPushToTalk = 9;
+constexpr NSInteger kVolume = 10;
+
+// Device-dependent modifier bits (NX_DEVICER*KEYMASK): a right-hand modifier
+// arrives as flagsChanged, and only these bits tell it from the left one.
+std::optional<NSUInteger> rightModifierMask(std::uint16_t code) {
+  if (code == 0x3C) return 0x00000004;  // Right Shift
+  if (code == 0x3E) return 0x00002000;  // Right Control
+  if (code == 0x3D) return 0x00000040;  // Right Option
+  return std::nullopt;
+}
 
 NSString* text(const std::string& value) {
   NSString* result = [NSString stringWithUTF8String:value.c_str()];
@@ -70,6 +83,7 @@ class MacTray final : public CoreInterface {
 
   ~MacTray() override {
     @autoreleasepool {
+      unhook();
       menu_.delegate = nil;
       if (item_) [[NSStatusBar systemStatusBar] removeStatusItem:item_];
     }
@@ -108,6 +122,8 @@ class MacTray final : public CoreInterface {
 
   void build(NSMenu* menu) {
     const auto view = controller_.presentation();
+    // Opening the menu is when someone returns after granting Accessibility.
+    watch(view.hotkey);
     [menu removeAllItems];
     add(menu, view.status, 0, false, false, nil);
     // macOS notifications need an authorized, signed bundle, which belongs to
@@ -128,6 +144,25 @@ class MacTray final : public CoreInterface {
     [menu addItem:[NSMenuItem separatorItem]];
     add(menu, view.muteLabel, kMute, view.muteEnabled, view.muteChecked, nil);
     add(menu, view.deafenLabel, kDeafen, view.deafenEnabled, view.deafenChecked, nil);
+    add(menu, view.pushToTalkLabel, kPushToTalk, view.connected, view.pushToTalkChecked, nil);
+    if (!view.people.empty()) {
+      [menu addItem:[NSMenuItem separatorItem]];
+      NSMenu* people = [[NSMenu alloc] init];
+      people.autoenablesItems = NO;
+      for (const auto& person : view.people) {
+        NSMenu* volumes = [[NSMenu alloc] init];
+        volumes.autoenablesItems = NO;
+        for (const auto preset : kVolumePresets) {
+          add(volumes, std::to_string(preset) + "%", kVolume, true, person.volume == preset,
+              @[ text(person.sessionId), @(preset) ]);
+        }
+        auto label = person.name;
+        if (person.volume != 100) label += " · " + std::to_string(person.volume) + "%";
+        if (person.speaking) label += " (" + std::string(text_.speaking) + ")";
+        submenu(people, label, volumes, true);
+      }
+      submenu(menu, text_.inThisCall, people, true);
+    }
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenu* devices = [[NSMenu alloc] init];
     devices.autoenablesItems = NO;
@@ -140,6 +175,11 @@ class MacTray final : public CoreInterface {
   }
 
   void activate(NSMenuItem* item) {
+    if (item.tag == kVolume) {
+      NSArray* choice = item.representedObject;
+      if (choice.count == 2) controller_.setVolume(utf8(choice[0]), [choice[1] intValue]);
+      return;
+    }
     const auto identifier = utf8((NSString*)item.representedObject);
     const auto wanted = item.state != NSControlStateValueOn;
     switch (item.tag) {
@@ -148,6 +188,7 @@ class MacTray final : public CoreInterface {
       case kMute: controller_.setMuted(wanted); break;
       case kDeafen: controller_.setDeafened(wanted); break;
       case kReconnect: controller_.reconnect(); break;
+      case kPushToTalk: controller_.setPushToTalk(wanted); break;
       case kJoin: controller_.join(identifier); break;
       case kInput: controller_.selectInput(identifier); break;
       case kOutput: controller_.selectOutput(identifier); break;
@@ -157,7 +198,7 @@ class MacTray final : public CoreInterface {
 
  private:
   void add(NSMenu* menu, const std::string& label, NSInteger tag, bool enabled, bool checked,
-           NSString* represented) {
+           id represented) {
     NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:text(label) action:nil keyEquivalent:@""];
     if (tag != 0) {
       item.action = @selector(activate:);
@@ -189,9 +230,11 @@ class MacTray final : public CoreInterface {
   void refresh() {
     const auto view = controller_.presentation();
     if (auto alert = controller_.takeAlert()) alert_ = std::move(alert);
+    watch(view.hotkey);
     @autoreleasepool {
       NSString* symbol = !view.connected  ? @"bolt.horizontal.circle"
                          : view.silenced  ? @"mic.slash.fill"
+                         : view.speaking  ? @"speaker.wave.2.circle.fill"
                          : view.inCall    ? @"waveform.circle.fill"
                                           : @"mic.fill";
       NSImage* image = [NSImage imageWithSystemSymbolName:symbol
@@ -211,8 +254,57 @@ class MacTray final : public CoreInterface {
     }
   }
 
+  // A global monitor sees input meant for other applications. It is added only
+  // while push-to-talk can transmit and never consumes the event. Keys need the
+  // Accessibility permission; without it macOS delivers no key events at all,
+  // so the monitor is added again once the user grants it.
+  void watch(const std::optional<PushToTalkKey>& key) {
+    const bool keyboard = key && key->kind == PushToTalkKey::Kind::keyboard;
+    const bool trusted = !keyboard || AXIsProcessTrusted();
+    const auto wanted = key ? std::optional<std::string>(key->name) : std::nullopt;
+    if (wanted == watched_ && trusted == trusted_) return;
+    unhook();
+    if (!key || !key->mac) return;
+    if (!trusted && !prompted_) {
+      prompted_ = true;
+      // Shows the system prompt once; the setting itself stays the user's.
+      NSDictionary* options = @{(__bridge NSString*)kAXTrustedCheckOptionPrompt : @YES};
+      AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+      alert_ = std::string(text_.accessibilityRequired);
+    }
+    const auto code = *key->mac;
+    const auto modifier = rightModifierMask(code);
+    NSEventMask mask = keyboard ? (modifier ? NSEventMaskFlagsChanged : (NSEventMaskKeyDown | NSEventMaskKeyUp))
+                                : (NSEventMaskOtherMouseDown | NSEventMaskOtherMouseUp);
+    TrayController* controller = &controller_;
+    const bool mouse = !keyboard;
+    monitor_ = [NSEvent addGlobalMonitorForEventsMatchingMask:mask
+                                                      handler:^(NSEvent* event) {
+      if (mouse) {
+        if (event.buttonNumber == code) controller->pushToTalk(event.type == NSEventTypeOtherMouseDown);
+      } else if (event.keyCode == code) {
+        if (modifier) controller->pushToTalk((event.modifierFlags & *modifier) != 0);
+        else if (!event.isARepeat) controller->pushToTalk(event.type == NSEventTypeKeyDown);
+      }
+    }];
+    watched_ = wanted;
+    trusted_ = trusted;
+  }
+
+  void unhook() {
+    if (!monitor_) return;
+    [NSEvent removeMonitor:monitor_];
+    monitor_ = nil;
+    watched_.reset();
+    controller_.releasePushToTalk();
+  }
+
   TrayController controller_;
   const Strings& text_;
+  id monitor_ = nil;
+  std::optional<std::string> watched_;
+  bool trusted_ = false;
+  bool prompted_ = false;
   MonkyLightTrayTarget* target_ = nil;
   NSStatusItem* item_ = nil;
   NSMenu* menu_ = nil;

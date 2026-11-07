@@ -21,6 +21,8 @@ struct ProfileSettings {
   // Playback volume per voice session, 0-200 percent like the full client.
   // 100 is the default and is never stored.
   std::map<std::string, int> userVolumes{};
+  // A name accepted by parsePushToTalkKey; nullopt until the user picks one.
+  std::optional<std::string> pushToTalkKey{};
 };
 
 constexpr int kDefaultUserVolume = 100;

@@ -224,9 +224,27 @@ for (const voiceMode of ['p2p', 'sfu']) {
     };
     await speech(true);
 
+    // An interface starts from the authenticated event and follows the roster by events.
+    assert.equal(auth.inputMode, 'voice_activity');
+    assert.equal(auth.pushToTalkKey, null);
+    const bobAuth = bob.events.find(event => event.event === 'authenticated');
+    const roster = await alice.wait(event => event.event === 'participants' && event.members.length === 2);
+    assert.deepEqual(roster.members.map(member => [member.sessionId, member.name, member.self]).sort(),
+      [[auth.sessionId, 'Light Alice', true], [bobAuth.sessionId, 'Light Bob', false]].sort());
+    assert.equal((await alice.state()).members.length, 2);
+    const keySince = alice.events.length;
+    assert.equal((await alice.command('set-ptt-key', { key: 'F13' })).event, 'command-accepted');
+    await alice.wait(event => event.event === 'push-to-talk-key' && event.key === 'F13', keySince);
+    assert.equal((await alice.state()).pushToTalkKey, 'F13');
+    for (const key of ['CapsLock', 'f13', 7]) {
+      assert.equal((await alice.command('set-ptt-key', { key })).event, 'command-error', `Key ${key} must be refused`);
+    }
+
     assert.equal((await alice.command('ptt', { active: true })).event, 'command-error',
       'Push-to-talk must not be accepted in voice-activity mode');
+    const modeSince = alice.events.length;
     await speech(false, () => alice.command('set-input-mode', { mode: 'push_to_talk' }));
+    await alice.wait(event => event.event === 'input-mode' && event.mode === 'push_to_talk', modeSince);
     const gated = await alice.state();
     assert.equal(gated.inputMode, 'push_to_talk');
     assert.equal(gated.pushToTalkActive, false);
@@ -287,8 +305,9 @@ for (const voiceMode of ['p2p', 'sfu']) {
 
     // A new call, even after a restart, applies the saved volume from the start.
     await bob.close();
-    const again = new NativeClient(fixture, { nickname: 'Light Bob', muted: true, profile: bob.profile });
-    await again.wait('authenticated');
+    const again = new NativeClient(fixture, { nickname: 'Light Bob', muted: true, profile: bob.profile,
+      pushToTalkKey: 'Mouse5' });
+    assert.equal((await again.wait('authenticated')).pushToTalkKey, 'Mouse5', '--ptt-key must be saved and reported');
     await again.command('set-volume', { sessionId: aliceAuth.sessionId, volume: 0 });
     await again.join(channelId);
     await again.untilState(value => value.userVolumes[aliceAuth.sessionId] === 0 && value.audioDevice.playoutCallbacks > 100,

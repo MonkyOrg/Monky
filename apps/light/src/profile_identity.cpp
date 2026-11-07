@@ -2,6 +2,7 @@
 
 #include "identity_key.hpp"
 #include "platform/identity_store.hpp"
+#include "push_to_talk_key.hpp"
 
 #include <json.hpp>
 
@@ -536,6 +537,15 @@ std::optional<std::string> settingsDevice(const Json& data, const char* field) {
   return found->get<std::string>();
 }
 
+std::optional<std::string> settingsKey(const Json& data) {
+  const auto found = data.find("pushToTalkKey");
+  if (found == data.end() || found->is_null()) return std::nullopt;
+  if (!found->is_string() || !parsePushToTalkKey(found->get<std::string>())) {
+    throw std::runtime_error("Profile settings contain an unknown push-to-talk key");
+  }
+  return found->get<std::string>();
+}
+
 bool validUserVolume(const std::string& session, int volume) {
   return !session.empty() && session.size() <= kMaxVolumeSessionBytes && volume >= 0 &&
          volume <= kMaxUserVolume && volume != kDefaultUserVolume;
@@ -586,7 +596,7 @@ ProfileSettings parseSettings(const std::string& contents) {
     throw std::runtime_error("Profile settings contain an invalid input mode");
   }
   return {settingsDevice(data, "inputDeviceId"), settingsDevice(data, "outputDeviceId"), mode == kPushToTalk,
-          settingsVolumes(data)};
+          settingsVolumes(data), settingsKey(data)};
 }
 
 std::string encodeSettings(const ProfileSettings& settings) {
@@ -594,6 +604,9 @@ std::string encodeSettings(const ProfileSettings& settings) {
     if (*id && ((*id)->empty() || (*id)->size() > kMaxDeviceIdBytes)) {
       throw std::invalid_argument("Audio device ID must be a nonempty string of at most 1024 bytes");
     }
+  }
+  if (settings.pushToTalkKey && !parsePushToTalkKey(*settings.pushToTalkKey)) {
+    throw std::invalid_argument("Unknown push-to-talk key");
   }
   if (settings.userVolumes.size() > kMaxUserVolumes) {
     throw std::invalid_argument("Too many participant volumes are stored; reset some to 100");
@@ -612,7 +625,8 @@ std::string encodeSettings(const ProfileSettings& settings) {
                   {"inputDeviceId", optional(settings.inputDeviceId)},
                   {"outputDeviceId", optional(settings.outputDeviceId)},
                   {"inputMode", settings.pushToTalk ? kPushToTalk : kVoiceActivity},
-                  {"userVolumes", Json(settings.userVolumes)}}.dump(2) + "\n";
+                  {"userVolumes", Json(settings.userVolumes)},
+                  {"pushToTalkKey", optional(settings.pushToTalkKey)}}.dump(2) + "\n";
   } catch (const Json::exception&) {
     throw std::invalid_argument("Audio device and session IDs must be valid UTF-8");
   }

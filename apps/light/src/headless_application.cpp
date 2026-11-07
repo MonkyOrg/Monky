@@ -8,6 +8,7 @@
 #include "profile_identity.hpp"
 #include "protocol.hpp"
 #include "protocol_session.hpp"
+#include "push_to_talk_key.hpp"
 #include "server_invite.hpp"
 
 #include <rtc_base/logging.h>
@@ -41,6 +42,7 @@ struct Options {
   bool muted = false;
   bool deafened = false;
   bool tray = false;
+  std::optional<std::string> pushToTalkKey;
   // From an invitation link given as --server (#821): the key it names and its password.
   std::optional<std::string> invitedServerKey;
   std::optional<std::string> invitedPassword;
@@ -61,7 +63,8 @@ Options parseOptions(const std::vector<std::string>& arguments) {
     else if (flag == "--deafened") result.deafened = true;
     else if (flag == "--tray") result.tray = true;
     else {
-      if (flag != "--profile" && flag != "--server" && flag != "--nickname" && flag != "--channel") {
+      if (flag != "--profile" && flag != "--server" && flag != "--nickname" && flag != "--channel" &&
+          flag != "--ptt-key") {
         throw std::invalid_argument("Unknown command-line option; use --help");
       }
       if (++index == arguments.size() || arguments[index].empty()) {
@@ -71,7 +74,10 @@ Options parseOptions(const std::vector<std::string>& arguments) {
       if (flag == "--profile") result.profile = std::filesystem::path(std::u8string(value.begin(), value.end()));
       else if (flag == "--server") result.server = value;
       else if (flag == "--nickname") result.nickname = value;
-      else result.channel = value;
+      else if (flag == "--ptt-key") {
+        if (!parsePushToTalkKey(value)) throw std::invalid_argument("Unknown --ptt-key; see --help");
+        result.pushToTalkKey = value;
+      } else result.channel = value;
     }
   }
   if (!result.profile.is_absolute() || result.server.empty() || result.nickname.empty()) {
@@ -212,6 +218,14 @@ class Application final {
       settings_ = identity_.loadSettings();
     } catch (const std::exception& error) {
       output({{"event", "warning"}, {"detail", std::string("Ignoring profile settings: ") + error.what()}});
+    }
+    // Saved like any other choice, so later starts and the tray keep the key.
+    if (options_.pushToTalkKey && options_.pushToTalkKey != settings_.pushToTalkKey) {
+      try {
+        setPushToTalkKey(options_.pushToTalkKey);
+      } catch (const std::invalid_argument& error) {
+        output({{"event", "warning"}, {"detail", error.what()}});
+      }
     }
     if (audio_.watchDevices) {
       stopWatchingDevices_ = audio_.watchDevices([this] {
@@ -538,6 +552,7 @@ class Application final {
     // A key held while switching modes must not keep transmitting later.
     pushToTalkActive_ = false;
     applyAudioPolicy();
+    output({{"event", "input-mode"}, {"mode", mode}});
   }
 
   // The key itself is the controller's business (a global hotkey in the tray
@@ -547,6 +562,47 @@ class Application final {
     if (pushToTalkActive_ == active) return;
     pushToTalkActive_ = active;
     applyAudioPolicy();
+  }
+
+  // The key is detected by the interface (a global hook in the tray); the core
+  // only stores it so every interface and later start agree on it.
+  void setPushToTalkKey(const std::optional<std::string>& key) {
+    if (key && !parsePushToTalkKey(*key)) throw std::invalid_argument("Unknown push-to-talk key");
+    auto settings = settings_;
+    settings.pushToTalkKey = key;
+    try {
+      identity_.saveSettings(settings);
+    } catch (const std::invalid_argument&) {
+      throw;
+    } catch (const std::exception& error) {
+      throw std::invalid_argument(std::string("Could not save push-to-talk key: ") + error.what());
+    }
+    settings_ = std::move(settings);
+    output({{"event", "push-to-talk-key"}, {"key", key ? Json(*key) : Json(nullptr)}});
+  }
+
+  // Who is in the current call, with the names the server sent and the volume
+  // this profile hears each session at. Empty outside a call.
+  Json members() const {
+    auto result = Json::array();
+    if (!session_.admission() || !session_.authentication()) return result;
+    const auto& self = session_.authentication()->sessionId;
+    for (const auto& [session, participant] : session_.admission()->participants) {
+      std::string name;
+      if (participant.user && participant.user->is_object()) {
+        const auto nickname = participant.user->find("nickname");
+        if (nickname != participant.user->end() && nickname->is_string()) name = nickname->get<std::string>();
+      }
+      const auto volume = settings_.userVolumes.find(session);
+      result.push_back({{"sessionId", session}, {"userId", participant.userId}, {"name", name},
+                        {"self", session == self},
+                        {"volume", volume == settings_.userVolumes.end() ? kDefaultUserVolume : volume->second}});
+    }
+    return result;
+  }
+
+  void publishParticipants() {
+    if (!closing_) output({{"event", "participants"}, {"members", members()}});
   }
 
   void applyAudioPolicy() {
@@ -618,7 +674,10 @@ class Application final {
           output({{"event", "authenticated"}, {"userId", auth.userId}, {"sessionId", auth.sessionId},
                   {"voiceMode", session_.voiceMode() == VoiceMode::sfu ? "sfu" : "p2p"},
                   {"serverName", auth.server.at("name")},
-                  {"channels", auth.server.at("channels")}});
+                  {"channels", auth.server.at("channels")},
+                  // An interface starts from these instead of asking for state.
+                  {"inputMode", settings_.pushToTalk ? "push_to_talk" : "voice_activity"},
+                  {"pushToTalkKey", settings_.pushToTalkKey ? Json(*settings_.pushToTalkKey) : Json(nullptr)}});
         }
         break;
       case SessionEventKind::admitted:
@@ -628,12 +687,14 @@ class Application final {
                 {"channelId", session_.admission()->channelId},
                 {"voiceMode", session_.voiceMode() == VoiceMode::sfu ? "sfu" : "p2p"}});
         beginVoice();
+        publishParticipants();
         break;
       case SessionEventKind::teardown:
         if (active_ && activeGeneration_ < event.generation) retireVoice();
         // Like the full client, a key held across calls does not carry over.
         pushToTalkActive_ = false;
         output({{"event", "voice-left"}, {"generation", event.generation}});
+        publishParticipants();
         break;
       case SessionEventKind::policyChanged:
         applyAudioPolicy();
@@ -644,6 +705,7 @@ class Application final {
       case SessionEventKind::peerJoined:
       case SessionEventKind::peerLeft:
         if (active_ && activeGeneration_ == event.generation) active_->update_roster(roster());
+        publishParticipants();
         break;
       case SessionEventKind::rtcSignal:
         if (active_ && activeGeneration_ == event.generation) active_->receive_signal(event.payload);
@@ -797,6 +859,8 @@ class Application final {
       }
     }
     result["userVolumes"] = std::move(volumes);
+    result["members"] = members();
+    result["pushToTalkKey"] = settings_.pushToTalkKey ? Json(*settings_.pushToTalkKey) : Json(nullptr);
     result["channels"] = session_.authentication() ? session_.authentication()->server.at("channels") : Json(nullptr);
     return result;
   }
@@ -832,6 +896,11 @@ class Application final {
       else if (name == "set-input-mode") setInputMode(value);
       else if (name == "ptt") pushToTalk(value.at("active").get<bool>());
       else if (name == "set-volume") setVolume(value);
+      else if (name == "set-ptt-key") {
+        const auto& key = value.at("key");
+        if (!key.is_null() && !key.is_string()) throw std::invalid_argument("key must be a key name or null");
+        setPushToTalkKey(key.is_null() ? std::nullopt : std::optional<std::string>(key.get<std::string>()));
+      }
       else if (name == "join") session_.join(value.at("channelId").get<std::string>(), Clock::now());
       else if (name == "leave") session_.leave();
       else if (name == "mute") session_.setMuted(value.at("enabled").get<bool>());
@@ -839,7 +908,7 @@ class Application final {
       else if (name == "reconnect") restartConnection();
       else if (name != "quit") {
         throw std::invalid_argument("Unknown command; use join, leave, mute, deafen, devices, set-input, "
-                                    "set-output, set-input-mode, ptt, set-volume, stats, channels, reconnect or quit");
+                                    "set-output, set-input-mode, ptt, set-ptt-key, set-volume, stats, channels, reconnect or quit");
       }
       output({{"event", "command-accepted"}, {"id", id}, {"command", name}});
       if (name == "quit") quit();
@@ -899,7 +968,9 @@ int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio)
     if (arguments == std::vector<std::string>{"--help"}) {
       std::cout << "Monky Light native voice core (development)\n"
                    "  --profile <absolute-path> --server <ws[s]://host:port | invitation link> --nickname <name>\n"
-                   "  [--channel <voice-channel-id>] [--muted] [--deafened] [--tray]\n"
+                   "  [--channel <voice-channel-id>] [--muted] [--deafened] [--tray] [--ptt-key <key>]\n"
+                   "--ptt-key: A-Z, 0-9, F1-F24, Mouse4, Mouse5, RightControl, RightAlt, RightShift,\n"
+                   "  Backquote, Insert or Pause; saved in the profile for the tray's push-to-talk.\n"
                    "The profile parent must exist. Password: MONKY_LIGHT_PASSWORD environment variable, else the invitation's.\n"
                    "Control: one JSON object per line on stdin; events are JSON lines on stdout.\n"
                    "{\"command\":\"join\",\"channelId\":\"...\"}\n"
@@ -909,6 +980,7 @@ int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio)
                    "{\"command\":\"set-output\",\"deviceId\":\"...\"|null}\n"
                    "{\"command\":\"set-input-mode\",\"mode\":\"voice_activity\"|\"push_to_talk\"}\n"
                    "{\"command\":\"ptt\",\"active\":true|false}\n"
+                   "{\"command\":\"set-ptt-key\",\"key\":\"F13\"|null}\n"
                    "{\"command\":\"set-volume\",\"sessionId\":\"...\",\"volume\":0-200}\n"
                    "{\"command\":\"stats\"} / {\"command\":\"channels\"}\n"
                    "{\"command\":\"leave\"} / {\"command\":\"reconnect\"} / {\"command\":\"quit\"}\n"
