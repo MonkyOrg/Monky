@@ -42,6 +42,16 @@ struct Strings {
   const char* serverKeyMissing;
   const char* serverKeyOfOtherServer;
   const char* serverKeyInvalid;
+  const char* pushToTalk;
+  const char* key;
+  const char* noPushToTalkKey;
+  const char* keyUnavailable;
+  const char* inThisCall;
+  const char* you;
+  const char* speaking;
+  const char* volume;
+  // macOS only lets a trusted application see keys pressed in other applications.
+  const char* accessibilityRequired;
 };
 
 inline constexpr Strings kEnglish{
@@ -76,6 +86,15 @@ inline constexpr Strings kEnglish{
     "This server presented an identity key before and now presented none. Monky Light did not join, so your sign-in is not handed to another server.",
     "This server presented the identity key of another server of this profile. Monky Light did not join, because a server may be relaying that one's sign-in.",
     "The server did not prove it holds the identity key it presented. Monky Light did not join.",
+    "Push-to-talk",
+    "key",
+    "no key: start with --ptt-key",
+    "not on this system",
+    "In the call",
+    "you",
+    "speaking",
+    "Volume",
+    "Push-to-talk cannot see the key yet. Allow Monky Light in System Settings › Privacy & Security › Accessibility.",
 };
 
 inline constexpr Strings kPortuguese{
@@ -110,6 +129,15 @@ inline constexpr Strings kPortuguese{
     "Este servidor já apresentou uma chave de identidade e agora não apresentou nenhuma. O Monky Light não entrou para não entregar o seu login a outro servidor.",
     "Este servidor apresentou a chave de identidade de outro servidor deste perfil. O Monky Light não entrou, porque um servidor pode estar repassando o login daquele.",
     "O servidor não provou ter a chave de identidade que apresentou. O Monky Light não entrou.",
+    "Apertar para falar",
+    "tecla",
+    "sem tecla: abra com --ptt-key",
+    "não existe neste sistema",
+    "Na chamada",
+    "você",
+    "falando",
+    "Volume",
+    "O apertar para falar ainda não vê a tecla. Permita o Monky Light em Ajustes do Sistema › Privacidade e Segurança › Acessibilidade.",
 };
 
 inline constexpr const Strings& textFor(Language language) {

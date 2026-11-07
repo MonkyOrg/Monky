@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "A bandeja do Monky Light agora tem apertar para falar com uma tecla ou botão do mouse escolhido com --ptt-key, mostra quando você está falando e permite ajustar o volume de cada participante da chamada pelo menu.",
+  "en": "The Monky Light tray now has push-to-talk on a key or mouse button chosen with --ptt-key, shows when you are speaking, and lets you set each call participant's volume from the menu."
+}
