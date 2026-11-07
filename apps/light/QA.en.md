@@ -156,3 +156,4 @@ available, so the terminal shows what each click did.
 | 6.37 | `Change server…` in the tray | The Light leaves the current server, the icon disappears, and the window reopens filled with the current server, without a password | | |
 | 6.38 | Open a second copy with the same profile | Profile unavailable notice; the first copy stays connected | | |
 | 6.39 | Cancel the window | The Light quits without connecting and leaves no process | | |
+| 6.40 | Turn `Start with the system` on, sign out of the system and back in | The Light opens by itself, tray only, and connects to the last server; turning it off removes the registration and it no longer opens | | |

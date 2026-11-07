@@ -31,6 +31,7 @@ constexpr UINT kDeafen = 4;
 constexpr UINT kReconnect = 5;
 constexpr UINT kPushToTalk = 6;
 constexpr UINT kSwitchServer = 7;
+constexpr UINT kStartup = 8;
 constexpr UINT kRange = 0x0400;
 constexpr UINT kChannels = 0x1000;
 constexpr UINT kInputs = kChannels + kRange;
@@ -139,8 +140,8 @@ void copyInto(WCHAR* destination, std::size_t capacity, const std::string& value
 
 class WindowsTray final : public CoreInterface {
  public:
-  WindowsTray(CoreCommands core, Language language)
-      : controller_(std::move(core), language), text_(textFor(language)) {
+  WindowsTray(CoreCommands core, Language language, std::optional<Startup> startup)
+      : controller_(std::move(core), language, std::move(startup)), text_(textFor(language)) {
     WNDCLASSEXW description{};
     description.cbSize = sizeof(description);
     description.lpfnWndProc = &WindowsTray::proc;
@@ -434,6 +435,7 @@ class WindowsTray final : public CoreInterface {
     separator(menu);
     append(menu, kReconnect, text_.reconnectNow, false, true, false);
     if (view.canSwitchServer) append(menu, kSwitchServer, text_.switchServer, false, true, false);
+    if (view.startupAvailable) append(menu, kStartup, text_.startWithSystem, view.startupChecked, true, false);
     append(menu, kQuit, text_.quit, false, true, false);
     POINT cursor{};
     GetCursorPos(&cursor);
@@ -458,6 +460,10 @@ class WindowsTray final : public CoreInterface {
     else if (identifier == kReconnect) controller_.reconnect();
     else if (identifier == kPushToTalk) controller_.setPushToTalk(!view.pushToTalkChecked);
     else if (identifier == kSwitchServer) controller_.switchServer();
+    else if (identifier == kStartup) {
+      controller_.setStartup(!view.startupChecked);
+      refresh();  // A refusal arrives as an alert.
+    }
     else if (identifier >= kPeople) {
       const auto person = static_cast<std::size_t>((identifier - kPeople) / kPresets);
       const auto preset = static_cast<std::size_t>((identifier - kPeople) % kPresets);
@@ -546,8 +552,8 @@ class WindowsTray final : public CoreInterface {
 
 }  // namespace
 
-std::unique_ptr<CoreInterface> createTray(CoreCommands core, Language language) {
-  return std::make_unique<WindowsTray>(std::move(core), language);
+std::unique_ptr<CoreInterface> createTray(CoreCommands core, Language language, std::optional<Startup> startup) {
+  return std::make_unique<WindowsTray>(std::move(core), language, std::move(startup));
 }
 
 Language systemLanguage() {

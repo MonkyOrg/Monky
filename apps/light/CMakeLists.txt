@@ -233,15 +233,17 @@ if(MONKY_LIGHT_WITH_RTC)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
   if(WIN32)
-    add_library(monky_light_ui STATIC src/ui/tray_windows.cpp src/ui/connect_windows.cpp)
-    target_link_libraries(monky_light_ui PUBLIC Shell32 User32 Gdi32 Ole32)
+    add_library(monky_light_ui STATIC src/ui/tray_windows.cpp src/ui/connect_windows.cpp
+      src/ui/startup_windows.cpp)
+    target_link_libraries(monky_light_ui PUBLIC Shell32 User32 Gdi32 Ole32 Advapi32)
     target_compile_definitions(monky_light_ui PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   else()
     find_library(MONKY_APPKIT_FRAMEWORK AppKit REQUIRED)
     # AXIsProcessTrusted: push-to-talk needs Accessibility to see keys.
     find_library(MONKY_APPLICATION_SERVICES_FRAMEWORK ApplicationServices REQUIRED)
-    add_library(monky_light_ui STATIC src/ui/tray_macos.mm src/ui/connect_macos.mm)
-    set_source_files_properties(src/ui/tray_macos.mm src/ui/connect_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    add_library(monky_light_ui STATIC src/ui/tray_macos.mm src/ui/connect_macos.mm src/ui/startup_macos.mm)
+    set_source_files_properties(src/ui/tray_macos.mm src/ui/connect_macos.mm src/ui/startup_macos.mm
+      PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(monky_light_ui PUBLIC "${MONKY_APPKIT_FRAMEWORK}"
       "${MONKY_APPLICATION_SERVICES_FRAMEWORK}")
   endif()
