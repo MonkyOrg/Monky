@@ -52,6 +52,22 @@ struct Strings {
   const char* volume;
   // macOS only lets a trusted application see keys pressed in other applications.
   const char* accessibilityRequired;
+  const char* switchServer;
+  const char* connectTitle;
+  const char* connectPrompt;
+  const char* serverField;
+  const char* nicknameField;
+  const char* passwordField;
+  const char* connect;
+  const char* cancel;
+  const char* missingServer;
+  const char* invalidServer;
+  const char* missingNickname;
+  const char* nicknameTooLong;
+  const char* wrongPassword;
+  const char* nicknameTaken;
+  const char* nicknameRefused;
+  const char* profileUnavailable;
 };
 
 inline constexpr Strings kEnglish{
@@ -95,6 +111,22 @@ inline constexpr Strings kEnglish{
     "speaking",
     "Volume",
     "Push-to-talk cannot see the key yet. Allow Monky Light in System Settings › Privacy & Security › Accessibility.",
+    "Change server…",
+    "Connect to a server",
+    "Paste the invitation link someone sent you, or the server address.",
+    "Invitation link or server address",
+    "Nickname",
+    "Password (only if the server asks)",
+    "Connect",
+    "Cancel",
+    "Paste an invitation link or a server address.",
+    "This is not an invitation link nor a ws:// or wss:// address.",
+    "Choose a nickname.",
+    "The nickname can have at most 32 characters.",
+    "The server refused the password. Type the password of this server.",
+    "Someone on this server already uses this nickname. Choose another one.",
+    "The server did not accept this nickname. Choose another one.",
+    "Monky Light could not open its profile. It may already be running: look for its icon near the clock.",
 };
 
 inline constexpr Strings kPortuguese{
@@ -138,6 +170,22 @@ inline constexpr Strings kPortuguese{
     "falando",
     "Volume",
     "O apertar para falar ainda não vê a tecla. Permita o Monky Light em Ajustes do Sistema › Privacidade e Segurança › Acessibilidade.",
+    "Trocar de servidor…",
+    "Conectar a um servidor",
+    "Cole o link de convite que te mandaram, ou o endereço do servidor.",
+    "Link de convite ou endereço do servidor",
+    "Apelido",
+    "Senha (só se o servidor pedir)",
+    "Conectar",
+    "Cancelar",
+    "Cole um link de convite ou o endereço de um servidor.",
+    "Isto não é um link de convite nem um endereço ws:// ou wss://.",
+    "Escolha um apelido.",
+    "O apelido pode ter no máximo 32 caracteres.",
+    "O servidor recusou a senha. Digite a senha deste servidor.",
+    "Alguém neste servidor já usa este apelido. Escolha outro.",
+    "O servidor não aceitou este apelido. Escolha outro.",
+    "O Monky Light não conseguiu abrir o perfil. Ele talvez já esteja aberto: procure o ícone perto do relógio.",
 };
 
 inline constexpr const Strings& textFor(Language language) {

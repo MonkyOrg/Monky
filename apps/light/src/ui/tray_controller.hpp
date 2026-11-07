@@ -37,7 +37,9 @@ class TrayController final {
   // Interface thread.
   Presentation presentation() const {
     std::lock_guard lock(mutex_);
-    return model_.presentation();
+    auto result = model_.presentation();
+    result.canSwitchServer = static_cast<bool>(core_.switchServer);
+    return result;
   }
 
   std::optional<std::string> takeAlert() {
@@ -99,6 +101,11 @@ class TrayController final {
   }
 
   void quit() { core_.quit(); }
+
+  // Stops this core; the application start then shows the connection window.
+  void switchServer() {
+    if (core_.switchServer) core_.switchServer();
+  }
 
  private:
   void selectDevice(const char* command, const std::string& deviceId) {

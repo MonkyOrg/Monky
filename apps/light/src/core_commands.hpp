@@ -12,6 +12,9 @@ namespace monky::light {
 struct CoreCommands {
   std::function<void(nlohmann::json)> command;
   std::function<void()> quit;
+  // Present only when the Light was opened without a command line: stops the
+  // core so the connection window can ask for another server.
+  std::function<void()> switchServer{};
 };
 
 // A native interface owns the process main thread, because the platform event

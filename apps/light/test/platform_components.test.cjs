@@ -32,6 +32,10 @@ test('native invitation links decode like the shared parser', () => {
   run('monky-light-invite-test', []);
 });
 
+test('opening without a command line reuses or asks for the server and never stores a password', () => {
+  run('monky-light-standalone-test', []);
+});
+
 test('native application loop waits for events and enforces deadlines and queue bounds', () => {
   run('monky-light-loop-test', []);
 });

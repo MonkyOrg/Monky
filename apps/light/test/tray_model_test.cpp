@@ -430,6 +430,17 @@ void theControllerGatesPushToTalk() {
           "A volume row must carry its session and preset");
 }
 
+void changingServerExistsOnlyForAnApplicationStart() {
+  TrayController console({[](Json) {}, [] {}}, Language::english);
+  require(!console.presentation().canSwitchServer, "A command-line start has no window to ask again");
+  console.switchServer();
+  bool switched = false;
+  TrayController application({[](Json) {}, [] {}, [&] { switched = true; }}, Language::english);
+  require(application.presentation().canSwitchServer, "An application start offers to change server");
+  application.switchServer();
+  require(switched, "Changing server must reach the application start");
+}
+
 void pushToTalkKeysAreNamedForBothPlatforms() {
   using monky::light::parsePushToTalkKey;
   require(!parsePushToTalkKey("CapsLock") && !parsePushToTalkKey("f13") && !parsePushToTalkKey(""),
@@ -467,6 +478,7 @@ int main() {
     pushToTalkWatchesTheKeyOnlyWhileItCanTransmit();
     peopleCarrySpeechAndVolume();
     theControllerGatesPushToTalk();
+    changingServerExistsOnlyForAnApplicationStart();
     pushToTalkKeysAreNamedForBothPlatforms();
     malformedEventsAreIgnored();
     std::cout << "Tray interface scenarios passed\n";
