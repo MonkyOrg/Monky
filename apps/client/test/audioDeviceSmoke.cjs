@@ -198,6 +198,21 @@ async function runAudioDeviceSmoke() {
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const wait = () => new Promise((resolve) => setTimeout(resolve, 80));
+  const savedMicrophone = settings.selectedMicrophoneId;
+  settings.selectedMicrophoneId = '';
+  const reasons = [
+    devices.microphoneFailureReason(new DOMException('Requested device not found', 'NotFoundError')),
+    devices.microphoneFailureReason(new DOMException('Could not start audio source', 'NotReadableError')),
+    devices.microphoneFailureReason(new DOMException('Permission denied', 'NotAllowedError')),
+    devices.microphoneFailureReason(new Error('Some Chromium detail')),
+  ];
+  settings.selectedMicrophoneId = 'mic-gone';
+  reasons.push(devices.microphoneFailureReason(new DOMException('Requested device not found', 'NotFoundError')));
+  settings.selectedMicrophoneId = savedMicrophone;
+  check(reasons.every(reason => reason && !/Requested device|Could not start|Permission denied|Chromium/.test(reason)),
+    'A failed microphone is explained in the app language, never with the browser message');
+  check(new Set(reasons.slice(0, 3)).size === 3 && reasons[4] !== reasons[0],
+    'No microphone, a busy one, a denied permission and a missing selected device each get their own explanation');
   const original = {
     gum: navigator.mediaDevices.getUserMedia, enumerate: navigator.mediaDevices.enumerateDevices,
     AudioContext: window.AudioContext, raw: audio.getRawMicrophoneStream,

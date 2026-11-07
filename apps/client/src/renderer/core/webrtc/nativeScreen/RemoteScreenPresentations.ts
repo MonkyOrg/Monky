@@ -9,6 +9,7 @@ import { voiceStore } from '../../../stores/voiceStore';
 import { resolveAudioOutput } from '../../../utils/audioPreferences';
 import { showInfoToast } from '../../../views/CopyToast';
 import { BrowserScreenSubscription } from '../BrowserScreenSubscription';
+import { browserScreenFailureReason } from '../browserScreenCodecs';
 import type { RemoteMediaRouter } from '../RemoteMediaRouter';
 import {
   announceScreenChange, cancelled, keyOf, messageOf, reportScreenError,
@@ -253,7 +254,8 @@ export class RemoteScreenPresentations {
   public browserFailed(call: Call, entry: Presentation, error: unknown): void {
     if (entry.stopping) return;
     reportScreenError(error);
-    entry.state = { state: 'unavailable', reason: 'connection-failed' };
+    // A codec the browser cannot decode is not the network: the viewer is told the format (#858).
+    entry.state = { state: 'unavailable', reason: browserScreenFailureReason(error) };
     this.rewatch(call).outcome(keyOf(entry.publisherSessionId, entry.source.shareId), entry);
     announceScreenChange();
     void this.stop(call, entry).catch(reportScreenError);

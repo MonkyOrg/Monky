@@ -26,6 +26,8 @@ inline void Require(bool condition, const char* message, MonkyEngineStatus statu
 struct EncodedConfiguration {
   std::uint32_t width = 1920, height = 1080, fps = 120;
   bool av1 = false;
+  // The compatible format (#858): H.264 Constrained Baseline instead of Main.
+  bool compatible = false;
 };
 
 inline std::uint8_t Av1ReceiveLevel(const webrtc::SdpVideoFormat& format) {
@@ -76,6 +78,18 @@ inline std::optional<policy::NegotiatedH264> ParseEncodedFormat(const webrtc::Sd
   return parsed;
 }
 
+// The compatible format (#858) is Constrained Baseline at any level a receiver advertises: browsers advertise
+// the default Level 3.1 and decode up to 5.2 (their WebRTC decoder probe decides before they watch, and the
+// source never needs more than 5.2), and the SFU forwards without levels. Such a receiver is served as if it
+// declared the engine's ceiling.
+inline std::optional<policy::NegotiatedH264> ParseCompatibleFormat(const webrtc::SdpVideoFormat& format) {
+  auto negotiated = format;
+  negotiated.parameters.erase("max-recv-level");
+  const auto parsed = policy::ParseFormat(negotiated, kEncodedH264Level);
+  if (!parsed || parsed->profile != sv::H264Profile::ConstrainedBaseline) return std::nullopt;
+  return policy::NegotiatedH264{sv::H264Profile::ConstrainedBaseline, kEncodedH264Level};
+}
+
 inline bool AcceptsEncodedFormat(const webrtc::SdpVideoFormat& format,
                                  std::uint8_t minimum_level = kEncodedH264Level) {
   const auto parsed = ParseEncodedFormat(format);
@@ -83,9 +97,9 @@ inline bool AcceptsEncodedFormat(const webrtc::SdpVideoFormat& format,
 }
 
 // The level a receiver negotiated with this format, when a source of this codec can send to that receiver at all.
-inline std::optional<std::uint8_t> ReceiverLevel(const webrtc::SdpVideoFormat& format, bool av1) {
+inline std::optional<std::uint8_t> ReceiverLevel(const webrtc::SdpVideoFormat& format, bool av1, bool compatible = false) {
   if (av1) return policy::IsScreenAv1Format(format) ? std::optional(Av1ReceiveLevel(format)) : std::nullopt;
-  const auto parsed = ParseEncodedFormat(format);
+  const auto parsed = compatible ? ParseCompatibleFormat(format) : ParseEncodedFormat(format);
   return parsed ? std::optional(parsed->level) : std::nullopt;
 }
 

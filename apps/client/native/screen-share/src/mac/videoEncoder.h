@@ -27,6 +27,8 @@ struct EncoderOptions {
   int width = 0, height = 0, fps = 0, bitrate_kbps = 0;
   bool hardware = false;
   bool av1 = false;
+  // The compatible format (#858): H.264 Constrained Baseline instead of Main.
+  bool constrained_baseline = false;
 };
 class VideoEncoder {
  public:

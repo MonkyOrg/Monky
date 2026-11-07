@@ -13,7 +13,7 @@ const ts = require('typescript');
 const shared = require('@monky/shared');
 const rendererRoot = path.resolve(__dirname, '..', 'src', 'renderer');
 // The controller and its parts under nativeScreen/ run for real; every other renderer module must be modeled.
-const realModules = ['core/webrtc/NativeScreenController', 'core/webrtc/nativeScreen/', 'utils/qualityProfileLimits'];
+const realModules = ['core/webrtc/NativeScreenController', 'core/webrtc/nativeScreen/', 'core/webrtc/browserScreenCodecs', 'utils/qualityProfileLimits'];
 const compiledModules = new Map();
 function compileRendererModule(filename) {
   let run = compiledModules.get(filename);
@@ -59,12 +59,12 @@ exports.SourceStartCore = SourceStartCore;`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 const compiledStart = vm.runInThisContext(
-  `(function(exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream, ScreenShareUserError) { ${startCompiled}\n})`,
+  `(function(exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream, ScreenShareUserError, createScreenShareStream) { ${startCompiled}\n})`,
   { filename: managerFilename });
 /** Stands in for utils/screenShareFailure: the refusals the renderer explains itself keep their text. */
 class ScreenShareUserError extends Error {}
 const loadStart = (exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream) =>
-  compiledStart(exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream, ScreenShareUserError);
+  compiledStart(exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream, ScreenShareUserError, () => new MediaStream());
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function deferred() {
   let resolve, reject;
@@ -78,7 +78,7 @@ const profile = (width = 1280, height = 720, fps = 60) => ({
 });
 const cancelled = () => new DOMException('Modeled operation was cancelled.', 'AbortError');
 
-function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false, web = false, commandResult = () => undefined, capabilities = {
+function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false, commandResult = () => undefined, capabilities = {
   capture: true, captureAudio: true, receive: true, backend: 'libobs-amf', reason: null,
 } } = {}) {
   const appBus = new EventEmitter();
@@ -236,7 +236,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
       getScreenAudioVolume: () => volume, get outputVolume() { return outputVolume; }, screenSharePreviewPauseWhenUnfocused: true,
       getScreenShareReceiver: () => receiver,
       screenEncodingStrategy: 'automatic', screenEncodingMode: 'hardware', preferredScreenCodec: 'h264',
-      browserScreenFormat: 'compatible',
+      screenFormat: 'compatible',
     } },
     'stores/voiceStore': { voiceStore: {
       getScreenWatchers: () => watching ? [['publisher', [remote.shareId]]] : [],
@@ -244,7 +244,6 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
       getScreenQuality: () => quality, getEffectiveDeafened: () => deafened, isScreenAudioMuted: () => muted,
     } },
     'utils/audioPreferences': { resolveAudioOutput: () => 'default' },
-    'platform/capabilities': { platformSupports: feature => web && feature === 'browserScreenPicker' },
     i18n: { t: key => key },
     'core/screenEncoding': { acceptScreenEncoding() {} },
     'views/CopyToast': { showInfoToast: message => { toasts.push(message); } },
@@ -345,6 +344,23 @@ for (const mode of ['p2p', 'sfu']) {
     assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).receiver, 'native');
   });
 }
+
+test('a codec refusal that reaches the call is reported as unsupported, not as the connection (#858)', async t => {
+  const f = fixture(t, { receiver: 'chromium', allowBrowser: true });
+  f.context.mode = 'sfu';
+  f.watching(true);
+  await f.controller.sync();
+  const [browser] = f.browsers;
+  browser.addProducer = async () => {
+    throw Object.assign(new Error('This browser cannot consume the video/av1 screen.'), { name: 'BrowserScreenCodecError' });
+  };
+  const producer = { channelId: 'room', producerId: 'video-producer', producerSessionId: 'publisher', kind: 'video',
+    appData: { mediaType: 'screen_video', shareId: f.remote.shareId, nativeScreen: { sourceInstanceId: f.remote.instanceId,
+      pipelineId: randomUUID(), video: shared.getScreenShareProfile(f.remote.video, 'source') } } };
+  for (const listener of f.networkListeners) listener(`message.${shared.MessageType.SFU_NEW_PRODUCER}`, producer);
+  for (let i = 0; i < 10; i++) await tick();
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId)?.reason, 'unsupported');
+});
 
 for (const failure of ['capabilities', 'watch']) {
   test(`native ${failure} failure retains the native receiver on retry`, async t => {
@@ -507,15 +523,36 @@ for (const strategy of ['automatic', 'manual']) {
   });
 }
 
-for (const web of [true, false]) {
-  test(`the browser format reaches every source start only on the web (web: ${web}) (#858)`, async t => {
-    const f = fixture(t, { web });
-    f.settings.browserScreenFormat = 'main';
+for (const screenFormat of ['compatible', 'main']) {
+  test(`the ${screenFormat} screen format reaches every source start, on the desktop as on the web (#858)`, async t => {
+    const f = fixture(t);
+    f.settings.screenFormat = screenFormat;
     await f.local();
     await f.controller.applyQuality(profile());
     const additions = f.commands.filter(command => command.action === 'source-add');
     assert.equal(additions.length, 2);
-    for (const command of additions) assert.equal(command.browserFormat, web ? 'main' : undefined);
+    for (const command of additions) assert.equal(command.screenFormat, screenFormat);
+  });
+}
+
+for (const [setting, field, value] of [['preferredScreenCodec', 'codec', 'av1'], ['screenEncodingMode', 'encodingMode', 'software'],
+  ['screenEncodingStrategy', 'encodingStrategy', 'manual'], ['screenFormat', 'screenFormat', 'main']]) {
+  test(`changing only ${setting} replaces the share on air with the new encoding; an unchanged one stays`, async t => {
+    const f = fixture(t), old = await f.local();
+    await f.controller.applyQuality(profile());
+    const additions = () => f.commands.filter(command => command.action === 'source-add');
+    const before = f.captures.get(old.shareId).source.instanceId;
+    await f.controller.applyQuality(profile());
+    assert.equal(additions().length, 2, 'Same quality and encoding keep the source as is');
+    f.settings[setting] = value;
+    await f.controller.applyQuality(profile());
+    assert.equal(additions().length, 3);
+    const replacement = additions().at(-1);
+    assert.equal(replacement[field], value);
+    assert.equal(replacement.replacesSourceInstanceId, before);
+    assert.equal(f.commands.some(command => command.action === 'source-remove'), false, 'The share never leaves the call');
+    await f.controller.applyQuality(profile());
+    assert.equal(additions().length, 3, 'The new encoding is remembered by the replacement');
   });
 }
 

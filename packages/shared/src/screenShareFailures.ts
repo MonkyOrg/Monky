@@ -38,7 +38,7 @@ export function nativeErrorCodes(error: unknown): string[] {
 
 /** Most specific first: when several codes come together, the first category here explains the failure. */
 export const SCREEN_SHARE_FAILURE_CATEGORIES = [
-  'game', 'permission', 'source-lost', 'files', 'encoder', 'quality', 'capacity', 'interrupted', 'unexpected',
+  'game', 'permission', 'source-lost', 'files', 'no-gpu', 'encoder', 'quality', 'capacity', 'interrupted', 'unexpected',
 ] as const;
 export type ScreenShareFailureCategory = typeof SCREEN_SHARE_FAILURE_CATEGORIES[number];
 
@@ -59,6 +59,8 @@ const byCategory: Readonly<Record<ScreenShareFailureCategory, readonly string[]>
     'ERR_SCREEN_CAPTURE_RUN_DIRECTORY', 'ERR_SCREEN_CAPTURE_STARTUP_MODE', 'ERR_SCREEN_CAPTURE_CORE',
     'ERR_MAC_AV1_RUNTIME', 'ERR_MAC_AV1_RUNTIME_PATH', 'ERR_MAC_HOST_START', 'ERR_SCREEN_AUDIO_UNAVAILABLE',
   ],
+  // Adapter 0 is only a software renderer, as in a virtual machine: no encoder, not even software, can capture.
+  'no-gpu': ['ERR_SCREEN_CAPTURE_NO_GPU'],
   encoder: [
     'ERR_SCREEN_CAPTURE_ENCODER_UNAVAILABLE', 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED',
     'ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION', 'ERR_SCREEN_CAPTURE_ENCODER_REROUTE',

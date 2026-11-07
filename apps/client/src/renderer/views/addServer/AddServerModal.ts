@@ -14,6 +14,8 @@ import { clientLog } from '../../core/ClientLogService';
 import { assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, updateSessionAvatar } from '../../core/serverConnection';
 import { ensureHostedServerStarted, findOwnedServer } from '../../core/hostedServerStart';
 import { checkServerOnline } from '../../utils/serverStatus';
+import { confirmHostedServerReach } from '../../utils/hostedServer';
+import { showSecureServerHelp } from '../../utils/secureServerHelp';
 import { parseServerHostInput, setServerTransport } from '../../utils/serverAddress';
 import { showConfirm } from '../Dialog';
 import { joinInviteModal } from '../JoinInviteModal';
@@ -488,6 +490,7 @@ class AddServerModal {
     };
     this.setConnectionPending(true);
     try {
+      if (!(await confirmHostedServerReach()) || !this.modalEl) return;
       await ensureHostedServerStarted(createdServer);
       await this.openAndSaveServer('127.0.0.1', port, password);
     } catch (error: unknown) {
@@ -549,6 +552,7 @@ class AddServerModal {
       clientLog.warn('CONNECTION', 'Could not join the server from the add-server modal', {
         error: error instanceof Error ? error.message : String(error),
       });
+      if (!this.modalEl || showSecureServerHelp(error)) return;
       this.showError(errorMessage(error, t('connection.connectError')));
     } finally {
       this.setConnectionPending(false);

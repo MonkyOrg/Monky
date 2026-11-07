@@ -22,7 +22,7 @@ struct EncodedFactoryBundle {
   std::unique_ptr<webrtc::FieldTrialsView> field_trials;
 };
 
-EncodedFactoryBundle CreateEncodedVideoFactory(std::uint8_t maximum_level, bool av1 = false);
+EncodedFactoryBundle CreateEncodedVideoFactory(std::uint8_t maximum_level, bool av1 = false, bool compatible = false);
 std::shared_ptr<VideoSource> CreateEncodedVideoSource(
     Host& host, std::uint64_t id, const Json& options,
     const std::shared_ptr<Cancellation>& cancellation,

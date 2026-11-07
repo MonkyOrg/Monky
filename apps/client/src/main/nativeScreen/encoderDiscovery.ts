@@ -7,7 +7,7 @@ import {
   type ScreenEncodingAvailability, type ScreenEncodingSelection,
 } from '@monky/shared';
 import type {
-  CaptureBridge, NativeScreenCaptureCapability, NativeScreenCaptureTarget, NativeScreenRuntime,
+  CaptureBridge, NativeScreenCaptureCapability, NativeScreenCaptureTarget, NativeScreenH264Profile, NativeScreenRuntime,
 } from '@monky/screen-share';
 import { canonicalDirectory, samePath } from '../canonicalDirectory';
 import { isRecord } from '../ipc/guards';
@@ -59,7 +59,8 @@ export class SelectedCaptureProbe {
   }
 
   async prepare(target: NativeScreenCaptureTarget, video: NativeScreenVideoProfile,
-    signal: AbortSignal, encoding: ScreenEncodingSelection, preserveAspectRatio = true): Promise<NativeScreenCaptureCapability> {
+    signal: AbortSignal, encoding: ScreenEncodingSelection, preserveAspectRatio = true,
+    h264Profile: NativeScreenH264Profile = 'main'): Promise<NativeScreenCaptureCapability> {
     let capability: NativeScreenCaptureCapability;
     try {
       signal.throwIfAborted();
@@ -71,7 +72,7 @@ export class SelectedCaptureProbe {
       this.bridge = screenShareModule().createCaptureBridge({
         host: this.runtime.host, runtime: this.runtime.obs, runId: this.runId, runDirectory: this.directory,
         encoder: encoding.encoder, video: { width, height, fps, bitrateKbps: maxBitrateKbps,
-          scaleMode: preserveAspectRatio ? 'fit' : 'stretch' },
+          scaleMode: preserveAspectRatio ? 'fit' : 'stretch' }, ...(encoding.codec === 'h264' ? { h264Profile } : {}),
         onError: error => {
           console.warn('[NativeScreen] Selected-source probe failed:', error);
           this.onError(error);

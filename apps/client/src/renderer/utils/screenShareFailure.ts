@@ -25,6 +25,7 @@ const CATEGORIES: Readonly<Record<ScreenShareFailureCategory, TranslationKey>> =
   permission: 'screenShare.failure.permission',
   'source-lost': 'screenShare.failure.source-lost',
   files: 'screenShare.failure.files',
+  'no-gpu': 'screenShare.failure.no-gpu',
   encoder: 'screenShare.failure.encoder',
   quality: 'screenShare.failure.quality',
   capacity: 'screenShare.nativeFailure.capacity-exceeded',
@@ -34,13 +35,8 @@ const CATEGORIES: Readonly<Record<ScreenShareFailureCategory, TranslationKey>> =
 
 const IPC_REJECTION = /^Error invoking remote method '/;
 
-/**
- * The message a screen-sharing failure shows (#490): what happened and what the person can do, never the
- * technical text. A message the app already wrote for the person is kept; native codes Main sent along an
- * IPC rejection pick a category; anything else reads as unexpected. The technical detail Main logged stays
- * in its log, and what only the renderer knows goes to the client log here.
- */
-export function screenShareFailureMessage(error: unknown, action: ScreenShareFailureAction): string {
+/** The native codes of a failure, including those Main wrote along an IPC rejection, and any message already explained. */
+function readFailure(error: unknown): { chain: unknown[]; codes: string[]; reason: string | null } {
   const chain = errorChain(error);
   const codes = new Set<string>(nativeErrorCodes(error));
   let reason: string | null = null;
@@ -51,9 +47,25 @@ export function screenShareFailureMessage(error: unknown, action: ScreenShareFai
     if (detail.notice) { reason = detail.notice; break; }
     for (const code of detail.codes) codes.add(code);
   }
-  const category = screenShareFailureCategory([...codes]);
+  return { chain, codes: [...codes], reason };
+}
+
+/** True when the failure means this computer has no graphics card native screen sharing can use. */
+export function isNoGpuScreenFailure(error: unknown): boolean {
+  return screenShareFailureCategory(readFailure(error).codes) === 'no-gpu';
+}
+
+/**
+ * The message a screen-sharing failure shows (#490): what happened and what the person can do, never the
+ * technical text. A message the app already wrote for the person is kept; native codes Main sent along an
+ * IPC rejection pick a category; anything else reads as unexpected. The technical detail Main logged stays
+ * in its log, and what only the renderer knows goes to the client log here.
+ */
+export function screenShareFailureMessage(error: unknown, action: ScreenShareFailureAction): string {
+  const { chain, codes, reason } = readFailure(error);
+  const category = screenShareFailureCategory(codes);
   clientLog.warn('SCREEN_SHARE', `Screen share ${action} failed`, {
-    category: reason === null ? category : 'explained', codes: [...codes],
+    category: reason === null ? category : 'explained', codes,
     // Main already logged what crossed the IPC, keeping only allowlisted fields of its messages.
     errors: chain.slice(0, 4).map(current => current instanceof Error
       ? { name: current.name, ...(IPC_REJECTION.test(current.message) ? {} : { message: current.message.slice(0, 300) }) }

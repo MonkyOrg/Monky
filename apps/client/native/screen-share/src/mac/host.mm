@@ -159,7 +159,10 @@ void Finish() {
   --operations;
 }
 monky::screen::mac::EncoderOptions VideoOptions(NSDictionary* value) {
-  Exact(value, @[@"width", @"height", @"fps", @"bitrateKbps", @"mode", @"scaleMode", @"codec"]);
+  NSArray<NSString*>* keys = @[@"width", @"height", @"fps", @"bitrateKbps", @"mode", @"scaleMode", @"codec"];
+  // The compatible format (#858) names its H.264 profile; Main when absent.
+  Exact(value, [value isKindOfClass:NSDictionary.class] && value[@"h264Profile"]
+      ? [keys arrayByAddingObject:@"h264Profile"] : keys);
   monky::screen::mac::EncoderOptions result;
   result.width = static_cast<int>(Number(value[@"width"], 4, 3840));
   result.height = static_cast<int>(Number(value[@"height"], 2, 2160));
@@ -171,6 +174,11 @@ monky::screen::mac::EncoderOptions VideoOptions(NSDictionary* value) {
   Require([value[@"codec"] isEqual:@"h264"] || [value[@"codec"] isEqual:@"av1"]);
   result.av1 = [value[@"codec"] isEqual:@"av1"];
   Require(!result.av1 || !result.hardware, "ERR_MAC_AV1_HARDWARE_UNSUPPORTED");
+  if (value[@"h264Profile"]) {
+    Require([value[@"h264Profile"] isEqual:@"main"] || [value[@"h264Profile"] isEqual:@"constrained-baseline"]);
+    result.constrained_baseline = [value[@"h264Profile"] isEqual:@"constrained-baseline"];
+    Require(!result.av1 || !result.constrained_baseline);
+  }
   return result;
 }
 uint64_t CaptureId(NSDictionary* arguments) {

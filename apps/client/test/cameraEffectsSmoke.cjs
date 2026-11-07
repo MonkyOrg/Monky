@@ -153,6 +153,7 @@ if (!process.versions.electron) {
     const fpsOnly = process.argv.includes('--fps-only') || process.argv.includes('--quality-only');
     const keyColorsOnly = process.argv.includes('--key-colors-only');
     const gpuOnly = process.argv.includes('--gpu-only');
+    const warmUpOnly = process.argv.includes('--warm-up-only');
     const normalOnly = process.argv.includes('--normal-only');
     const stallOnly = process.argv.includes('--stall-only');
     const withoutTrackGenerator = process.argv.includes('--without-track-generator');
@@ -165,12 +166,12 @@ if (!process.versions.electron) {
     const selectedPhases = [
       ...(ownershipOnly ? ['ownership'] : []), ...(keyColorsOnly ? ['key-colors'] : []),
       ...(fpsOnly ? ['quality'] : []), ...(transitionsOnly ? ['transitions'] : []), ...(chromaOnly ? ['chroma'] : []),
-      ...(gpuOnly ? ['gpu'] : []),
+      ...(gpuOnly ? ['gpu'] : []), ...(warmUpOnly ? ['warm-up'] : []),
       ...(normalOnly ? ['normal'] : []), ...(stallOnly ? ['stall'] : []),
     ];
     const phases = selectedPhases.length ? selectedPhases
       : cpuCompositor ? ['chroma']
-        : ['gpu', 'ownership', 'key-colors', 'quality', 'transitions', 'stall', 'missing-model', 'normal', 'recovery'];
+        : ['gpu', 'warm-up', 'ownership', 'key-colors', 'quality', 'transitions', 'stall', 'missing-model', 'normal', 'recovery'];
     let checks = 0;
     for (const phase of phases) {
       blockModel = phase === 'missing-model';
@@ -178,7 +179,7 @@ if (!process.versions.electron) {
       if (blockModel) await window.webContents.session.clearCache();
       if (blockModel && packagedModel) fs.renameSync(packagedModel, `${packagedModel}.smoke-missing`);
       try {
-        const run = phase === 'gpu' ? runCameraGpuChecks : runCameraEffectsSmoke;
+        const run = phase === 'gpu' ? runCameraGpuChecks : phase === 'warm-up' ? runMattingWarmUpChecks : runCameraEffectsSmoke;
         checks += await window.webContents.executeJavaScript(`window.cameraEffectsTrace = ${process.argv.includes('--camera-trace')}; (${run.toString()})('${phase}')`, true);
       } finally {
         if (blockModel && packagedModel) fs.renameSync(`${packagedModel}.smoke-missing`, packagedModel);
@@ -192,6 +193,45 @@ if (!process.versions.electron) {
     console.log(`Camera effects ${phases.join(' + ')} (${packaged ? 'packaged offline' : 'dev'}${withoutTrackGenerator ? ', main-thread fallback' : ''}) smoke: ${checks} checks passed; no external requests`);
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
+}
+
+async function runMattingWarmUpChecks() {
+  const { RvmPersonMatting, DEFAULT_CAMERA_EFFECT_SETTINGS: defaults } = window.cameraEffectsFixture;
+  let checks = 0;
+  const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  const prototype = WebGL2RenderingContext.prototype;
+  const { linkProgram, drawElements } = prototype;
+  let draws = 0;
+  let linksAfterFirstDraw = 0;
+  prototype.linkProgram = function (program) { if (draws) linksAfterFirstDraw++; return linkProgram.call(this, program); };
+  prototype.drawElements = function (...args) { draws++; return drawElements.apply(this, args); };
+  let matting;
+  let bitmap;
+  try {
+    matting = await RvmPersonMatting.create();
+    const source = new OffscreenCanvas(256, 144);
+    const context = source.getContext('2d');
+    context.fillStyle = '#2a6f3a';
+    context.fillRect(0, 0, source.width, source.height);
+    context.fillStyle = '#d9a37c';
+    context.fillRect(96, 24, 64, 120);
+    bitmap = await createImageBitmap(source);
+    for (let frame = 0; frame < 2; frame++) {
+      const output = await matting.render(bitmap, { ...defaults, mode: 'blur' }, null);
+      check(output.width === source.width && output.height === source.height, 'Matting must keep the frame size');
+      output.close();
+    }
+    check(draws > 0, 'The matting model must run on WebGL');
+    // Compiling ~330 programs serially inside the first inference made the first blur slow (#878).
+    // A handful of late programs (compositor, output upload, recurrent shapes) remain expected.
+    check(linksAfterFirstDraw <= 16,  `RVM programs must be compiled before the first inference: ${linksAfterFirstDraw} linked mid-inference`);
+  } finally {
+    prototype.linkProgram = linkProgram;
+    prototype.drawElements = drawElements;
+    bitmap?.close();
+    await matting?.dispose();
+  }
+  return checks;
 }
 
 async function runCameraGpuChecks() {

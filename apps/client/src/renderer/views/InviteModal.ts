@@ -4,7 +4,7 @@ import { getActiveNetworkClient, networkClient, type NetworkClient } from '../co
 import { serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { sessionManager } from '../core/SessionManager';
-import { findOwnedServer } from '../core/hostedServerStart';
+import { knownServerPassword } from '../core/hostedServerStart';
 import { escapeHtml } from '../utils/html';
 import { getLanguage, t } from '../i18n';
 import { openModal, type ModalShell } from '../utils/modalShell';
@@ -98,8 +98,7 @@ export class InviteModal {
     this.networkInterfaces = [];
 
     const active = sessionManager.getActive();
-    this.knownPassword = active?.password
-      || (active ? findOwnedServer(active.host, active.port)?.password : undefined);
+    this.knownPassword = active ? knownServerPassword(active) : undefined;
     this.serverKey = active ? connectionStore.serverKeyExpectation(active).pinned : undefined;
 
     const shell = openModal({

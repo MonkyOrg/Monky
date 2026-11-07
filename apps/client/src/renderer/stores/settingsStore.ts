@@ -16,7 +16,7 @@ import {
   type BotFormValues,
   type BotLocale,
   type ScreenEncodingMode,
-  type ScreenCodec, type ScreenEncodingStrategy, type BrowserScreenFormat, browserScreenFormatSchema,
+  type ScreenCodec, type ScreenEncodingStrategy, type ScreenFormat, screenFormatSchema,
 } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import {
@@ -26,6 +26,8 @@ import {
 import { autoEntryServerKey, restoreAutoEntryServerKeys, type AutoEntryServerAddress } from '../utils/autoEntry';
 import { normalizeCustomQualityProfile } from '../utils/qualityProfileLimits';
 import { platformSupports } from '../platform/capabilities';
+
+const DEFAULT_SCREEN_FORMAT: ScreenFormat = 'main';
 
 /**
  * Chat-notification-sound mode for the 3-level configuration (#153).
@@ -53,7 +55,7 @@ function savedSettings(store: SettingsStore) {
     screenEncodingMode: store.screenEncodingMode,
     screenEncodingStrategy: store.screenEncodingStrategy,
     preferredScreenCodec: store.preferredScreenCodec,
-    browserScreenFormat: store.browserScreenFormat,
+    screenFormat: store.screenFormat,
     vadSensitivity: store.vadSensitivity,
     inputVolume: store.inputVolume,
     outputVolume: store.outputVolume,
@@ -103,6 +105,7 @@ function savedSettings(store: SettingsStore) {
     updateBetaChannel: store.updateBetaChannel,
     minimizeToTrayOnClose: store.minimizeToTrayOnClose,
     askShutdownOnLastLeave: store.askShutdownOnLastLeave,
+    warnHostedServerReach: store.warnHostedServerReach,
     appearOffline: store.appearOffline,
     brb: store.brb,
     customStatus: store.customStatus,
@@ -205,8 +208,8 @@ export class SettingsStore {
   public screenEncodingMode: ScreenEncodingMode = 'hardware';
   public screenEncodingStrategy: ScreenEncodingStrategy = 'automatic';
   public preferredScreenCodec: ScreenCodec = 'h264';
-  /** How the web version encodes the screens it shares (#858): compatible with every viewer by default. */
-  public browserScreenFormat: BrowserScreenFormat = 'compatible';
+  /** The H.264 profile screens are shared in (#858): better quality by default, everywhere; AV1 ignores it (#890). */
+  public screenFormat: ScreenFormat = DEFAULT_SCREEN_FORMAT;
   public customProfile: QualityProfile = { ...DEFAULT_CUSTOM_PROFILE };
   public inputMode: 'voice_activity' | 'push_to_talk' = 'voice_activity'; // #186
   public pttKey: PttKeyBinding = { code: 'KeyV', display: 'V', keyType: 'keyboard', keyCode: 47 };
@@ -279,6 +282,9 @@ export class SettingsStore {
   // Ask whether to shut the local server down when its owner is the last one
   // leaving (#334). Turned off from the prompt itself or in Settings.
   public askShutdownOnLastLeave: boolean = true;
+  // Before creating a server, warn that friends only reach it over a VPN, the
+  // local network or forwarded ports (#877). Turned off from the warning or in Settings.
+  public warnHostedServerReach: boolean = true;
   // Appear offline to other users on all servers (#561).
   public appearOffline: boolean = false;
   // "Volto já" status (user-brb). Never combined with appearOffline.
@@ -330,7 +336,7 @@ export class SettingsStore {
     this.screenEncodingMode = 'hardware';
     this.screenEncodingStrategy = 'automatic';
     this.preferredScreenCodec = 'h264';
-    this.browserScreenFormat = 'compatible';
+    this.screenFormat = DEFAULT_SCREEN_FORMAT;
     this.screenShareReceiver = 'native';
     this.soundboardLimiterEnabled = false;
     this.soundboardLoudnessLimit = 6;
@@ -355,8 +361,9 @@ export class SettingsStore {
         this.qualityPreset = restoreQualityPreset(parsed.qualityPreset);
         this.screenEncodingMode = parsed.screenEncodingMode === 'software' ? 'software' : 'hardware';
         this.preferredScreenCodec = parsed.preferredScreenCodec === 'av1' ? 'av1' : 'h264';
-        const browserFormat = browserScreenFormatSchema.safeParse(parsed.browserScreenFormat);
-        this.browserScreenFormat = browserFormat.success ? browserFormat.data : 'compatible';
+        // v41.5.4 saved the web's choice as browserScreenFormat.
+        const screenFormat = screenFormatSchema.safeParse(parsed.screenFormat ?? parsed.browserScreenFormat);
+        this.screenFormat = screenFormat.success ? screenFormat.data : DEFAULT_SCREEN_FORMAT;
         this.screenEncodingStrategy = parsed.screenEncodingStrategy === 'manual' ? 'manual'
           : parsed.screenEncodingStrategy === undefined
             && (parsed.screenEncodingMode === 'software' || parsed.preferredScreenCodec === 'h264'
@@ -491,6 +498,9 @@ export class SettingsStore {
         }
         if (typeof this.askShutdownOnLastLeave !== 'boolean') {
           this.askShutdownOnLastLeave = true;
+        }
+        if (typeof this.warnHostedServerReach !== 'boolean') {
+          this.warnHostedServerReach = true;
         }
         if (typeof this.appearOffline !== 'boolean') {
           this.appearOffline = false;
@@ -921,8 +931,8 @@ export class SettingsStore {
     catch (error) { this.screenShareReceiver = previous; throw error; }
   }
 
-  public setBrowserScreenFormat(format: BrowserScreenFormat): void {
-    this.browserScreenFormat = browserScreenFormatSchema.parse(format);
+  public setScreenFormat(format: ScreenFormat): void {
+    this.screenFormat = screenFormatSchema.parse(format);
     this.save();
   }
 

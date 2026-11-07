@@ -118,6 +118,10 @@ a decisão entre **Perguntar**, **Sempre** e **Nunca**, ajusta o limite (50 MB
 por padrão, de 1 MB a 100 GB) e apaga os dados. A mudança vale na hora, também
 para um miniapp aberto.
 
+Na versão web, as regras são as mesmas. Os dados ficam no navegador, na origem
+do Monky e não na do miniapp, que só os alcança por `monkyScreen.storage`. Sair
+da conta na versão web apaga esses dados.
+
 | API | Comportamento |
 |-----|---------------|
 | `status` | `'granted'`, `'denied'` ou `'unavailable'` |

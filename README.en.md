@@ -41,6 +41,8 @@ Download the latest version from [github.com/MonkyOrg/Monky/releases/latest](htt
 
 If Windows/macOS shows a security warning, see [Download](https://monkyorg.github.io/Monky/en/download). For checksums and signatures, see [Verify Releases](https://monkyorg.github.io/Monky/en/verificar-releases).
 
+To try it without installing anything, use the web version at [monkyweb.vercel.app](https://monkyweb.vercel.app/). It only joins servers with a secure connection (`wss://`, see [`monky tls`](https://monkyorg.github.io/Monky/en/cli#monky-tls)); hosting a server, the overlay and global shortcuts stay in the app.
+
 ## 📚 Documentation
 
 Full usage and hosting manual at **[monkyorg.github.io/Monky/en](https://monkyorg.github.io/Monky/en/)** — installation, getting started, creating a server, hosting on a VPS and troubleshooting. ([Português](https://monkyorg.github.io/Monky/))

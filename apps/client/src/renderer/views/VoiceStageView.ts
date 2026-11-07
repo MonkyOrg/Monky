@@ -1225,11 +1225,9 @@ export class VoiceStageView {
     if (state.reason !== 'unsupported') return failure;
     // Choosing the native receiver exists only where the platform has one (the desktop).
     if (platformSupports('nativeScreenAudio')) return `${failure} ${t('screenShare.chromiumReceiverSettingsHint')}`;
-    const codec = webRtcManager.getNativeScreenSource(sessionId, shareId)?.codec ?? 'h264';
-    switch (browserScreenRefusal(codec)) {
-      case 'main': return t('screenShare.browserCannotReceiveMain');
+    switch (browserScreenRefusal(webRtcManager.getNativeScreenSource(sessionId, shareId)?.codec ?? 'h264')) {
+      case 'unwatchable': return t('screenShare.browserCannotWatch');
       case 'switch': return `${failure} ${t('screenShare.browserReceiverHint')}`;
-      case 'codec': return t('screenShare.browserCannotReceive', { codec: codec === 'av1' ? 'AV1' : 'H.264' });
       default: return failure;
     }
   }

@@ -179,6 +179,11 @@ MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_encoded_av1(
     const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
     MonkyRtcEngine** engine, MonkyEngineError* error) MONKY_ENGINE_NOEXCEPT;
 
+// External H.264 in Constrained Baseline, the compatible format every browser decodes (#858).
+MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_encoded_compatible(
+    const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
+    MonkyRtcEngine** engine, MonkyEngineError* error) MONKY_ENGINE_NOEXCEPT;
+
 // IDs are caller-selected nonzero safe JS integers. Do not reuse a request ID
 // before its completion event has been consumed.
 // OK acknowledges admission only. operation events report actual completion.

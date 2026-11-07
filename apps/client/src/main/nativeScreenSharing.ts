@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
   MessageType, NATIVE_SCREEN_IPC, SCREEN_SHARE_LIMITS, nativeScreenCommandSchema,
-  getScreenShareProfile, nativeScreenFailureReason, nativeScreenProducerSchema, nativeScreenSignalSchema,
+  compatibleScreenProfile, getScreenShareProfile, nativeScreenFailureReason, nativeScreenProducerSchema, nativeScreenSignalSchema,
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommand, type NativeScreenCommandResult,
   type NativeScreenParticipant, type NativeScreenSignalPayload,
   type NativeScreenSource, type NativeScreenAudioPreferences, type NativeScreenCaptureKind, type NativeScreenVideoProfile,
@@ -11,7 +11,7 @@ import {
 } from '@monky/shared';
 import type {
   NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub, NativeScreenPreviewBridge,
-  NativeScreenRuntime, NativeScreenAudioOptions, NativeScreenCaptureTarget, NativeScreenCaptureCapability,
+  NativeScreenRuntime, NativeScreenAudioOptions, NativeScreenCaptureTarget, NativeScreenCaptureCapability, NativeScreenH264Profile,
 } from '@monky/screen-share';
 import { validateCaptureTarget } from '@monky/screen-share/target';
 import * as screenAudio from '@monky/screen-audio';
@@ -27,6 +27,7 @@ import { diagnosticId, diagnosticProfile, errorDetails, NativeScreenNotice, rend
 import { documentIdentity, RendererBridge } from './nativeScreen/rendererBridge';
 import { screenShareModule } from './nativeScreen/screenShareModule';
 import { isScreenEncoderFailure } from './screenEncodingCache';
+import { screenH264Profile } from './screenEncodingPolicy';
 
 type SourceRecord = {
   desktopSourceId: string;
@@ -427,22 +428,25 @@ class NativeScreenSharingService {
       assertCurrent();
       monitor.assertCurrent();
       stage = 'preflight';
-      this.diagnostics.log('preflight-start', diagnostic);
+      this.diagnostics.log('preflight-start', { ...diagnostic, screenFormat: command.screenFormat ?? 'main' });
       const discover = (): Promise<ScreenEncodingAvailability> => this.discovery.encoding({ video: command.video,
         mode: command.encodingMode ?? 'hardware', codec: command.codec ?? 'auto',
         strategy: command.encodingStrategy ?? 'automatic', inspectHardware: false }, selection.abort.signal);
-      type Preflight = { video: NativeScreenVideoProfile; proof: NativeScreenCaptureCapability };
+      type Preflight = { video: NativeScreenVideoProfile; proof: NativeScreenCaptureCapability; h264Profile?: NativeScreenH264Profile };
       // The selected source proves the chosen encoder with the real target, even when discovery was remembered.
       const prepare = async (encoding: ScreenEncodingAvailability): Promise<Preflight> => {
         assertCurrent();
         if (!encoding.selection) throw new Error(encoding.reason ?? 'No compatible screen encoder is available for this codec and profile.');
-        const video = getScreenShareProfile(command.video, 'source', encoding.selection.codec);
+        const sized = getScreenShareProfile(command.video, 'source', encoding.selection.codec);
+        // The format is an H.264 profile (#858, #890): AV1 has none, so it never narrows the codec choice.
+        const h264Profile = screenH264Profile(encoding.selection.codec, command.screenFormat);
+        const video = h264Profile === 'constrained-baseline' ? compatibleScreenProfile(sized) : sized;
         diagnostic.video = diagnosticProfile(video);
         selection.probe = new SelectedCaptureProbe(this.nativeRuntime(), captureDirectory,
           error => this.diagnostics.logFailure('preflight', error, undefined, { ...diagnostic, stage: 'preflight' }));
         try {
-          return { video, proof: await selection.probe.prepare(target, video, selection.abort.signal, encoding.selection,
-            command.preserveAspectRatio) };
+          return { video, h264Profile, proof: await selection.probe.prepare(target, video, selection.abort.signal,
+            encoding.selection, command.preserveAspectRatio, h264Profile) };
         } catch (error) {
           // An encoder that fails with the real source makes every remembered discovery suspect.
           if (isScreenEncoderFailure(error)) this.discovery.cache.clear();
@@ -460,7 +464,7 @@ class NativeScreenSharingService {
         encoding = await discover();
         preflight = await prepare(encoding);
       }
-      const { video, proof } = preflight;
+      const { video, proof, h264Profile } = preflight;
       assertCurrent();
       monitor.assertCurrent();
       const backend = target.platform === 'darwin'
@@ -543,6 +547,7 @@ class NativeScreenSharingService {
             source: { ...options.source, codec: source.codec ?? 'h264' },
             onState: state => { observe(state); options.onState(state); },
             publisherSessionId: call.config.sessionId, target: captureTarget, captureDirectory, captureEncoder: proof.encoderId,
+            ...(h264Profile ? { h264Profile } : {}),
             preserveAspectRatio: command.preserveAspectRatio ?? true,
             isSourcePaused: () => monitor.paused,
             assertSourceCurrent: () => {

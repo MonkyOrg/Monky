@@ -8,7 +8,6 @@ import { emitOutsideRouting } from '../../sessionRouting';
 import { t } from '../../../i18n';
 import { videoService, type NativeScreenCapture } from '../../VideoService';
 import { settingsStore } from '../../../stores/settingsStore';
-import { platformSupports } from '../../../platform/capabilities';
 import { customVideoFpsLimit } from '../../../utils/qualityProfileLimits';
 import { acceptScreenEncoding } from '../../screenEncoding';
 import {
@@ -18,8 +17,6 @@ import {
 /** Why viewers see a frozen picture of a local source: its window is minimized or hidden, or a browser stopped drawing it. */
 export type NativeScreenSourceWarning = 'hidden' | 'covered';
 
-/** The format a browser publisher encodes in (#858); the desktop chooses its codec through its own settings. */
-const browserFormat = () => platformSupports('browserScreenPicker') ? { browserFormat: settingsStore.browserScreenFormat } : {};
 
 export type SourceInput = Omit<NativeScreenCapture, 'source'> & {
   shareId: string; video: NativeScreenVideoProfile; audio: boolean;
@@ -31,6 +28,8 @@ export type SourceInput = Omit<NativeScreenCapture, 'source'> & {
 export interface LocalSource {
   readonly ready: Promise<NativeScreenSource>;
   descriptor: NativeScreenSource | null;
+  /** The encoding settings Main prepared this source with; changing them replaces the source on air. */
+  encoding: string;
   removing: boolean;
   reconfiguration?: { retired: boolean };
   retirement?: Promise<void>;
@@ -44,6 +43,13 @@ export interface LocalSource {
   preview?: {
     presentationId: string; video: HTMLVideoElement; stream: MediaStream | null;
     attachment: Promise<void>; retirement?: Promise<void>;
+  };
+}
+
+function encodingSettings() {
+  return {
+    encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
+    encodingStrategy: settingsStore.screenEncodingStrategy, screenFormat: settingsStore.screenFormat,
   };
 }
 
@@ -148,14 +154,13 @@ export class LocalScreenSources {
     this.calls.current(call);
     const existing = call.sources.get(input.shareId);
     if (existing) return existing.removing ? Promise.reject(new Error('The native source is still retiring.')) : existing.ready;
+    const encoding = encodingSettings();
     const entry: LocalSource = {
-      descriptor: null, removing: false,
+      descriptor: null, removing: false, encoding: JSON.stringify(encoding),
       ready: call.api.nativeScreenCommand({
         action: 'source-add', callId: call.config.callId, shareId: input.shareId,
         desktopSourceId: input.desktopSourceId, video: input.video, audio: input.audio, audioBitrateKbps: input.audioBitrateKbps,
-        preserveAspectRatio: input.preserveAspectRatio ?? true,
-        encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
-        encodingStrategy: settingsStore.screenEncodingStrategy, ...browserFormat(),
+        preserveAspectRatio: input.preserveAspectRatio ?? true, ...encoding,
         ...(input.replacesAudioShareIds?.length ? { replacesAudioShareIds: [...input.replacesAudioShareIds] } : {}),
         ...(input.captureKind ? { captureKind: input.captureKind } : {}),
       }).then(result => {
@@ -210,8 +215,11 @@ export class LocalScreenSources {
       // A source may give up its audio in place (#253), never acquire it.
       const audio = capture.source.audio && selected?.audio !== false;
       const previous = call.sources.get(shareId);
+      const encoding = encodingSettings(), encodingKey = JSON.stringify(encoding);
+      // A codec, encoder or format change also replaces the source on air: Main prepares a new encoder for it.
       if (previous && !previous.removing && screenShareProfileKey(capture.source.video) === screenShareProfileKey(video)
-        && capture.audioBitrateKbps === audioBitrateKbps && capture.source.audio === audio) return;
+        && capture.audioBitrateKbps === audioBitrateKbps && capture.source.audio === audio
+        && previous.encoding === encodingKey) return;
       const isCurrentCapture = () => this.calls.active === call && !call.stopping && call.context.isCurrent()
         && videoService.getNativeScreenCapture(shareId) === capture;
       if (selected && previous?.descriptor && !previous.removing) {
@@ -223,9 +231,7 @@ export class LocalScreenSources {
             replacesSourceInstanceId: previous.descriptor.instanceId,
             desktopSourceId: capture.desktopSourceId, captureKind: capture.captureKind,
             preserveAspectRatio: capture.preserveAspectRatio ?? true,
-            video, audio, audioBitrateKbps,
-            encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
-            encodingStrategy: settingsStore.screenEncodingStrategy, ...browserFormat(),
+            video, audio, audioBitrateKbps, ...encoding,
           });
           this.calls.current(call);
           if (!isCurrentCapture() || previous.removing || call.sources.get(shareId) !== previous) {
@@ -242,7 +248,8 @@ export class LocalScreenSources {
             return;
           }
           const source = { ...result.source, ...(capture.source.audience ? { audience: capture.source.audience } : {}) };
-          call.sources.set(shareId, { descriptor: source, ready: Promise.resolve(source), removing: false });
+          call.sources.set(shareId, { descriptor: source, ready: Promise.resolve(source), removing: false,
+            encoding: encodingKey });
           videoService.updateNativeScreenCapture({ ...capture, source, audioBitrateKbps });
           try { await this.attachPreview(shareId); }
           catch (error) { reportScreenError(error); }

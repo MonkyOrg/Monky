@@ -5,7 +5,7 @@ import {
   type EditorCommand, type FileBatchDownloadFile, type FileBatchDownloadRequest, type FileBatchDownloadResult,
   type HostServerStatus, type LinkPreviewData, type ServerInviteResult,
 } from '@monky/shared';
-import type { BotStorageApi, PlatformApi, PlatformCapabilities } from '../api';
+import type { PlatformApi, PlatformCapabilities } from '../api';
 import { t } from '../../i18n';
 import { IMAGE_ACCEPT, base64ToBytes, bytesToBase64, pickFiles, readImageSelection, saveBlob, saveText } from './webFiles';
 import {
@@ -19,6 +19,7 @@ import {
 import { embeddedReleaseRequest } from './webReleases';
 import { createWebMediaLibrary, supportsDirectoryPicker } from './webMediaLibrary';
 import { createWebBotScreenDocument, removeWebBotScreenDocument, webBotScreenDocumentHost } from './webBotScreens';
+import { webBotStorage, wipeWebBotStorage } from './webBotStorage';
 import { createEventCalendar } from '../../utils/eventCalendar';
 import { clearWebLogs, exportWebLogs, getWebLogConfig, getWebLogSize, setWebLogConfig, writeWebLog } from './webClientLog';
 import { WebScreenRuntime, webScreenCapabilities } from './webScreen/webScreenRuntime';
@@ -78,18 +79,6 @@ const done = (): Promise<void> => Promise.resolve();
 const never = (): (() => void) => () => {};
 
 const NO_HOSTED_SERVERS: HostServerStatus = { servers: [] };
-
-const webBotStorage: BotStorageApi = {
-  documentState: unsupported('Bot storage'),
-  documentRequest: unsupported('Bot storage'),
-  list: () => Promise.resolve([]),
-  get: unsupported('Bot storage'),
-  setDecision: unsupported('Bot storage'),
-  setQuota: unsupported('Bot storage'),
-  clear: unsupported('Bot storage'),
-  forget: unsupported('Bot storage'),
-  onChanged: never,
-};
 
 /** Only web pages leave the app, in a new tab that cannot reach back into it. */
 function openExternal(url: string): Promise<{ success: boolean }> {
@@ -217,6 +206,7 @@ async function logOut(): Promise<{ success: boolean; error?: string }> {
   try {
     await deleteWebIdentity();
     await wipeWebDirectMessages();
+    await wipeWebBotStorage();
     // The desktop relaunches; a tab starts over by loading the page again.
     setTimeout(() => window.location.reload(), 0);
     return { success: true };

@@ -9,7 +9,7 @@ import {
 import { NativeScreenNotice, rendererFailure } from '../src/main/nativeScreen/errorDiagnostics';
 import { setLanguage, t, type SupportedLanguage, type TranslationKey } from '../src/renderer/i18n';
 import {
-  ScreenShareUserError, screenEncodingFallbackMessage, screenShareFailureMessage,
+  ScreenShareUserError, isNoGpuScreenFailure, screenEncodingFallbackMessage, screenShareFailureMessage,
 } from '../src/renderer/utils/screenShareFailure';
 
 const client = path.resolve(__dirname, '..', '..');
@@ -61,6 +61,7 @@ test('every native ERR_SCREEN and ERR_MAC code has a category, and the table nam
     ['ERR_MAC_AV1_RUNTIME', 'files'], ['ERR_MAC_HOST_START', 'files'], ['ERR_SCREEN_AUDIO_UNAVAILABLE', 'files'],
     ['ERR_MAC_VIDEO_METAL_UNAVAILABLE', 'encoder'], ['ERR_MAC_CAPTURE_FIRST_FRAME', 'interrupted'],
     ['ERR_MAC_SCREEN_PERMISSION', 'permission'], ['ERR_MAC_SOURCE_LOST', 'source-lost'],
+    ['ERR_SCREEN_CAPTURE_NO_GPU', 'no-gpu'], ['ERR_SCREEN_CAPTURE_DEVICE', 'encoder'],
   ] as const) assert.equal(SCREEN_SHARE_FAILURE_CODES.get(code), category, code);
 });
 
@@ -105,6 +106,11 @@ for (const language of ['pt-BR', 'en'] as const satisfies readonly SupportedLang
     assert.equal(screenShareFailureMessage(wrapped, 'start'), start(t('screenShare.failure.encoder')));
     assert.equal(screenShareFailureMessage(crossed(coded('Hook refused', 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE')), 'start'),
       start(t('screenShare.gameCaptureUnavailable')));
+    // A virtual machine's software renderer is explained as such, not as a driver to update or a retry.
+    const noGpu = crossed(coded('Not supported on capture adapter 0', 'ERR_SCREEN_CAPTURE_NO_GPU'));
+    assert.equal(screenShareFailureMessage(noGpu, 'start'), start(t('screenShare.failure.no-gpu')));
+    assert.equal(isNoGpuScreenFailure(noGpu), true);
+    assert.equal(isNoGpuScreenFailure(crossed(coded('OBS D3D11 device was removed', 'ERR_SCREEN_CAPTURE_DEVICE'))), false);
   });
 
   test(`every native code reads as plain language in every action (${language})`, () => {

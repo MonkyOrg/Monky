@@ -5,7 +5,7 @@ import {
 } from '@monky/shared';
 import { BrowserScreenP2p } from './BrowserScreenP2p';
 import { BrowserScreenSfu, type BrowserScreenRpc } from './BrowserScreenSfu';
-import { BrowserScreenCodecError, supportsBrowserScreenCodec } from './browserScreenCodecs';
+import { BrowserScreenCodecError, browserScreenFailureReason, browserScreenRefusal, supportsBrowserScreenCodec } from './browserScreenCodecs';
 
 export interface BrowserScreenSubscriptionOptions {
   call: NativeScreenCall;
@@ -52,23 +52,30 @@ export class BrowserScreenSubscription {
 
   private fail(error: unknown): void {
     if (this.stopping) return;
-    this.options.onUnavailable(error instanceof BrowserScreenCodecError ? 'unsupported' : 'connection-failed');
+    this.options.onUnavailable(browserScreenFailureReason(error));
     this.options.onError(error);
   }
 
   /**
    * The first frame never came. Video that arrived yet never decoded is the browser's decoder refusing the
    * stream (Firefox accepts AV1 in its capability probe and then decodes none of a screen), not the network.
+   * So is a connection that carries media but no video at all, on a browser with no decoder for the codec
+   * the screen is in: it dropped the stream before counting it.
    */
   private async startupExpired(message: string): Promise<void> {
-    let undecoded = false;
+    let undecoded = false, videoPackets = 0, connected = false;
     try {
       (await this.stats())?.forEach(report => {
-        if (report.type === 'inbound-rtp' && report.kind === 'video' && report.packetsReceived > 0 && !report.framesDecoded)
-          undecoded = true;
+        if (report.type === 'inbound-rtp' && report.kind === 'video') {
+          videoPackets += report.packetsReceived ?? 0;
+          if (report.packetsReceived > 0 && !report.framesDecoded) undecoded = true;
+        }
+        if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.bytesReceived > 0) connected = true;
       });
     } catch { /* The stats only refine the reason. */ }
-    this.fail(undecoded ? new BrowserScreenCodecError(`${message} Its video arrived, but this browser decoded none of it.`)
+    const dropped = connected && videoPackets === 0 && browserScreenRefusal(this.options.source.codec ?? 'h264') === 'unwatchable';
+    this.fail(undecoded || dropped ? new BrowserScreenCodecError(`${message} ${undecoded
+      ? 'Its video arrived, but this browser decoded none of it.' : 'The connection works, but this browser kept none of its video.'}`)
       : new Error(message));
   }
 

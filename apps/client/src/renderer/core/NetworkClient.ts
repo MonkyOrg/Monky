@@ -29,8 +29,8 @@ import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
 import { settingsStore } from '../stores/settingsStore';
 import { connectionStore } from '../stores/connectionStore';
-import { isIpLiteralHost, isLoopbackHost, isSecureServer, normalizeHost, toWsUrl } from '../utils/serverAddress';
-import { platformSupports } from '../platform/capabilities';
+import { isIpLiteralHost, isLoopbackHost, normalizeHost, toWsUrl } from '../utils/serverAddress';
+import { insecureServerError, needsSecureConnection, SecureServerRequiredError } from '../utils/secureServer';
 
 /**
  * WebKit 26 (Safari and every iOS browser) leaves a WebSocket to an IP address
@@ -239,8 +239,8 @@ export class NetworkClient {
   private async diagnoseConnectionFailure(host: string, port: number): Promise<Error> {
     clientLog.warn('NETWORK', `Diagnosing connection failure to ${host}:${port}`);
     // On the web every other server is reached over TLS, and the page cannot probe it (#858).
-    if (!platformSupports('plainRemoteServers') && !isLoopbackHost(host)) {
-      return new Error(t('network.webSecureFailed', { host, port }));
+    if (needsSecureConnection(host)) {
+      return new SecureServerRequiredError(t('network.webSecureFailed', { host, port }));
     }
     // Outside Electron (tests, a page opened without the preload) there is no probe.
     const probe = window.api?.probeServer;
@@ -417,8 +417,9 @@ export class NetworkClient {
 
       try {
         // A page served over HTTPS may only open `wss://` or this machine (#858).
-        if (!platformSupports('plainRemoteServers') && !isSecureServer({ host, port }) && !isLoopbackHost(host)) {
-          fail(new Error(t('network.webUnsupportedServer', { host: probeHost, port })));
+        const insecure = insecureServerError(probeHost, port);
+        if (insecure) {
+          fail(insecure);
           return;
         }
         this.ws = new WebSocket(this.currentServerUrl);

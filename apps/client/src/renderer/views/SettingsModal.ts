@@ -38,6 +38,8 @@ interface SettingsTab extends SettingsTabEntry {
   hide?(): void;
   /** What it needs of the platform (#858); without it, its panel is shown read-only, naming `feature`. */
   requires?: { capability: keyof PlatformCapabilities; feature: DesktopFeature };
+  /** What still works where `requires` is missing: shown and bound below the read-only panel. */
+  available?: { render(): string; attach(root: HTMLElement): void; cleanup(): void };
 }
 
 export class SettingsModal {
@@ -130,6 +132,11 @@ export class SettingsModal {
       render: () => this.localToolsTab.renderHtml(),
       attach: (root) => this.localToolsTab.attachEvents(root),
       cleanup: () => this.localToolsTab.cleanup(),
+      available: {
+        render: () => LocalToolsTab.botStorageHtml(),
+        attach: (root) => this.localToolsTab.attachBotStorage(root),
+        cleanup: () => this.localToolsTab.cleanup(),
+      },
     },
     {
       id: 'logs', icon: 'description', label: 'settings.tabLogs',
@@ -153,12 +160,17 @@ export class SettingsModal {
       .map(entry => entry.requires && isDesktopOnly(entry.requires.capability) ? this.locked(entry, entry.requires) : entry);
   }
 
-  /** The tab as a read-only panel: its own content under the notice, never bound, so nothing it reads is asked of the platform. */
+  /**
+   * The tab as a read-only panel: its own content under the notice, never bound, so nothing it reads is asked of
+   * the platform. Only what it marks as `available` here is shown below and bound.
+   */
   private locked(entry: SettingsTab, requires: NonNullable<SettingsTab['requires']>): SettingsTab {
+    const available = entry.available;
     return {
       id: entry.id, icon: entry.icon, label: entry.label, separated: entry.separated, desktopOnly: true,
-      render: () => lockedPanel(requires.capability, requires.feature, entry.render()),
-      attach: () => {},
+      render: () => lockedPanel(requires.capability, requires.feature, entry.render()) + (available?.render() ?? ''),
+      attach: (root) => available?.attach(root),
+      cleanup: available ? () => available.cleanup() : undefined,
     };
   }
 

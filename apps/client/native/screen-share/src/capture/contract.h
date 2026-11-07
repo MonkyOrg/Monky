@@ -58,7 +58,12 @@ inline const char* ScaleModeName(ScaleMode mode) { return mode == ScaleMode::Fit
 struct VideoConfiguration {
   std::uint32_t width = 1920, height = 1080, fps = 120, bitrateKbps = 5000;
   ScaleMode scaleMode = ScaleMode::Stretch;
+  // The compatible format (#858): H.264 Constrained Baseline instead of Main.
+  bool constrainedBaseline = false;
 };
+inline const char* H264ProfileName(const VideoConfiguration& video) {
+  return video.constrainedBaseline ? "constrained-baseline" : "main";
+}
 
 inline constexpr std::uint32_t kMaximumBitrateKbps = 80000;
 
@@ -281,7 +286,7 @@ inline void ValidatePathEvidence(const PathEvidence& value) {
 }
 
 inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
-  Require(input.size() >= 9 && input.size() <= 17, "Expected capture identity and explicit video configuration",
+  Require(input.size() >= 9 && input.size() <= 18, "Expected capture identity and explicit video configuration",
           "ERR_SCREEN_CAPTURE_ARGUMENT");
   Arguments value;
   unsigned seen = 0;
@@ -354,6 +359,10 @@ inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
       } else if (name == L"--bitrate-ceiling") {
         bit = 1048576;
         value.bitrateCeilingKbps = static_cast<std::uint32_t>(Decimal(text, kMaximumBitrateKbps));
+      } else if (name == L"--h264-profile") {
+        bit = 2097152;
+        Require(text == L"main" || text == L"constrained-baseline", "Unsupported H264 profile", "ERR_SCREEN_CAPTURE_ARGUMENT");
+        value.video.constrainedBaseline = text == L"constrained-baseline";
       } else throw ContractError("ERR_SCREEN_CAPTURE_ARGUMENT", "Unknown native host option");
     }
     Require((seen & bit) == 0, "Duplicate native host option", "ERR_SCREEN_CAPTURE_ARGUMENT");
@@ -362,7 +371,9 @@ inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
   ValidateVideoConfiguration(value.video);
   Require(value.bitrateCeilingKbps >= value.video.bitrateKbps && value.bitrateCeilingKbps % 50 == 0,
           "Invalid capture bitrate ceiling", "ERR_SCREEN_CAPTURE_VIDEO");
-  const auto targetOptions = seen & ~(524288u | 1048576u);
+  Require(!value.video.constrainedBaseline || (value.encoder != EncoderKind::Auto && !IsAv1(value.encoder)),
+          "Constrained Baseline needs an explicit H264 encoder", "ERR_SCREEN_CAPTURE_ARGUMENT");
+  const auto targetOptions = seen & ~(524288u | 1048576u | 2097152u);
   if (value.encoderProbe) {
     Require(targetOptions == ((511u & ~24u) | 2048u | 262144u),
             "Encoder probing must not select a window, monitor or game", "ERR_SCREEN_CAPTURE_ARGUMENT");
@@ -754,7 +765,10 @@ class BitReader {
 };
 
 inline void ReadSpsPicture(BitReader& bits, const VideoConfiguration& video) {
-  Require(bits.Read(8) == 77, "Encoded SPS did not accept H264 main profile", "ERR_SCREEN_CAPTURE_H264");
+  // A Baseline SPS is marked Constrained Baseline by NormalizeConstrainedBaseline before it leaves the host.
+  Require(bits.Read(8) == (video.constrainedBaseline ? 66u : 77u), video.constrainedBaseline
+      ? "Encoded SPS did not accept H264 constrained baseline profile" : "Encoded SPS did not accept H264 main profile",
+      "ERR_SCREEN_CAPTURE_H264");
   Require((bits.Read(8) & 3u) == 0, "Invalid SPS reserved constraint bits", "ERR_SCREEN_CAPTURE_H264");
   const auto level = bits.Read(8);
   Require(level >= RequiredCaptureH264Level(video) &&
@@ -934,6 +948,26 @@ inline AmfColorNormalization NormalizeAmfBt709(std::span<const std::uint8_t> byt
     ++result.parameterSets;
   });
   if (result.parameterSets) append(bytes.subspan(copied));
+  return result;
+}
+
+// A Baseline encoder (AMF and NVENC "baseline", x264) emits no slice groups or redundant pictures, which is
+// Constrained Baseline (H.264 A.2.1); some leave constraint_set1 clear. The compatible format (#858) declares it,
+// so receivers that admit only Constrained Baseline accept the stream. AMF also sets constraint_set5, which has no
+// meaning for Baseline (7.4.2.1.1) but takes the SPS out of WebRTC's Constrained Baseline table, so receivers
+// refused it; constraint_set4/5 are cleared. The flag byte follows profile_idc (never zero), so no emulation
+// prevention depends on it. Empty means no rewrite.
+inline std::vector<std::uint8_t> NormalizeConstrainedBaseline(std::span<const std::uint8_t> bytes,
+    const VideoConfiguration& video) {
+  std::vector<std::uint8_t> result;
+  if (!video.constrainedBaseline) return result;
+  VisitAnnexB(bytes, [&](std::span<const std::uint8_t> nal, std::size_t begin, std::size_t) {
+    if ((nal.front() & 0x1fu) != 7 || nal.size() < 4 || nal[1] != 66) return;
+    const auto declared = static_cast<std::uint8_t>((nal[2] | 0x40u) & ~0x0cu);
+    if (declared == nal[2]) return;
+    if (result.empty()) result.assign(bytes.begin(), bytes.end());
+    result[begin + 2] = declared;
+  });
   return result;
 }
 
@@ -1268,7 +1302,7 @@ inline std::string ConfigurationJson(Method method, const VideoConfiguration& vi
       ",\"scaleMode\":" + JsonString(ScaleModeName(video.scaleMode)) +
       ",\"rateControl\":" + JsonString(EncoderRateControl(encoder)) +
       ",\"codec\":" + JsonString(EncoderCodec(encoder)) + ",\"encoderId\":" + JsonString(EncoderId(encoder)) +
-      ",\"profile\":\"main\",\"bFrames\":0,\"keyframeIntervalSeconds\":1}";
+      ",\"profile\":" + JsonString(H264ProfileName(video)) + ",\"bFrames\":0,\"keyframeIntervalSeconds\":1}";
 }
 
 inline std::string CommonJson(const Common& common, std::string_view type, std::uint64_t sequence,

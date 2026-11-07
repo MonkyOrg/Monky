@@ -16,6 +16,8 @@ export type { NativeScreenAudioPreferences } from '@monky/shared';
 export type NativeScreenCaptureEncoder = 'auto' | 'h264_texture_amf' | 'obs_nvenc_h264_tex'
   | 'obs_x264' | 'av1_texture_amf' | 'obs_nvenc_av1_tex' | 'monky_aom_av1'
   | 'apple_vt_h264' | 'apple_vt_h264_software';
+/** The H.264 profile a capture encodes: Main, or the Constrained Baseline of the compatible format (#858). */
+export type NativeScreenH264Profile = 'main' | 'constrained-baseline';
 export type NativeScreenCaptureTarget =
   | MacCaptureTarget
   | { platform?: never; kind: 'window' | 'game'; hwnd: number; expectedProcessId: number; expectedProcessCreationTime100ns: string }
@@ -68,6 +70,8 @@ export interface NativeScreenCaptureProbeOptions {
   runDirectory: string;
   video: { width: number; height: number; fps: number; bitrateKbps: number; scaleMode?: 'stretch' | 'fit' };
   encoder?: NativeScreenCaptureEncoder;
+  /** H.264 encoders only; Main when absent. */
+  h264Profile?: NativeScreenH264Profile;
 }
 
 export interface NativeScreenCaptureProbeResult extends NativeScreenCaptureCapability {
@@ -189,6 +193,8 @@ export interface NativeScreenEndpointOptions {
   audio?: NativeScreenAudioOptions;
   target?: NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget;
   captureEncoder?: NativeScreenCaptureEncoder;
+  /** The H.264 profile an H.264 publisher encodes and negotiates; Main when absent. */
+  h264Profile?: NativeScreenH264Profile;
   preserveAspectRatio?: boolean;
   captureDirectory?: string;
   isSourcePaused?: () => boolean;

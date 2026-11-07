@@ -90,6 +90,12 @@ to download the app; elsewhere, activating the item opens that offer. One rule d
 from `utils/desktopOnly.ts`. Only the desktop's title bar and window buttons are
 left out on the web.
 
+When a feature exists on both, its rules live in one engine and each platform
+supplies the storage. Direct messages use `packages/dm`. Miniapp storage on the
+device uses `botDeviceStorageEngine.ts`, in `packages/shared`: the desktop writes
+files from the main process, and the web writes to IndexedDB on the app's origin,
+never on the miniapps' origin.
+
 Three barriers protect that bridge. The Content-Security-Policy in `index.html`
 only runs the app's own scripts, so HTML injected by mistake does not execute;
 a new kind of resource (another iframe, worker or origin) has to be added to
@@ -284,16 +290,29 @@ the browser's own dialog (`getDisplayMedia`), each requested profile is a copy
 of the capture scaled down by the browser, and it is sent as H.264 over a
 connection of its own per viewer in P2P or through a pair of screen producers
 on the SFU, with the same `monky-native-screen-p2p` protocol and rendition
-data. The default format is Constrained Baseline (`42e0..`, packetization-mode
-1), which every receiver decodes, Firefox and Safari included; the publisher
-can choose H.264 Main, a better picture that only Chrome, Edge and the desktop
-watch. The codec is pinned by `setCodecPreferences` in P2P and by the
+data. The default format is H.264 Main, a better picture that only Chrome, Edge
+and the desktop watch; the publisher can choose Constrained Baseline (`42e0..`,
+packetization-mode 1), which every receiver decodes, Firefox and Safari
+included. The codec is pinned by `setCodecPreferences` in P2P and by the
 producer's codec on the SFU, even when the browser would use its hardware
 encoder. The renderer above it does not change; the picker is the browser's
 dialog (`views/screenShare/BrowserScreenSharePicker.ts`), and the web version
 always watches with the browser's receiver. A browser without the share's
 profile or codec (Firefox facing H.264 Main or AV1) gets a message naming the
 format, not the generic connection failure.
+
+The desktop app offers the same pair of formats in Quality & sharing, with
+Better quality as its default. The format is an H.264 profile and does not
+narrow the codec: Automatic still picks AV1 when available. When the screen is
+sent in H.264 with Compatible, Main passes
+`--h264-profile=constrained-baseline` to the
+capture host: x264, NVENC and AMF use OBS's `baseline` profile, and
+VideoToolbox uses `H264_ConstrainedBaseline_AutoLevel`. The host and the engine
+set `constraint_set1` on a Baseline SPS without slice groups or redundant
+pictures, which is Constrained Baseline (H.264 A.2.1). The engine
+(`videoInput: 'encoded-h264-cb'`) negotiates only that profile and serves
+receivers at any advertised level, since browsers advertise the default
+Level 3.1 and decode up to 5.2; so a compatible source never exceeds Level 5.2.
 
 The picker only uses native capture and explains why when it is unavailable:
 there is no fallback to Chromium capture. Closing the picker cancels pending
@@ -467,9 +486,10 @@ Payload validation uses **zod**, with the schemas in `packages/shared` — the v
 same ones the client uses to validate before sending.
 
 ::: warning Negotiated compatibility, never an unrestricted downgrade
-Protocol **26** negotiates independent minimum versions: **26 for clients** and
-**24 for bots**, plus feature flags in `AUTH_CONNECT`/`AUTH_SUCCESS`. The native
-4K/80 Mbps screen contract requires updating client and server; clients 24/25
+Since protocol **26**, client and bot minimum versions are independent. Today
+they are **35 for clients** (`MIN_CLIENT_PROTOCOL`) and **24 for bots**
+(`MIN_BOT_PROTOCOL`), plus feature flags in `AUTH_CONNECT`/`AUTH_SUCCESS`. The native
+4K/80 Mbps screen contract requires updating client and server; older clients
 are not silently downgraded. Version 24 bots retain their existing audio and
 command contract. Message blocks and message-limit settings are enabled only
 when negotiated. The SDK may retry authentication once using an old server's

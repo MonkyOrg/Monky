@@ -1,4 +1,8 @@
-import { QUALITY_PRESETS, QualityPresetType, QualityProfile, NATIVE_SCREEN_VIDEO_LIMITS, type NativeScreenVideoProfile } from '@monky/shared';
+import {
+  QUALITY_PRESETS, QualityPresetType, QualityProfile, NATIVE_SCREEN_VIDEO_LIMITS, screenFormatSchema, type NativeScreenVideoProfile,
+} from '@monky/shared';
+import { renderChoiceCards, selectChoiceCard } from '../../../utils/formControls';
+import { screenFormatChoice } from '../../screenShare/screenFormatChoices';
 import { settingsStore } from '../../../stores/settingsStore';
 import { webRtcManager } from '../../../core/WebRtcManager';
 import { t, type TranslationKey } from '../../../i18n';
@@ -12,6 +16,7 @@ import { showInfoToast, showSuccessToast } from '../../CopyToast';
 import { ScreenEncodingControls } from '../../ScreenEncodingControls';
 import { nativeScreenProfile } from '../../../core/webrtc/NativeScreenController';
 import { lockedBlock } from '../../../utils/desktopOnly';
+import { platformSupports } from '../../../platform/capabilities';
 import {
   ASPECT_RATIO_GROUPS,
   AUDIO_BITRATE_OPTIONS,
@@ -47,8 +52,16 @@ export class QualityTab {
   private released = false;
   private appliedEncoding = '';
   private readonly encoding = new ScreenEncodingControls(() => nativeScreenProfile(this.qualityProfile()),
-    undefined, profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest(),
+    () => this.renderScreenFormat(), profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest(),
     () => this.settleReleasedRequest());
+
+  /** The format is an H.264 profile (#890): it shows only while screens go out in H.264, below the encoding. */
+  private renderScreenFormat(): void {
+    const section = this.container?.querySelector<HTMLElement>('#screen-format-section');
+    const codec = this.encoding.transmittedCodec;
+    // While Automatic resolves, the section keeps what it showed instead of flickering.
+    if (section && codec) setSurfaceVisible(section, codec === 'h264');
+  }
 
   private qualityProfile(): QualityProfile {
     return this.requestedQuality?.profile ?? (settingsStore.qualityPreset === 'CUSTOM'
@@ -95,7 +108,7 @@ export class QualityTab {
   }
 
   private commitQualityChanges(preset: QualityPresetType, customProfile?: QualityProfile, persist = true,
-    confirm = false): void {
+    confirm = false): Promise<number | null> {
     const previousPreset = settingsStore.qualityPreset, previousCustom = settingsStore.customProfile;
     const profile = preset === 'CUSTOM' ? customProfile ?? previousCustom : QUALITY_PRESETS[preset];
     webRtcManager.assertScreenSharingSettings(profile);
@@ -111,6 +124,7 @@ export class QualityTab {
     if (persist) settingsStore.save();
     void this.encoding.refresh();
     if (confirm) this.confirmQualityChange(profile, applied);
+    return applied;
   }
 
   // Active shares confirm only after their replacement source is live; failures are reported by the share.
@@ -133,11 +147,15 @@ export class QualityTab {
     // A clamp notice or FPS adjustment already explains the applied value; never replace it.
     const confirm = !!this.requestedQuality && !this.requestedQuality.noticeShown && !adjusted;
     const encoding = this.encodingKey();
+    const encodingChanged = this.appliedEncoding !== encoding;
     this.requestedQuality = null;
     try {
-      this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined,
+      const applied = this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined,
         persist, confirm);
       this.appliedEncoding = encoding;
+      if (encodingChanged && !confirm) void applied.then(shares => {
+        if (shares) showSuccessToast(t('settings.screenEncodingAppliedLive'), 5000);
+      });
     } catch (error) {
       this.renderQualityDetails();
       throw error;
@@ -158,6 +176,13 @@ export class QualityTab {
     const preset = this.requestedQuality?.preset ?? settingsStore.qualityPreset;
     return `
       ${ScreenEncodingControls.html()}
+      <div id="screen-format-section" class="form-group" data-settings-section="screen-format"
+        data-settings-label="${escapeHtml(t('screenShare.format'))}" ${this.encoding.transmittedCodec === 'h264' ? '' : 'hidden'}>
+        <label>${t('screenShare.format')}</label>
+        ${renderChoiceCards({ id: 'screen-format-choice', label: t('screenShare.format'), attribute: 'data-screen-format',
+          selected: settingsStore.screenFormat, choices: screenFormatSchema.options.map(screenFormatChoice) })}
+        <p id="screen-format-apply" class="audio-device-status">${t('settings.screenFormatApply')}</p>
+      </div>
       ${lockedBlock('nativeScreenAudio', 'screenReceiver', `<div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
         <label>${t('settings.screenReceiverSection')}</label>
         <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenReceiverSection'))}" aria-describedby="screen-receiver-warning screen-receiver-apply">
@@ -426,6 +451,21 @@ export class QualityTab {
     this.appliedEncoding = this.encodingKey();
     this.encoding.attach(container);
     const options = { signal: this.eventController.signal };
+    const formats = container.querySelector<HTMLElement>('#screen-format-choice');
+    formats?.addEventListener('click', event => {
+      const card = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-screen-format]') : null;
+      const format = screenFormatSchema.safeParse(card?.dataset.screenFormat);
+      if (!format.success || card?.hasAttribute('disabled')) return;
+      settingsStore.setScreenFormat(format.data);
+      selectChoiceCard(formats, 'data-screen-format', format.data);
+    }, options);
+    // A browser offers only the formats it encodes (Firefox and Safari have no H.264 Main); the desktop has both.
+    if (platformSupports('browserScreenPicker')) void webRtcManager.getNativeScreenCapabilities().then(capabilities => {
+      if (this.container !== container || !capabilities.browserFormats) return;
+      formats?.querySelectorAll<HTMLButtonElement>('[data-screen-format]').forEach(card => {
+        card.hidden = !capabilities.browserFormats?.some(format => format === card.dataset.screenFormat);
+      });
+    }, (error: unknown) => console.warn('[QualityTab] Screen capabilities are unavailable:', error));
     const nativeReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-native');
     const chromiumReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-chromium');
     for (const receiver of ['native', 'chromium'] as const) {

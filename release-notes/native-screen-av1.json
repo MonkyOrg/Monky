@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Transmitir tela com AV1 voltou a funcionar, e o automático volta a escolher AV1 quando a placa permite. O Formato do vídeo agora só aparece com H.264, abaixo de Codificação de tela, e o padrão é a melhor qualidade.",
+  "en": "Screen sharing with AV1 works again, and automatic mode picks AV1 again when your GPU supports it. Video format now only shows with H.264, below Screen encoding, and defaults to the best quality."
+}

@@ -12,6 +12,7 @@ import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 import { t } from '../src/renderer/i18n';
 import { connectionStore } from '../src/renderer/stores/connectionStore';
 import { setServerTransport } from '../src/renderer/utils/serverAddress';
+import { SecureServerRequiredError } from '../src/renderer/utils/secureServer';
 
 const identity = { clientId: 'fixture-client', publicKey: 'fixture-public-key' };
 const NONCE = 'ab'.repeat(32);
@@ -713,7 +714,8 @@ test('the web version refuses a plain server on another machine without opening 
   const attempt = f.client.connect('192.168.0.10', 3000, identity, 'Fixture');
   const opened = f.sockets.length;
   f.sockets.at(-1)?.drop();
-  await assert.rejects(attempt, { message: t('network.webUnsupportedServer', { host: '192.168.0.10', port: 3000 }) });
+  await assert.rejects(attempt, error => error instanceof SecureServerRequiredError
+    && error.message === t('network.webUnsupportedServer', { host: '192.168.0.10', port: 3000 }));
   assert.equal(opened, 0);
   assert.equal(f.client.getStatus(), 'DISCONNECTED');
 });
@@ -728,12 +730,14 @@ test('the web version still dials this machine and secure servers, and words a f
   const local = f.client.connect('localhost', 48731, identity, 'Fixture');
   assert.equal(f.lastSocket().url, 'ws://localhost:48731');
   f.lastSocket().drop();
-  await assert.rejects(local, { message: t('network.genericConnectError') });
+  await assert.rejects(local, error => !(error instanceof SecureServerRequiredError)
+    && error instanceof Error && error.message === t('network.genericConnectError'));
 
   const remote = f.client.connect(secure.host, secure.port, identity, 'Fixture');
   assert.equal(f.lastSocket().url, 'wss://chat.example:443');
   f.lastSocket().drop();
-  await assert.rejects(remote, { message: t('network.webSecureFailed', { host: 'chat.example', port: 443 }) });
+  await assert.rejects(remote, error => error instanceof SecureServerRequiredError
+    && error.message === t('network.webSecureFailed', { host: 'chat.example', port: 443 }));
 });
 
 const SAFARI_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Safari/605.1.15';

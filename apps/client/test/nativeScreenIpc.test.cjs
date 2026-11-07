@@ -75,6 +75,23 @@ test('encoding policy prefers initialized hardware AV1, then H264, then visible 
   }
 });
 
+test('the screen format is only an H.264 profile and never narrows the codec (#890)', async () => {
+  assert.equal(policy.screenH264Profile('av1', 'compatible'), undefined);
+  assert.equal(policy.screenH264Profile('av1', 'main'), undefined);
+  assert.equal(policy.screenH264Profile('av1', undefined), undefined);
+  assert.equal(policy.screenH264Profile('h264', 'compatible'), 'constrained-baseline');
+  assert.equal(policy.screenH264Profile('h264', 'main'), 'main');
+  assert.equal(policy.screenH264Profile('h264', undefined), 'main');
+  const compiled = ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264', 'monky_aom_av1'];
+  const tried = [];
+  const selected = await policy.selectScreenEncoding('automatic', 'hardware', 'h264', compiled,
+    async value => { tried.push(value.encoder); });
+  assert.deepEqual(tried, ['av1_texture_amf']);
+  assert.equal(selected.selection.codec, 'av1');
+  const manual = await policy.selectScreenEncoding('manual', 'hardware', 'av1', compiled, async () => {});
+  assert.equal(manual.selection.codec, 'av1');
+});
+
 test('macOS keeps Automatic on hardware H264 and exposes AV1 only as explicit native software', async () => {
   const encoders = ['apple_vt_h264', 'apple_vt_h264_software', 'monky_aom_av1'];
   const tried = [];
@@ -1080,6 +1097,47 @@ for (const encoder of ['h264_texture_amf', 'obs_nvenc_h264_tex']) {
     assert.equal(f.endpoints[0].options.captureEncoder, encoder);
     assert.equal(f.endpoints[0].options.preserveAspectRatio, true);
     assert.equal(f.probes[0].closed, true);
+  });
+}
+
+for (const screenFormat of ['compatible', 'main', undefined]) {
+  test(`the ${screenFormat ?? 'default'} format reaches the H.264 source probe and publisher (#858)`, async t => {
+    const f = fixture(t, { encoder: 'h264_texture_amf', compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] });
+    await f.join(); await f.participants();
+    const { source } = await f.addSource(undefined, { video: { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 },
+      ...(screenFormat ? { screenFormat } : {}) });
+    const compatible = screenFormat === 'compatible';
+    // The format is an H.264 profile, never a codec filter (#890): Automatic tries AV1 first in every format.
+    assert.equal(f.encodingProbes[0].encoder, 'av1_texture_amf');
+    assert.equal(source.codec, 'h264');
+    // Firefox decodes Constrained Baseline up to Level 5.2: 4K keeps its size and drops to 64 FPS.
+    assert.equal(source.video.fps, compatible ? 64 : 120);
+    assert.equal(f.probes[0].options.h264Profile, compatible ? 'constrained-baseline' : 'main');
+    await f.command({ action: 'signal', signal: {
+      fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+      channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+      subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+    } });
+    assert.equal(f.endpoints[0].options.h264Profile, compatible ? 'constrained-baseline' : 'main');
+  });
+
+  test(`an AV1 screen ignores the ${screenFormat ?? 'default'} format and never carries an H.264 profile (#890)`, async t => {
+    const f = fixture(t, { encoder: 'av1_texture_amf', compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] });
+    await f.join(); await f.participants();
+    const { source } = await f.addSource(undefined, { video: { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 },
+      ...(screenFormat ? { screenFormat } : {}) });
+    assert.equal(source.codec, 'av1');
+    assert.equal(source.video.fps, 120, 'the compatible H.264 level ceiling does not apply to AV1');
+    assert.equal(f.probes[0].options.encoder, 'av1_texture_amf');
+    assert.equal('h264Profile' in f.probes[0].options, false);
+    await f.command({ action: 'signal', signal: {
+      fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+      channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+      subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+    } });
+    assert.equal(f.endpoints[0].options.captureEncoder, 'av1_texture_amf');
+    // The native endpoint rejects an AV1 source with an H.264 profile (nativeEndpoint.cjs).
+    assert.equal('h264Profile' in f.endpoints[0].options, false);
   });
 }
 

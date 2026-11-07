@@ -3,6 +3,7 @@ import { settingsStore } from '../stores/settingsStore';
 import { showConfirm, showConfirmWithOption } from '../views/Dialog';
 import { t, tCount } from '../i18n';
 import { isLoopbackHost, parseServerUrl } from './serverAddress';
+import { docsUrl } from './docsLinks';
 
 /**
  * Number of people connected to the server this app hosts on `port`, or null
@@ -33,6 +34,31 @@ export async function confirmStopHostedServer(port: number): Promise<boolean> {
     confirmLabel: t('hostedServer.stopAnyway'),
     variant: 'danger',
   });
+}
+
+/**
+ * Before the first server is created, explains that friends only reach it over
+ * a VPN, the same local network or forwarded ports (#877). Returns whether to
+ * go on; "don't show again" turns the warning off, Settings turns it back on.
+ */
+export async function confirmHostedServerReach(): Promise<boolean> {
+  if (!settingsStore.warnHostedServerReach) return true;
+
+  const { confirmed, checked } = await showConfirmWithOption({
+    title: t('hostedServer.reachTitle'),
+    message: t('hostedServer.reachMessage'),
+    confirmLabel: t('hostedServer.reachConfirm'),
+    variant: 'info',
+    link: { label: t('hostedServer.reachDocs'), url: docsUrl('reachServer') },
+    checkboxLabel: t('hostedServer.dontShowAgain'),
+  });
+
+  // Only a confirmed warning counts as read: cancelling keeps it for next time.
+  if (confirmed && checked) {
+    settingsStore.warnHostedServerReach = false;
+    settingsStore.save();
+  }
+  return confirmed;
 }
 
 /**

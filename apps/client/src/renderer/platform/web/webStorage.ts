@@ -58,6 +58,12 @@ function prefixRange(prefix: string): IDBKeyRange {
   return IDBKeyRange.bound(prefix, `${prefix}\uffff`);
 }
 
+/** The keys that start with `prefix`, without reading their values. */
+export async function listRecordKeysWithPrefix(prefix: string): Promise<string[]> {
+  const keys = await requestResult((await store('readonly')).getAllKeys(prefixRange(prefix)));
+  return keys.filter((key): key is string => typeof key === 'string');
+}
+
 /** Every record whose key starts with `prefix`. */
 export async function readRecordsWithPrefix(prefix: string): Promise<Map<string, unknown>> {
   const records = await store('readonly');
