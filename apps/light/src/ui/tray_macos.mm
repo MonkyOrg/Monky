@@ -28,6 +28,7 @@ constexpr NSInteger kInput = 7;
 constexpr NSInteger kOutput = 8;
 constexpr NSInteger kPushToTalk = 9;
 constexpr NSInteger kVolume = 10;
+constexpr NSInteger kSwitchServer = 11;
 
 // Device-dependent modifier bits (NX_DEVICER*KEYMASK): a right-hand modifier
 // arrives as flagsChanged, and only these bits tell it from the left one.
@@ -171,6 +172,7 @@ class MacTray final : public CoreInterface {
     submenu(menu, text_.audioDevices, devices, true);
     [menu addItem:[NSMenuItem separatorItem]];
     add(menu, text_.reconnectNow, kReconnect, true, false, nil);
+    if (view.canSwitchServer) add(menu, text_.switchServer, kSwitchServer, true, false, nil);
     add(menu, text_.quit, kQuit, true, false, nil);
   }
 
@@ -189,6 +191,7 @@ class MacTray final : public CoreInterface {
       case kDeafen: controller_.setDeafened(wanted); break;
       case kReconnect: controller_.reconnect(); break;
       case kPushToTalk: controller_.setPushToTalk(wanted); break;
+      case kSwitchServer: controller_.switchServer(); break;
       case kJoin: controller_.join(identifier); break;
       case kInput: controller_.selectInput(identifier); break;
       case kOutput: controller_.selectOutput(identifier); break;

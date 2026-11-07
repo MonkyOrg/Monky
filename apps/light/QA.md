@@ -148,3 +148,12 @@ valendo, então o terminal serve para conferir o que cada clique fez.
 | 6.28 | Abrir `Na chamada` enquanto alguém fala | A pessoa aparece com `(falando)`; você não aparece na lista | | |
 | 6.29 | Escolher 0%, 200% e 100% para um participante | Some, fica mais alto, volta ao normal; os outros não percebem diferença | | |
 | 6.30 | Reiniciar o Light e reabrir `Na chamada` | O volume escolhido continua marcado e aplicado | | |
+| 6.31 | Com `MONKY_LIGHT_PROFILE` numa pasta descartável, abrir o executável com duplo clique | O console some na hora, a janela `Conectar a um servidor` aparece e nenhum terminal fica aberto | | |
+| 6.32 | Colar um link de convite, escolher o apelido e conectar | Entra no servidor; `monky-light-settings.json` tem só `server` (`ws(s)://`) e `nickname`, sem senha | | |
+| 6.33 | Fechar e abrir de novo | Conecta direto ao mesmo servidor, sem janela | | |
+| 6.34 | Endereço inválido, apelido vazio ou com mais de 32 caracteres | A janela continua aberta, explica o motivo e foca o campo a corrigir | | |
+| 6.35 | Servidor com senha, sem senha ou com a errada | A janela reabre no campo da senha com a explicação, mantendo servidor e apelido | | |
+| 6.36 | Apelido já usado por outra pessoa no servidor | A janela reabre no campo do apelido com a explicação | | |
+| 6.37 | `Trocar de servidor…` na bandeja | O Light sai do servidor atual, o ícone some e a janela reabre preenchida com o servidor atual, sem senha | | |
+| 6.38 | Abrir uma segunda cópia com o mesmo perfil | Aviso de perfil indisponível; a primeira cópia continua conectada | | |
+| 6.39 | Cancelar a janela | O Light encerra sem conectar e sem deixar processo | | |
