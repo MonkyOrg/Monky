@@ -157,3 +157,4 @@ valendo, então o terminal serve para conferir o que cada clique fez.
 | 6.37 | `Trocar de servidor…` na bandeja | O Light sai do servidor atual, o ícone some e a janela reabre preenchida com o servidor atual, sem senha | | |
 | 6.38 | Abrir uma segunda cópia com o mesmo perfil | Aviso de perfil indisponível; a primeira cópia continua conectada | | |
 | 6.39 | Cancelar a janela | O Light encerra sem conectar e sem deixar processo | | |
+| 6.40 | Ligar `Iniciar com o sistema`, sair da sessão do sistema e entrar de novo | O Light abre sozinho, só com a bandeja, e conecta ao último servidor; desligar remove o registro e ele não abre mais | | |

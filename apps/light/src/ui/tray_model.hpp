@@ -67,6 +67,9 @@ struct Presentation {
   std::vector<Person> people;
   // Only when opened as an application, where the window can ask again.
   bool canSwitchServer = false;
+  // Same condition, minus development and QA profiles: see systemStartup().
+  bool startupAvailable = false;
+  bool startupChecked = false;
 };
 
 // Rebuilds the interface state from the events the console consumer already
