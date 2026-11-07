@@ -60,7 +60,7 @@ struct JoinConfig {
   AudioDevicePreference devices;
   // Playback gain per remote session (1.0 when absent), applied to the
   // decoded stream before mixing, as the full client's per-user slider.
-  std::map<std::string, double> volumes;
+  std::map<std::string, double> volumes{};
   std::optional<int> network_ignore_mask;
   std::chrono::milliseconds operation_timeout{15000};
 };

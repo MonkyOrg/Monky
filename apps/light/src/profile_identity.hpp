@@ -20,7 +20,7 @@ struct ProfileSettings {
   bool pushToTalk = false;                    // false: voice activity
   // Playback volume per voice session, 0-200 percent like the full client.
   // 100 is the default and is never stored.
-  std::map<std::string, int> userVolumes;
+  std::map<std::string, int> userVolumes{};
 };
 
 constexpr int kDefaultUserVolume = 100;
