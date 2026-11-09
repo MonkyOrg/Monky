@@ -203,6 +203,123 @@ for (const voiceMode of ['p2p', 'sfu']) {
   });
 }
 
+for (const voiceMode of ['p2p', 'sfu']) {
+  test(`headless clients report ${voiceMode} speech and gate it with push-to-talk`, { timeout: 60_000 }, async t => {
+    const fixture = await createServerFixture(t, { voiceMode });
+    const alice = new NativeClient(fixture, { nickname: 'Light Alice' });
+    const bob = new NativeClient(fixture, { nickname: 'Light Bob' });
+    const auth = await alice.wait('authenticated');
+    await bob.wait('authenticated');
+    const channelId = auth.channels.find(channel => channel.type === 'VOICE').id;
+    await alice.join(channelId);
+    await bob.join(channelId);
+    // The synthetic microphone plays a constant tone, so both sides see Alice speak.
+    // Without an action the change may already have happened: Alice speaks as
+    // soon as her own call starts, possibly before Bob's join returns.
+    const speech = async (speaking, action) => {
+      const since = action ? [alice.events.length, bob.events.length] : [0, 0];
+      if (action) await action();
+      await Promise.all([alice, bob].map((client, index) => client.wait(event => event.event === 'speaking' &&
+        event.sessionId === auth.sessionId && event.speaking === speaking, since[index])));
+    };
+    await speech(true);
+
+    // An interface starts from the authenticated event and follows the roster by events.
+    assert.equal(auth.inputMode, 'voice_activity');
+    assert.equal(auth.pushToTalkKey, null);
+    const bobAuth = bob.events.find(event => event.event === 'authenticated');
+    const roster = await alice.wait(event => event.event === 'participants' && event.members.length === 2);
+    assert.deepEqual(roster.members.map(member => [member.sessionId, member.name, member.self]).sort(),
+      [[auth.sessionId, 'Light Alice', true], [bobAuth.sessionId, 'Light Bob', false]].sort());
+    assert.equal((await alice.state()).members.length, 2);
+    const keySince = alice.events.length;
+    assert.equal((await alice.command('set-ptt-key', { key: 'F13' })).event, 'command-accepted');
+    await alice.wait(event => event.event === 'push-to-talk-key' && event.key === 'F13', keySince);
+    assert.equal((await alice.state()).pushToTalkKey, 'F13');
+    for (const key of ['CapsLock', 'f13', 7]) {
+      assert.equal((await alice.command('set-ptt-key', { key })).event, 'command-error', `Key ${key} must be refused`);
+    }
+
+    assert.equal((await alice.command('ptt', { active: true })).event, 'command-error',
+      'Push-to-talk must not be accepted in voice-activity mode');
+    const modeSince = alice.events.length;
+    await speech(false, () => alice.command('set-input-mode', { mode: 'push_to_talk' }));
+    await alice.wait(event => event.event === 'input-mode' && event.mode === 'push_to_talk', modeSince);
+    const gated = await alice.state();
+    assert.equal(gated.inputMode, 'push_to_talk');
+    assert.equal(gated.pushToTalkActive, false);
+    assert.equal(gated.audioDevice.recording, true, 'Push-to-talk keeps capture open so a press is immediate');
+
+    await speech(true, () => alice.command('ptt', { active: true }));
+    await speech(false, () => alice.command('ptt', { active: false }));
+    await speech(true, () => alice.command('ptt', { active: true }));
+    await speech(false, () => alice.command('mute', { enabled: true }));
+    await speech(true, () => alice.command('mute', { enabled: false }));
+    await alice.command('set-input-mode', { mode: 'voice_activity' });
+    const restored = await alice.state();
+    assert.equal(restored.inputMode, 'voice_activity');
+    assert.equal(restored.pushToTalkActive, false, 'Switching modes releases a held key');
+    await alice.close();
+    await bob.close();
+  });
+
+  test(`participant volume scales ${voiceMode} playback and is kept in the profile`, { timeout: 60_000 }, async t => {
+    const fixture = await createServerFixture(t, { voiceMode });
+    const alice = new NativeClient(fixture, { nickname: 'Light Alice' });
+    const bob = new NativeClient(fixture, { nickname: 'Light Bob', muted: true });
+    const aliceAuth = await alice.wait('authenticated');
+    await bob.wait('authenticated');
+    const channelId = aliceAuth.channels.find(channel => channel.type === 'VOICE').id;
+    await alice.join(channelId);
+    await bob.join(channelId);
+    // Only Alice transmits, so Bob's playout is exactly her scaled stream.
+    await bob.untilState(value => value.audioDevice.nonzeroPlayoutCallbacks >= 25, 'Bob did not hear Alice');
+    const window = async () => {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      const start = (await bob.state()).audioDevice;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const end = (await bob.state()).audioDevice;
+      const callbacks = end.playoutCallbacks - start.playoutCallbacks;
+      return { nonzero: end.nonzeroPlayoutCallbacks - start.nonzeroPlayoutCallbacks,
+        energy: (end.outputEnergy - start.outputEnergy) / callbacks };
+    };
+    const normal = await window();
+    const setVolume = async volume => {
+      const since = bob.events.length;
+      assert.equal((await bob.command('set-volume', { sessionId: aliceAuth.sessionId, volume })).event,
+        'command-accepted');
+      await bob.wait(event => event.event === 'participant-volume' && event.sessionId === aliceAuth.sessionId &&
+        event.volume === volume, since);
+    };
+    await setVolume(0);
+    assert.ok((await window()).nonzero <= 2, 'Volume 0 must silence that participant');
+    await setVolume(200);
+    const loud = await window();
+    assert.ok(loud.energy > normal.energy * 2.5,
+      `Volume 200 must amplify (${loud.energy} vs ${normal.energy})`);
+    assert.equal((await bob.state()).userVolumes[aliceAuth.sessionId], 200);
+    for (const invalid of [{ volume: 201 }, { volume: 1.5 }, { volume: -1 }]) {
+      assert.equal((await bob.command('set-volume', { sessionId: aliceAuth.sessionId, ...invalid })).event,
+        'command-error');
+    }
+
+    // A new call, even after a restart, applies the saved volume from the start.
+    await bob.close();
+    const again = new NativeClient(fixture, { nickname: 'Light Bob', muted: true, profile: bob.profile,
+      pushToTalkKey: 'Mouse5' });
+    assert.equal((await again.wait('authenticated')).pushToTalkKey, 'Mouse5', '--ptt-key must be saved and reported');
+    await again.command('set-volume', { sessionId: aliceAuth.sessionId, volume: 0 });
+    await again.join(channelId);
+    await again.untilState(value => value.userVolumes[aliceAuth.sessionId] === 0 && value.audioDevice.playoutCallbacks > 100,
+      'Saved volume was not reported for the new call');
+    assert.ok((await again.state()).audioDevice.nonzeroPlayoutCallbacks <= 2, 'Saved volume 0 was not applied on join');
+    await again.command('set-volume', { sessionId: aliceAuth.sessionId, volume: 100 });
+    assert.deepEqual((await again.state()).userVolumes, {}, 'Volume 100 must free its stored entry');
+    await again.close();
+    await alice.close();
+  });
+}
+
 test('native calls survive both live P2P/SFU topology transitions and preserve moderation', { timeout: 60_000 }, async t => {
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');

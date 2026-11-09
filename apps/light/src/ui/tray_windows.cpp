@@ -29,15 +29,21 @@ constexpr UINT kLeave = 2;
 constexpr UINT kMute = 3;
 constexpr UINT kDeafen = 4;
 constexpr UINT kReconnect = 5;
+constexpr UINT kPushToTalk = 6;
 constexpr UINT kRange = 0x0400;
 constexpr UINT kChannels = 0x1000;
 constexpr UINT kInputs = kChannels + kRange;
 constexpr UINT kOutputs = kInputs + kRange;
+// Each person owns one row per volume preset.
+constexpr UINT kPeople = kOutputs + kRange;
+constexpr UINT kPresets = static_cast<UINT>(kVolumePresets.size());
 
 // The product palette, matching the accent, success and danger tokens of the
 // full client so both editions report the same states with the same colours.
 constexpr std::uint32_t kIdle = 0x5865F2;
 constexpr std::uint32_t kInCall = 0x23A55A;
+// Lighter than the call colour, so speaking reads as the same state, active.
+constexpr std::uint32_t kSpeaking = 0x57F287;
 constexpr std::uint32_t kSilenced = 0xF23F43;
 constexpr std::uint32_t kOffline = 0x8A8A8A;
 
@@ -162,6 +168,7 @@ class WindowsTray final : public CoreInterface {
   }
 
   ~WindowsTray() override {
+    unhook();
     removeIcon();
     if (window_) DestroyWindow(window_);
     if (icon_) DestroyIcon(icon_);
@@ -235,6 +242,7 @@ class WindowsTray final : public CoreInterface {
       return 0;
     }
     if (message == WM_DESTROY) {
+      unhook();
       removeIcon();
       window_ = nullptr;
       PostQuitMessage(0);
@@ -279,8 +287,10 @@ class WindowsTray final : public CoreInterface {
     const auto view = controller_.presentation();
     const auto colour = !view.connected ? kOffline
                         : view.silenced ? kSilenced
+                        : view.speaking ? kSpeaking
                         : view.inCall   ? kInCall
                                         : kIdle;
+    watch(view.hotkey);
     // Most events move the tooltip alone, so the bitmap is only redrawn when the
     // state it depicts actually changed.
     if (colour != colour_ || view.silenced != slashed_) {
@@ -356,6 +366,24 @@ class WindowsTray final : public CoreInterface {
     return submenu;
   }
 
+  void attach(HMENU menu, const std::string& label, HMENU submenu, bool enabled) const {
+    MENUITEMINFOW item{};
+    item.cbSize = sizeof(item);
+    item.fMask = MIIM_SUBMENU | MIIM_STATE | MIIM_STRING;
+    item.fState = static_cast<UINT>(enabled ? MFS_ENABLED : MFS_DISABLED);
+    item.hSubMenu = submenu;
+    const auto wide = wideFromUtf8(label);
+    item.dwTypeData = const_cast<LPWSTR>(wide.c_str());
+    InsertMenuItemW(menu, static_cast<UINT>(GetMenuItemCount(menu)), TRUE, &item);
+  }
+
+  std::string personLabel(const Person& person) const {
+    auto result = person.name;
+    if (person.volume != 100) result += " · " + std::to_string(person.volume) + "%";
+    if (person.speaking) result += " (" + std::string(text_.speaking) + ")";
+    return result;
+  }
+
   void separator(HMENU menu) const {
     MENUITEMINFOW item{};
     item.cbSize = sizeof(item);
@@ -376,18 +404,31 @@ class WindowsTray final : public CoreInterface {
     separator(menu);
     append(menu, kMute, view.muteLabel, view.muteChecked, view.muteEnabled, false);
     append(menu, kDeafen, view.deafenLabel, view.deafenChecked, view.deafenEnabled, false);
+    append(menu, kPushToTalk, view.pushToTalkLabel, view.pushToTalkChecked, view.connected, false);
+    if (!view.people.empty()) {
+      separator(menu);
+      const auto people = CreatePopupMenu();
+      if (people) {
+        for (std::size_t person = 0; person < view.people.size() && person < kRange / kPresets; ++person) {
+          const auto& entry = view.people[person];
+          const auto volumes = CreatePopupMenu();
+          if (!volumes) continue;
+          for (UINT preset = 0; preset < kPresets; ++preset) {
+            append(volumes, kPeople + static_cast<UINT>(person) * kPresets + preset,
+                   std::to_string(kVolumePresets[preset]) + "%", entry.volume == kVolumePresets[preset], true,
+                   true);
+          }
+          attach(people, personLabel(entry), volumes, true);
+        }
+        attach(menu, text_.inThisCall, people, true);
+      }
+    }
     separator(menu);
     const auto devices = CreatePopupMenu();
     if (devices) {
       appendRows(devices, text_.input, view.inputs, kInputs, true);
       appendRows(devices, text_.output, view.outputs, kOutputs, true);
-      MENUITEMINFOW item{};
-      item.cbSize = sizeof(item);
-      item.fMask = MIIM_SUBMENU | MIIM_STRING;
-      item.hSubMenu = devices;
-      const auto wide = wideFromUtf8(text_.audioDevices);
-      item.dwTypeData = const_cast<LPWSTR>(wide.c_str());
-      InsertMenuItemW(menu, static_cast<UINT>(GetMenuItemCount(menu)), TRUE, &item);
+      attach(menu, text_.audioDevices, devices, true);
     }
     separator(menu);
     append(menu, kReconnect, text_.reconnectNow, false, true, false);
@@ -413,7 +454,14 @@ class WindowsTray final : public CoreInterface {
     else if (identifier == kMute) controller_.setMuted(!view.muteChecked);
     else if (identifier == kDeafen) controller_.setDeafened(!view.deafenChecked);
     else if (identifier == kReconnect) controller_.reconnect();
-    else if (identifier >= kOutputs) {
+    else if (identifier == kPushToTalk) controller_.setPushToTalk(!view.pushToTalkChecked);
+    else if (identifier >= kPeople) {
+      const auto person = static_cast<std::size_t>((identifier - kPeople) / kPresets);
+      const auto preset = static_cast<std::size_t>((identifier - kPeople) % kPresets);
+      if (person < view.people.size()) {
+        controller_.setVolume(view.people[person].sessionId, kVolumePresets[preset]);
+      }
+    } else if (identifier >= kOutputs) {
       if (const auto* entry = row(view.outputs, kOutputs)) controller_.selectOutput(entry->id);
     } else if (identifier >= kInputs) {
       if (const auto* entry = row(view.inputs, kInputs)) controller_.selectInput(entry->id);
@@ -422,8 +470,67 @@ class WindowsTray final : public CoreInterface {
     }
   }
 
+  // Low-level hooks see a key pressed in any application, which a hotkey
+  // registration cannot (it reports no release). They run on this thread's
+  // message loop, are installed only while push-to-talk can transmit, and
+  // never swallow the input. The mouse hook is used only for a mouse button,
+  // since it is called on every pointer movement.
+  void watch(const std::optional<PushToTalkKey>& key) {
+    const auto wanted = key ? std::optional<std::string>(key->name) : std::nullopt;
+    if (wanted == watched_) return;
+    unhook();
+    if (!key) return;
+    hooked_ = this;
+    hotkey_ = *key;
+    const auto type = key->kind == PushToTalkKey::Kind::mouse ? WH_MOUSE_LL : WH_KEYBOARD_LL;
+    hook_ = SetWindowsHookExW(type, key->kind == PushToTalkKey::Kind::mouse ? &WindowsTray::mouse
+                                                                             : &WindowsTray::keyboard,
+                              instance_, 0);
+    if (!hook_) {
+      hooked_ = nullptr;
+      return;
+    }
+    watched_ = wanted;
+  }
+
+  void unhook() {
+    if (!hook_) return;
+    UnhookWindowsHookEx(hook_);
+    hook_ = nullptr;
+    hooked_ = nullptr;
+    watched_.reset();
+    controller_.releasePushToTalk();
+  }
+
+  static LRESULT CALLBACK keyboard(int code, WPARAM message, LPARAM data) {
+    if (code == HC_ACTION && hooked_) {
+      const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(data);
+      if (key->vkCode == hooked_->hotkey_.windows) {
+        if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) hooked_->controller_.pushToTalk(true);
+        else if (message == WM_KEYUP || message == WM_SYSKEYUP) hooked_->controller_.pushToTalk(false);
+      }
+    }
+    return CallNextHookEx(nullptr, code, message, data);
+  }
+
+  static LRESULT CALLBACK mouse(int code, WPARAM message, LPARAM data) {
+    if (code == HC_ACTION && hooked_ && (message == WM_XBUTTONDOWN || message == WM_XBUTTONUP)) {
+      const auto* event = reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
+      if (HIWORD(event->mouseData) == hooked_->hotkey_.windows) {
+        hooked_->controller_.pushToTalk(message == WM_XBUTTONDOWN);
+      }
+    }
+    return CallNextHookEx(nullptr, code, message, data);
+  }
+
+  // A hook procedure has no context argument; the process has one tray.
+  static inline WindowsTray* hooked_ = nullptr;
+
   TrayController controller_;
   const Strings& text_;
+  HHOOK hook_ = nullptr;
+  PushToTalkKey hotkey_;
+  std::optional<std::string> watched_;
   HINSTANCE instance_ = nullptr;
   HWND window_ = nullptr;
   HWND target_ = nullptr;

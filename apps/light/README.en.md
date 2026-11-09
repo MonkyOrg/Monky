@@ -82,6 +82,9 @@ Enter one JSON object per line in the terminal, using the received channel ID:
 {"command":"devices"}
 {"command":"set-input","deviceId":"DEVICE-ID"}
 {"command":"set-output","deviceId":null}
+{"command":"set-input-mode","mode":"push_to_talk"}
+{"command":"ptt","active":true}
+{"command":"set-volume","sessionId":"SESSION-ID","volume":150}
 {"command":"stats","id":"my-query"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -129,6 +132,47 @@ quitting remain available. Denial keeps the microphone muted and emits
 `microphone-error`; it does not try to bypass system settings. The macOS
 permission flow still requires execution on a Mac.
 
+### Speaking indicator and push-to-talk
+
+During a call, the core emits `speaking` with `sessionId` and
+`speaking:true|false` whenever someone, including the local user, starts or
+stops speaking. As in the full client, this is **not** published to the server:
+each client derives who is speaking from the audio.
+
+- **Remote participants:** the level comes from the RTP header (RFC 6464) the
+  sender already includes, read every 100 ms. Nothing is decoded or measured
+  separately. While the user is deafened, no one is shown speaking.
+- **Local user:** the level is measured on raw capture, before echo
+  cancellation and noise suppression. Loud, steady background noise can count
+  as speech.
+- The threshold is -40 dBov (the 0.01 `audioLevel` the full client uses), and
+  speech ends only after 400 ms of silence so it does not flicker between words.
+- Sampling exists only during a call; outside one, no thread wakes up.
+
+`set-input-mode` selects `voice_activity` (default: always transmitting) or
+`push_to_talk` and saves the choice in the profile. In push-to-talk, `ptt` with
+`active:true`/`false` opens and closes transmission. The core does not capture
+keys: the global hotkey belongs to whatever controls the process; the tray has
+no global shortcuts yet. Capture stays open while the key is released, so a press takes
+effect immediately. The track sends silence, and the local user is not shown
+speaking. Mute, deafen, and server restrictions still apply while the key is
+held. Switching modes or leaving the call releases the key. `ptt` outside
+push-to-talk mode is rejected.
+
+### Per-participant volume
+
+`set-volume` sets, from 0 to 200%, how loud you hear one voice session
+(`sessionId` from the participant list), like the full client's slider. It is a
+local preference: neither the server nor the other participants know about it.
+The choice is saved in the profile, applies at once to the current call and to
+later ones, in both P2P and SFU, and emits `participant-volume`. `stats` lists in
+`userVolumes` the non-default volumes of the current call's sessions.
+
+WebRTC applies the gain to the decoded stream before mixing: there is no extra
+processing, and 100% costs nothing. Setting 100 again removes the entry. The
+profile keeps up to 256 sessions with a changed volume; beyond that, `set-volume`
+is rejected until one is set back to 100.
+
 ## Tray interface
 
 `--tray` adds the icon to the Windows notification area or the macOS status bar.
@@ -153,6 +197,9 @@ rendering between activations. It carries:
 - the server voice channels, with the current one marked, and `Leave the channel`;
 - mute and deafen, marked and disabled when the server imposed them or the
   channel does not allow speaking;
+- `Push-to-talk`, which switches the input mode and shows the key;
+- `In the call`, with each participant, who is speaking, and the volume, in
+  presets from 0 to 200%;
 - `Audio devices`, with input, output, and `System default`;
 - `Reconnect now` and `Quit Monky Light`.
 
@@ -162,8 +209,9 @@ and the switch of the web interface. Actual switches and cards belong to the
 panels, which are not part of this milestone.
 
 The icon reports the state with the same colours as the full client: grey
-disconnected, accent connected without a call, green in a call, and red with a
-diagonal bar when muted or deafened. It is drawn at runtime and does **not**
+disconnected, accent connected without a call, green in a call, light green
+while you speak, and red with a diagonal bar when muted or deafened. Only your
+own speech redraws the icon; other people's appears in the menu when it opens. It is drawn at runtime and does **not**
 reuse the full Monky icon, because one edition must not pass for the other; the
 Light's own identity belongs to distribution, which is not implemented yet. On
 macOS the icon is a template system symbol, which follows the menu bar
@@ -185,8 +233,31 @@ The language follows the operating system, between Portuguese and English.
 Choosing the language inside the Light depends on the settings panel, which does
 not exist yet.
 
-There are still no native panels, global shortcuts, connection screen, or
-installer: the tray starts with the same command-line options as the core.
+### Push-to-talk shortcut
+
+The key is chosen with `--ptt-key` and saved in the profile: `A`–`Z`, `0`–`9`,
+`F1`–`F24`, `Mouse4`, `Mouse5` (side buttons), `RightControl`, `RightAlt`,
+`RightShift`, `Backquote`, `Insert`, or `Pause`. There is no default key, so it
+never takes one the user plays with; without a key, the menu row says how to
+choose one. Caps Lock and Num Lock are left out because holding them changes
+their system state. macOS reports neither `F21`–`F24` nor `Pause`; the menu says so.
+
+The shortcut is watched **only while it can transmit**: in a call, in
+push-to-talk mode. Otherwise nothing is installed and nothing is spent. The key
+is never consumed, so it keeps working in the foreground application, and
+keyboard auto-repeat becomes a single press.
+
+- **Windows:** a low-level keyboard hook or, for `Mouse4`/`Mouse5`, a mouse
+  hook, installed on the interface thread. The mouse hook is called on every
+  pointer movement, so it exists only when the key is a button.
+- **macOS:** an AppKit global event monitor. The system only delivers keys to an
+  application allowed under *System Settings › Privacy & Security ›
+  Accessibility*; the Light asks once and shows the notice in the menu. Mouse
+  buttons need no such permission. The macOS shortcut still requires
+  qualification on a Mac.
+
+There are still no native panels, connection screen, or installer: the tray
+starts with the same command-line options as the core.
 
 ## Shared contracts
 
@@ -226,7 +297,7 @@ require explicit recovery, never silent replacement. Directories containing
 another application's files are rejected.
 
 `monky-light-settings.json` stores only user preferences (currently audio
-devices) and never participates in identity validation. It is replaced
+devices, the input mode, and each participant's volume) and never participates in identity validation. It is replaced
 atomically under the profile lock. Invalid or unreadable settings emit a
 `warning`, fall back to defaults, and are replaced by the next save; an
 interrupted settings write does not require recovery.

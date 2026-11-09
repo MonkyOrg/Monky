@@ -138,3 +138,12 @@ available, so the terminal shows what each click did.
 | 6.19 | Measure the same phase with and without `--tray` | The tray does not measurably change idle resource use | | |
 | 6.20 | A channel without `Speak` | The mute row is marked and disabled, with the note that there is no permission to speak | | |
 | 6.21 | Close the console window during a call (Windows only) | The others see Light leave at once (logout), the icon disappears and no process is left | | |
+| 6.22 | Start with `--ptt-key F13` (or `Mouse4`) and turn `Push-to-talk` on | The row is checked and shows the key; nothing is watched outside a call | | |
+| 6.23 | In a call, hold and release the key with another application in front | Others only hear you while the key is held, and the start of speech is not cut; the key still reaches the other application | | |
+| 6.24 | Hold the key for several seconds | A single `ptt` `active:true` in the terminal, no repetition | | |
+| 6.25 | Hold the key and turn `Push-to-talk` off from the menu | Transmits all the time again, with no `command-error` | | |
+| 6.26 | Without Accessibility permission (macOS only) | The system asks once and the notice appears in the menu; after allowing it and reopening the menu, the key works | | |
+| 6.27 | Speak in voice-activity mode | The icon turns light green while you speak and back to green when you stop | | |
+| 6.28 | Open `In the call` while someone speaks | They appear with `(speaking)`; you are not listed | | |
+| 6.29 | Choose 0%, 200%, and 100% for a participant | Silent, louder, back to normal; nobody else notices a difference | | |
+| 6.30 | Restart the Light and reopen `In the call` | The chosen volume is still checked and applied | | |

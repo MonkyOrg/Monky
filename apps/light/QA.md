@@ -139,3 +139,12 @@ valendo, então o terminal serve para conferir o que cada clique fez.
 | 6.19 | Medir a mesma fase com `--tray` e sem | A bandeja não muda o consumo em repouso de forma perceptível | | |
 | 6.20 | Canal sem `Falar` | O mute fica marcado e desabilitado, com a nota de que falta permissão para falar | | |
 | 6.21 | Fechar a janela do console durante uma chamada (só Windows) | Os outros veem o Light sair na hora (logout), o ícone desaparece e não sobra processo | | |
+| 6.22 | Iniciar com `--ptt-key F13` (ou `Mouse4`) e ligar `Apertar para falar` | O item fica marcado e mostra a tecla; fora de chamada nada é observado | | |
+| 6.23 | Em chamada, segurar e soltar a tecla com outro aplicativo em primeiro plano | Os outros só ouvem enquanto a tecla está segurada, e o início da fala não é cortado; a tecla continua chegando ao outro aplicativo | | |
+| 6.24 | Segurar a tecla por vários segundos | Um único `ptt` `active:true` no terminal, sem repetição | | |
+| 6.25 | Segurar a tecla e desligar `Apertar para falar` pelo menu | Volta a transmitir sempre, sem `command-error` | | |
+| 6.26 | Sem autorização de Acessibilidade (só macOS) | O sistema pede a autorização uma vez e o aviso aparece no menu; após autorizar e reabrir o menu, a tecla funciona | | |
+| 6.27 | Falar com o modo de atividade de voz | O ícone fica verde claro enquanto você fala e volta ao verde ao parar | | |
+| 6.28 | Abrir `Na chamada` enquanto alguém fala | A pessoa aparece com `(falando)`; você não aparece na lista | | |
+| 6.29 | Escolher 0%, 200% e 100% para um participante | Some, fica mais alto, volta ao normal; os outros não percebem diferença | | |
+| 6.30 | Reiniciar o Light e reabrir `Na chamada` | O volume escolhido continua marcado e aplicado | | |

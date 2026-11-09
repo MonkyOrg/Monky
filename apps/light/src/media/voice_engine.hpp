@@ -10,6 +10,7 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,6 +26,9 @@ struct AudioPolicy {
   // These are EFFECTIVE values, including server restrictions.
   bool muted = false;
   bool deafened = false;
+  // Push-to-talk gate. The device keeps capturing so a press takes effect
+  // at once; the track sends silence and local speech is not reported.
+  bool transmit = true;
   bool echo_cancellation = true;
   bool automatic_gain = true;
   NoiseSuppression noise_suppression = NoiseSuppression::moderate;
@@ -54,6 +58,9 @@ struct JoinConfig {
   std::vector<IceServer> ice_servers;
   AudioPolicy policy;
   AudioDevicePreference devices;
+  // Playback gain per remote session (1.0 when absent), applied to the
+  // decoded stream before mixing, as the full client's per-user slider.
+  std::map<std::string, double> volumes{};
   std::optional<int> network_ignore_mask;
   std::chrono::milliseconds operation_timeout{15000};
 };
@@ -80,7 +87,11 @@ enum class EventKind {
   stats,
   warning,
   // `stats` carries the effective input/output device selection.
-  devices
+  devices,
+  // A participant (self included) started or stopped speaking; `stats` holds
+  // {"speaking": bool}. Sampled only during a call, never published to the
+  // server: receivers derive it from audio, as the Chromium client does.
+  speaking
 };
 struct Event {
   EventKind kind;
@@ -127,6 +138,8 @@ public:
   // Persists for later generations of this call. Missing devices fall back to
   // the system default and are retried when the preference is applied again.
   void select_devices(AudioDevicePreference devices);
+  // Gain 0.0-2.0; applies at once and to that session's later streams.
+  void set_volume(std::string session_id, double gain);
   void poll_stats();
 
 private:

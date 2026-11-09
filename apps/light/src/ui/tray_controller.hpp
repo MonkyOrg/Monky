@@ -64,6 +64,40 @@ class TrayController final {
 
   void reconnect() { core_.command(Json{{"command", "reconnect"}}); }
 
+  void setPushToTalk(bool enabled) {
+    core_.command(Json{{"command", "set-input-mode"},
+                       {"mode", enabled ? "push_to_talk" : "voice_activity"}});
+  }
+
+  // Interface thread, from the global hook. Key repeat and duplicate reports
+  // become one command per real press and release.
+  void pushToTalk(bool pressed) {
+    {
+      std::lock_guard lock(mutex_);
+      if (pressed_ == pressed) return;
+      pressed_ = pressed;
+    }
+    core_.command(Json{{"command", "ptt"}, {"active", pressed}});
+  }
+
+  // The hook was removed while the key may be down (call ended, mode or key
+  // changed), so no release will ever arrive. Leaving the call or the mode
+  // already released it in the core, which would refuse a release outside
+  // push-to-talk; a changed key would not, so it is released here.
+  void releasePushToTalk() {
+    bool release = false;
+    {
+      std::lock_guard lock(mutex_);
+      release = pressed_ && model_.presentation().pushToTalkChecked;
+      pressed_ = false;
+    }
+    if (release) core_.command(Json{{"command", "ptt"}, {"active", false}});
+  }
+
+  void setVolume(const std::string& sessionId, int volume) {
+    core_.command(Json{{"command", "set-volume"}, {"sessionId", sessionId}, {"volume", volume}});
+  }
+
   void quit() { core_.quit(); }
 
  private:
@@ -75,6 +109,7 @@ class TrayController final {
   CoreCommands core_;
   mutable std::mutex mutex_;
   TrayModel model_;
+  bool pressed_ = false;
 };
 
 }  // namespace monky::light::ui

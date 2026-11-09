@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -399,9 +400,11 @@ void settingsBesideIdentity(const fs::path& root) {
     ProfileIdentity identity(profile.path);
     publicKey = identity.publicKeyHex();
     const auto defaults = identity.loadSettings();
-    require(!defaults.inputDeviceId && !defaults.outputDeviceId, "Missing settings did not yield defaults");
+    require(!defaults.inputDeviceId && !defaults.outputDeviceId && !defaults.pushToTalk,
+            "Missing settings did not yield defaults");
     identity.saveSettings({std::string("input-\xc3\xa1"), std::nullopt});
-    identity.saveSettings({std::string("input-\xc3\xa1"), std::string("output")});
+    identity.saveSettings({std::string("input-\xc3\xa1"), std::string("output"), true,
+                           {{"user:device-a", 0}, {"user:device-b", 200}}, std::string("RightControl")});
     require(!fs::exists(profile.path / "monky-light-settings.json.pending"), "Settings write left its marker");
     requireFailure([&] { identity.saveSettings({std::string(), std::nullopt}); },
                    "An empty device ID was saved");
@@ -409,6 +412,20 @@ void settingsBesideIdentity(const fs::path& root) {
                    "An unbounded device ID was saved");
     requireFailure([&] { identity.saveSettings({std::string("\xff"), std::nullopt}); },
                    "An invalid UTF-8 device ID was saved");
+    requireFailure([&] { identity.saveSettings({std::nullopt, std::nullopt, false, {{"session", 201}}}); },
+                   "An out-of-range participant volume was saved");
+    requireFailure([&] { identity.saveSettings({std::nullopt, std::nullopt, false, {{"session", 100}}}); },
+                   "The default participant volume was stored");
+    requireFailure([&] { identity.saveSettings({std::nullopt, std::nullopt, false, {{std::string(257, 's'), 50}}}); },
+                   "An unbounded session ID was saved");
+    std::map<std::string, int> crowded;
+    for (std::size_t index = 0; index <= monky::light::kMaxUserVolumes; ++index) {
+      crowded.emplace("session-" + std::to_string(index), 50);
+    }
+    requireFailure([&] { identity.saveSettings({std::nullopt, std::nullopt, false, crowded}); },
+                   "Unbounded participant volumes were saved");
+    requireFailure([&] { identity.saveSettings({std::nullopt, std::nullopt, false, {}, std::string("CapsLock")}); },
+                   "An unknown push-to-talk key was saved");
   }
   const auto saved = readFile(settingsPath);
   // An interrupted settings write is not identity state and must not block the profile.
@@ -418,15 +435,35 @@ void settingsBesideIdentity(const fs::path& root) {
     require(identity.publicKeyHex() == publicKey, "Settings changed the profile identity");
     const auto loaded = identity.loadSettings();
     require(loaded.inputDeviceId == std::optional<std::string>("input-\xc3\xa1") &&
-            loaded.outputDeviceId == std::optional<std::string>("output"), "Settings did not round-trip");
+            loaded.outputDeviceId == std::optional<std::string>("output") && loaded.pushToTalk &&
+            loaded.userVolumes == std::map<std::string, int>{{"user:device-a", 0}, {"user:device-b", 200}} &&
+            loaded.pushToTalkKey == std::optional<std::string>("RightControl"),
+            "Settings did not round-trip");
     identity.saveSettings({std::nullopt, std::string("output")});
     require(!fs::exists(profile.path / "monky-light-settings.json.pending"),
             "Settings write did not replace an interrupted marker");
   }
+  // Profiles saved before push-to-talk existed keep voice activity.
+  writeFile(settingsPath, "{\"format\":\"monky-light-settings\",\"version\":1,\"inputDeviceId\":\"mic\"}");
+  {
+    ProfileIdentity identity(profile.path);
+    const auto legacy = identity.loadSettings();
+    require(legacy.inputDeviceId == std::optional<std::string>("mic") && !legacy.pushToTalk,
+            "Settings without an input mode did not default to voice activity");
+  }
   for (const auto* invalid : {"", "{", "[]", "{\"format\":\"monky-light-settings\",\"version\":2}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"inputMode\":\"always\"}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"inputMode\":true}",
                               "{\"format\":\"other\",\"version\":1}",
                               "{\"format\":\"monky-light-settings\",\"version\":1,\"inputDeviceId\":7}",
-                              "{\"format\":\"monky-light-settings\",\"version\":1,\"inputDeviceId\":{}}"}) {
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"inputDeviceId\":{}}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"userVolumes\":[]}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"userVolumes\":{\"s\":201}}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"userVolumes\":{\"s\":\"50\"}}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"userVolumes\":{\"s\":{}}}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"other\":{}}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"pushToTalkKey\":\"Esc\"}",
+                              "{\"format\":\"monky-light-settings\",\"version\":1,\"pushToTalkKey\":13}"}) {
     writeFile(settingsPath, invalid);
     ProfileIdentity identity(profile.path);
     require(identity.publicKeyHex() == publicKey, "Invalid settings affected identity validation");

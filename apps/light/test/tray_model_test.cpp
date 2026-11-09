@@ -325,6 +325,123 @@ void theControllerSendsConsoleCommands() {
   require(quit, "Quit must reach the core");
 }
 
+Json members() {
+  return {{"event", "participants"},
+          {"members", Json::array({{{"sessionId", "user:a"}, {"name", "Me"}, {"self", true}, {"volume", 100}},
+                                   {{"sessionId", "ana:b"}, {"name", "Ana"}, {"self", false}, {"volume", 150}},
+                                   {{"sessionId", "bia:c"}, {"name", ""}, {"self", false}, {"volume", 100}}})}};
+}
+
+void pushToTalkWatchesTheKeyOnlyWhileItCanTransmit() {
+  TrayModel model(Language::english);
+  auto start = authenticated();
+  start["inputMode"] = "push_to_talk";
+  start["pushToTalkKey"] = nullptr;
+  model.apply(start);
+  auto view = model.presentation();
+  require(view.pushToTalkChecked, "The saved input mode must reach the interface at start");
+  require(view.pushToTalkLabel == "Push-to-talk (no key: start with --ptt-key)",
+          "Without a key the menu must say how to choose one");
+  require(!view.hotkey, "No key means nothing to watch");
+
+  require(model.apply({{"event", "push-to-talk-key"}, {"key", "F13"}}), "A new key must redraw");
+  require(model.presentation().pushToTalkLabel == "Push-to-talk (key: F13)", "The menu must name the key");
+  require(!model.presentation().hotkey, "Outside a call the key must not be watched");
+
+  model.apply({{"event", "voice-admitted"}, {"channelId", "first"}});
+  view = model.presentation();
+  require(view.hotkey && view.hotkey->name == "F13" && view.hotkey->windows == 0x7C,
+          "In a call the key must be watched with its platform code");
+  require(model.apply({{"event", "input-mode"}, {"mode", "voice_activity"}}), "A mode change must redraw");
+  require(!model.presentation().hotkey && !model.presentation().pushToTalkChecked,
+          "Voice activity must stop watching the key");
+  model.apply({{"event", "input-mode"}, {"mode", "push_to_talk"}});
+  model.apply({{"event", "push-to-talk-key"}, {"key", "Mouse4"}});
+  view = model.presentation();
+  require(view.hotkey && view.hotkey->kind == monky::light::PushToTalkKey::Kind::mouse,
+          "A side button must be watched as a mouse button");
+  model.apply({{"event", "voice-left"}});
+  require(!model.presentation().hotkey, "Leaving the call must stop watching the key");
+}
+
+void peopleCarrySpeechAndVolume() {
+  TrayModel model(Language::english);
+  model.apply(authenticated());
+  model.apply({{"event", "voice-admitted"}, {"channelId", "first"}});
+  model.apply({{"event", "media-connected"}});
+  require(model.apply(members()), "A new roster must redraw");
+  auto view = model.presentation();
+  require(view.people.size() == 2, "The local user is not listed among the people to adjust");
+  require(view.people[0].name == "Ana" && view.people[0].volume == 150, "A saved volume must be shown");
+  require(view.people[1].name == "participant", "A nameless participant still needs a label");
+
+  require(!model.apply({{"event", "speaking"}, {"sessionId", "ana:b"}, {"speaking", true}}),
+          "Someone else's speech must not wake the interface thread");
+  require(model.presentation().people[0].speaking, "The menu must show who is speaking");
+  require(!model.presentation().speaking, "Someone else speaking is not the local user speaking");
+  require(model.apply({{"event", "speaking"}, {"sessionId", "user:a"}, {"speaking", true}}),
+          "The local user's speech changes the icon");
+  require(model.presentation().speaking, "The icon must show the local user speaking");
+
+  require(!model.apply({{"event", "participant-volume"}, {"sessionId", "ana:b"}, {"volume", 0}}),
+          "A volume only appears in the menu, which is rebuilt when it opens");
+  require(model.presentation().people[0].volume == 0, "A changed volume must be shown");
+
+  auto remaining = members();
+  remaining["members"].erase(1);
+  model.apply(remaining);
+  model.apply(members());
+  require(!model.presentation().people[0].speaking, "Someone who left the call must stop speaking");
+  model.apply({{"event", "voice-left"}});
+  view = model.presentation();
+  require(view.people.empty() && !view.speaking, "Leaving the call clears the people and the speech");
+}
+
+void theControllerGatesPushToTalk() {
+  std::vector<Json> sent;
+  TrayController controller({[&](Json value) { sent.push_back(std::move(value)); }, [] {}}, Language::english);
+  auto start = authenticated();
+  start["inputMode"] = "push_to_talk";
+  controller.observe(start);
+  sent.clear();
+  controller.pushToTalk(true);
+  controller.pushToTalk(true);
+  require(sent.size() == 1 && sent.back().at("command") == "ptt" && sent.back().at("active") == true,
+          "Key repeat must become a single press");
+  controller.pushToTalk(false);
+  require(sent.size() == 2 && sent.back().at("active") == false, "A release must be sent once");
+  controller.releasePushToTalk();
+  require(sent.size() == 2, "Nothing is held, so removing the hook sends nothing");
+  controller.pushToTalk(true);
+  controller.releasePushToTalk();
+  require(sent.size() == 4 && sent.back().at("active") == false,
+          "A key held while its hook is removed must still be released");
+  controller.observe({{"event", "input-mode"}, {"mode", "voice_activity"}});
+  controller.pushToTalk(true);
+  controller.releasePushToTalk();
+  require(sent.size() == 5, "Outside push-to-talk the core already released it and would refuse");
+
+  controller.setPushToTalk(true);
+  require(sent.back().at("command") == "set-input-mode" && sent.back().at("mode") == "push_to_talk",
+          "The menu toggle must change the input mode");
+  controller.setVolume("ana:b", 50);
+  require(sent.back().at("command") == "set-volume" && sent.back().at("sessionId") == "ana:b" &&
+              sent.back().at("volume") == 50,
+          "A volume row must carry its session and preset");
+}
+
+void pushToTalkKeysAreNamedForBothPlatforms() {
+  using monky::light::parsePushToTalkKey;
+  require(!parsePushToTalkKey("CapsLock") && !parsePushToTalkKey("f13") && !parsePushToTalkKey(""),
+          "Unknown, lower-case and toggling keys are refused");
+  const auto letter = parsePushToTalkKey("A");
+  require(letter && letter->windows == 0x41 && letter->mac == 0, "kVK_ANSI_A is zero, not missing");
+  const auto modifier = parsePushToTalkKey("RightControl");
+  require(modifier && modifier->windows == 0xA3 && modifier->mac == 0x3E, "Right Control maps on both systems");
+  const auto windowsOnly = parsePushToTalkKey("F24");
+  require(windowsOnly && !windowsOnly->mac, "macOS cannot report F24");
+}
+
 void malformedEventsAreIgnored() {
   TrayModel model(Language::english);
   require(!model.apply(Json::array({1, 2})), "A non-object event must be ignored");
@@ -347,6 +464,10 @@ int main() {
     failuresAndPermissionsReachTheInterface();
     portugueseFollowsTheSameStates();
     theControllerSendsConsoleCommands();
+    pushToTalkWatchesTheKeyOnlyWhileItCanTransmit();
+    peopleCarrySpeechAndVolume();
+    theControllerGatesPushToTalk();
+    pushToTalkKeysAreNamedForBothPlatforms();
     malformedEventsAreIgnored();
     std::cout << "Tray interface scenarios passed\n";
     return 0;
