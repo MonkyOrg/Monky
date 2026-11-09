@@ -30,6 +30,7 @@ constexpr UINT kMute = 3;
 constexpr UINT kDeafen = 4;
 constexpr UINT kReconnect = 5;
 constexpr UINT kPushToTalk = 6;
+constexpr UINT kSwitchServer = 7;
 constexpr UINT kRange = 0x0400;
 constexpr UINT kChannels = 0x1000;
 constexpr UINT kInputs = kChannels + kRange;
@@ -432,6 +433,7 @@ class WindowsTray final : public CoreInterface {
     }
     separator(menu);
     append(menu, kReconnect, text_.reconnectNow, false, true, false);
+    if (view.canSwitchServer) append(menu, kSwitchServer, text_.switchServer, false, true, false);
     append(menu, kQuit, text_.quit, false, true, false);
     POINT cursor{};
     GetCursorPos(&cursor);
@@ -455,6 +457,7 @@ class WindowsTray final : public CoreInterface {
     else if (identifier == kDeafen) controller_.setDeafened(!view.deafenChecked);
     else if (identifier == kReconnect) controller_.reconnect();
     else if (identifier == kPushToTalk) controller_.setPushToTalk(!view.pushToTalkChecked);
+    else if (identifier == kSwitchServer) controller_.switchServer();
     else if (identifier >= kPeople) {
       const auto person = static_cast<std::size_t>((identifier - kPeople) / kPresets);
       const auto preset = static_cast<std::size_t>((identifier - kPeople) % kPresets);

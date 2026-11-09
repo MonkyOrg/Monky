@@ -1,5 +1,8 @@
 #include "headless_application.hpp"
 #include "platform/utf8.hpp"
+#include "profile_identity.hpp"
+#include "standalone.hpp"
+#include "ui/connect.hpp"
 #include "ui/tray.hpp"
 
 #include <api/audio/create_audio_device_module.h>
@@ -9,9 +12,16 @@
 #include <rtc_base/win/scoped_com_initializer.h>
 #endif
 
+#include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <functional>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -37,7 +47,7 @@ monky::light::media::AudioDeviceList enumerateAudioDevices() {
   return result;
 }
 
-int run(std::vector<std::string> arguments) {
+monky::light::HeadlessConfiguration configuration() {
   monky::light::HeadlessConfiguration audio;
   audio.create = [](const webrtc::Environment& environment) {
 #ifdef _WIN32
@@ -56,7 +66,81 @@ int run(std::vector<std::string> arguments) {
 #ifdef __APPLE__
   audio.requestMicrophoneAccess = monky::light::requestMicrophoneAccess;
 #endif
-  return monky::light::runHeadless(std::move(arguments), std::move(audio));
+  return audio;
+}
+
+std::optional<std::filesystem::path> profileOverride() {
+#ifdef _WIN32
+  wchar_t* value = nullptr;
+  std::size_t length = 0;
+  if (_wdupenv_s(&value, &length, L"MONKY_LIGHT_PROFILE") != 0 || !value) return std::nullopt;
+  std::filesystem::path result(value);
+  std::free(value);
+#else
+  const auto* value = std::getenv("MONKY_LIGHT_PROFILE");
+  if (!value) return std::nullopt;
+  std::filesystem::path result(value);
+#endif
+  if (!result.is_absolute()) throw std::invalid_argument("MONKY_LIGHT_PROFILE must be an absolute path");
+  return result;
+}
+
+// Opened like an application (a double click, Finder, a shortcut): no command
+// line, no console reader, the tray as the only interface.
+int runApplication() {
+  namespace ui = monky::light::ui;
+  const auto language = ui::systemLanguage();
+#ifdef _WIN32
+  // A double click gives the program a console of its own; hide it. One shared
+  // with a terminal that started the program is left alone.
+  DWORD processes[2]{};
+  if (GetConsoleProcessList(processes, 2) == 1) FreeConsole();
+#endif
+  monky::light::StandaloneHooks hooks;
+  try {
+    // Development and QA point this elsewhere, never at the installed profile.
+    hooks.profile = profileOverride().value_or(ui::defaultProfileDirectory());
+    // The profile creates only its own folder; the one above is the Light's.
+    std::filesystem::create_directories(hooks.profile.parent_path());
+  } catch (const std::exception& error) {
+    ui::showProfileUnavailable(error.what(), language);
+    return 1;
+  }
+  hooks.load = [](const std::filesystem::path& profile) {
+    monky::light::ProfileIdentity identity(profile);
+    try {
+      return identity.loadSettings();
+    } catch (const std::exception&) {
+      // Unreadable settings are only preferences; the core reports and replaces them.
+      return monky::light::ProfileSettings{};
+    }
+  };
+  hooks.save = [](const std::filesystem::path& profile, const monky::light::ProfileSettings& settings) {
+    monky::light::ProfileIdentity identity(profile);
+    identity.saveSettings(settings);
+  };
+  hooks.ask = [language](const monky::light::Connection& current, std::optional<monky::light::ConnectionIssue> issue) {
+    return ui::askConnection(current, issue, language);
+  };
+  hooks.profileUnavailable = [language](const std::string& detail) { ui::showProfileUnavailable(detail, language); };
+  hooks.run = [](std::vector<std::string> arguments, std::optional<std::string> password,
+                 std::function<void(std::optional<std::string>)> askAgain) {
+    auto audio = configuration();
+    audio.console = false;
+    audio.password = std::move(password);
+    audio.askAgain = std::move(askAgain);
+    return monky::light::runHeadless(std::move(arguments), std::move(audio));
+  };
+  return monky::light::runStandalone(hooks);
+}
+
+int run(std::vector<std::string> arguments) {
+#ifdef __APPLE__
+  // Older macOS versions pass a process serial number to applications Finder opens.
+  std::erase_if(arguments, [](const std::string& value) { return value.starts_with("-psn_"); });
+#endif
+  if (arguments.empty()) return runApplication();
+  return monky::light::runHeadless(std::move(arguments), configuration());
 }
 
 }  // namespace

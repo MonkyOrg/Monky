@@ -65,6 +65,8 @@ struct Presentation {
   // global hook costs nothing when it is not installed.
   std::optional<PushToTalkKey> hotkey;
   std::vector<Person> people;
+  // Only when opened as an application, where the window can ask again.
+  bool canSwitchServer = false;
 };
 
 // Rebuilds the interface state from the events the console consumer already

@@ -173,6 +173,44 @@ processing, and 100% costs nothing. Setting 100 again removes the entry. The
 profile keeps up to 256 sessions with a changed volume; beyond that, `set-volume`
 is rejected until one is set back to 100.
 
+## Opening as an application
+
+With no arguments at all (double click, Finder, or a shortcut), the Light opens
+with only the tray and no console. The first time, a small window asks for the
+invitation link or server address, the nickname, and the password if the server
+needs one. Later starts connect straight to the last server. `Change server…`,
+in the tray, ends the current connection and reopens the window in the same
+process.
+
+- **Profile:** `%LOCALAPPDATA%\Monky Light\Profile` on Windows and
+  `~/Library/Application Support/Monky Light/Profile` on macOS, apart from any
+  profile given with `--profile`. For development and QA, point
+  `MONKY_LIGHT_PROFILE` at a disposable absolute folder; never use the profile
+  of a real installation.
+- **What is saved:** only the `ws(s)://` address and the nickname, in
+  `monky-light-settings.json`. An invitation link is reduced to its address:
+  the server key is pinned on first contact, and the password **never** reaches
+  the disk. On a server with a password, each start connects without it; the
+  server's refusal reopens the window on the password field, keeping the rest.
+- **Refusals the window can fix** reopen it with the reason, instead of only a
+  tray alert: a wrong password (`AUTH_INVALID_PASSWORD`), a nickname in use
+  (`NICKNAME_ALREADY_EXISTS`) or refused (`NICKNAME_INVALID`).
+- **The window checks** what the core would refuse: empty fields, an address
+  that is neither an invitation nor `ws://`/`wss://`, and a nickname above the
+  shared limit (32 units, counted as the server counts them). The reason shows
+  in the window itself, and the field to fix gets the focus.
+- **Without a console reader**, events reach only the tray and nothing is read
+  from stdin; a missing console does not end the core as it does in
+  command-line mode.
+- **Another copy open:** the profile keeps its exclusive lock. A second start
+  shows a notice and quits without touching the first one.
+- On Windows the executable is still a console program: a double click opens a
+  console for an instant, which the Light lets go right away. A console shared
+  with the terminal that started it is kept.
+
+Any argument keeps the command-line behaviour documented above, even without
+`--tray`.
+
 ## Tray interface
 
 `--tray` adds the icon to the Windows notification area or the macOS status bar.
@@ -201,7 +239,8 @@ rendering between activations. It carries:
 - `In the call`, with each participant, who is speaking, and the volume, in
   presets from 0 to 200%;
 - `Audio devices`, with input, output, and `System default`;
-- `Reconnect now` and `Quit Monky Light`.
+- `Reconnect now`, `Change server…` (only when opened as an application), and
+  `Quit Monky Light`.
 
 In a native menu an exclusive choice (channel, device) uses a radio mark and a
 toggle uses a check mark: these are the native equivalents of the selectable card
