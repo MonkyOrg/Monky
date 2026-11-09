@@ -441,6 +441,29 @@ void changingServerExistsOnlyForAnApplicationStart() {
   require(switched, "Changing server must reach the application start");
 }
 
+void startingWithTheSystemFollowsTheRegistration() {
+  TrayController none({[](Json) {}, [] {}}, Language::english);
+  require(!none.presentation().startupAvailable, "Without a registration the row is not offered");
+  bool registered = false;
+  bool refuse = false;
+  monky::light::ui::Startup startup{[&] { return registered; }, [&](bool wanted) {
+                                      if (refuse) throw std::runtime_error("registry is read-only");
+                                      registered = wanted;
+                                    }};
+  TrayController controller({[](Json) {}, [] {}}, Language::english, startup);
+  auto view = controller.presentation();
+  require(view.startupAvailable && !view.startupChecked, "An unregistered start is offered unchecked");
+  controller.setStartup(true);
+  require(registered && controller.presentation().startupChecked, "Checking the row registers the start");
+  registered = false;
+  require(!controller.presentation().startupChecked, "The row reads the system each time, not a copy");
+  refuse = true;
+  controller.setStartup(true);
+  const auto alert = controller.takeAlert();
+  require(alert && *alert == "registry is read-only", "A refused registration must be shown");
+  require(!controller.presentation().startupChecked, "A refused registration stays unchecked");
+}
+
 void pushToTalkKeysAreNamedForBothPlatforms() {
   using monky::light::parsePushToTalkKey;
   require(!parsePushToTalkKey("CapsLock") && !parsePushToTalkKey("f13") && !parsePushToTalkKey(""),
@@ -479,6 +502,7 @@ int main() {
     peopleCarrySpeechAndVolume();
     theControllerGatesPushToTalk();
     changingServerExistsOnlyForAnApplicationStart();
+    startingWithTheSystemFollowsTheRegistration();
     pushToTalkKeysAreNamedForBothPlatforms();
     malformedEventsAreIgnored();
     std::cout << "Tray interface scenarios passed\n";

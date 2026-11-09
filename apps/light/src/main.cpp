@@ -3,6 +3,7 @@
 #include "profile_identity.hpp"
 #include "standalone.hpp"
 #include "ui/connect.hpp"
+#include "ui/startup.hpp"
 #include "ui/tray.hpp"
 
 #include <api/audio/create_audio_device_module.h>
@@ -97,9 +98,14 @@ int runApplication() {
   if (GetConsoleProcessList(processes, 2) == 1) FreeConsole();
 #endif
   monky::light::StandaloneHooks hooks;
+  // A build started with a development or QA profile must not register itself
+  // to open at sign-in, where it would use the real profile instead.
+  bool developmentProfile = false;
   try {
     // Development and QA point this elsewhere, never at the installed profile.
-    hooks.profile = profileOverride().value_or(ui::defaultProfileDirectory());
+    const auto override = profileOverride();
+    developmentProfile = override.has_value();
+    hooks.profile = override ? *override : ui::defaultProfileDirectory();
     // The profile creates only its own folder; the one above is the Light's.
     std::filesystem::create_directories(hooks.profile.parent_path());
   } catch (const std::exception& error) {
@@ -123,9 +129,14 @@ int runApplication() {
     return ui::askConnection(current, issue, language);
   };
   hooks.profileUnavailable = [language](const std::string& detail) { ui::showProfileUnavailable(detail, language); };
-  hooks.run = [](std::vector<std::string> arguments, std::optional<std::string> password,
-                 std::function<void(std::optional<std::string>)> askAgain) {
+  hooks.run = [developmentProfile, language](std::vector<std::string> arguments, std::optional<std::string> password,
+                                             std::function<void(std::optional<std::string>)> askAgain) {
     auto audio = configuration();
+    if (!developmentProfile) {
+      audio.createInterface = [language](monky::light::CoreCommands core) {
+        return ui::createTray(std::move(core), language, ui::systemStartup());
+      };
+    }
     audio.console = false;
     audio.password = std::move(password);
     audio.askAgain = std::move(askAgain);

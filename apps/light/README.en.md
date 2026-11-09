@@ -208,6 +208,15 @@ process.
   console for an instant, which the Light lets go right away. A console shared
   with the terminal that started it is kept.
 
+- **Start with the system**, off by default, registers this executable with no
+  arguments to open at sign-in: a value under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` on Windows and a
+  LaunchAgent `~/Library/LaunchAgents/org.monky.light.plist` on macOS
+  (effective from the next login; works from macOS 12). The row is checked only
+  when the registration points at this very executable, and it is not offered
+  with `MONKY_LIGHT_PROFILE`, so a development build never registers itself
+  with the real profile.
+
 Any argument keeps the command-line behaviour documented above, even without
 `--tray`.
 
@@ -239,8 +248,8 @@ rendering between activations. It carries:
 - `In the call`, with each participant, who is speaking, and the volume, in
   presets from 0 to 200%;
 - `Audio devices`, with input, output, and `System default`;
-- `Reconnect now`, `Change server…` (only when opened as an application), and
-  `Quit Monky Light`.
+- `Reconnect now`, `Change server…` and `Start with the system` (both only when
+  opened as an application), and `Quit Monky Light`.
 
 In a native menu an exclusive choice (channel, device) uses a radio mark and a
 toggle uses a check mark: these are the native equivalents of the selectable card

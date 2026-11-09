@@ -68,6 +68,7 @@ struct Strings {
   const char* nicknameTaken;
   const char* nicknameRefused;
   const char* profileUnavailable;
+  const char* startWithSystem;
 };
 
 inline constexpr Strings kEnglish{
@@ -127,6 +128,7 @@ inline constexpr Strings kEnglish{
     "Someone on this server already uses this nickname. Choose another one.",
     "The server did not accept this nickname. Choose another one.",
     "Monky Light could not open its profile. It may already be running: look for its icon near the clock.",
+    "Start with the system",
 };
 
 inline constexpr Strings kPortuguese{
@@ -186,6 +188,7 @@ inline constexpr Strings kPortuguese{
     "Alguém neste servidor já usa este apelido. Escolha outro.",
     "O servidor não aceitou este apelido. Escolha outro.",
     "O Monky Light não conseguiu abrir o perfil. Ele talvez já esteja aberto: procure o ícone perto do relógio.",
+    "Iniciar com o sistema",
 };
 
 inline constexpr const Strings& textFor(Language language) {

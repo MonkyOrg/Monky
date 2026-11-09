@@ -209,6 +209,15 @@ no mesmo processo.
   por um instante, que o Light solta logo em seguida. Um console compartilhado
   com o terminal que o iniciou é mantido.
 
+- **Iniciar com o sistema**, desligado por padrão, registra este executável
+  sem argumentos para abrir no login: um valor em
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` no Windows e um
+  LaunchAgent `~/Library/LaunchAgents/org.monky.light.plist` no macOS (vale a
+  partir do próximo login; funciona desde o macOS 12). O item só aparece
+  marcado quando o registro aponta para este mesmo executável, e não é
+  oferecido com `MONKY_LIGHT_PROFILE`, para um build de desenvolvimento nunca
+  se registrar com o perfil real.
+
 Qualquer argumento mantém o comportamento de linha de comando documentado
 acima, inclusive sem `--tray`.
 
@@ -240,8 +249,8 @@ renderizando entre as ativações. Ele traz:
 - `Na chamada`, com cada participante, quem está falando e o volume, em
   predefinições de 0 a 200%;
 - `Dispositivos de áudio`, com entrada, saída e `Padrão do sistema`;
-- `Reconectar agora`, `Trocar de servidor…` (só quando aberto como aplicativo)
-  e `Sair do Monky Light`.
+- `Reconectar agora`, `Trocar de servidor…` e `Iniciar com o sistema` (os dois
+  só quando aberto como aplicativo) e `Sair do Monky Light`.
 
 Em menu nativo, escolha exclusiva (canal, dispositivo) usa marca de rádio e
 liga/desliga usa marca de seleção: são os equivalentes nativos do card
