@@ -1020,7 +1020,8 @@ void ProtocolSession::chatReply(const std::string& type, const Json& payload, co
     const auto channel = pending->second.channelId;
     chatPending_.erase(pending);
     effects_.push_back([callback = std::move(callback), channel, messages = std::move(messages)]() mutable {
-      callback(RpcResult{std::string(msg::CHAT_HISTORY), Json{{"channelId", channel}, {"messages", std::move(messages)}}});
+      callback(RpcResult{std::string(msg::CHAT_HISTORY), Json{{"channelId", channel}, {"messages", std::move(messages)}},
+                         std::nullopt});
     });
     return;
   }
@@ -1030,7 +1031,7 @@ void ProtocolSession::chatReply(const std::string& type, const Json& payload, co
     auto callback = std::move(pending->second.callback);
     chatPending_.erase(pending);
     effects_.push_back([callback = std::move(callback), message] {
-      callback(RpcResult{std::string(msg::CHAT_MESSAGE), Json{{"message", message}}});
+      callback(RpcResult{std::string(msg::CHAT_MESSAGE), Json{{"message", message}}, std::nullopt});
     });
   }
   // Our own message arrives only as this answer, so it is also an event:
