@@ -312,7 +312,7 @@ class Application final {
       [this, attempt](std::string frame) {
         // What this client never reads is dropped here, before it takes room
         // in the queue: a soundboard broadcast alone carries up to ~4 MiB.
-        if (overrun_.load() == attempt || reader::discardable(frame)) return;
+        if (overrun_.load() == attempt || reader::discardable(frame, chatOpen_.load())) return;
         const auto bytes = frame.size();
         if (loop_.offer([this, attempt, frame = std::move(frame)] {
               if (attempt == attempt_ && epoch_) session_.receive(*epoch_, frame, Clock::now());
@@ -612,6 +612,39 @@ class Application final {
     if (!closing_) output({{"event", "participants"}, {"members", members()}});
   }
 
+  void watchChat(bool enabled) {
+    chatOpen_.store(enabled);
+    session_.watchChat(enabled);
+  }
+
+  static Json failureOf(const Json& id, const Failure& failure) {
+    return {{"event", "command-error"}, {"id", id}, {"code", failure.code}, {"detail", failure.detail}};
+  }
+
+  void loadChatHistory(const Json& id, const Json& value) {
+    const auto channel = value.at("channelId").get<std::string>();
+    std::optional<std::int64_t> before;
+    if (value.contains("before") && !value.at("before").is_null()) before = value.at("before").get<std::int64_t>();
+    const auto limit = value.contains("limit") ? value.at("limit").get<int>() : kChatPage;
+    watchChat(true);
+    session_.loadChatHistory(channel, before, limit, [this, id](RpcResult result) {
+      if (closing_) return;
+      if (result.failure) output(failureOf(id, *result.failure));
+      else output({{"event", "chat-history"}, {"id", id}, {"channelId", result.payload.at("channelId")},
+                   {"messages", result.payload.at("messages")}});
+    }, Clock::now());
+  }
+
+  void sendChat(const Json& id, const Json& value) {
+    watchChat(true);
+    session_.sendChat(value.at("channelId").get<std::string>(), value.at("content").get<std::string>(),
+                      [this, id](RpcResult result) {
+                        if (closing_) return;
+                        if (result.failure) output(failureOf(id, *result.failure));
+                        else output({{"event", "chat-sent"}, {"id", id}, {"message", result.payload.at("message")}});
+                      }, Clock::now());
+  }
+
   void applyAudioPolicy() {
     if (active_ && activeGeneration_ == session_.generation()) active_->update_policy(audioPolicy());
   }
@@ -746,6 +779,12 @@ class Application final {
         }
         output({{"event", "disconnected"}, {"reconnecting", !closing_ && session_.phase() == SessionPhase::offline}});
         finishOperations(Clock::now());
+        break;
+      case SessionEventKind::chatMessage:
+        if (!closing_) {
+          output({{"event", event.type == message::CHAT_MESSAGE_UPDATED ? "chat-message-updated" : "chat-message"},
+                  {"message", event.payload}});
+        }
         break;
       case SessionEventKind::channelsChanged:
         // Channel creation, renaming and deletion used to be visible only by
@@ -911,6 +950,9 @@ class Application final {
       else if (name == "set-input-mode") setInputMode(value);
       else if (name == "ptt") pushToTalk(value.at("active").get<bool>());
       else if (name == "set-volume") setVolume(value);
+      else if (name == "chat-watch") watchChat(value.at("enabled").get<bool>());
+      else if (name == "chat-history") loadChatHistory(id, value);
+      else if (name == "chat-send") sendChat(id, value);
       else if (name == "set-ptt-key") {
         const auto& key = value.at("key");
         if (!key.is_null() && !key.is_string()) throw std::invalid_argument("key must be a key name or null");
@@ -923,7 +965,7 @@ class Application final {
       else if (name == "reconnect") restartConnection();
       else if (name != "quit") {
         throw std::invalid_argument("Unknown command; use join, leave, mute, deafen, devices, set-input, "
-                                    "set-output, set-input-mode, ptt, set-ptt-key, set-volume, stats, channels, reconnect or quit");
+                                    "set-output, set-input-mode, ptt, set-ptt-key, set-volume, chat-watch, chat-history, chat-send, stats, channels, reconnect or quit");
       }
       output({{"event", "command-accepted"}, {"id", id}, {"command", name}});
       if (name == "quit") quit();
@@ -943,6 +985,8 @@ class Application final {
   std::uint64_t attempt_ = 0;
   // The connection attempt whose input outran the core; written by the transport.
   std::atomic<std::uint64_t> overrun_ = 0;
+  // Read by the transport thread: chat frames are kept only while chat is read.
+  std::atomic<bool> chatOpen_ = false;
   std::optional<std::uint64_t> epoch_;
   std::unique_ptr<media::VoiceEngine> active_;
   std::uint64_t activeGeneration_ = 0;
@@ -953,6 +997,8 @@ class Application final {
   StopWatchingAudioDevices stopWatchingDevices_;
   // Device notifications arrive in bursts; apply the preference once they settle.
   static constexpr auto kDeviceChangeSettle = 300ms;
+  // One screen of a text window; the server caps a page at 100.
+  static constexpr int kChatPage = 50;
   ApplicationLoop::Deadline devicesChangedDeadline_;
   ApplicationLoop::Deadline operationDeadline_;
   ApplicationLoop::Deadline drainDeadline_;
@@ -997,6 +1043,9 @@ int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio)
                    "{\"command\":\"ptt\",\"active\":true|false}\n"
                    "{\"command\":\"set-ptt-key\",\"key\":\"F13\"|null}\n"
                    "{\"command\":\"set-volume\",\"sessionId\":\"...\",\"volume\":0-200}\n"
+                   "{\"command\":\"chat-history\",\"channelId\":\"...\",\"before\":<ms>?} / "
+                   "{\"command\":\"chat-send\",\"channelId\":\"...\",\"content\":\"...\"}\n"
+                   "{\"command\":\"chat-watch\",\"enabled\":false} stops reading chat until the next chat command\n"
                    "{\"command\":\"stats\"} / {\"command\":\"channels\"}\n"
                    "{\"command\":\"leave\"} / {\"command\":\"reconnect\"} / {\"command\":\"quit\"}\n"
                    "EOF and Ctrl+C release the connection and media resources.\n"

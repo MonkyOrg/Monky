@@ -64,7 +64,10 @@ struct Authenticated {
 enum class SessionEventKind {
   authenticated, admitted, rosterChanged, peerJoined, peerLeft, policyChanged,
   rtcSignal, sfuEvent, topologyChanged, teardown, disconnected, reconnectRequested,
-  kicked, channelsChanged, failure
+  kicked, channelsChanged, failure,
+  // A new or changed chat message (type CHAT_MESSAGE or CHAT_MESSAGE_UPDATED),
+  // already reduced by reader::chatMessage, delivered only while chat is read.
+  chatMessage
 };
 
 struct SessionEvent {
@@ -152,6 +155,18 @@ public:
                       RpcCallback callback, Time now, std::uint64_t generation);
   void cancel(const std::string& requestId);
   bool sendSignal(Json payload, std::uint64_t generation);
+
+  // Text chat, independent of any call: its requests survive leaving or
+  // switching rooms and fail only with the connection. Reading chat is opt-in
+  // (watchChat), and both requests turn it on.
+  void watchChat(bool enabled);
+  bool watchingChat() const { return chatWatching_; }
+  // Answers {"channelId", "messages"} oldest first, at most `limit`.
+  std::string loadChatHistory(std::string channelId, std::optional<std::int64_t> before, int limit,
+                              RpcCallback callback, Time now);
+  // Answers {"message"} once the server stored it; a refusal (no permission,
+  // too long) comes back as a failure with the server's code.
+  std::string sendChat(std::string channelId, std::string content, RpcCallback callback, Time now);
   bool sendSfuNotification(std::string type, Json payload, std::uint64_t generation);
 
   SessionPhase phase() const { return phase_; }
@@ -233,6 +248,16 @@ private:
   std::string joinReply_;
   std::string controlId_;
   std::map<std::string, Pending> pending_;
+  struct ChatPending {
+    std::string reply;
+    std::string channelId;
+    Time deadline;
+    RpcCallback callback;
+  };
+  std::map<std::string, ChatPending> chatPending_;
+  bool chatWatching_ = false;
+  void failChat(Failure reason);
+  void chatReply(const std::string& type, const Json& payload, const std::string& id);
   std::deque<std::string> retired_;
   std::deque<EarlySignal> earlySignals_;
   std::deque<std::function<void()>> effects_;

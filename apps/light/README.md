@@ -85,6 +85,8 @@ Digite um objeto JSON por linha no terminal, usando o ID recebido:
 {"command":"set-input-mode","mode":"push_to_talk"}
 {"command":"ptt","active":true}
 {"command":"set-volume","sessionId":"ID-DA-SESSAO","volume":150}
+{"command":"chat-history","channelId":"ID-DO-CANAL-DE-TEXTO"}
+{"command":"chat-send","channelId":"ID-DO-CANAL-DE-TEXTO","content":"oi"}
 {"command":"stats","id":"minha-consulta"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -173,6 +175,36 @@ O ganho é aplicado pelo próprio WebRTC ao fluxo decodificado, antes da mixagem
 não há processamento extra, e 100% não custa nada. Voltar a 100 apaga a entrada.
 O perfil guarda até 256 sessões com volume alterado; acima disso, `set-volume`
 é recusado até que alguma volte a 100.
+
+### Chat de texto
+
+O chat é **lido sob demanda**. Enquanto nada o abre, as mensagens que o
+servidor transmite a todos são descartadas no transporte, antes de serem
+interpretadas, como já acontece com o soundboard: um servidor movimentado não
+custa nada a um Light que ninguém está lendo.
+
+- `chat-history` (`channelId`, opcional `before` em ms e `limit` até 100,
+  padrão 50) responde com `chat-history` e as mensagens, da mais antiga para a
+  mais recente. Para paginar, passe em `before` o `createdAt` da mais antiga.
+- `chat-send` (`channelId`, `content`) responde com `chat-sent` quando o
+  servidor guardou a mensagem. Cada envio leva um `clientMessageId` (recurso
+  `chat-delivery`), então o servidor nunca grava a mesma mensagem duas vezes.
+  Uma recusa, como falta de permissão ou texto longo demais, volta como
+  `command-error` com o `code` do servidor, sem derrubar a sessão.
+- Os dois comandos ligam a leitura. A partir daí chegam `chat-message` (nova,
+  inclusive as suas) e `chat-message-updated` (editada ou apagada) de todos os
+  canais de texto que você pode ler. `chat-watch` com `enabled:false` volta a
+  descartar tudo.
+- As mensagens chegam reduzidas ao que uma interface de texto mostra: `id`,
+  `channelId`, `userId`, `author`, `content`, `createdAt` e, quando existirem,
+  `editedAt`, `deletedAt` (com `content` vazio), os nomes dos anexos, a
+  resposta citada, `forwarded` e as marcas de sistema e de bot. Reações,
+  enquetes, blocos e o conteúdo dos anexos ficam de fora.
+- O chat não depende da chamada: entrar, sair ou trocar de sala não cancela um
+  histórico ou envio pendente. Só a queda da conexão os encerra.
+
+A janela de chat da bandeja é a próxima etapa; por enquanto o chat é usado
+pelos comandos.
 
 ## Abrir como aplicativo
 
