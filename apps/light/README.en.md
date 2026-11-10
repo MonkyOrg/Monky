@@ -201,8 +201,13 @@ nobody is reading.
 - Chat does not depend on the call: joining, leaving, or switching rooms never
   cancels a pending history or send. Only a lost connection ends them.
 
-The tray's chat window is the next step; until then chat is used through the
-commands.
+In the tray, `Text chat…` opens a native window with the channel choice, the
+conversation, `Load older messages`, and the message field (Enter sends, Escape
+closes). It exists only while open: closing drops the messages from memory and
+sends `chat-watch false`. The window keeps up to 500 messages of the open
+channel, and a new message is appended at the end of the text, without
+redrawing the conversation. Server refusals appear in the window itself, not as
+a balloon.
 
 ## Opening as an application
 
@@ -279,6 +284,7 @@ rendering between activations. It carries:
 - `In the call`, with each participant, who is speaking, and the volume, in
   presets from 0 to 200%;
 - `Audio devices`, with input, output, and `System default`;
+- `Text chat…`, which opens the chat window;
 - `Reconnect now`, `Change server…` and `Start with the system` (both only when
   opened as an application), and `Quit Monky Light`.
 

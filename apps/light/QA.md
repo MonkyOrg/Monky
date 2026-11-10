@@ -158,3 +158,11 @@ valendo, então o terminal serve para conferir o que cada clique fez.
 | 6.38 | Abrir uma segunda cópia com o mesmo perfil | Aviso de perfil indisponível; a primeira cópia continua conectada | | |
 | 6.39 | Cancelar a janela | O Light encerra sem conectar e sem deixar processo | | |
 | 6.40 | Ligar `Iniciar com o sistema`, sair da sessão do sistema e entrar de novo | O Light abre sozinho, só com a bandeja, e conecta ao último servidor; desligar remove o registro e ele não abre mais | | |
+| 6.41 | `Chat de texto…` na bandeja | Abre a janela no primeiro canal de texto, com as mensagens recentes, da mais antiga para a mais nova | | |
+| 6.42 | Alguém manda uma mensagem no canal aberto | Aparece no fim da conversa na hora, sem a conversa piscar ou voltar ao topo | | |
+| 6.43 | Escrever e apertar Enter | A mensagem aparece para quem está no app completo e na própria janela; o campo esvazia | | |
+| 6.44 | `Carregar mensagens antigas` até o começo do canal | Cada clique traz as anteriores sem repetir; no começo o botão fica desabilitado | | |
+| 6.45 | Trocar de canal na lista | A conversa troca, sem misturar mensagens dos dois canais | | |
+| 6.46 | Mensagem editada ou apagada no app completo | A linha muda para `(editada)` ou `(mensagem apagada)` | | |
+| 6.47 | Texto acima do limite do servidor ou canal sem permissão de escrita | O motivo aparece embaixo da janela, sem balão | | |
+| 6.48 | Fechar a janela e medir em repouso | Volta ao consumo de antes de abrir o chat; mensagens novas não acordam o Light | | |

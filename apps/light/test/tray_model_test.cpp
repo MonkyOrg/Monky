@@ -1,3 +1,4 @@
+#include "ui/chat_model.hpp"
 #include "ui/tray_controller.hpp"
 
 #include <cstddef>
@@ -464,6 +465,80 @@ void startingWithTheSystemFollowsTheRegistration() {
   require(!controller.presentation().startupChecked, "A refused registration stays unchecked");
 }
 
+Json chatMessage(std::string id, std::string content, double createdAt, std::string channel = "general") {
+  return {{"id", std::move(id)}, {"channelId", std::move(channel)}, {"userId", "u"}, {"author", "Ana"},
+          {"content", std::move(content)}, {"createdAt", createdAt}};
+}
+
+void chatKeepsOnlyTheOpenChannelAndFormatsLines() {
+  using monky::light::ui::ChatChange;
+  monky::light::ui::ChatModel chat(Language::english);
+  auto start = authenticated();
+  start["channels"].push_back(channel("general", "general", 1, "TEXT"));
+  start["channels"].push_back(channel("news", "news", 0, "TEXT"));
+  require(chat.apply(start) == ChatChange::channels, "Text channels come with authentication");
+  // The fixture already has "Chat" at position 0; equal positions keep the server's order.
+  require(chat.channels().size() == 3 && chat.channels()[0].name == "Chat" && chat.channels()[1].name == "news" &&
+              chat.channels()[2].name == "general",
+          "Only text channels, in server order");
+
+  require(chat.apply({{"event", "chat-message"}, {"message", chatMessage("x", "closed", 1)}}) == ChatChange::none,
+          "Nothing is kept while no channel is open");
+  const auto open = chat.open("general");
+  require(open.at("command") == "chat-history" && open.at("channelId") == "general", "Opening asks for history");
+  require(!chat.older(), "No older page while the first one is on its way");
+  require(chat.apply({{"event", "chat-history"}, {"id", "stale"}, {"channelId", "general"},
+                      {"messages", Json::array({chatMessage("s", "stale", 1)})}}) == ChatChange::none,
+          "An answer to another request is ignored");
+  auto deleted = chatMessage("m2", "", 2000);
+  deleted["deletedAt"] = 2500;
+  auto edited = chatMessage("m3", "ok", 3000);
+  edited["editedAt"] = 3100;
+  edited["attachments"] = Json::array({"foto.png"});
+  edited["reply"] = {{"messageId", "m1"}, {"userNickname", "Bia"}, {"content", "pergunta"}};
+  require(chat.apply({{"event", "chat-history"}, {"id", open.at("id")}, {"channelId", "general"},
+                      {"messages", Json::array({chatMessage("m1", "oi", 1000), deleted, edited})}}) == ChatChange::reset,
+          "The first page fills the window");
+  auto lines = chat.lines();
+  require(lines.size() == 3 && lines[0].text.find("Ana: oi") != std::string::npos, "A line shows the author and text");
+  require(lines[1].text.find("(message deleted)") != std::string::npos, "A deleted message keeps its row");
+  require(lines[2].text.find("(replying to Bia: pergunta)") != std::string::npos &&
+              lines[2].text.find("[file: foto.png]") != std::string::npos &&
+              lines[2].text.find("(edited)") != std::string::npos,
+          "Replies, files and edits are marked");
+
+  require(chat.apply({{"event", "chat-message"}, {"message", chatMessage("m4", "nova", 4000)}}) == ChatChange::appended,
+          "A new message is appended, not redrawn");
+  require(chat.lastChanged()->id == "m4", "The window learns which line to append");
+  require(chat.apply({{"event", "chat-message"}, {"message", chatMessage("m4", "nova", 4000)}}) == ChatChange::replaced,
+          "A repeated message replaces its line");
+  require(chat.apply({{"event", "chat-message"}, {"message", chatMessage("o", "outro", 5000, "news")}}) == ChatChange::none,
+          "Another channel's message is not shown");
+  require(chat.apply({{"event", "chat-message-updated"}, {"message", chatMessage("gone", "x", 1)}}) == ChatChange::none,
+          "An update outside the loaded window changes nothing");
+
+  const auto older = chat.older();
+  require(older && older->at("before") == 1000, "Older pages start before the oldest loaded message");
+  require(chat.apply({{"event", "chat-history"}, {"id", older->at("id")}, {"channelId", "general"},
+                      {"messages", Json::array({chatMessage("m0", "antes", 500), chatMessage("m1", "oi", 1000)})}}) ==
+              ChatChange::reset && chat.lines().size() == 5 && chat.lines()[0].id == "m0",
+          "An older page goes before, without repeating known messages");
+  const auto empty = chat.older();
+  chat.apply({{"event", "chat-history"}, {"id", empty->at("id")}, {"channelId", "general"}, {"messages", Json::array()}});
+  require(!chat.canLoadOlder() && !chat.older(), "An empty older page means the start of the channel");
+
+  require(!chat.send("   "), "Blank text is not sent");
+  const auto send = chat.send("ol\xc3\xa1");
+  require(send && send->at("command") == "chat-send" && send->at("channelId") == "general", "Text is sent to the open channel");
+  chat.apply({{"event", "command-error"}, {"id", send->at("id")}, {"detail", "Too long"}});
+  require(chat.takeAlert() == std::optional<std::string>("Too long"), "A refused message is explained");
+  chat.apply({{"event", "command-error"}, {"id", "someone-else"}, {"detail", "Not ours"}});
+  require(!chat.takeAlert(), "Errors of other commands are not the chat's");
+
+  require(chat.close() == Json{{"command", "chat-watch"}, {"enabled", false}} && chat.lines().empty() && !chat.channel(),
+          "Closing stops reading and releases the messages");
+}
+
 void pushToTalkKeysAreNamedForBothPlatforms() {
   using monky::light::parsePushToTalkKey;
   require(!parsePushToTalkKey("CapsLock") && !parsePushToTalkKey("f13") && !parsePushToTalkKey(""),
@@ -503,6 +578,7 @@ int main() {
     theControllerGatesPushToTalk();
     changingServerExistsOnlyForAnApplicationStart();
     startingWithTheSystemFollowsTheRegistration();
+    chatKeepsOnlyTheOpenChannelAndFormatsLines();
     pushToTalkKeysAreNamedForBothPlatforms();
     malformedEventsAreIgnored();
     std::cout << "Tray interface scenarios passed\n";

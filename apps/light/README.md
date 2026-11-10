@@ -203,8 +203,12 @@ custa nada a um Light que ninguém está lendo.
 - O chat não depende da chamada: entrar, sair ou trocar de sala não cancela um
   histórico ou envio pendente. Só a queda da conexão os encerra.
 
-A janela de chat da bandeja é a próxima etapa; por enquanto o chat é usado
-pelos comandos.
+Na bandeja, `Chat de texto…` abre uma janela nativa com a escolha do canal, a
+conversa, `Carregar mensagens antigas` e o campo da mensagem (Enter envia, Esc
+fecha). Ela só existe enquanto está aberta: fechar descarta as mensagens da
+memória e manda `chat-watch false`. A janela guarda até 500 mensagens do canal
+aberto, e uma mensagem nova é acrescentada ao fim do texto, sem redesenhar a
+conversa. As recusas do servidor aparecem na própria janela, não como balão.
 
 ## Abrir como aplicativo
 
@@ -281,6 +285,7 @@ renderizando entre as ativações. Ele traz:
 - `Na chamada`, com cada participante, quem está falando e o volume, em
   predefinições de 0 a 200%;
 - `Dispositivos de áudio`, com entrada, saída e `Padrão do sistema`;
+- `Chat de texto…`, que abre a janela de chat;
 - `Reconectar agora`, `Trocar de servidor…` e `Iniciar com o sistema` (os dois
   só quando aberto como aplicativo) e `Sair do Monky Light`.
 

@@ -157,3 +157,11 @@ available, so the terminal shows what each click did.
 | 6.38 | Open a second copy with the same profile | Profile unavailable notice; the first copy stays connected | | |
 | 6.39 | Cancel the window | The Light quits without connecting and leaves no process | | |
 | 6.40 | Turn `Start with the system` on, sign out of the system and back in | The Light opens by itself, tray only, and connects to the last server; turning it off removes the registration and it no longer opens | | |
+| 6.41 | `Text chat…` in the tray | Opens the window on the first text channel, with recent messages, oldest to newest | | |
+| 6.42 | Someone sends a message in the open channel | It appears at the end at once, without the conversation flickering or jumping to the top | | |
+| 6.43 | Type and press Enter | The message appears for people on the full app and in the window itself; the field empties | | |
+| 6.44 | `Load older messages` up to the start of the channel | Each click brings earlier ones without repeats; at the start the button is disabled | | |
+| 6.45 | Switch channels in the list | The conversation switches, without mixing both channels' messages | | |
+| 6.46 | A message edited or deleted on the full app | The line turns into `(edited)` or `(message deleted)` | | |
+| 6.47 | Text above the server limit, or a channel without write permission | The reason shows at the bottom of the window, no balloon | | |
+| 6.48 | Close the window and measure at rest | Back to the use before opening chat; new messages do not wake the Light | | |

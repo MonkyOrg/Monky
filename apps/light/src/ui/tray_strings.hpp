@@ -69,6 +69,18 @@ struct Strings {
   const char* nicknameRefused;
   const char* profileUnavailable;
   const char* startWithSystem;
+  const char* textChat;
+  const char* chatTitle;
+  const char* textChannel;
+  const char* noTextChannels;
+  const char* loadOlder;
+  const char* send;
+  const char* messageField;
+  const char* replyingTo;
+  const char* forwarded;
+  const char* messageDeleted;
+  const char* attachment;
+  const char* edited;
 };
 
 inline constexpr Strings kEnglish{
@@ -129,6 +141,18 @@ inline constexpr Strings kEnglish{
     "The server did not accept this nickname. Choose another one.",
     "Monky Light could not open its profile. It may already be running: look for its icon near the clock.",
     "Start with the system",
+    "Text chat…",
+    "Text chat",
+    "Channel",
+    "This server has no text channel you can read.",
+    "Load older messages",
+    "Send",
+    "Message",
+    "replying to",
+    "forwarded",
+    "message deleted",
+    "file",
+    "edited",
 };
 
 inline constexpr Strings kPortuguese{
@@ -189,6 +213,18 @@ inline constexpr Strings kPortuguese{
     "O servidor não aceitou este apelido. Escolha outro.",
     "O Monky Light não conseguiu abrir o perfil. Ele talvez já esteja aberto: procure o ícone perto do relógio.",
     "Iniciar com o sistema",
+    "Chat de texto…",
+    "Chat de texto",
+    "Canal",
+    "Este servidor não tem canal de texto que você possa ler.",
+    "Carregar mensagens antigas",
+    "Enviar",
+    "Mensagem",
+    "respondendo a",
+    "encaminhada",
+    "mensagem apagada",
+    "arquivo",
+    "editada",
 };
 
 inline constexpr const Strings& textFor(Language language) {

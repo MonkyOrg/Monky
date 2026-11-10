@@ -1,5 +1,6 @@
 #include "platform/utf8.hpp"  // Defines NOMINMAX and WIN32_LEAN_AND_MEAN before <windows.h>.
 #include "ui/tray.hpp"
+#include "ui/chat_window_windows.hpp"
 #include "ui/tray_controller.hpp"
 
 #include <shellapi.h>
@@ -9,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -21,6 +23,7 @@ constexpr UINT kIconIdentifier = 1;
 constexpr UINT kIconMessage = WM_APP + 1;
 constexpr UINT kRefreshMessage = WM_APP + 2;
 constexpr UINT kStoppedMessage = WM_APP + 3;
+constexpr UINT kChatMessage = WM_APP + 4;
 
 // Menu identifiers. The rows occupy reserved ranges so an activation carries the
 // selected index without a second lookup table.
@@ -32,6 +35,7 @@ constexpr UINT kReconnect = 5;
 constexpr UINT kPushToTalk = 6;
 constexpr UINT kSwitchServer = 7;
 constexpr UINT kStartup = 8;
+constexpr UINT kChat = 9;
 constexpr UINT kRange = 0x0400;
 constexpr UINT kChannels = 0x1000;
 constexpr UINT kInputs = kChannels + kRange;
@@ -141,7 +145,7 @@ void copyInto(WCHAR* destination, std::size_t capacity, const std::string& value
 class WindowsTray final : public CoreInterface {
  public:
   WindowsTray(CoreCommands core, Language language, std::optional<Startup> startup)
-      : controller_(std::move(core), language, std::move(startup)), text_(textFor(language)) {
+      : controller_(core, language, std::move(startup)), chat_(std::move(core), language), text_(textFor(language)) {
     WNDCLASSEXW description{};
     description.cbSize = sizeof(description);
     description.lpfnWndProc = &WindowsTray::proc;
@@ -179,6 +183,11 @@ class WindowsTray final : public CoreInterface {
 
   void observe(const Json& event) override {
     if (controller_.observe(event)) PostMessageW(target_, kRefreshMessage, 0, 0);
+    // The chat model always follows the channel list; messages only while open.
+    const auto change = chat_.observe(event);
+    if (change != ChatChange::none || (event.is_object() && event.value("event", "") == "command-error")) {
+      PostMessageW(target_, kChatMessage, static_cast<WPARAM>(change), 0);
+    }
   }
 
   void stopped() override { PostMessageW(target_, kStoppedMessage, 0, 0); }
@@ -190,8 +199,13 @@ class WindowsTray final : public CoreInterface {
       const auto result = GetMessageW(&message, nullptr, 0, 0);
       if (result == 0) return 0;
       if (result == -1) return 1;
+      if (chatWindow_ && chatWindow_->dialogMessage(message)) {
+        releaseClosedChat();
+        continue;
+      }
       TranslateMessage(&message);
       DispatchMessageW(&message);
+      releaseClosedChat();
     }
   }
 
@@ -233,7 +247,12 @@ class WindowsTray final : public CoreInterface {
       return 0;
     }
     if (message == kStoppedMessage) {
+      chatWindow_.reset();
       DestroyWindow(window);
+      return 0;
+    }
+    if (message == kChatMessage) {
+      if (chatWindow_ && !chatWindow_->closed()) chatWindow_->update(static_cast<ChatChange>(first));
       return 0;
     }
     if (taskbarRestarted_ && message == taskbarRestarted_) {
@@ -436,6 +455,7 @@ class WindowsTray final : public CoreInterface {
     append(menu, kReconnect, text_.reconnectNow, false, true, false);
     if (view.canSwitchServer) append(menu, kSwitchServer, text_.switchServer, false, true, false);
     if (view.startupAvailable) append(menu, kStartup, text_.startWithSystem, view.startupChecked, true, false);
+    append(menu, kChat, text_.textChat, false, view.connected, false);
     append(menu, kQuit, text_.quit, false, true, false);
     POINT cursor{};
     GetCursorPos(&cursor);
@@ -460,6 +480,7 @@ class WindowsTray final : public CoreInterface {
     else if (identifier == kReconnect) controller_.reconnect();
     else if (identifier == kPushToTalk) controller_.setPushToTalk(!view.pushToTalkChecked);
     else if (identifier == kSwitchServer) controller_.switchServer();
+    else if (identifier == kChat) openChat();
     else if (identifier == kStartup) {
       controller_.setStartup(!view.startupChecked);
       refresh();  // A refusal arrives as an alert.
@@ -532,10 +553,26 @@ class WindowsTray final : public CoreInterface {
     return CallNextHookEx(nullptr, code, message, data);
   }
 
+  void openChat() {
+    if (chatWindow_ && !chatWindow_->closed()) {
+      chatWindow_->focus();
+      return;
+    }
+    chatWindow_ = std::make_unique<WindowsChatWindow>(chat_, text_);
+  }
+
+  // Closing only hides the window from inside its own procedure; it is freed
+  // here, once that procedure returned.
+  void releaseClosedChat() {
+    if (chatWindow_ && chatWindow_->closed()) chatWindow_.reset();
+  }
+
   // A hook procedure has no context argument; the process has one tray.
   static inline WindowsTray* hooked_ = nullptr;
 
   TrayController controller_;
+  ChatController chat_;
+  std::unique_ptr<WindowsChatWindow> chatWindow_;
   const Strings& text_;
   HHOOK hook_ = nullptr;
   PushToTalkKey hotkey_;

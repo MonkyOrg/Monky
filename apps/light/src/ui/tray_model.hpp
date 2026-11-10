@@ -186,6 +186,8 @@ class TrayModel final {
       alert_ = detail(event);
       return true;
     }
+    // The chat window explains its own refusals in place.
+    if (name == "command-error" && stringAt(event, "id").starts_with("chat-")) return false;
     if (name == "session-error" || name == "fatal-error" || name == "transport-error" ||
         name == "command-error") {
       alert_ = serverKeyAlert(event).value_or(detail(event));

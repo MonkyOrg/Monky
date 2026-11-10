@@ -1,4 +1,5 @@
 #include "ui/tray.hpp"
+#include "ui/chat_window_macos.hpp"
 #include "ui/tray_controller.hpp"
 
 #import <AppKit/AppKit.h>
@@ -30,6 +31,7 @@ constexpr NSInteger kPushToTalk = 9;
 constexpr NSInteger kVolume = 10;
 constexpr NSInteger kSwitchServer = 11;
 constexpr NSInteger kStartup = 12;
+constexpr NSInteger kChat = 13;
 
 // Device-dependent modifier bits (NX_DEVICER*KEYMASK): a right-hand modifier
 // arrives as flagsChanged, and only these bits tell it from the left one.
@@ -64,7 +66,7 @@ namespace monky::light::ui {
 class MacTray final : public CoreInterface {
  public:
   MacTray(CoreCommands core, Language language, std::optional<Startup> startup)
-      : controller_(std::move(core), language, std::move(startup)), text_(textFor(language)) {
+      : controller_(core, language, std::move(startup)), chat_(std::move(core), language), text_(textFor(language)) {
     @autoreleasepool {
       NSApplication* application = [NSApplication sharedApplication];
       // An accessory application has no Dock tile and no window; the status item
@@ -92,6 +94,13 @@ class MacTray final : public CoreInterface {
   }
 
   void observe(const Json& event) override {
+    // The chat model always follows the channel list; messages only while open.
+    const auto change = chat_.observe(event);
+    if (change != ChatChange::none || (event.is_object() && event.value("event", "") == "command-error")) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (chatWindow_ && !chatWindow_->closed()) chatWindow_->update(change);
+      });
+    }
     if (!controller_.observe(event)) return;
     // The main queue is the interface thread. Blocks queued after the run loop
     // stops simply never execute, which is why this never blocks on a result.
@@ -174,6 +183,7 @@ class MacTray final : public CoreInterface {
     [menu addItem:[NSMenuItem separatorItem]];
     add(menu, text_.reconnectNow, kReconnect, true, false, nil);
     if (view.canSwitchServer) add(menu, text_.switchServer, kSwitchServer, true, false, nil);
+    add(menu, text_.textChat, kChat, view.connected, false, nil);
     if (view.startupAvailable) add(menu, text_.startWithSystem, kStartup, true, view.startupChecked, nil);
     add(menu, text_.quit, kQuit, true, false, nil);
   }
@@ -194,6 +204,7 @@ class MacTray final : public CoreInterface {
       case kReconnect: controller_.reconnect(); break;
       case kPushToTalk: controller_.setPushToTalk(wanted); break;
       case kSwitchServer: controller_.switchServer(); break;
+      case kChat: openChat(); break;
       case kStartup:
         controller_.setStartup(wanted);
         refresh();  // A refusal arrives as an alert.
@@ -263,6 +274,19 @@ class MacTray final : public CoreInterface {
     }
   }
 
+  void openChat() {
+    if (chatWindow_ && !chatWindow_->closed()) {
+      chatWindow_->focus();
+      return;
+    }
+    chatWindow_ = std::make_unique<MacChatWindow>(chat_, text_, [this] {
+      // Released after the window's own close callback has returned.
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (chatWindow_ && chatWindow_->closed()) chatWindow_.reset();
+      });
+    });
+  }
+
   // A global monitor sees input meant for other applications. It is added only
   // while push-to-talk can transmit and never consumes the event. Keys need the
   // Accessibility permission; without it macOS delivers no key events at all,
@@ -309,6 +333,8 @@ class MacTray final : public CoreInterface {
   }
 
   TrayController controller_;
+  ChatController chat_;
+  std::unique_ptr<MacChatWindow> chatWindow_;
   const Strings& text_;
   id monitor_ = nil;
   std::optional<std::string> watched_;

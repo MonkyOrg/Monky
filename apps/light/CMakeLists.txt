@@ -241,9 +241,10 @@ if(MONKY_LIGHT_WITH_RTC)
     find_library(MONKY_APPKIT_FRAMEWORK AppKit REQUIRED)
     # AXIsProcessTrusted: push-to-talk needs Accessibility to see keys.
     find_library(MONKY_APPLICATION_SERVICES_FRAMEWORK ApplicationServices REQUIRED)
-    add_library(monky_light_ui STATIC src/ui/tray_macos.mm src/ui/connect_macos.mm src/ui/startup_macos.mm)
+    add_library(monky_light_ui STATIC src/ui/tray_macos.mm src/ui/connect_macos.mm src/ui/startup_macos.mm
+      src/ui/chat_window_macos.mm)
     set_source_files_properties(src/ui/tray_macos.mm src/ui/connect_macos.mm src/ui/startup_macos.mm
-      PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+      src/ui/chat_window_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(monky_light_ui PUBLIC "${MONKY_APPKIT_FRAMEWORK}"
       "${MONKY_APPLICATION_SERVICES_FRAMEWORK}")
   endif()
