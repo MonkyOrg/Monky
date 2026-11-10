@@ -430,6 +430,40 @@ void theControllerGatesPushToTalk() {
           "A volume row must carry its session and preset");
 }
 
+void changingServerExistsOnlyForAnApplicationStart() {
+  TrayController console({[](Json) {}, [] {}}, Language::english);
+  require(!console.presentation().canSwitchServer, "A command-line start has no window to ask again");
+  console.switchServer();
+  bool switched = false;
+  TrayController application({[](Json) {}, [] {}, [&] { switched = true; }}, Language::english);
+  require(application.presentation().canSwitchServer, "An application start offers to change server");
+  application.switchServer();
+  require(switched, "Changing server must reach the application start");
+}
+
+void startingWithTheSystemFollowsTheRegistration() {
+  TrayController none({[](Json) {}, [] {}}, Language::english);
+  require(!none.presentation().startupAvailable, "Without a registration the row is not offered");
+  bool registered = false;
+  bool refuse = false;
+  monky::light::ui::Startup startup{[&] { return registered; }, [&](bool wanted) {
+                                      if (refuse) throw std::runtime_error("registry is read-only");
+                                      registered = wanted;
+                                    }};
+  TrayController controller({[](Json) {}, [] {}}, Language::english, startup);
+  auto view = controller.presentation();
+  require(view.startupAvailable && !view.startupChecked, "An unregistered start is offered unchecked");
+  controller.setStartup(true);
+  require(registered && controller.presentation().startupChecked, "Checking the row registers the start");
+  registered = false;
+  require(!controller.presentation().startupChecked, "The row reads the system each time, not a copy");
+  refuse = true;
+  controller.setStartup(true);
+  const auto alert = controller.takeAlert();
+  require(alert && *alert == "registry is read-only", "A refused registration must be shown");
+  require(!controller.presentation().startupChecked, "A refused registration stays unchecked");
+}
+
 void pushToTalkKeysAreNamedForBothPlatforms() {
   using monky::light::parsePushToTalkKey;
   require(!parsePushToTalkKey("CapsLock") && !parsePushToTalkKey("f13") && !parsePushToTalkKey(""),
@@ -467,6 +501,8 @@ int main() {
     pushToTalkWatchesTheKeyOnlyWhileItCanTransmit();
     peopleCarrySpeechAndVolume();
     theControllerGatesPushToTalk();
+    changingServerExistsOnlyForAnApplicationStart();
+    startingWithTheSystemFollowsTheRegistration();
     pushToTalkKeysAreNamedForBothPlatforms();
     malformedEventsAreIgnored();
     std::cout << "Tray interface scenarios passed\n";

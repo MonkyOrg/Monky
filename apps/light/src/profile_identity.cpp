@@ -537,6 +537,16 @@ std::optional<std::string> settingsDevice(const Json& data, const char* field) {
   return found->get<std::string>();
 }
 
+std::optional<std::string> settingsText(const Json& data, const char* field, std::size_t limit) {
+  const auto found = data.find(field);
+  if (found == data.end() || found->is_null()) return std::nullopt;
+  if (!found->is_string() || found->get_ref<const std::string&>().empty() ||
+      found->get_ref<const std::string&>().size() > limit) {
+    throw std::runtime_error("Profile settings contain an invalid saved connection");
+  }
+  return found->get<std::string>();
+}
+
 std::optional<std::string> settingsKey(const Json& data) {
   const auto found = data.find("pushToTalkKey");
   if (found == data.end() || found->is_null()) return std::nullopt;
@@ -596,7 +606,8 @@ ProfileSettings parseSettings(const std::string& contents) {
     throw std::runtime_error("Profile settings contain an invalid input mode");
   }
   return {settingsDevice(data, "inputDeviceId"), settingsDevice(data, "outputDeviceId"), mode == kPushToTalk,
-          settingsVolumes(data), settingsKey(data)};
+          settingsVolumes(data), settingsKey(data), settingsText(data, "server", kMaxSavedServerBytes),
+          settingsText(data, "nickname", kMaxSavedNicknameBytes)};
 }
 
 std::string encodeSettings(const ProfileSettings& settings) {
@@ -604,6 +615,10 @@ std::string encodeSettings(const ProfileSettings& settings) {
     if (*id && ((*id)->empty() || (*id)->size() > kMaxDeviceIdBytes)) {
       throw std::invalid_argument("Audio device ID must be a nonempty string of at most 1024 bytes");
     }
+  }
+  if ((settings.server && (settings.server->empty() || settings.server->size() > kMaxSavedServerBytes)) ||
+      (settings.nickname && (settings.nickname->empty() || settings.nickname->size() > kMaxSavedNicknameBytes))) {
+    throw std::invalid_argument("The saved server and nickname must be nonempty and bounded");
   }
   if (settings.pushToTalkKey && !parsePushToTalkKey(*settings.pushToTalkKey)) {
     throw std::invalid_argument("Unknown push-to-talk key");
@@ -626,7 +641,9 @@ std::string encodeSettings(const ProfileSettings& settings) {
                   {"outputDeviceId", optional(settings.outputDeviceId)},
                   {"inputMode", settings.pushToTalk ? kPushToTalk : kVoiceActivity},
                   {"userVolumes", Json(settings.userVolumes)},
-                  {"pushToTalkKey", optional(settings.pushToTalkKey)}}.dump(2) + "\n";
+                  {"pushToTalkKey", optional(settings.pushToTalkKey)},
+                  {"server", optional(settings.server)},
+                  {"nickname", optional(settings.nickname)}}.dump(2) + "\n";
   } catch (const Json::exception&) {
     throw std::invalid_argument("Audio device and session IDs must be valid UTF-8");
   }

@@ -1,8 +1,10 @@
 #pragma once
 
 #include "core_commands.hpp"
+#include "ui/startup.hpp"
 #include "ui/tray_model.hpp"
 
+#include <exception>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -16,8 +18,8 @@ namespace monky::light::ui {
 // the same command-accepted/command-error answers.
 class TrayController final {
  public:
-  TrayController(CoreCommands core, Language language)
-      : core_(std::move(core)), model_(language) {}
+  TrayController(CoreCommands core, Language language, std::optional<Startup> startup = std::nullopt)
+      : core_(std::move(core)), model_(language), startup_(std::move(startup)) {}
 
   // Core thread. Returns true when the interface must redraw or notify.
   bool observe(const Json& event) {
@@ -37,12 +39,33 @@ class TrayController final {
   // Interface thread.
   Presentation presentation() const {
     std::lock_guard lock(mutex_);
-    return model_.presentation();
+    auto result = model_.presentation();
+    result.canSwitchServer = static_cast<bool>(core_.switchServer);
+    result.startupAvailable = startup_.has_value();
+    // Read when the menu is built, so a change made elsewhere is never hidden.
+    try {
+      result.startupChecked = startup_ && startup_->enabled();
+    } catch (const std::exception&) {
+      result.startupChecked = false;
+    }
+    return result;
   }
 
   std::optional<std::string> takeAlert() {
     std::lock_guard lock(mutex_);
+    if (startupFailure_) return std::exchange(startupFailure_, std::nullopt);
     return model_.takeAlert();
+  }
+
+  // Interface thread. A refusal is shown like any other failure.
+  void setStartup(bool enabled) {
+    if (!startup_) return;
+    try {
+      startup_->set(enabled);
+    } catch (const std::exception& error) {
+      std::lock_guard lock(mutex_);
+      startupFailure_ = error.what();
+    }
   }
 
   void join(const std::string& channelId) {
@@ -100,6 +123,11 @@ class TrayController final {
 
   void quit() { core_.quit(); }
 
+  // Stops this core; the application start then shows the connection window.
+  void switchServer() {
+    if (core_.switchServer) core_.switchServer();
+  }
+
  private:
   void selectDevice(const char* command, const std::string& deviceId) {
     core_.command(Json{{"command", command},
@@ -110,6 +138,8 @@ class TrayController final {
   mutable std::mutex mutex_;
   TrayModel model_;
   bool pressed_ = false;
+  std::optional<Startup> startup_;
+  std::optional<std::string> startupFailure_;
 };
 
 }  // namespace monky::light::ui

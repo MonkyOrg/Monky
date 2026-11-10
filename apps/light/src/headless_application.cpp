@@ -154,7 +154,7 @@ class Application final {
   Application(Options options, HeadlessConfiguration audio)
       : options_(std::move(options)), audio_(std::move(audio)), identity_(options_.profile),
         session_({identity_.publicKeyHex(), identity_.deviceId(), options_.nickname,
-                  sessionPassword(options_.invitedPassword),
+                  sessionPassword(audio_.password ? audio_.password : options_.invitedPassword),
                   identity_.serverKey(options_.server), identity_.serverKeysExcept(options_.server),
                   options_.invitedServerKey},
                  {[this](const std::string& frame) {
@@ -186,6 +186,11 @@ class Application final {
           loop_.post([this, line = std::move(line)] { command(line); }, bytes);
         },
         [this] { loop_.post([this] { quit(); }); },
+        audio_.askAgain ? std::function<void()>([this] {
+          audio_.askAgain(std::nullopt);
+          loop_.post([this] { quit(); });
+        })
+                        : std::function<void()>(),
     };
   }
 
@@ -200,7 +205,9 @@ class Application final {
   }
 
   int run() {
-    ConsoleControl control({
+    // An application without a console has no control channel at all.
+    std::optional<ConsoleControl> control;
+    if (audio_.console) control.emplace(ConsoleControl::Callbacks{
       [this](std::string line) {
         const auto bytes = line.size();
         loop_.post([this, line = std::move(line)] { command(line); }, bytes);
@@ -269,7 +276,7 @@ class Application final {
 
   void output(Json event) {
     if (observer_) observer_(event);
-    if (outputLost_) return;
+    if (outputLost_ || !audio_.console) return;
     std::cout << event.dump() << '\n' << std::flush;
     if (std::cout) return;
     // Nobody reads the events anymore. Leave the call and the server properly,
@@ -752,6 +759,14 @@ class Application final {
         if (event.failure) {
           output({{"event", "session-error"}, {"code", event.failure->code},
                   {"kind", static_cast<int>(event.failure->kind)}, {"detail", event.failure->detail}});
+          // Retrying cannot fix these; the connection window can.
+          const auto& code = event.failure->code;
+          if (audio_.askAgain && (code == protocol::error::AUTH_INVALID_PASSWORD ||
+                                  code == protocol::error::NICKNAME_ALREADY_EXISTS ||
+                                  code == protocol::error::NICKNAME_INVALID)) {
+            audio_.askAgain(code);
+            quit();
+          }
         }
         break;
     }

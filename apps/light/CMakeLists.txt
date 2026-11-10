@@ -211,6 +211,15 @@ foreach(target monky_light_platform monky-light-platform-test monky_light_loop m
   endif()
 endforeach()
 if(MONKY_LIGHT_WITH_RTC)
+  # Opening without a command line: the flow is platform-free, the window is not.
+  add_library(monky_light_standalone STATIC src/standalone.cpp)
+  target_include_directories(monky_light_standalone PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(monky_light_standalone PUBLIC monky_light_profile monky_light_invite monky_light_contracts)
+  add_executable(monky-light-standalone-test test/standalone_test.cpp)
+  target_link_libraries(monky-light-standalone-test PRIVATE monky_light_standalone)
+  set_target_properties(monky-light-standalone-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
   add_library(monky_light_application STATIC src/headless_application.cpp)
   target_include_directories(monky_light_application PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(monky_light_application PUBLIC
@@ -224,22 +233,24 @@ if(MONKY_LIGHT_WITH_RTC)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
   if(WIN32)
-    add_library(monky_light_ui STATIC src/ui/tray_windows.cpp)
-    target_link_libraries(monky_light_ui PUBLIC Shell32 User32 Gdi32)
+    add_library(monky_light_ui STATIC src/ui/tray_windows.cpp src/ui/connect_windows.cpp
+      src/ui/startup_windows.cpp)
+    target_link_libraries(monky_light_ui PUBLIC Shell32 User32 Gdi32 Ole32 Advapi32)
     target_compile_definitions(monky_light_ui PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   else()
     find_library(MONKY_APPKIT_FRAMEWORK AppKit REQUIRED)
     # AXIsProcessTrusted: push-to-talk needs Accessibility to see keys.
     find_library(MONKY_APPLICATION_SERVICES_FRAMEWORK ApplicationServices REQUIRED)
-    add_library(monky_light_ui STATIC src/ui/tray_macos.mm)
-    set_source_files_properties(src/ui/tray_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    add_library(monky_light_ui STATIC src/ui/tray_macos.mm src/ui/connect_macos.mm src/ui/startup_macos.mm)
+    set_source_files_properties(src/ui/tray_macos.mm src/ui/connect_macos.mm src/ui/startup_macos.mm
+      PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(monky_light_ui PUBLIC "${MONKY_APPKIT_FRAMEWORK}"
       "${MONKY_APPLICATION_SERVICES_FRAMEWORK}")
   endif()
   target_include_directories(monky_light_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(monky_light_ui PUBLIC monky_light_json)
   add_executable(monky-light src/main.cpp)
-  target_link_libraries(monky-light PRIVATE monky_light_application monky_light_ui)
+  target_link_libraries(monky-light PRIVATE monky_light_application monky_light_ui monky_light_standalone)
   if(APPLE)
     set_target_properties(monky-light PROPERTIES
       MACOSX_BUNDLE TRUE
@@ -257,7 +268,8 @@ if(MONKY_LIGHT_WITH_RTC)
       monky_light_profile monky-light-profile-test monky_light_fixture_audio monky-light-audio-fixture-test
       monky_light_session monky-light-session-test monky_light_media
       monky-light-media-lifecycle-test monky-light-media-loopback-test
-      monky_light_application monky_light_ui monky-light-tray-test monky-light monky-light-fixture)
+      monky_light_application monky_light_ui monky-light-tray-test monky-light monky-light-fixture
+      monky_light_standalone monky-light-standalone-test)
     if(MSVC)
       target_compile_options(${target} PRIVATE /W4 /WX /EHsc /utf-8 /permissive-)
     else()

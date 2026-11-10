@@ -23,7 +23,14 @@ struct ProfileSettings {
   std::map<std::string, int> userVolumes{};
   // A name accepted by parsePushToTalkKey; nullopt until the user picks one.
   std::optional<std::string> pushToTalkKey{};
+  // The last server joined without a command line, as a ws(s):// address (an
+  // invitation's password is never stored), and the nickname used there.
+  std::optional<std::string> server{};
+  std::optional<std::string> nickname{};
 };
+
+constexpr std::size_t kMaxSavedServerBytes = 2048;
+constexpr std::size_t kMaxSavedNicknameBytes = 256;
 
 constexpr int kDefaultUserVolume = 100;
 constexpr int kMaxUserVolume = 200;

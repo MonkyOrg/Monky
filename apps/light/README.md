@@ -174,6 +174,53 @@ não há processamento extra, e 100% não custa nada. Voltar a 100 apaga a entra
 O perfil guarda até 256 sessões com volume alterado; acima disso, `set-volume`
 é recusado até que alguma volte a 100.
 
+## Abrir como aplicativo
+
+Sem nenhum argumento (duplo clique, Finder ou atalho), o Light abre só com a
+bandeja, sem console. Na primeira vez, uma janela pequena pede o link de
+convite ou o endereço do servidor, o apelido e, se o servidor pedir, a senha.
+Nas próximas aberturas ele conecta direto ao último servidor.
+`Trocar de servidor…`, na bandeja, encerra a conexão atual e reabre a janela
+no mesmo processo.
+
+- **Perfil:** `%LOCALAPPDATA%\Monky Light\Profile` no Windows e
+  `~/Library/Application Support/Monky Light/Profile` no macOS, separado de
+  qualquer perfil passado por `--profile`. Para desenvolvimento e QA, aponte
+  `MONKY_LIGHT_PROFILE` para uma pasta descartável absoluta; nunca use o perfil
+  de uma instalação real.
+- **O que é salvo:** só o endereço `ws(s)://` e o apelido, em
+  `monky-light-settings.json`. Um link de convite é reduzido ao endereço: a
+  chave do servidor fica fixada no primeiro contato, e a senha **nunca** vai
+  para o disco. Num servidor com senha, cada abertura conecta sem ela; ao
+  recusar, o servidor faz a janela reabrir no campo da senha, mantendo o resto.
+- **Recusas que a janela resolve** reabrem a janela com o motivo, em vez de só
+  um alerta na bandeja: senha errada (`AUTH_INVALID_PASSWORD`), apelido em uso
+  (`NICKNAME_ALREADY_EXISTS`) ou recusado (`NICKNAME_INVALID`).
+- **A janela confere** o que o núcleo recusaria: campos vazios, endereço que
+  não é convite nem `ws://`/`wss://` e apelido acima do limite compartilhado
+  (32 unidades, contadas como o servidor conta). O motivo aparece na própria
+  janela, e o campo a corrigir recebe o foco.
+- **Sem leitor de console**, os eventos vão só para a bandeja e nada é lido do
+  stdin; a ausência do console não encerra o núcleo como acontece no modo de
+  linha de comando.
+- **Outra cópia aberta:** o perfil continua com lock exclusivo. Uma segunda
+  abertura mostra um aviso e encerra, sem tocar na primeira.
+- No Windows, o executável ainda é de console: o duplo clique abre um console
+  por um instante, que o Light solta logo em seguida. Um console compartilhado
+  com o terminal que o iniciou é mantido.
+
+- **Iniciar com o sistema**, desligado por padrão, registra este executável
+  sem argumentos para abrir no login: um valor em
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` no Windows e um
+  LaunchAgent `~/Library/LaunchAgents/org.monky.light.plist` no macOS (vale a
+  partir do próximo login; funciona desde o macOS 12). O item só aparece
+  marcado quando o registro aponta para este mesmo executável, e não é
+  oferecido com `MONKY_LIGHT_PROFILE`, para um build de desenvolvimento nunca
+  se registrar com o perfil real.
+
+Qualquer argumento mantém o comportamento de linha de comando documentado
+acima, inclusive sem `--tray`.
+
 ## Interface de bandeja
 
 `--tray` adiciona o ícone na área de notificação do Windows ou na barra de status
@@ -202,7 +249,8 @@ renderizando entre as ativações. Ele traz:
 - `Na chamada`, com cada participante, quem está falando e o volume, em
   predefinições de 0 a 200%;
 - `Dispositivos de áudio`, com entrada, saída e `Padrão do sistema`;
-- `Reconectar agora` e `Sair do Monky Light`.
+- `Reconectar agora`, `Trocar de servidor…` e `Iniciar com o sistema` (os dois
+  só quando aberto como aplicativo) e `Sair do Monky Light`.
 
 Em menu nativo, escolha exclusiva (canal, dispositivo) usa marca de rádio e
 liga/desliga usa marca de seleção: são os equivalentes nativos do card

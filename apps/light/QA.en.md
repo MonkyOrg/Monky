@@ -147,3 +147,13 @@ available, so the terminal shows what each click did.
 | 6.28 | Open `In the call` while someone speaks | They appear with `(speaking)`; you are not listed | | |
 | 6.29 | Choose 0%, 200%, and 100% for a participant | Silent, louder, back to normal; nobody else notices a difference | | |
 | 6.30 | Restart the Light and reopen `In the call` | The chosen volume is still checked and applied | | |
+| 6.31 | With `MONKY_LIGHT_PROFILE` on a disposable folder, double-click the executable | The console disappears at once, the `Connect to a server` window appears, and no terminal stays open | | |
+| 6.32 | Paste an invitation link, pick a nickname, and connect | Joins the server; `monky-light-settings.json` holds only `server` (`ws(s)://`) and `nickname`, no password | | |
+| 6.33 | Quit and open again | Connects straight to the same server, with no window | | |
+| 6.34 | Invalid address, empty nickname, or one longer than 32 characters | The window stays open, explains why, and focuses the field to fix | | |
+| 6.35 | A server with a password, with none or a wrong one | The window reopens on the password field with the explanation, keeping server and nickname | | |
+| 6.36 | A nickname someone else already uses on the server | The window reopens on the nickname field with the explanation | | |
+| 6.37 | `Change server…` in the tray | The Light leaves the current server, the icon disappears, and the window reopens filled with the current server, without a password | | |
+| 6.38 | Open a second copy with the same profile | Profile unavailable notice; the first copy stays connected | | |
+| 6.39 | Cancel the window | The Light quits without connecting and leaves no process | | |
+| 6.40 | Turn `Start with the system` on, sign out of the system and back in | The Light opens by itself, tray only, and connects to the last server; turning it off removes the registration and it no longer opens | | |
