@@ -21,6 +21,7 @@ import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { customStatusLabel } from '../../../utils/presenceTag';
 import type { TranslationKey } from '../../../i18n';
 import { lockedBlock } from '../../../utils/desktopOnly';
+import { openOwnIdentitySessions } from '../../OwnIdentitySessions';
 
 const PRESENCE_OPTIONS: ReadonlyArray<{ status: PresenceStatus; icon: string; label: TranslationKey; description: TranslationKey }> = [
   { status: 'online', icon: 'circle', label: 'main.statusOnline', description: 'settings.presenceOnlineDesc' },
@@ -234,7 +235,7 @@ export class AccountTab {
         </label>
         <div style="padding: 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
           <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 10px;">
-            ${connectionStore.hasIdentity ? t('identity.sectionReady') : t('identity.sectionMissing')}
+            ${connectionStore.guest ? t('identity.guestHint') : connectionStore.hasIdentity ? t('identity.sectionReady') : t('identity.sectionMissing')}
           </div>
           <div style="display: grid; gap: 6px; margin-bottom: 12px;">
             <div style="font-size: 11px; color: var(--text-muted);">
@@ -247,7 +248,7 @@ export class AccountTab {
             </div>
           </div>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <button type="button" id="btn-export-identity" class="btn btn-secondary" ${connectionStore.hasIdentity ? '' : 'disabled'}>
+            <button type="button" id="btn-export-identity" class="btn btn-secondary" ${connectionStore.hasIdentity && !connectionStore.guest ? '' : 'disabled'}>
               <span class="material-symbols-outlined md-16" style="margin-right: 4px;">qr_code_2</span>
               ${t('identity.exportAction')}
             </button>
@@ -255,6 +256,7 @@ export class AccountTab {
               <span class="material-symbols-outlined md-16" style="margin-right: 4px;">qr_code_scanner</span>
               ${t('identity.importAction')}
             </button>
+            <button type="button" id="btn-identity-sessions" class="btn btn-secondary">${t('identity.sessionsTitle')}</button>
           </div>
         </div>
       </div>
@@ -300,6 +302,7 @@ export class AccountTab {
     const avatarWrapper = container.querySelector<HTMLElement>('#settings-avatar-wrapper');
     const btnExportIdentity = container.querySelector<HTMLButtonElement>('#btn-export-identity');
     const btnImportIdentity = container.querySelector<HTMLButtonElement>('#btn-import-identity-settings');
+    container.querySelector('#btn-identity-sessions')?.addEventListener('click', openOwnIdentitySessions);
 
     const btnEmojiNickname = container.querySelector<HTMLElement>('#btn-emoji-nickname');
     if (btnEmojiNickname && inputNickname) {
@@ -405,9 +408,9 @@ export class AccountTab {
     btnImportIdentity?.addEventListener('click', async () => {
       const imported = await showIdentityImportDialog();
       if (imported) {
-        connectionStore.clientId = imported.clientId;
-        connectionStore.publicKey = imported.publicKey;
-        connectionStore.hasIdentity = true;
+        if (connectionStore.guest) await sessionManager.removeAll();
+        connectionStore.setIdentity(imported);
+        connectionStore.loadUserProfile();
         // Connections already open stay signed in as before; when they reconnect, they sign in as this identity.
         for (const session of sessionManager.getAll()) session.client.adoptIdentity(imported);
         // The imported identity brings its own friends and conversations.

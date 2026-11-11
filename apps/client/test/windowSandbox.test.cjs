@@ -58,6 +58,7 @@ test('every Main window with a preload gets it through isolatedWebPreferences, s
     overlayPreload: 'overlayManager.ts',
     crashRecoveryPreload: 'crashRecovery.ts',
     localPreparationDialog: path.join('localExecution', 'preparationWindow.ts'),
+    miniappBrowserPreload: 'miniappBrowserWindows.ts',
   });
 });
 

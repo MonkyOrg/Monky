@@ -342,7 +342,11 @@ export class SessionManager {
       });
     });
     session.community.dispose();
+    session.botScreenStore.clear();
     session.client.dispose({ quiet });
+    session.serverStore.clear();
+    session.chatStore.clear();
+    session.participants.clear();
     this.sessions.delete(key);
     // The disconnect above may have already handed the screen to another
     // session, and clearing the key then would undo it.

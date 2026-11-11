@@ -638,6 +638,7 @@ async function* regression(locale, inviteModule) {
   const revokedEvents = new Set();
   const hiddenEvent = id => deletedEvents.has(id) || revokedEvents.has(id);
   let historyGate = null;
+  let historyFailure = null;
   let uploadedCommunityImages = 0;
   const cancelled = [];
   const calls = [], listeners = new Set();
@@ -680,7 +681,21 @@ async function* regression(locale, inviteModule) {
       }
       if (type === 'COMMUNITY_GET') {
         if (!payload?.includeEnded) return structuredClone(snapshot);
-        const answer = structuredClone({ ...snapshot, events: [...snapshot.events, ...endedEvents.filter(entry => !hiddenEvent(entry.id))] });
+        const answer = structuredClone({ ...snapshot, events: [...snapshot.events, ...endedEvents.filter(entry => !hiddenEvent(entry.id))].slice(0, 200) });
+        if (historyGate) await historyGate;
+        return answer;
+      }
+      if (type === 'EVENT_HISTORY_GET') {
+        if (historyFailure) throw historyFailure;
+        let entries = endedEvents.filter(entry => !hiddenEvent(entry.id))
+          .sort((a, b) => b.startsAt - a.startsAt || a.id.localeCompare(b.id));
+        if (payload.ids) entries = entries.filter(entry => payload.ids.includes(entry.id));
+        else if (payload.after) entries = entries.filter(entry => entry.startsAt < payload.after.startsAt
+          || (entry.startsAt === payload.after.startsAt && entry.id > payload.after.id));
+        const page = entries.slice(0, payload.limit ?? 20);
+        const last = page.at(-1);
+        const answer = structuredClone({ events: page,
+          nextCursor: !payload.ids && entries.length > page.length ? { startsAt: last.startsAt, id: last.id } : null });
         if (historyGate) await historyGate;
         return answer;
       }
@@ -2403,6 +2418,16 @@ async function* regression(locale, inviteModule) {
   document.querySelector('[data-input=title]').dispatchEvent(new Event('input', { bubbles: true }));
   document.querySelector('[data-event-next]').click();
   await flush();
+  const previewLink = document.querySelector('.server-event-wizard [data-event-location-link]');
+  const previewApi = window.api;
+  const previewOpened = [];
+  window.api = { ...(previewApi ?? {}), openExternal: async url => { previewOpened.push(url); return { success: true }; } };
+  check(previewLink?.getAttribute('href') === 'https://example.test/event', 'An external event location is a real link in its wizard preview');
+  previewLink.click();
+  await flush();
+  check(previewOpened.join() === 'https://example.test/event' && document.querySelector('.server-event-wizard'),
+    'The preview opens its location through the external-navigation bridge without leaving the wizard');
+  if (previewApi === undefined) delete window.api; else window.api = previewApi;
   document.querySelector('[data-event-submit]').click();
   await flush();
   check(calls.some(call => call.type === 'EVENT_SAVE' && call.payload.title === 'External event' &&
@@ -2494,6 +2519,43 @@ async function* regression(locale, inviteModule) {
   server.currentUser = { id: 'member', sessionId: 'member-session' };
   allowed = false;
   root.querySelector('[data-community=events]').click();
+  const locationApi = window.api;
+  const openedLocations = [];
+  window.api = { ...(locationApi ?? {}), openExternal: async url => { openedLocations.push(url); return { success: true }; } };
+  emit('message.COMMUNITY_SNAPSHOT', { ...snapshot, events: [{ ...event, location: {
+    kind: 'external', label: 'Online: https://example.test/event?a=1&b=2, ou www.example.test/meet.',
+  } }] });
+  const locationLinks = [...document.querySelectorAll('.event-list-modal [data-event-location-link]')];
+  check(locationLinks.length === 2 && locationLinks[0].getAttribute('href') === 'https://example.test/event?a=1&b=2'
+    && locationLinks[1].getAttribute('href') === 'https://www.example.test/meet',
+    'Event locations reuse automatic links, preserve query parameters, and leave surrounding text and punctuation intact');
+  locationLinks[0].click();
+  await flush();
+  check(openedLocations.length === 1 && !document.querySelector('.event-detail-modal'),
+    'Clicking a location link opens the browser, not the clickable event card');
+  locationLinks[1].focus();
+  yield 'keyboard-enter';
+  await flush();
+  check(openedLocations.at(-1) === 'https://www.example.test/meet' && !document.querySelector('.event-detail-modal'),
+    'A real keyboard Enter opens the location link without opening the card');
+  document.querySelector('.event-list-modal [data-event-action=detail]').click();
+  const detailsLocation = document.querySelector('.event-detail-modal [data-event-location-link]');
+  check(detailsLocation?.getAttribute('href') === 'https://example.test/event?a=1&b=2', 'The event details use the same linked location');
+  detailsLocation.click();
+  await flush();
+  check(openedLocations.length === 3 && document.querySelectorAll('.event-detail-modal').length === 1,
+    'The detail location also opens externally without creating another event dialog');
+  document.querySelector('.event-detail-modal [data-community-close]').click();
+  await flush();
+  const { renderServerEventLocation } = await import('/views/ServerEventCard.ts');
+  const locationFixture = document.createElement('div');
+  locationFixture.innerHTML = String(renderServerEventLocation('external', '<img src=x onerror=alert(1)> Praça Central; javascript:alert(1); file:///C:/secret'));
+  check(!locationFixture.querySelector('img, a') && locationFixture.textContent.includes('Praça Central'),
+    'Physical locations and unsafe schemes stay escaped plain text');
+  locationFixture.innerHTML = String(renderServerEventLocation('voice', 'https://example.test/channel-name'));
+  check(!locationFixture.querySelector('a'), 'Channel names are not mistaken for external event locations');
+  if (locationApi === undefined) delete window.api; else window.api = locationApi;
+  emit('message.COMMUNITY_SNAPSHOT', snapshot);
   const eventCard = document.querySelector('.event-list-modal [data-event-openable=true]');
   check(eventCard && !eventCard.querySelector('.community-event-footer [data-event-action=detail]')
     && getComputedStyle(eventCard).cursor === 'pointer',
@@ -2572,10 +2634,12 @@ async function* regression(locale, inviteModule) {
   detail().querySelector('[data-event-tab=details]').click();
   detail().querySelector('[data-event-tab=interested]').click();
   const revokedRequest = calls.at(-1).requestId;
+  server.userRoles = [{ userId: server.currentUser.id, roleIds: ['access-change-fixture'] }];
   emit('message.ROLES_LIST', {});
   check(!detail() && cancelled.includes(revokedRequest), 'ACL invalidation cancels requests and closes interested-member data immediately');
   interestedGate({ id: event.id, users: [], nextCursor: null });
   await flush();
+  delete server.userRoles;
   interestedMode = 'normal';
   feed.requestOpenEvent('historic');
   await flush();
@@ -2976,8 +3040,115 @@ async function* regression(locale, inviteModule) {
     historyGate = null;
     snapshot = historyBaseline;
   }
-  document.querySelector('.event-list-modal [data-community-close]').click();
+  // Without the new feature the checks above use the unchanged legacy history request.
+  check(!calls.some(call => call.type === 'EVENT_HISTORY_GET'), 'Legacy servers retain COMMUNITY_GET history instead of receiving an unsupported cursor request');
+  server.serverDetails.protocol.features.push('event-history-cursor');
+  endedEvents = Array.from({ length: 500 }, (_, index) => ({
+    ...event, id: `lazy-${String(index).padStart(3, '0')}`, title: `Past event ${index}`,
+    startsAt: now - Math.floor(index / 3), status: 'ended',
+  }));
+  const pagedCalls = () => calls.filter(call => call.type === 'EVENT_HISTORY_GET');
+  const historyCards = () => [...document.querySelectorAll('.event-list-modal [data-event-id^="lazy-"]')];
+  const historyScroller = document.querySelector('.event-list-modal');
+  const togglePagedHistory = checked => {
+    const toggle = document.querySelector('.event-list-modal [data-history]');
+    toggle.checked = checked;
+    toggle.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  let releasePage;
+  historyGate = new Promise(resolve => { releasePage = resolve; });
+  const legacyBeforePaging = historyGets();
+  togglePagedHistory(true);
+  check(document.querySelector('.event-history-page .skeleton')
+    && document.querySelector('.event-history-page').getAttribute('aria-busy') === 'true',
+    'Enabling past events immediately shows accessible skeletons while its first page is pending');
+  await until(() => pagedCalls().length === 1 || historyGets() > legacyBeforePaging);
+  check(pagedCalls().length === 1 && pagedCalls()[0].payload.limit === 20 && historyCards().length === 0,
+    'A 500-event history initially requests only 20, not the entire history');
+  historyGate = null;
+  releasePage();
+  await until(() => historyCards().length === 20);
   await flush();
+  check(pagedCalls().length === 1 && !document.querySelector('.event-history-page .skeleton'),
+    'The first page replaces skeletons and does not eagerly fetch the other 480 events');
+  const firstHistoryCard = historyCards()[0];
+  const firstHistoryButton = firstHistoryCard.querySelector('[data-event-action=detail]');
+  firstHistoryButton.focus({ preventScroll: true });
+  historyGate = new Promise(resolve => { releasePage = resolve; });
+  historyScroller.scrollTop = historyScroller.scrollHeight;
+  await until(() => pagedCalls().length === 2);
+  check(document.querySelector('.event-history-page .skeleton') && historyCards().length === 20,
+    'Scrolling to the end requests one more page and shows skeletons below existing cards');
+  check(pagedCalls()[1].payload.after.id === 'lazy-019' && pagedCalls()[1].payload.limit === 20,
+    'The next page starts after the exact previous timestamp/id cursor');
+  const scrollBeforePage = historyScroller.scrollTop;
+  historyGate = null;
+  releasePage();
+  await until(() => historyCards().length === 40);
+  await flush();
+  check(historyCards()[0] === firstHistoryCard && document.activeElement === firstHistoryButton,
+    'Appending a page preserves existing card elements and keyboard focus');
+  check(Math.abs(historyScroller.scrollTop - scrollBeforePage) < 1, 'Appending an old-event page preserves the exact reading scroll position');
+  const beforeRefresh = pagedCalls().length;
+  revokedEvents.add('lazy-000');
+  emit('message.COMMUNITY_SNAPSHOT', structuredClone(snapshot));
+  await until(() => !document.querySelector('.event-list-modal [data-event-id="lazy-000"]'));
+  await until(() => pagedCalls().length === beforeRefresh + 2);
+  check(pagedCalls().slice(beforeRefresh).every(call => call.payload.ids.length === 20)
+    && historyCards().length === 39,
+    'Revocation revalidates only the 40 already loaded ids in bounded batches, not all 500 events');
+  revokedEvents.delete('lazy-000');
+  togglePagedHistory(false);
+  historyGate = new Promise(resolve => { releasePage = resolve; });
+  togglePagedHistory(true);
+  await until(() => pagedCalls().length === beforeRefresh + 3);
+  const cancelledPage = pagedCalls().at(-1).requestId;
+  togglePagedHistory(false);
+  historyGate = null;
+  releasePage();
+  await flush();
+  check(cancelled.includes(cancelledPage) && !historyCards().length && !document.querySelector('.event-history-page'),
+    'Disabling paginated history cancels its request and discards late pages and skeletons');
+  historyFailure = new RequestTimeoutError('EVENT_HISTORY_GET');
+  togglePagedHistory(true);
+  await until(() => document.querySelector('.event-history-page [data-event-history-more]')?.textContent === t('community.retry'));
+  check(document.querySelector('.chat-copy-toast--danger:not([data-ui-closing])')?.textContent.includes(t('community.historyLoadError')),
+    'A failed page reports a localized alert toast and offers retry without leaving an error in the list layout');
+  historyFailure = null;
+  historyScroller.scrollTop = 0;
+  document.querySelector('[data-event-history-more]').click();
+  await until(() => historyCards().length === 20);
+  check(historyCards().length === 20, 'Retry successfully restores the bounded first page');
+  const completePagesBaseline = pagedCalls().length - 1;
+  document.querySelector('[data-event-history-more]').focus({ preventScroll: true });
+  yield 'keyboard-enter';
+  await until(() => historyCards().length === 40);
+  check(historyCards().length === 40, 'The load-more fallback is usable through a real keyboard Enter');
+  for (let count = 60; count <= 500; count += 20) {
+    historyScroller.scrollTop = historyScroller.scrollHeight;
+    await until(() => historyCards().length === count);
+  }
+  check(pagedCalls().length - completePagesBaseline === 25
+    && new Set(historyCards().map(card => card.dataset.eventId)).size === 500
+    && !document.querySelector('.event-history-page'),
+    'Scrolling reaches all 500 events in exactly 25 bounded pages without duplicates or a stranded final skeleton');
+  togglePagedHistory(false);
+  historyScroller.scrollTop = 0;
+  togglePagedHistory(true);
+  await until(() => historyCards().length === 20);
+  historyGate = new Promise(resolve => { releasePage = resolve; });
+  const beforeClose = pagedCalls().length;
+  historyScroller.scrollTop = historyScroller.scrollHeight;
+  await until(() => pagedCalls().length === beforeClose + 1);
+  const closingRequest = pagedCalls().at(-1).requestId;
+  document.querySelector('.event-list-modal [data-community-close]').click();
+  historyGate = null;
+  releasePage();
+  await flush();
+  check(cancelled.includes(closingRequest) && !document.querySelector('.event-list-modal'),
+    'Closing the list cancels the pending page and its late result cannot remount the dialog');
+  endedEvents = [];
+  server.serverDetails.protocol.features = server.serverDetails.protocol.features.filter(feature => feature !== 'event-history-cursor');
   root.querySelector('[data-community=actions]').click();
   await flush();
   const pollMenu = id => document.querySelector(`.live-action-list-modal [data-live-poll-card="${id}"] [data-live-action-menu]`);

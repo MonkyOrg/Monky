@@ -13,6 +13,7 @@ import { createTypeahead, focusItem, nextIndex } from '../utils/rovingFocus';
 import '../styles/mediaPopovers.css';
 import { reportError } from '../utils/feedback';
 import { isDesktopOnly, setDesktopOnly } from '../utils/desktopOnly';
+import { bindMasterVolumeControls, renderMasterVolumeControl } from './MasterVolumeControl';
 
 let nextId = 0;
 type PopoverKind = 'input' | 'output' | 'camera' | 'noise';
@@ -83,6 +84,11 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       status.className = 'audio-device-status';
       status.setAttribute('role', 'status');
       if (kind !== 'noise') panel.append(deviceRow, select);
+      if (kind === 'input' || kind === 'output') {
+        const volume = document.createElement('div');
+        volume.innerHTML = renderMasterVolumeControl(kind, `${id}-`);
+        panel.append(volume);
+      }
 
       let meter: HTMLElement | null = null;
       const inputModeButtons: HTMLButtonElement[] = [];
@@ -329,6 +335,7 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         refreshInputMode();
         void refresh();
       });
+      const offVolume = bindMasterVolumeControls(panel);
       const offConnection = appEvents.on('network.disconnected', () => close());
       const offChannel = appEvents.on('voice.channel_changed', (channel: string | null) => { if (!channel) close(); });
       const offMeter = meter ? bindMicrophoneLevelMeter(meter, (error) => {
@@ -353,6 +360,7 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         clearSubmenuTimer();
         offMeter();
         offSettings();
+        offVolume();
         offConnection();
         offChannel();
         observer.disconnect();

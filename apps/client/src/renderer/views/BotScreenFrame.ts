@@ -250,6 +250,7 @@ function screenBootstrap(seed: FrameSeed, installVolume: typeof installMiniappVo
 }
 
 export function botScreenDocument(screen: BotScreen, viewer: BotScreenViewer, volume = 1, visible = true): string {
+  if (screen.kind === 'browser') throw new Error('A native browser cannot become an HTML miniapp document.');
   const seed: FrameSeed = {
     viewer, state: screen.state, revision: screen.revision,
     actionBytes: BOT_SCREEN_LIMITS.actionBytes, storageBytes: MINIAPP_STORAGE_OBJECT_BYTES,
@@ -353,6 +354,11 @@ export class BotScreenFrame {
     private onAction: (action: BotScreenAction) => void,
     private onError: (error: unknown) => void, volume = 1,
     private onStorage: (state: BotScreenStorageState) => void = () => undefined, visible = true) {
+    if (screen.kind === 'browser') {
+      this.channel.port1.close();
+      this.channel.port2.close();
+      throw new Error('A native browser cannot become an HTML miniapp frame.');
+    }
     if (!botScreenDocumentConsentSchema.safeParse(consent).success || consent.screenId !== screen.id ||
         consent.instanceId !== screen.instanceId || consent.botId !== screen.botId) {
       this.channel.port1.close();

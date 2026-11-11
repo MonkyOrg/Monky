@@ -4,6 +4,7 @@ import type {
   NativeLiveFormRecord,
   NativeLiveFormResponse,
   ServerEvent,
+  EventHistoryCursor,
 } from '@monky/shared';
 
 export interface ICommunityRepository {
@@ -11,6 +12,9 @@ export interface ICommunityRepository {
   setSettings(eventsEnabled: boolean, bannerPath: string | null, disabledAt: number | null): void;
   event(id: string): ServerEvent | undefined;
   events(includeEnded?: boolean): ServerEvent[];
+  eventHistory(after: EventHistoryCursor | undefined, limit: number): ServerEvent[];
+  eventsByIds(ids: readonly string[]): ServerEvent[];
+  eventInterests(ids: readonly string[], userId: string): Map<string, { interested: boolean; interestedCount: number }>;
   saveEvent(event: ServerEvent): void;
   deleteEvent(id: string): void;
   interest(id: string, userId: string): { interested: boolean; interestedCount: number };

@@ -50,6 +50,7 @@ export interface CommandRuntimeHost {
   createSelector(serverId: string, input: BotSelectorCreate): Promise<BotSelector>;
   createLiveAction(serverId: string, input: LiveActionCreate): Promise<LiveAction>;
   createScreen(serverId: string, input: BotScreenCreate): Promise<BotScreen>;
+  closeScreen(serverId: string, ref: Pick<BotScreen, 'id' | 'instanceId'>): Promise<void>;
 }
 
 /**
@@ -324,6 +325,15 @@ export class CommandRuntime {
         return this.host.createScreen(conn.serverId, {
           ...input, channelId, invocationId: payload.invocationId,
         });
+      },
+      createBrowserScreen: async (input) => {
+        const screen = await ctx.createScreen({ ...input, kind: 'browser', html: '', state: null });
+        if (invocation.controller.signal.aborted || conn.invocations.get(payload.invocationId) !== invocation) {
+          try { await this.host.closeScreen(conn.serverId, { id: screen.id, instanceId: screen.instanceId }); }
+          catch (error: unknown) { this.host.report(error, conn); throw error; }
+          requireActive();
+        }
+        return screen;
       },
       choose: async (choice) => {
         const values = await ctx.prompt({

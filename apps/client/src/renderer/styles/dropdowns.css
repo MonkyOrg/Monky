@@ -50,8 +50,6 @@ select optgroup {
 .floating-context-menu,
 .user-context-menu,
 .ctx-submenu,
-.settings-action-menu,
-.settings-action-submenu,
 .command-dropup,
 .bot-parameter-menu,
 .emoji-picker {
@@ -145,21 +143,18 @@ select optgroup {
 
 /* Only ordinary menu rows: command palettes and emoji grids keep their layouts. */
 .server-dropdown-item,
-.settings-action-menu-item,
 .ctx-submenu-item {
   border-radius: 7px;
   transition: background-color 120ms ease, color 120ms ease;
 }
 
 .server-dropdown-item:not(.danger):not(:disabled):hover,
-.settings-action-menu-item:not(.danger):not(:disabled):hover,
 .ctx-submenu-item:not(.danger):not(:disabled):hover {
   background: var(--bg-card-hover);
   color: var(--text-primary);
 }
 
 .server-dropdown-item:focus-visible,
-.settings-action-menu-item:focus-visible,
 .ctx-submenu-item:focus-visible {
   outline: 2px solid var(--accent-primary);
   outline-offset: -2px;
@@ -169,7 +164,6 @@ select optgroup {
 @media (prefers-reduced-motion: reduce) {
   select,
   .server-dropdown-item,
-  .settings-action-menu-item,
   .ctx-submenu-item {
     transition: none;
   }

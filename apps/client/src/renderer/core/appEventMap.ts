@@ -96,6 +96,7 @@ export interface AppEvents extends ServerMessageEvents {
   'voice.mode_switched': { mode: VoiceMode };
   'voice.ping_updated': number | null;
   'voice.screen_watch_changed': { sessionId: string; shareId: string; watching: boolean };
+  'voice.camera_watch_changed': { sessionId: string; watching: boolean };
   'voice.screen_watch_handoff': { sessionId: string; fromShareId: string; shareId: string };
   'voice.screen_quality_changed': { sessionId: string; shareId: string; quality: ScreenShareQuality };
   'voice.screen_audio_mute_changed': { sessionId: string; muted: boolean };

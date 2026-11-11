@@ -265,6 +265,79 @@ if (!process.versions.electron) {
       assert.equal(await run(window, '!!document.querySelector("#screenshare-notice-btn")'), true, 'remote screen invitation survives');
     }
     const [aliceWindow, spectatorWindow] = windows;
+    assert.deepEqual(await run(aliceWindow, 'window.screenFixture.cues'), [], 'The recovered miniapp list is silent');
+    assert.deepEqual(await run(aliceWindow, `[
+      document.querySelectorAll("#voice-mini-user-alice-device [data-member-miniapp]").length,
+      document.querySelectorAll(".member-item[data-user-id=alice] [data-member-miniapp]").length,
+      document.querySelector("#voice-mini-user-alice-device [data-member-miniapp=game]")?.getAttribute("aria-label") ?? null,
+      !!document.querySelector("#voice-mini-user-alice-device [data-member-miniapp=game] not"),
+    ]`), [4, 4, 'Abrir miniapp: Voice game <not markup>', false],
+    'Call miniapps appear as accessible, escaped shortcuts on their creator in both member lists');
+    await run(aliceWindow, `window.screenFixture.receive({
+      ...window.screenFixture.snapshot(), id: "presence", instanceId: "presence-1", creatorUserId: "remote"
+    })`);
+    await waitFor(async () => await run(aliceWindow,
+      '!!document.querySelector("#voice-mini-user-remote-device [data-member-miniapp=presence]")'), 'live miniapp member indicator');
+    assert.deepEqual(await run(aliceWindow, 'window.screenFixture.cues'), ['screen_share_start'],
+      'Publishing a miniapp uses the same sound key as screen sharing');
+    assert.equal(await run(aliceWindow,
+      '!!document.querySelector("#voice-mini-user-alice-device [data-member-miniapp=presence]")'), false,
+    'A miniapp belongs to the human creator, not a different member or the bot offering it');
+    await run(aliceWindow, `window.savedPresenceButton = document.querySelector("[data-member-miniapp=presence]");
+      window.screenFixture.remove({id: "presence", instanceId: "presence-1", channelId: "voice", reason: "closed"})`);
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector("[data-member-miniapp=presence]")'),
+      'removed miniapp indicator disappears without a full layout redraw');
+    await run(aliceWindow, `window.screenFixture.receive({
+      ...window.screenFixture.snapshot(), id: "presence", instanceId: "presence-2", creatorUserId: "remote", createdAt: 2
+    })`);
+    await waitFor(async () => await run(aliceWindow,
+      '!!document.querySelector("#voice-mini-user-remote-device [data-member-miniapp=presence]")'), 'replacement miniapp indicator');
+    await run(aliceWindow, `document.querySelector("#voice-mini-user-remote-device").append(window.savedPresenceButton);
+      window.savedPresenceButton.click(); window.savedPresenceButton.remove()`);
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'), false,
+      'An old indicator cannot start a permission review for its replacement instance');
+    await run(aliceWindow, 'window.screenFixture.remove({id: "presence", instanceId: "presence-2", channelId: "voice", reason: "closed"})');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector("[data-member-miniapp=presence]")'),
+      'replacement indicator removed');
+    assert.deepEqual(await run(aliceWindow, 'window.screenFixture.cues'),
+      ['screen_share_start', 'screen_share_stop', 'screen_share_start', 'screen_share_stop']);
+    // Both the pointer shortcut and its keyboard activation follow the ordinary stage/consent path.
+    await run(aliceWindow, 'document.querySelector("#voice-mini-user-alice-device [data-member-miniapp=game]").click()');
+    await waitFor(async () => await run(aliceWindow,
+      '!!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'), 'miniapp consent from channel member shortcut');
+    assert.equal(frames(aliceWindow).length, 0, 'The member shortcut never bypasses miniapp consent');
+    await run(aliceWindow, 'document.querySelector(".modal-backdrop:not([data-ui-closing]) [data-action=cancel]").click()');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'),
+      'member shortcut consent cancelled');
+    await run(aliceWindow, 'document.querySelector(".member-item[data-user-id=alice] [data-member-miniapp=second]").focus()');
+    for (const type of ['keyDown', 'keyUp']) await aliceWindow.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+      type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}),
+    });
+    await waitFor(async () => await run(aliceWindow,
+      '!!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'), 'keyboard miniapp shortcut');
+    assert.equal(await run(aliceWindow,
+      '!!document.querySelector("#stage-participants-area .stage-focused-main[data-bot-screen-slot=second]")'), true,
+    'The member shortcut focuses its own miniapp, not the first available one');
+    await run(aliceWindow, 'document.querySelector(".modal-backdrop:not([data-ui-closing]) [data-action=cancel]").click()');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'),
+      'keyboard shortcut consent cancelled');
+    assert.equal(await run(aliceWindow, 'window.screenFixture.cues.length'), 4, 'Opening/cancelling a local view adds no availability cues');
+    await run(aliceWindow, `window.screenFixture.receive({
+      ...window.screenFixture.snapshot(), id: "unbound", instanceId: "unbound-1", creatorUserId: undefined
+    }); window.screenFixture.botPresence("other")`);
+    assert.equal(await run(aliceWindow, '!!document.querySelector("[data-member-miniapp=unbound]")'), false,
+      'Without a human creator, a bot outside the corresponding call has no member shortcut');
+    await run(aliceWindow, 'window.screenFixture.botPresence("voice")');
+    await waitFor(async () => await run(aliceWindow, `[
+      "#voice-mini-user-bot-device [data-member-miniapp=unbound]",
+      ".member-item[data-user-id=bot] [data-member-miniapp=unbound]"
+    ].every(selector => !!document.querySelector(selector))`), 'bot-owned shortcuts in the matching call');
+    await run(aliceWindow, 'window.screenFixture.botPresence(null)');
+    assert.equal(await run(aliceWindow, '!!document.querySelector("[data-member-miniapp=unbound]")'), false,
+      'The bot-owned shortcut disappears when the bot leaves the call');
+    await run(aliceWindow, 'window.screenFixture.remove({id: "unbound", instanceId: "unbound-1", channelId: "voice", reason: "closed"})');
+    assert.deepEqual(await run(aliceWindow, 'window.screenFixture.cues.slice(-2)'), ['screen_share_start', 'screen_share_stop']);
+    await run(aliceWindow, 'document.querySelector(".channel-item[data-channel-id=chat]").click()');
     assert.deepEqual(await run(aliceWindow, `(${verifyVolumeHook.toString()})()`), {
       chosen: [0.8, 0.4, 0.25, 0.125], errors: ['IndexSizeError', 'IndexSizeError', 'TypeError'], afterErrors: [0.8, 0.4],
       played: [1, 0.5], attached: [1, 0.5], external: [0.6, 0.3], chained: true, routed: true, outputs: [1, 0.5],
@@ -285,7 +358,7 @@ if (!process.versions.electron) {
       [...document.querySelectorAll("[data-watch-live]")].map(button => button.dataset.watchLive),
     ]`), ['SPAN', 'SPAN', ['remote-device', 'remote-device']]);
     await run(aliceWindow, 'window.screenFixture.selfLive(false)');
-    await waitFor(async () => await run(aliceWindow, '!document.querySelector("#voice-mini-user-alice-device .voice-mini-icon.live")'), 'own share icon gone');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector("#voice-mini-user-alice-device .voice-mini-icon.live:not([data-member-miniapp])")'), 'own share icon gone');
     // Someone else's share icon asks first; cancelling opens nothing.
     await run(aliceWindow, 'document.querySelector(".voice-participant-mini [data-watch-live]").click()');
     await waitFor(async () => await run(aliceWindow, `!!document.querySelector(${JSON.stringify(dialog)})`), 'watch question from the share icon');
@@ -364,6 +437,7 @@ if (!process.versions.electron) {
     await run(spectatorWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=close]").click(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=focus]").click(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
     await approveMiniapp(spectatorWindow);
     await waitFor(() => frames(spectatorWindow).length === 1, 'spectator reopens using the stage tile');
+    assert.equal(await run(spectatorWindow, 'window.screenFixture.cues.length'), 0, 'Opening, leaving and reopening a local view are silent');
     assert.equal(await run(spectatorWindow, '!!document.querySelector(".stage-focused-main[data-bot-screen-slot=game]")'), true, 'Spectator tile opt-in also enters focus automatically');
     let alice = await gameFrame(aliceWindow);
     let spectator = await gameFrame(spectatorWindow);
@@ -789,6 +863,8 @@ if (!process.versions.electron) {
     assert.equal(await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=second]")'), false, 'Background voice updates do not undo another explicit exit');
     assert.equal(await run(aliceWindow, 'document.querySelector("#server-name-title").textContent'), 'Other server');
     assert.equal(await run(aliceWindow, 'window.screenFixture.backgroundNotificationsSafe()'), true);
+    assert.equal(await run(aliceWindow, '!!document.querySelector("[data-member-miniapp]")'), false,
+      'The other server never shows indicators for the background call or its unrelated cached miniapp');
     assert.equal(await run(aliceWindow, '[...document.querySelectorAll("#screenshare-notice-slot, #bot-screen-background-slot")].some(slot => slot.textContent.includes("WRONG SERVER"))'), false);
     await run(aliceWindow, `document.querySelector(${gameReturn}).click()`);
     await waitFor(async () => await run(aliceWindow, 'document.querySelector("#server-name-title").textContent === "Voice server" && !!document.querySelector("#stage-bot-screens [data-bot-screen-id=game] iframe")'), 'Back to miniapp activates the call server');
@@ -1398,9 +1474,10 @@ async function setupVoiceStage(id, locale, adminPermission) {
   const onRejection = event => errors.push(String(event.reason));
   window.addEventListener('error', onError);
   window.addEventListener('unhandledrejection', onRejection);
-  const [{ MainView }, { sessionManager }, { voiceStore }, { appEvents }, routing, language, { bindBotScreenEvents }] = await Promise.all([
+  const [{ MainView }, { sessionManager }, { voiceStore }, { appEvents }, routing, language, { bindBotScreenEvents }, { soundEffects }] = await Promise.all([
     import('/views/MainView.ts'), import('/core/SessionManager.ts'), import('/stores/voiceStore.ts'),
     import('/core/EventBus.ts'), import('/core/sessionRouting.ts'), import('/i18n/index.ts'), import('/core/botScreenEvents.ts'),
+    import('/core/SoundEffects.ts'),
   ]);
   language.setLanguage(locale);
   sessionManager.install();
@@ -1502,7 +1579,10 @@ async function setupVoiceStage(id, locale, adminPermission) {
   sessionManager.activate(session.key);
   const listenerCount = () => [...appEvents.listeners.values()].reduce((sum, entries) => sum + entries.size, 0);
   const before = listenerCount();
-  const offScreens = bindBotScreenEvents();
+  const cues = [];
+  const originalPlay = soundEffects.play;
+  soundEffects.play = cue => cues.push(cue);
+  const offScreens = bindBotScreenEvents(appEvents, key => soundEffects.play(key));
   const view = new MainView(document.getElementById('app'), { suspend() {}, render() {} });
   const offLanguage = appEvents.on('i18n.language_changed', () => view.render(true));
   // The application, rather than MainView, owns session navigation rendering.
@@ -1510,7 +1590,8 @@ async function setupVoiceStage(id, locale, adminPermission) {
     if (key && !sessionManager.isHome() && sessionManager.get(key)?.serverStore.serverDetails) view.render();
   });
   const offNotifications = appEvents.on('voice.bot_screens_updated', () => {
-    safeNotifications &&= routing.isForegroundEvent() && routing.currentEventOrigin() === null;
+    const origin = routing.currentEventOrigin();
+    safeNotifications &&= routing.isForegroundEvent() && (origin === null || origin === sessionManager.getActiveKey());
   });
   // Mirrors the tray, which puts its 3D glasses on and off by asking again on this event: every
   // change to the call's open miniapps must report it, once the change has happened.
@@ -1532,7 +1613,15 @@ async function setupVoiceStage(id, locale, adminPermission) {
     appEvents.emit('participants.updated');
   };
   window.screenFixture = {
-    actions, sent, join, receive, remove, errors,
+    actions, sent, join, receive, remove, errors, cues,
+    botPresence(channelId) {
+      const bot = { id: 'bot', clientId: 'bot', sessionId: 'bot-device', nickname: 'Bot', status: 'ONLINE', joinedAt: 1, isBot: true };
+      session.serverStore.addMember(bot);
+      session.participants.addUser(bot);
+      if (channelId) session.participants.updateVoiceState(state(bot, channelId));
+      else session.participants.removeVoiceState(bot.sessionId);
+      appEvents.emit('participants.updated');
+    },
     lastRemoval: () => structuredClone(lastRemoval),
     trayWatching: () => trayWatching,
     // A list that silently lost a screen, as when its removal never reached this connection.
@@ -1613,6 +1702,7 @@ async function setupVoiceStage(id, locale, adminPermission) {
       window.removeEventListener('error', onError);
       window.removeEventListener('unhandledrejection', onRejection);
       offLanguage(); offNavigation(); offNotifications(); offStageScreens(); view.destroy(); offScreens();
+      soundEffects.play = originalPlay;
       voiceStore.reset(); await sessionManager.removeAll();
       return listenerCount() === before;
     },

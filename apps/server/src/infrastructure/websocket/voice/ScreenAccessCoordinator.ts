@@ -19,7 +19,9 @@ import {
   type VoiceRosterParticipant,
   type VoiceStateChangedPayload,
   type VoiceUserJoinedPayload,
+  type BotScreenRef, type NativeScreenSource,
 } from '@monky/shared';
+import { ServiceError } from '../../../application/errors';
 import type { PermissionService } from '../../../application/services/PermissionService';
 import type { RoleService } from '../../../application/services/RoleService';
 import type { SignalingService } from '../../../application/services/SignalingService';
@@ -69,6 +71,36 @@ export class ScreenAccessCoordinator {
   private publishedScreenRoles?: number;
 
   constructor(private readonly host: ScreenAccessHost) {}
+
+  /** The verified browser host adds one source without replacing any screen already on air. */
+  public publishMiniappSource(session: Pick<ClientSession, 'sessionId' | 'protocol'>, ref: BotScreenRef, source: NativeScreenSource | null): void {
+    const { sessionId } = session;
+    const current = sessionId ? this.host.signaling.getVoiceState(sessionId) : null;
+    if (!current) {
+      if (source) throw new ServiceError(ProtocolErrorCode.CHANNEL_NOT_FOUND, 'The browser host left the room.');
+      return;
+    }
+    const shareId = `browser-${ref.instanceId}`;
+    const existing = current.nativeScreenShares ?? [];
+    if (source && (existing.some(value => value.shareId === shareId) ||
+      (current.screenShareIds?.length ?? 0) >= (session.protocol?.features.includes('screen-shares-8')
+        ? SCREEN_SHARE_LIMITS.maximum : SCREEN_SHARE_LIMITS.legacy)))
+      throw new ServiceError(ProtocolErrorCode.BOT_SCREEN_CONFLICT, 'Close an existing transmission before adding a browser.');
+    if (!source && !existing.some(value => value.shareId === shareId && value.instanceId === ref.instanceId)) return;
+    const sources = source ? [...existing, source]
+      : existing.filter(value => value.shareId !== shareId || value.instanceId !== ref.instanceId);
+    const ids = source ? [...current.screenShareIds ?? [], shareId]
+      : (current.screenShareIds ?? []).filter(value => value !== shareId);
+    const updated = this.host.signaling.updateVoiceState(sessionId!, {
+      nativeScreenShares: sources, screenShareIds: ids, isScreenSharing: ids.length > 0,
+      isSharingScreenAudio: ids.length > 0 && current.isSharingScreenAudio,
+    });
+    this.reconcileScreenAccess();
+    if (updated) void this.host.broadcastToChannel(updated.channelId, {
+      type: MessageType.VOICE_STATE_CHANGED, payload: { voiceState: updated },
+    }, undefined, () => this.host.signaling.getVoiceState(sessionId!) === updated)
+      .catch(error => Logger.error('WEBRTC', 'Browser source announcement failed.', error));
+  }
 
   public canReceiveProducer(session: ClientSession, channelId: string, producerId: string): boolean {
     const producer = this.host.sfu.getProducer(producerId);

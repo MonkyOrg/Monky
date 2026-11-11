@@ -10,7 +10,7 @@ import { t } from '../../i18n';
 import { IMAGE_ACCEPT, base64ToBytes, bytesToBase64, pickFiles, readImageSelection, saveBlob, saveText } from './webFiles';
 import {
   createWebIdentity, deleteWebIdentity, exportWebIdentity, getWebClientId, getWebIdentity, getWebIdentityStatus, importWebIdentity,
-  signWebChallenge,
+  signWebChallenge, createWebGuestIdentity,
 } from './webIdentity';
 import { openWebBackup, sealWebBackup } from './webSecretEnvelope';
 import {
@@ -54,6 +54,7 @@ export function webCapabilities(): PlatformCapabilities {
     screenEncoderChoice: false,
     localExecution: false,
     botScreens: true,
+    miniappBrowser: false,
     directMessages: true,
     mediaFolders: true,
     mediaFolderPicker: supportsDirectoryPicker(),
@@ -204,9 +205,13 @@ function onFragmentInvite(callback: () => void): () => void {
 
 async function logOut(): Promise<{ success: boolean; error?: string }> {
   try {
+    const guest = (await getWebIdentity())?.guest === true;
     await deleteWebIdentity();
-    await wipeWebDirectMessages();
-    await wipeWebBotStorage();
+    if (guest) await resetWebDirectMessages();
+    else {
+      await wipeWebDirectMessages();
+      await wipeWebBotStorage();
+    }
     // The desktop relaunches; a tab starts over by loading the page again.
     setTimeout(() => window.location.reload(), 0);
     return { success: true };
@@ -260,7 +265,16 @@ export function createWebPlatformApi(): PlatformApi {
 
     // Identity.
     getIdentityStatus: getWebIdentityStatus,
-    createIdentity: createWebIdentity,
+    createIdentity: async () => {
+      const identity = await createWebIdentity();
+      await resetWebDirectMessages();
+      return identity;
+    },
+    createGuestIdentity: async nickname => {
+      const identity = await createWebGuestIdentity(nickname);
+      await resetWebDirectMessages();
+      return identity;
+    },
     getIdentity: getWebIdentity,
     getClientId: getWebClientId,
     signChallenge: signWebChallenge,
@@ -471,6 +485,10 @@ export function createWebPlatformApi(): PlatformApi {
 
     // Bots that run on this computer, and their screens and storage.
     createBotScreenDocument: createWebBotScreenDocument,
+    openMiniappBrowser: unsupported('miniappBrowser'),
+    miniappBrowserCommand: unsupported('miniappBrowser'),
+    captureMiniappBrowser: unsupported('miniappBrowser'),
+    onMiniappBrowserClosed: never,
     removeBotScreenDocument: removeWebBotScreenDocument,
     botScreenDocuments: webBotScreenDocumentHost(),
     botStorage: webBotStorage,

@@ -46,6 +46,8 @@ const ACTION_KEYS: Record<ServerAuditAction, TranslationKey> = {
   'role.unassign': 'serverAudit.action.role.unassign',
   'member.join': 'serverAudit.action.member.join',
   'member.kick': 'serverAudit.action.member.kick',
+  'member.ban': 'serverAudit.action.member.ban',
+  'member.unban': 'serverAudit.action.member.unban',
   'member.nickname': 'serverAudit.action.member.nickname',
   'voice.mute': 'serverAudit.action.voice.mute',
   'voice.unmute': 'serverAudit.action.voice.unmute',

@@ -1,6 +1,7 @@
 import {
   SecretEnvelopeError, deriveClientIdFromPublicKey, memberAuthChallenge, normalizePublicKeyHex, openIdentityExport,
   sealIdentityExport, serverAuthChallenge, serverChallengeBindingSchema,
+  nicknameSchema,
   type AppIdentityImportOutcome, type AppIdentityResult, type AppIdentityStatus, type ServerChallengeBinding,
   type SignChallengeResult,
 } from '@monky/shared';
@@ -41,6 +42,8 @@ type WebIdentityState =
 const ED25519 = { name: 'Ed25519' } as const;
 
 let loaded: LoadedWebIdentity | null = null;
+let guestIdentity: LoadedWebIdentity | null = null;
+let guestBase: WebIdentityState | null = null;
 
 function toHex(bytes: ArrayBuffer | Uint8Array): string {
   return Array.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -78,6 +81,7 @@ async function openPrivateKey(privateKeyDer: Uint8Array<ArrayBuffer>): Promise<L
 }
 
 async function readIdentity(): Promise<WebIdentityState> {
+  if (guestIdentity) return { kind: 'ready', identity: guestIdentity };
   if (loaded) return { kind: 'ready', identity: loaded };
   let record: unknown;
   try {
@@ -127,6 +131,7 @@ async function asideKey(kind: 'unreadable' | 'replaced'): Promise<string> {
  * identity in use, is first kept aside under `identity.<kind>-<time>`.
  */
 async function storeIdentity(identity: LoadedWebIdentity, current: WebIdentityState): Promise<void> {
+  current = guestBase ?? current;
   if (current.kind === 'unreadable') {
     const unreadable = await readRecord(IDENTITY_RECORD);
     if (unreadable !== undefined) await writeRecord(await asideKey('unreadable'), unreadable);
@@ -135,6 +140,8 @@ async function storeIdentity(identity: LoadedWebIdentity, current: WebIdentitySt
   }
   await writeRecord(IDENTITY_RECORD, await sealIdentity(identity));
   loaded = identity;
+  guestIdentity = null;
+  guestBase = null;
 }
 
 async function requireIdentity(): Promise<LoadedWebIdentity> {
@@ -144,11 +151,23 @@ async function requireIdentity(): Promise<LoadedWebIdentity> {
 }
 
 function publicIdentity(identity: LoadedWebIdentity): AppIdentityResult {
-  return { publicKey: identity.publicKey, clientId: identity.clientId };
+  return { publicKey: identity.publicKey, clientId: identity.clientId,
+    ...(identity.guest ? { guest: true, nickname: identity.nickname } : {}) };
+}
+export async function createWebGuestIdentity(nickname: string): Promise<AppIdentityResult> {
+  const name = nicknameSchema.parse(nickname);
+  const state = await readIdentity();
+  if (state.kind === 'ready') throw new Error('Sign out before entering as a guest.');
+  const pair = await crypto.subtle.generateKey(ED25519, true, ['sign', 'verify']);
+  guestIdentity = { ...await openPrivateKey(new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey))),
+    guest: true, nickname: name };
+  guestBase = state;
+  return publicIdentity(guestIdentity);
 }
 
 /** Logout: removes the identity and every copy kept aside; the next load asks for a new or imported one. */
 export async function deleteWebIdentity(): Promise<void> {
+  if (guestIdentity) { guestIdentity = null; guestBase = null; return; }
   const copies = (await listRecordKeys()).filter(key => key.startsWith(`${IDENTITY_RECORD}.`));
   for (const key of copies) await deleteRecord(key);
   await deleteRecord(IDENTITY_RECORD);
@@ -172,6 +191,7 @@ export async function createWebIdentity(): Promise<AppIdentityResult> {
 
 /** Seals the identity in the format the desktop and `monky create` also read (#490). */
 export async function exportWebIdentity(password: string, extras?: string, dm?: unknown): Promise<string> {
+  if (guestIdentity) throw new Error('Temporary guest identities cannot be exported.');
   const identity = await requireIdentity();
   try {
     return await sealIdentityExport({
@@ -227,10 +247,10 @@ export async function getWebClientId(): Promise<string> {
 }
 
 /** The key DMs derive theirs from; stays inside the web platform, as it stays in Main on the desktop. */
-export async function webIdentitySecret(): Promise<{ publicKey: string; privateKeyDerBase64: string } | null> {
+export async function webIdentitySecret(): Promise<{ publicKey: string; privateKeyDerBase64: string; guest?: boolean } | null> {
   const state = await readIdentity();
   return state.kind === 'ready'
-    ? { publicKey: state.identity.publicKey, privateKeyDerBase64: bytesToBase64(state.identity.privateKeyDer) }
+    ? { publicKey: state.identity.publicKey, privateKeyDerBase64: bytesToBase64(state.identity.privateKeyDer), guest: state.identity.guest }
     : null;
 }
 

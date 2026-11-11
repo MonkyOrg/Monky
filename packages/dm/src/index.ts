@@ -3,7 +3,7 @@
  * desktop app and the web version (#858). The host installs the crypto
  * primitives (`installDmCrypto`) and gives each identity a store.
  */
-export { afterCurrentTask, dmCrypto, installDmCrypto, type DmCryptoBackend, type DmFileReader, type DmFileStore, type DmGcmSealer, type DmHash } from './backend';
+export { afterCurrentTask, dmCrypto, installDmCrypto, MemoryDmFileStore, type DmCryptoBackend, type DmFileReader, type DmFileStore, type DmGcmSealer, type DmHash } from './backend';
 export * from './bytes';
 export {
   DM_ENVELOPE_VERSION, DmCryptoError, DmKeyring, canonicalJson, createSha256, isIdentityPublicKey, newDmId,

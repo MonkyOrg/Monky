@@ -3,6 +3,8 @@ import {
   ADMIN_PERMISSIONS,
   DEFAULT_PERMISSIONS,
   authConnectSchema,
+  identityBanSchema,
+  identityBanNoticeSchema,
   getNicknameIssue,
   isValidMessageContent,
   isValidNickname,
@@ -124,7 +126,19 @@ assert.deepEqual(motion.filter(isMotionQualityPreset), motion);
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
-assert.equal(PROTOCOL_VERSION, 40);
+assert.equal(PROTOCOL_VERSION, 41);
+const validBan = { targetUserId: 'member', reason: '  Required reason  ', showReason: false, durationSeconds: null };
+assert.equal(identityBanSchema.parse(validBan).reason, 'Required reason');
+assert.equal(identityBanSchema.safeParse({ ...validBan, reason: '  ' }).success, false);
+assert.equal(identityBanSchema.safeParse({ ...validBan, showReason: 'false' }).success, false);
+assert.equal(identityBanSchema.safeParse({ ...validBan, durationSeconds: 1 }).success, true);
+assert.equal(identityBanSchema.safeParse({ ...validBan, durationSeconds: 315_360_000 }).success, true);
+for (const durationSeconds of [0, -1, 1.5, 315_360_001, Infinity]) {
+  assert.equal(identityBanSchema.safeParse({ ...validBan, durationSeconds }).success, false);
+}
+assert.equal(identityBanNoticeSchema.safeParse({ expiresAt: null }).success, true);
+assert.equal(identityBanNoticeSchema.safeParse({ expiresAt: 1, reason: 'Shown reason' }).success, true);
+assert.equal(identityBanNoticeSchema.safeParse({ expiresAt: null, publicKey: 'private metadata' }).success, false);
 assert.equal(LIMITS.SFU_DEFAULT_MIN_PORT, 40000, 'Porta mínima padrão SFU');
 assert.equal(LIMITS.SFU_DEFAULT_MAX_PORT, 49151, 'Porta máxima padrão SFU');
 assert.ok(

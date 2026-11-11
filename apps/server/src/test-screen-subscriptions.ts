@@ -746,6 +746,52 @@ test('a share without a native source can be neither watched nor listed', async 
   f.manager.close();
 });
 
+test('browser publication preserves existing screens, audio and their subscriptions, then removes only its exact source', async t => {
+  const f = await signalingFixture(); t.after(() => f.manager.close());
+  const publisher = f.clients[2];
+  publisher.protocol = { version: 41, minimumVersion: 35, features: ['screen-shares-8', 'miniapp-browser-broadcast'] };
+  const before = f.service.getVoiceState('publisher')!;
+  const ref = { id: 'browser', instanceId: crypto.randomUUID() };
+  const source = { shareId: `browser-${ref.instanceId}`, instanceId: ref.instanceId, audio: false, codec: 'h264' as const,
+    video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 6000 } };
+  f.server['broadcastToChannel'] = async () => {};
+  f.server['screens'].publishMiniappSource(publisher, ref, source);
+  const active = f.service.getVoiceState('publisher')!;
+  assert.deepEqual(active.nativeScreenShares, [...before.nativeScreenShares!, source]);
+  assert.deepEqual(active.screenShareIds, ['one','two',source.shareId]);
+  assert.equal(active.isSharingScreenAudio, true);
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-a', 'one', SOURCE_IDS.one), true);
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-b', source.shareId, source.instanceId), true);
+  assert.equal(f.service.canWatchScreen('publisher', 'outside-room', source.shareId, source.instanceId), false);
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-b', source.shareId, crypto.randomUUID()), false);
+  assert.throws(() => f.server['screens'].publishMiniappSource(publisher, ref, source), /existing transmission/);
+  f.server['screens'].publishMiniappSource(publisher, { ...ref, instanceId: crypto.randomUUID() }, null);
+  assert.deepEqual(f.service.getVoiceState('publisher'), active, 'A stale instance does not withdraw the current browser');
+  f.server['screens'].publishMiniappSource(publisher, ref, null);
+  assert.deepEqual(f.service.getVoiceState('publisher')!.screenShareIds, before.screenShareIds);
+  assert.deepEqual(f.service.getVoiceState('publisher')!.nativeScreenShares, before.nativeScreenShares);
+  assert.equal(f.service.getVoiceState('publisher')!.isSharingScreenAudio, true);
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-b', source.shareId, source.instanceId), false);
+  assert.equal(f.service.canWatchScreen('publisher', 'viewer-a', 'one', SOURCE_IDS.one), true);
+});
+
+test('browser publication refuses a full legacy call and stale withdrawal cannot erase a different source incarnation', async t => {
+  const f = await signalingFixture(); t.after(() => f.manager.close());
+  const publisher = f.clients[2];
+  f.server['broadcastToChannel'] = async () => {};
+  const ref = { id: 'browser', instanceId: crypto.randomUUID() };
+  const source = { shareId: `browser-${ref.instanceId}`, instanceId: ref.instanceId, audio: false, codec: 'h264' as const,
+    video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 6000 } };
+  const before = f.service.getVoiceState('publisher')!;
+  assert.throws(() => f.server['screens'].publishMiniappSource(publisher, ref, source), /existing transmission/);
+  assert.deepEqual(f.service.getVoiceState('publisher'), before);
+  const other = { ...source, instanceId: crypto.randomUUID() };
+  f.service.updateVoiceState('publisher', { screenShareIds: [source.shareId], nativeScreenShares: [other] });
+  f.server['screens'].publishMiniappSource(publisher, ref, null);
+  assert.deepEqual(f.service.getVoiceState('publisher')!.screenShareIds, [source.shareId]);
+  assert.deepEqual(f.service.getVoiceState('publisher')!.nativeScreenShares, [other]);
+});
+
 test('private SFU projection hides producers and close events; guessed video and audio are denied', async () => {
   const f = await privateScreenFixture();
   const [viewer, outsider] = f.clients;

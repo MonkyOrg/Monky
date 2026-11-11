@@ -98,6 +98,19 @@ export const eventInterestedListResultSchema = z.object({
 }).strict();
 export const eventResultSchema = z.object({ event: serverEventPublicSchema }).strict();
 export const eventListSchema = z.object({ includeEnded: z.boolean().optional() }).strict();
+export const EVENT_HISTORY_PAGE_SIZE = 20;
+export const eventHistoryCursorSchema = z.object({ startsAt: timestamp, id }).strict();
+export const eventHistoryRequestSchema = z.union([
+  z.object({
+    after: eventHistoryCursorSchema.optional(),
+    limit: z.number().int().min(1).max(EVENT_HISTORY_PAGE_SIZE).default(EVENT_HISTORY_PAGE_SIZE),
+  }).strict(),
+  z.object({ ids: z.array(id).min(1).max(EVENT_HISTORY_PAGE_SIZE) }).strict(),
+]);
+export const eventHistoryResultSchema = z.object({
+  events: z.array(serverEventPublicSchema).max(EVENT_HISTORY_PAGE_SIZE),
+  nextCursor: eventHistoryCursorSchema.nullable(),
+}).strict();
 
 export const liveActionContentSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('selector'), selectorId: id }).strict(),
@@ -168,6 +181,9 @@ export type EventSave = z.input<typeof eventSaveSchema>;
 export type EventControl = z.infer<typeof eventControlSchema>;
 export type EventInterestedList = z.infer<typeof eventInterestedListSchema>;
 export type EventInterestedListResult = z.infer<typeof eventInterestedListResultSchema>;
+export type EventHistoryCursor = z.infer<typeof eventHistoryCursorSchema>;
+export type EventHistoryRequest = z.input<typeof eventHistoryRequestSchema>;
+export type EventHistoryResult = z.infer<typeof eventHistoryResultSchema>;
 export type LiveAction = z.infer<typeof liveActionSchema>;
 export type LiveActionRecord = z.infer<typeof liveActionRecordSchema>;
 export type LiveActionCreate = z.input<typeof liveActionCreateSchema>;

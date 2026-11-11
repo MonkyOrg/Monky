@@ -9,6 +9,7 @@ import {
   type CommunitySettingsUpdate, type EventInterestedList, type EventInterestedListResult, eventInterestedListSchema,
   type NativeLiveForm, type NativeLiveFormCreate, type NativeLiveFormRecord, type NativeLiveFormResults,
   type NativeLiveFormResultsRequest, type NativeLiveFormSubmit, type NativePoll, type ResourceAudience,
+  eventHistoryRequestSchema, type EventHistoryCursor, type EventHistoryRequest, type EventHistoryResult,
 } from '@monky/shared';
 import type { ICommunityRepository } from '../../domain/community';
 import type { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
@@ -112,12 +113,15 @@ export class CommunityService {
         : await this.permissions.checkPermission(userId, permission));
   }
 
-  async publicEvent(event: ServerEvent, userId: string, access = this.channels.accessScope()): Promise<ServerEventPublic> {
+  async publicEvent(
+    event: ServerEvent, userId: string, access = this.channels.accessScope(),
+    interest = this.repository.interest(event.id, userId),
+  ): Promise<ServerEventPublic> {
     const reveal = await this.revealsAudienceTo(access, userId, event.creatorUserId);
     return {
       ...event,
       audience: projectResourceAudience(event.audience, reveal),
-      ...this.repository.interest(event.id, userId),
+      ...interest,
     };
   }
 
@@ -144,6 +148,45 @@ export class CommunityService {
       id: member.id, nickname: member.nickname, avatarUrl: this.images.getPublicUrl(member.avatarPath),
     }));
     return { id, users, nextCursor: rows.length > limit ? users.at(-1)!.id : null };
+  }
+
+  async eventHistory(
+    userId: string, input: EventHistoryRequest, assertCurrent: () => void = () => {},
+  ): Promise<EventHistoryResult> {
+    const request = eventHistoryRequestSchema.parse(input);
+    if (!this.settings().eventsEnabled) throw new CommunityError('Events unavailable.', ProtocolErrorCode.PERMISSION_DENIED);
+    const access = this.channels.accessScope();
+    const visible: ServerEvent[] = [];
+    let nextCursor: EventHistoryCursor | null = null;
+    if ('ids' in request) {
+      for (const event of this.repository.eventsByIds([...new Set(request.ids)])) {
+        if (await this.canViewEvent(userId, event, access)) visible.push(event);
+      }
+    } else {
+      let after = request.after;
+      while (visible.length <= request.limit) {
+        const batch = this.repository.eventHistory(after, request.limit + 1);
+        for (const event of batch) {
+          if (await this.canViewEvent(userId, event, access)) visible.push(event);
+          if (visible.length > request.limit) break;
+        }
+        assertCurrent();
+        if (visible.length > request.limit) {
+          visible.pop();
+          const last = visible.at(-1)!;
+          nextCursor = { startsAt: last.startsAt, id: last.id };
+          break;
+        }
+        if (batch.length < request.limit + 1) break;
+        const last = batch.at(-1)!;
+        after = { startsAt: last.startsAt, id: last.id };
+      }
+    }
+    const interests = this.repository.eventInterests(visible.map(event => event.id), userId);
+    const events: ServerEventPublic[] = [];
+    for (const event of visible) events.push(await this.publicEvent(event, userId, access, interests.get(event.id)!));
+    assertCurrent();
+    return { events, nextCursor };
   }
 
   async snapshot(userId: string, includeEnded = false): Promise<CommunitySnapshot> {

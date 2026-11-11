@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Ao clicar no servidor próprio, o Monky confirma sua inicialização antes de entrar, informa falhas de início e confere a chave local sem desligar a proteção do login. O menu distingue remover a conexão de apagar o servidor e seus dados, preservando a lista se a exclusão falhar.",
+  "en": "Clicking your hosted server now confirms startup before joining, reports startup failures and checks the local key without disabling sign-in protection. The menu distinguishes removing a connection from deleting the server and its data, preserving the list if deletion fails."
+}

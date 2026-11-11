@@ -39,6 +39,13 @@ Quem administra pode criar canais públicos/privados, configurar cargos,
 moderar membros, controlar recursos e consultar métricas e logs protegidos.
 O limite de membros considera cadastros, não apenas pessoas online.
 
+Nas listas, detalhes e prévias de eventos, links HTTP/HTTPS na localização
+abrem no navegador; locais presenciais continuam como texto. Ao ativar
+**Mostrar eventos encerrados**, clientes e servidores atualizados carregam
+o histórico em páginas de 20 conforme você rola, com skeletons durante a
+busca e **Carregar mais** disponível pelo teclado. Servidores antigos mantêm
+a lista anterior, limitada a 200 eventos.
+
 Comece por [Criar pelo aplicativo](/criar-seu-servidor). Para operação contínua,
 use o [CLI](/cli) e o [guia de VPS](/hospedar-em-vps).
 

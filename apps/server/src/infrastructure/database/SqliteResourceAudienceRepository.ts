@@ -55,4 +55,29 @@ export class SqliteResourceAudienceRepository {
       .map(row => row.id);
     return { visibility: 'private', userIds, roleIds };
   }
+
+  loadMany(resourceType: CommunityResourceType, ids: readonly string[]): Map<string, ResourceAudience> {
+    const result = new Map<string, ResourceAudience>();
+    if (!ids.length) return result;
+    const placeholders = ids.map(() => '?').join(',');
+    const rows: Array<{ id: string }> = this.db.prepare(`SELECT resource_id AS id FROM community_resource_audiences
+      WHERE resource_type = ? AND resource_id IN (${placeholders})`).all(resourceType, ...ids);
+    const users: Array<{ resourceId: string; id: string }> = this.db.prepare(`SELECT resource_id AS resourceId, user_id AS id
+      FROM community_resource_audience_users WHERE resource_type = ? AND resource_id IN (${placeholders}) ORDER BY user_id`)
+      .all(resourceType, ...ids);
+    const roles: Array<{ resourceId: string; id: string }> = this.db.prepare(`SELECT resource_id AS resourceId, role_id AS id
+      FROM community_resource_audience_roles WHERE resource_type = ? AND resource_id IN (${placeholders}) ORDER BY role_id`)
+      .all(resourceType, ...ids);
+    for (const row of rows) result.set(row.id, { visibility: 'private', userIds: [], roleIds: [] });
+    for (const row of users) {
+      const audience = result.get(row.resourceId);
+      if (audience?.visibility === 'private') audience.userIds.push(row.id);
+    }
+    for (const row of roles) {
+      const audience = result.get(row.resourceId);
+      if (audience?.visibility === 'private') audience.roleIds.push(row.id);
+    }
+    for (const id of ids) if (!result.has(id)) result.set(id, PUBLIC_AUDIENCE);
+    return result;
+  }
 }

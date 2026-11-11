@@ -42,6 +42,7 @@ import {
 } from './stage/stageTiles';
 import { StageTelemetryMonitor } from './stage/StageTelemetryMonitor';
 import { FocusedScreenZoom } from './stage/FocusedScreenZoom';
+import { bindWatchControls, renderStopWatchingButton, renderWatchOverlay } from './stage/StageWatchControls';
 import { showErrorToast } from './CopyToast';
 import { reportError } from '../utils/feedback';
 import { platformSupports } from '../platform/capabilities';
@@ -734,6 +735,13 @@ export class VoiceStageView {
       && voiceStore.isWatchingScreen(sessionId, shareId);
   }
 
+  private isWatchingTile(tile: ParticipantStageTile): boolean {
+    if (tile.local || tile.kind === 'voice') return true;
+    return isViewingCallServer() && this.currentChannelId === voiceStore.currentVoiceChannelId
+      && (tile.kind === 'camera' ? voiceStore.isWatchingCamera(sidOf(tile.p))
+        : voiceStore.isWatchingScreen(sidOf(tile.p), tile.shareId!));
+  }
+
   private isTileSpeaking(tile: StageTile): boolean {
     // The speaking glow reflects the microphone; a pure screen tile shouldn't
     // pulse when the user talks (their camera/voice tile already does).
@@ -883,8 +891,7 @@ export class VoiceStageView {
   private showsTileMedia(card: HTMLElement, tile: StageTile, pipKey: string | null): boolean {
     if (tile.kind === 'voice' || tile.kind === 'miniapp' || tile.key === pipKey) return true;
     const video = card.querySelector<HTMLVideoElement>('video[data-video-tile-key]');
-    const stream = tile.kind === 'screen' && !tile.local
-      && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!) ? null : this.getTileStream(tile);
+    const stream = this.isWatchingTile(tile) ? this.getTileStream(tile) : null;
     // A remote camera moving to a new track (a new SFU consumer, a rebuilt peer link) keeps
     // its card: refreshParticipantMedia points the same element at the new stream.
     if (tile.kind === 'camera' && video && stream && !tile.local) return true;
@@ -1035,35 +1042,10 @@ export class VoiceStageView {
 
     const viewers = [...card.querySelectorAll<HTMLElement>('.stage-viewers')].map(root => new ScreenViewersView(root));
 
-    // #150: "Assistir transmissão" — opt into a gated remote screen share.
-    // Starts video + audio and auto-focuses the broadcaster.
-    card.querySelectorAll<HTMLButtonElement>('.stage-watch-btn').forEach((btn) => {
-      btn.addEventListener('click', (e: Event) => {
-        e.stopPropagation();
-        const sessionId = btn.getAttribute('data-watch-session');
-        const shareId = btn.getAttribute('data-watch-share');
-        if (!sessionId || !shareId) return;
-        if (!isViewingCallServer() || this.currentChannelId !== voiceStore.currentVoiceChannelId) return;
-        this.setFocusedTiles([stageTileKey.screen(sessionId, shareId)], { beforeRender: () => {
-          webRtcManager.setRemoteScreenWatching(sessionId, shareId, true);
-        } });
-      });
-    });
-
-    // Stop changes the transport subscription, not just playback or styling.
-    card.querySelectorAll<HTMLButtonElement>('.stage-stopwatch-btn').forEach((btn) => {
-      btn.addEventListener('click', (e: Event) => {
-        e.stopPropagation();
-        const sessionId = btn.getAttribute('data-stopwatch-session');
-        const shareId = btn.getAttribute('data-stopwatch-share');
-        if (!sessionId || !shareId) return;
-        const tileKey = stageTileKey.screen(sessionId, shareId);
-        if (!isViewingCallServer() || this.currentChannelId !== voiceStore.currentVoiceChannelId) return;
-        this.setFocusedTiles(this.focusedTileKeys.filter((key) => key !== tileKey), {
-          beforeRender: () => { webRtcManager.setRemoteScreenWatching(sessionId, shareId, false); },
-        });
-      });
-    });
+    const unbindWatching = bindWatchControls(card,
+      () => isViewingCallServer() && this.currentChannelId === voiceStore.currentVoiceChannelId,
+      (tileKey, watching, apply, afterRender) => this.setFocusedTiles(
+        watching ? [tileKey] : this.focusedTileKeys.filter(key => key !== tileKey), { beforeRender: apply, afterRender }));
 
     const menus: HTMLElement[] = [];
     card.querySelectorAll<HTMLButtonElement>('.stage-quality-button').forEach(button => {
@@ -1137,6 +1119,7 @@ export class VoiceStageView {
     return {
       sync: () => syncVolume(),
       dispose: () => {
+        unbindWatching();
         menus.forEach(cancelSurfaceMotion);
         viewers.forEach(view => view.destroy());
         // A discarded copy button must not keep copying, even if something still holds it.
@@ -1151,7 +1134,7 @@ export class VoiceStageView {
     // by share id so every tile shows independent video (#26, #253).
     tiles.forEach((tile) => {
       if (tile.kind === 'voice' || tile.kind === 'miniapp') return;
-      if (!tile.local && tile.kind === 'screen' && !this.isWatchingScreen(sidOf(tile.p), tile.shareId!)) return;
+      if (!this.isWatchingTile(tile)) return;
       const stream = this.getTileStream(tile);
       if (!stream) return;
       const suffix = tile.kind === 'screen' ? `screen-${tile.shareId}` : tile.kind;
@@ -1525,12 +1508,13 @@ export class VoiceStageView {
     const tileSuffix = isScreenTile ? `screen-${tile.shareId}` : tile.kind;
     const videoId = isMini ? `video-mini-${sidOf(p)}-${tileSuffix}` : `video-${sidOf(p)}-${tileSuffix}`;
     const isRemoteScreen = isScreenTile && !isLocal;
+    const isRemoteVideo = isVideoTile && !isLocal;
     const localNative = isScreenTile && isLocal && tile.shareId ? videoService.getNativeScreenCapture(tile.shareId) : null;
     const remoteNative = isRemoteScreen && tile.shareId
       ? p.voiceState?.nativeScreenShares?.find(source => source.shareId === tile.shareId) : undefined;
-    const isWatching = !!tile.shareId && this.isWatchingScreen(sidOf(p), tile.shareId);
-    // An unrequested source is only a placeholder; no remote payload is needed.
-    const isLocked = isRemoteScreen && !isWatching;
+    const isWatching = this.isWatchingTile(tile);
+    // An unwatched source is a placeholder, without playback or video controls.
+    const isLocked = isRemoteVideo && !isWatching;
     const inPictureInPicture = isRemoteScreen && isWatching && tile.key === this.pictureInPictureTileKey();
     const hasVideo = isVideoTile && !inPictureInPicture;
     // Distinguish the two tiles of a camera + screen sharer with a "· Tela"
@@ -1583,23 +1567,13 @@ export class VoiceStageView {
             data-telemetry-key="${escapeHtml(tile.key)}"
           >${escapeHtml(this.telemetry.text(tile.key))}</div>
         ` : ''}
-        ${isLocked ? html`
-          <div class="stage-watch-overlay${isMini ? ' stage-watch-overlay--mini' : ''}">
-            <button class="stage-watch-btn" data-watch-session="${sidOf(p)}" data-watch-share="${tile.shareId}"${isMini ? html` title="${t('stage.watchBroadcast')}" aria-label="${t('stage.watchBroadcast')}"` : ''}>
-              <span class="material-symbols-outlined">smart_display</span>
-              ${isMini ? '' : html`<span>${t('stage.watchBroadcast')}</span>`}
-            </button>
-            ${isMini ? '' : html`<div class="stage-watch-caption">${t('stage.watchCaption', { name: participantManager.displayName(p) })}</div>`}
-          </div>
-        ` : html`
+        ${isLocked ? renderWatchOverlay(sidOf(p), tile.shareId, participantManager.displayName(p), isMini) : html`
           <div class="stage-card-controls">
-            ${isRemoteScreen ? html`
+            ${isRemoteVideo ? html`
               ${remoteNative && !isMini ? trustedHtml(this.renderScreenQuality(remoteNative, sidOf(p))) : ''}
-              <span data-volume-slot hidden></span>
-              <button class="stage-stopwatch-btn" data-stopwatch-session="${sidOf(p)}" data-stopwatch-share="${tile.shareId}" title="${t('stage.stopWatching')}" aria-label="${t('stage.stopWatching')}">
-                <span class="material-symbols-outlined md-18">visibility_off</span>
-              </button>
-              ${this.isPictureInPictureAvailable() && hasVideo ? html`
+              ${isRemoteScreen ? html`<span data-volume-slot hidden></span>` : ''}
+              ${renderStopWatchingButton(sidOf(p), tile.shareId)}
+              ${isRemoteScreen && this.isPictureInPictureAvailable() && hasVideo ? html`
                 <button type="button" class="stage-pip-btn" data-pip-target="${videoId}" title="${t('stage.pictureInPicture')}" aria-label="${t('stage.pictureInPicture')}">
                   <span class="material-symbols-outlined md-18">picture_in_picture_alt</span>
                 </button>
@@ -1650,7 +1624,8 @@ export class VoiceStageView {
   /** The video tiles the telemetry measures; miniapps have none. */
   private getTelemetryTiles(): ParticipantStageTile[] {
     if (!this.currentChannelId) return [];
-    return measuredTiles(buildStageTiles(participantManager.getInVoiceChannel(this.currentChannelId), this.ownMedia()),
+    return measuredTiles(buildStageTiles(participantManager.getInVoiceChannel(this.currentChannelId), this.ownMedia())
+      .filter(tile => tile.kind === 'miniapp' || this.isWatchingTile(tile)),
       (sessionId, shareId) => this.isWatchingScreen(sessionId, shareId));
   }
 
@@ -1936,6 +1911,7 @@ export class VoiceStageView {
     const u20 = appEvents.on('server.updated', () => this.renderParticipants());
     const u21 = appEvents.on('server.roles_updated', () => this.renderParticipants());
     const u22 = appEvents.on('voice.screen_watch_changed', () => this.renderParticipants());
+    const u29 = appEvents.on('voice.camera_watch_changed', () => this.renderParticipants());
     const u23 = appEvents.on('native_screen.updated', () => this.refreshNativeScreenState());
     const u24 = appEvents.on('local.screen_started', (start: { shareId: string; stream: MediaStream }) => this.queueScreenStartFocus(start));
     const u25 = appEvents.on('local.screen_stopped', (shareId: string) => this.pendingScreenFocus.delete(shareId));
@@ -1944,7 +1920,7 @@ export class VoiceStageView {
       (release?: ScreenPictureInPictureRelease) => this.syncPictureInPictureTile(release));
     const u27 = appEvents.on('voice.screen_watch_handoff',
       (handoff: { sessionId: string; fromShareId: string; shareId: string }) => this.refocusScreenHandoff(handoff));
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27, u28);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27, u28, u29);
     const inactive = () => {
       if (this.windowInactive) return;
       this.windowInactive = true;

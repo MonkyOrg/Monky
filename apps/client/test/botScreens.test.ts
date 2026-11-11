@@ -12,7 +12,7 @@ import { installMiniappStorage, miniappStorageResult, readMiniappStorageRequest 
 import { voiceStore } from '../src/renderer/stores/voiceStore';
 import { commandVoiceError, commandVoiceContextKey, getBotVoiceContext } from '../src/renderer/utils/botVoice';
 
-const snapshot = (id = 'game', revision = 0): BotScreen => ({
+const snapshot = (id = 'game', revision = 0): Extract<BotScreen, { kind?: undefined }> => ({
   id, instanceId: `${id}-instance`, creatorUserId: 'alice', botId: 'bot', channelId: 'voice', title: 'Game', html: '<script>play()</script>',
   state: { count: revision }, revision, createdAt: 0,
 });
@@ -34,6 +34,15 @@ test('miniapp consent requires the current policy and exact bot/screen instance 
     assert.throws(() => new BotScreenFrame(snapshot(), { id: 'alice', nickname: 'Alice', locale: 'en' },
       { ...consent, [field]: 'another-instance' }, () => {}, () => {}), /consent does not match/);
   }
+});
+
+test('native browser invitations cannot be rendered as HTML miniapp documents', () => {
+  const browser: BotScreen = { ...snapshot(), kind: 'browser', html: '', state: null, hostSessionId: 'alice-device', broadcastSource: null };
+  assert.throws(() => botScreenDocument(browser, { id: 'alice', nickname: 'Alice', locale: 'en' }), /native browser/);
+  assert.throws(() => new BotScreenFrame(browser, { id: 'alice', nickname: 'Alice', locale: 'en' }, {
+    policyVersion: BOT_SCREEN_PERMISSION_POLICY_VERSION, serverKey: 'server', botId: 'bot',
+    screenId: browser.id, instanceId: browser.instanceId,
+  }, () => {}, () => {}), /native browser/);
 });
 
 test('storage consent is optional and can only address the bot that owns the miniapp', () => {
@@ -500,6 +509,61 @@ function seed(session: ServerSession): void {
   session.participants.addUser(user);
   session.participants.updateVoiceState(voiceState(user.sessionId));
 }
+
+test('miniapp availability cues belong to the call and do not replay snapshots, views or stale instances', async (testContext) => {
+  sessionManager.install();
+  const visible = sessionManager.create('cue-visible', 7800, 'alice');
+  const call = sessionManager.create('cue-call', 7801, 'alice');
+  seed(visible); seed(call);
+  testContext.mock.method(visible.client, 'getStatus', () => 'CONNECTED');
+  testContext.mock.method(call.client, 'getStatus', () => 'CONNECTED');
+  testContext.mock.method(call.client, 'sendRequest', async () => ({ channelId: 'voice', screens: [snapshot('existing')] }));
+  sessionManager.activate(visible.key);
+  voiceStore.setChannel('voice', call.key);
+  const cues: string[] = [];
+  const off = bindBotScreenEvents(appEvents, cue => cues.push(cue));
+  const receive = (session: ServerSession, screen: BotScreen): void =>
+    routeSessionEvent(session.key, `message.${MessageType.BOT_SCREEN_SNAPSHOT}`, () =>
+      appEvents.emit(`message.${MessageType.BOT_SCREEN_SNAPSHOT}`, screen));
+  const remove = (session: ServerSession, removed: BotScreenRemoved): void =>
+    routeSessionEvent(session.key, `message.${MessageType.BOT_SCREEN_REMOVED}`, () =>
+      appEvents.emit(`message.${MessageType.BOT_SCREEN_REMOVED}`, removed));
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.ok(call.botScreenStore.get('existing'));
+    assert.deepEqual(cues, [], 'recovering the room list is not a new publication');
+    receive(visible, snapshot('foreign'));
+    receive(call, { ...snapshot('other-room'), channelId: 'other' });
+    receive(call, snapshot('existing', 1));
+    receive(call, snapshot('existing', 0));
+    assert.deepEqual(cues, [], 'another server/channel and ordinary state updates never announce availability');
+    receive(call, snapshot());
+    receive(call, snapshot());
+    receive(call, snapshot('game', 1));
+    assert.deepEqual(cues, ['screen_share_start'], 'one start per accepted new instance, even while browsing another server');
+    receive(call, { ...snapshot(), instanceId: 'replacement', createdAt: 1 });
+    receive(call, snapshot('game', 99));
+    remove(call, removal());
+    assert.deepEqual(cues, ['screen_share_start', 'screen_share_start'], 'old snapshots/removals cannot announce or close the replacement');
+    remove(visible, removal('game', 'voice', 'replacement'));
+    remove(call, removal('game', 'other', 'replacement'));
+    assert.equal(cues.length, 2);
+    remove(call, removal('game', 'voice', 'replacement'));
+    remove(call, removal('game', 'voice', 'replacement'));
+    assert.deepEqual(cues, ['screen_share_start', 'screen_share_start', 'screen_share_stop']);
+    remove(call, { ...removal('existing'), reason: 'view_revoked' });
+    assert.equal(cues.length, 3, 'a local view revocation is not the end of the shared miniapp');
+    receive(call, snapshot('disconnect'));
+    routeSessionEvent(call.key, 'network.status', () => appEvents.emit('network.status', 'DISCONNECTED'));
+    assert.equal(cues.length, 4, 'disconnect teardown does not add a second end cue');
+    voiceStore.setChannel(null);
+    receive(call, snapshot('late'));
+    remove(call, removal('late'));
+    assert.equal(cues.length, 4, 'late events after leaving the call are silent');
+  } finally {
+    off(); voiceStore.reset(); await sessionManager.removeAll();
+  }
+});
 
 test('background voice snapshots notify global UI only after restoring the visible server', async (testContext) => {
   sessionManager.install();

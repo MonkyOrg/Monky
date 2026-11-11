@@ -462,7 +462,7 @@ class App {
     // ── Bot infrastructure (#569) ────────────────────────────────────────
     bindBotChatEvents();
     // Bot screens are documents served by the desktop app (#858).
-    if (platformSupports('botScreens')) bindBotScreenEvents();
+    if (platformSupports('botScreens')) bindBotScreenEvents(appEvents, key => soundEffects.play(key));
     bindBotVoiceCommandEvents();
 
     appEvents.on('modal.open_screenshare_picker', () => {

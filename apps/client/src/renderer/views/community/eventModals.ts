@@ -1,19 +1,21 @@
 import {
-  MessageType, ProtocolErrorCode, communitySnapshotSchema, createServerInviteLink, eventInterestedListResultSchema,
+  MessageType, ProtocolErrorCode, createServerInviteLink, eventInterestedListResultSchema,
   eventResultSchema, type EventControl, type EventInterestedListResult, type ServerEventPublic,
 } from '@monky/shared';
 import type { CommunityFeed } from '../../core/CommunityFeed';
+import { EventHistory } from '../../core/EventHistory';
 import { ProtocolRequestError } from '../../core/NetworkClient';
 import { connectionStore } from '../../stores/connectionStore';
 import { getLanguage, t } from '../../i18n';
 import { copyText, reportError } from '../../utils/feedback';
-import { html } from '../../utils/html';
+import { html, trustedHtml } from '../../utils/html';
 import { renderKeyedList } from '../../utils/keyedList';
+import { renderLoadingSkeleton } from '../../utils/loadingSkeleton';
 import type { CommunityModal } from '../CommunityModal';
 import { contextMenu } from '../ContextMenu';
 import { showConfirm } from '../Dialog';
 import { imageCarouselNavigationButton, moveImageCarousel } from '../ImageCarousel';
-import { renderServerEventCard } from '../ServerEventCard';
+import { bindServerEventLocationLinks, renderServerEventCard, renderServerEventLocation } from '../ServerEventCard';
 import { openServerEventWizard } from '../ServerEventWizard';
 import { canCreateEvent, canManageEvent } from './communityAccess';
 import { assetUrl, followFeed, keepPlace, type CommunityContext } from './communityContext';
@@ -21,8 +23,6 @@ import { locationIcon } from './communityMarkup';
 
 /** Shortest wait between two checks of an event the snapshot does not carry. */
 const EVENT_CHECK_INTERVAL_MS = 1000;
-/** Shortest wait between two fetches of the event history while snapshots keep arriving. */
-const HISTORY_REFRESH_INTERVAL_MS = 1000;
 
 /** How the server answers for an event that was deleted or is no longer visible to this member. */
 function isEventRefused(error: unknown): boolean {
@@ -106,6 +106,7 @@ function eventCard(feed: CommunityFeed, event: ServerEventPublic, openable: bool
 }
 
 function bindEventActions(ctx: CommunityContext, modal: CommunityModal, events: () => ServerEventPublic[]): void {
+  bindServerEventLocationLinks(modal.content, modal.signal);
   modal.content.addEventListener('click', (click) => {
     const carouselButton = imageCarouselNavigationButton(click.target);
     if (carouselButton && moveImageCarousel(carouselButton)) return;
@@ -219,16 +220,29 @@ export function openEvents(ctx: CommunityContext): void {
     modal.card.querySelector('.modal-header .modal-title')?.after(create);
   }
   let history = false;
-  let previous: ServerEventPublic[] = [];
   let shown: string | null = null;
-  const events = () => history ? previous : feed.snapshot?.events ?? [];
+  let sentinel: Element | null = null;
+  const observer = new IntersectionObserver(entries => {
+    if (entries.some(entry => entry.isIntersecting) && !past.failed) void past.loadMore();
+  }, { root: modal.card, rootMargin: '0px 0px 120px' });
+  const past = new EventHistory(feed, modal.signal, () => render(), id => ctx.forgetEvent(id));
+  const events = () => {
+    const current = feed.snapshot?.events ?? [];
+    const ids = new Set(current.map(event => event.id));
+    return [...current, ...history ? past.entries.filter(event => !ids.has(event.id)) : []];
+  };
   const render = () => {
     const list = events();
     const count = list.length;
     const heading = String(html`<span class="material-symbols-outlined md-24" aria-hidden="true">event</span>${t(count === 1 ? 'community.oneEvent' : 'community.eventCount', { count })}`);
     const items = [
-      ...count ? list.map((event) => ({ key: `event:${event.id}`, html: eventCard(feed, event, true) })) : [{ key: 'empty', html: `<div class="community-empty">
+      ...count ? list.map((event) => ({ key: `event:${event.id}`, html: eventCard(feed, event, true) })) : past.loading ? [] : [{ key: 'empty', html: `<div class="community-empty">
         <span class="material-symbols-outlined">event</span><h2>${t('community.emptyEvents')}</h2><p>${t('community.emptyHint')}</p></div>` }],
+      ...history && (past.loading || past.more || past.failed) ? [{ key: 'history-page', html: String(html`
+        <div class="event-history-page" data-event-history-page aria-busy="${past.loading}">
+          ${past.loading ? trustedHtml(renderLoadingSkeleton('cards', 3)) : ''}
+          ${!past.loading ? html`<button class="btn btn-secondary" type="button" data-event-history-more>${t(past.failed ? 'community.retry' : 'community.loadMore')}</button>` : ''}
+        </div>`) }] : [],
       // Its state lives in the switch, so the row never has to be rebuilt.
       { key: 'history', html: String(html`<div class="community-history">
         <span>${t('community.history')}</span>
@@ -245,86 +259,39 @@ export function openEvents(ctx: CommunityContext): void {
     keepPlace(modal, () => renderKeyedList(modal.content, items));
     const toggle = modal.content.querySelector<HTMLInputElement>('[data-history]');
     if (toggle) toggle.checked = history;
-  };
-  // In the server's order: what is on or coming first (the pushed snapshot), then the ended and
-  // cancelled from `ended`, which the server only sends when asked.
-  const mergeHistory = (ended: readonly ServerEventPublic[]) => {
-    const current = new Map((feed.snapshot?.events ?? []).map((event) => [event.id, event]));
-    return [...current.values(), ...ended.filter((event) => !current.has(event.id) && ['ended', 'cancelled'].includes(event.status))];
-  };
-  // Pushed snapshots never carry ended events, so one deleted or no longer visible is only
-  // learned by asking again: each snapshot asks, at most once per interval and one at a time.
-  let historyRequest: string | null = null;
-  let historyStale = false;
-  let historyTimer: ReturnType<typeof setTimeout> | undefined;
-  let historyFetchedAt = -Infinity;
-  let seenEvents = feed.snapshot?.events;
-  const stopHistory = () => {
-    clearTimeout(historyTimer);
-    historyTimer = undefined;
-    historyStale = false;
-    if (historyRequest) feed.client.cancelRequest(historyRequest);
-    historyRequest = null;
-  };
-  const fetchHistory = async (): Promise<void> => {
-    stopHistory();
-    const requestId = crypto.randomUUID();
-    historyRequest = requestId;
-    historyFetchedAt = performance.now();
-    // An answer for a fetch the history was closed or a newer fetch replaced changes nothing.
-    const outdated = () => historyRequest !== requestId || !history || modal.signal.aborted;
-    try {
-      const response: unknown = await feed.client.sendRequest(MessageType.COMMUNITY_GET, { includeEnded: true }, requestId);
-      if (outdated()) return;
-      const fetched = communitySnapshotSchema.parse(response).events;
-      const listed = new Set([...fetched, ...feed.snapshot?.events ?? []].map((event) => event.id));
-      // Deleted or no longer visible: whatever else shows it, such as its open dialog, lets it
-      // go first, so focus returns to its card before the card leaves the list.
-      for (const gone of previous.filter((event) => !listed.has(event.id))) ctx.forgetEvent(gone.id);
-      previous = mergeHistory(fetched);
-      render();
-    } catch (error) {
-      if (!outdated()) throw error;
-    } finally {
-      if (historyRequest === requestId) {
-        historyRequest = null;
-        if (historyStale) scheduleHistory();
-      }
+    const next = modal.content.querySelector('[data-event-history-page]');
+    if (next !== sentinel) {
+      if (sentinel) observer.unobserve(sentinel);
+      sentinel = next;
+      if (next) observer.observe(next);
     }
   };
-  const scheduleHistory = () => {
-    historyStale = true;
-    if (historyRequest || historyTimer !== undefined) return;
-    historyTimer = setTimeout(() => {
-      historyTimer = undefined;
-      // A failed check keeps the copy shown; the next snapshot asks again.
-      fetchHistory().catch((error: unknown) => console.warn('[Community] Event history refresh failed.', error));
-    }, Math.max(0, historyFetchedAt + HISTORY_REFRESH_INTERVAL_MS - performance.now()));
-  };
+  let seenEvents = feed.snapshot?.events;
   modal.content.addEventListener('change', (event) => {
     if (event.target instanceof HTMLInputElement && event.target.hasAttribute('data-history')) {
       history = event.target.checked;
-      if (history) void modal.run(fetchHistory);
-      else { stopHistory(); render(); }
+      if (history) past.start();
+      else { past.stop(); render(); }
     }
+  }, { signal: modal.signal });
+  modal.content.addEventListener('click', click => {
+    if (click.target instanceof Element && click.target.closest('[data-event-history-more]')) void past.loadMore();
   }, { signal: modal.signal });
   bindEventActions(ctx, modal, events);
   // An event the server refused since the last fetch leaves the history at once.
   const unwatch = ctx.watchEvents((id) => {
-    if (!previous.some((event) => event.id === id)) return;
-    previous = previous.filter((event) => event.id !== id);
+    if (!past.entries.some((event) => event.id === id)) return;
+    past.forget(id);
     render();
   });
-  modal.signal.addEventListener('abort', () => { unwatch(); stopHistory(); }, { once: true });
+  modal.signal.addEventListener('abort', () => { unwatch(); observer.disconnect(); }, { once: true });
   followFeed(feed, modal, () => {
     if (!feed.snapshot?.settings.eventsEnabled) { modal.close(true); return; }
     // A vote replaces the snapshot but keeps its events: only a snapshot from the server asks.
     const pushed = feed.snapshot.events !== seenEvents;
+    const left = seenEvents?.some(event => !feed.snapshot?.events.some(current => current.id === event.id)) ?? false;
     seenEvents = feed.snapshot.events;
-    if (history) {
-      previous = mergeHistory(previous);
-      if (pushed) scheduleHistory();
-    }
+    if (history && pushed) past.scheduleRefresh(left);
     render();
   });
   render();
@@ -363,7 +330,7 @@ export function openEvent(ctx: CommunityContext, initial: ServerEventPublic, fre
       </section>`;
     const facts = html`<div class="community-event-details-meta">
       <p><span class="material-symbols-outlined md-18">dns</span>${feed.server.serverDetails?.name ?? ''}</p>
-      <p><span class="material-symbols-outlined md-18">${locationIcon(event.location.kind)}</span>${locationName(feed, event)}</p>
+      <p><span class="material-symbols-outlined md-18">${locationIcon(event.location.kind)}</span>${renderServerEventLocation(event.location.kind, locationName(feed, event))}</p>
       <p><span class="material-symbols-outlined md-18">group</span>${t('community.interestedCount', { count: event.interestedCount })}</p>
       ${creator ? html`<p><span class="material-symbols-outlined md-18">person</span>${t('community.createdBy', { name: creator })}</p>` : ''}</div>`;
     modal.content.innerHTML = renderServerEventCard(event, locationName(feed, event), eventImages(feed, event), {

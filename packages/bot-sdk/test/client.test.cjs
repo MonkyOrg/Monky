@@ -198,8 +198,12 @@ test('a bot can explicitly remove its previous avatar through the SDK', { timeou
   assert.deepEqual(errors, []);
 });
 
-async function makeVoiceContextFixture(t) {
-  const server = await makeServer(t);
+async function makeVoiceContextFixture(t, features) {
+  const server = await makeServer(t, features ? { authenticate(ws) {
+    ws.send(JSON.stringify({ type: MessageType.AUTH_SUCCESS, payload: {
+      server: { protocol: { version: PROTOCOL_VERSION, minimumVersion: MIN_BOT_PROTOCOL, features } },
+    } }));
+  } } : {});
   const { bot, errors } = makeBot(t, server);
   let release, started;
   const waiting = new Promise((resolve) => { release = resolve; });
@@ -363,6 +367,50 @@ test('miniapp context creation targets the live voice room, never the command te
   f.release();
   await f.server.next(MessageType.COMMAND_FINISH);
   assert.deepEqual(f.errors, []);
+});
+
+test('browser API publishes no personal data, negotiates support and cleans an aborted ACK', async (t) => {
+  for (const mode of ['normal completion', 'aborted during ACK', 'cleanup failure']) await t.test(mode, async subtest => {
+    const cancel = mode !== 'normal completion', cleanupFailure = mode === 'cleanup failure';
+    const f = await makeVoiceContextFixture(subtest, ['miniapp-browser', 'miniapp-browser-broadcast']);
+    const pending = f.ctx.createBrowserScreen({ title: 'Personal browser' });
+    const lookup = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+    f.server.send(MessageType.BOT_VOICE_CONTEXT_RESULT, { invocationId: f.ctx.invocationId, voiceChannelId: 'current-voice' }, lookup.requestId);
+    const request = await f.server.next(MessageType.BOT_SCREEN_CREATE);
+    assert.deepEqual(request.payload, { title: 'Personal browser', channelId: 'current-voice',
+      invocationId: f.ctx.invocationId, kind: 'browser', html: '', state: null });
+    const screen = { ...request.payload, id: 'browser', instanceId: 'exact-instance', botId: 'bot-one', revision: 0, createdAt: 1,
+      hostSessionId: 'authenticated-caller-session', broadcastSource: null };
+    delete screen.invocationId;
+    const result = cancel ? assert.rejects(pending, cleanupFailure ? /rollback failed/ : /already ended/) : pending;
+    if (cancel) f.server.send(MessageType.COMMAND_FINISHED, {
+      invocationId: f.ctx.invocationId, channelId: f.ctx.channelId, reason: 'cancelled',
+    });
+    f.server.send(MessageType.BOT_SCREEN_SNAPSHOT, screen, request.requestId);
+    if (cancel) {
+      const close = await f.server.next(MessageType.BOT_SCREEN_CLOSE);
+      assert.deepEqual(close.payload, { id: 'browser', instanceId: 'exact-instance' });
+      if (cleanupFailure) f.server.send(MessageType.SERVER_ERROR, {
+        code: ProtocolErrorCode.BOT_INTERACTION_INVALID, message: 'rollback failed',
+      }, close.requestId);
+      else f.server.send(MessageType.BOT_SCREEN_REMOVED, { ...close.payload, channelId: 'current-voice', reason: 'closed' }, close.requestId);
+      await result;
+    } else {
+      assert.equal((await result).kind, 'browser');
+      f.release();
+      await f.server.next(MessageType.COMMAND_FINISH);
+      assert.equal(f.server.frames.some(frame => frame.type === MessageType.BOT_SCREEN_CLOSE), false);
+    }
+    if (cleanupFailure) {
+      assert.equal(f.errors.length, 1);
+      assert.match(f.errors[0].message, /rollback failed/);
+    } else assert.deepEqual(f.errors, []);
+  });
+  const f = await makeVoiceContextFixture(t);
+  await assert.rejects(f.bot.createBrowserScreen('voice-context-server', { channelId: 'voice', title: 'Browser' }),
+    error => error.code === ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  assert.equal(f.server.frames.some(frame => frame.type === MessageType.BOT_SCREEN_CREATE), false);
+  f.release();
 });
 
 test('miniapp context cannot create outside voice or after cancellation during the membership lookup', async (t) => {
@@ -1620,8 +1668,8 @@ test('new SDK reconnects using the known legacy bot contract without an update w
   bot.command({ name: 'ping', description: 'Ping', handler() {} });
   bot.connect();
   await server.next(MessageType.COMMAND_REGISTER);
-  assert.deepEqual(offered.map(offer => offer.protocolVersion), [40, 24]);
-  assert.equal(PROTOCOL_VERSION, 40);
+  assert.deepEqual(offered.map(offer => offer.protocolVersion), [PROTOCOL_VERSION, 24]);
+  assert.equal(PROTOCOL_VERSION, 41);
   assert.equal(offered[0].protocolOffer.minimumVersion, 24);
   assert.equal(offered[0].publicKey, offered[1].publicKey);
   assert.equal(offered[0].botToken, offered[1].botToken);
@@ -2427,7 +2475,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 40);
+  assert.equal(PROTOCOL_VERSION, 41);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

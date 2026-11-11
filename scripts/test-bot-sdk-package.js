@@ -37,7 +37,7 @@ try {
       const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities: ['commands'], autoReconnect: false });
       for (const method of [
         'joinVoice', 'leaveVoice', 'getVoiceConnection', 'getPermissions',
-        'createScreen', 'updateScreen', 'closeScreen', 'listScreens',
+        'createScreen', 'createBrowserScreen', 'updateScreen', 'closeScreen', 'listScreens',
       ]) {
         assert.equal(typeof bot[method], 'function', method + ' must be available in the packaged SDK.');
       }

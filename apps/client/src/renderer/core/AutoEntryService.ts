@@ -25,6 +25,9 @@ import { checkServerOnline } from '../utils/serverStatus';
  * that may pass.
  */
 const DEFINITIVE_REFUSALS: ReadonlySet<ProtocolErrorCode> = new Set([
+  ProtocolErrorCode.IDENTITY_BANNED,
+  ProtocolErrorCode.GUEST_OWNER_REQUIRED,
+  ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
   ProtocolErrorCode.AUTH_INVALID_PASSWORD,
   ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
   ProtocolErrorCode.UNAUTHORIZED,

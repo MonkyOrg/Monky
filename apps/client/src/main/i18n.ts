@@ -13,6 +13,7 @@ export type MainLanguage = 'pt-BR' | 'en';
 
 const CATALOGS = {
   'pt-BR': {
+    'identity.guestHosting': 'Para hospedar um servidor, saia do modo convidado e crie ou importe uma identidade permanente.',
     'calendar.save': 'Exportar evento para calendário',
     'calendar.filter': 'Calendário iCalendar',
     'calendar.failed': 'Não foi possível salvar o evento no calendário.',
@@ -218,6 +219,7 @@ const CATALOGS = {
     'taskbar.micAfk': 'Mutado no canal AFK',
   },
   en: {
+    'identity.guestHosting': 'To host a server, leave guest mode and create or import a permanent identity.',
     'calendar.save': 'Export event to calendar',
     'calendar.filter': 'iCalendar calendar',
     'calendar.failed': 'Could not save the event to a calendar.',

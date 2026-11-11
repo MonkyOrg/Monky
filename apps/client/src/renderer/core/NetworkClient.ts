@@ -27,10 +27,19 @@ import { emitOutsideRouting, routeSessionEvent } from './sessionRouting';
 import { clientLog } from './ClientLogService';
 import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
+import { identityBanMessage } from '../utils/identityBan';
 import { settingsStore } from '../stores/settingsStore';
 import { connectionStore } from '../stores/connectionStore';
+import { localHostedServerKey } from './hostedServerStart';
 import { isIpLiteralHost, isLoopbackHost, normalizeHost, toWsUrl } from '../utils/serverAddress';
 import { insecureServerError, needsSecureConnection, SecureServerRequiredError } from '../utils/secureServer';
+
+function clientProtocolOffer(): ReturnType<typeof createProtocolOffer> {
+  const offer = createProtocolOffer('client');
+  if (typeof window !== 'undefined' && window.api?.capabilities?.miniappBrowser === false)
+    offer.features = offer.features.filter(feature => feature !== 'miniapp-browser-host');
+  return offer;
+}
 
 /**
  * WebKit 26 (Safari and every iOS browser) leaves a WebSocket to an IP address
@@ -108,6 +117,7 @@ interface MessageWriter {
 }
 
 interface ClientIdentity {
+  guest?: boolean;
   publicKey: string;
   clientId: string;
 }
@@ -279,6 +289,7 @@ export class NetworkClient {
     if (!this.lastConnectPayload) return;
     this.lastConnectPayload.clientId = identity.clientId;
     this.lastConnectPayload.publicKey = identity.publicKey;
+    this.lastConnectPayload.guest = identity.guest || undefined;
   }
 
   public getConnectionId(): string { return this.connectionId; }
@@ -364,6 +375,7 @@ export class NetworkClient {
     isReconnect = false
   ): Promise<AuthSuccessPayload> {
     clientLog.info('NETWORK', `Connecting to ${host}:${port}${isReconnect ? ' (reconnect)' : ''}`);
+    const guest = identity.guest ?? (identity.publicKey === connectionStore.publicKey && connectionStore.guest);
     const connectionId = this.connectionId = uuidv4();
     this.cancelPendingConnect(new DOMException('Connection was replaced', 'AbortError'));
     this.clearReconnect();
@@ -384,6 +396,7 @@ export class NetworkClient {
     if (!this.sessionKey) this.sessionKey = this.currentServerUrl;
     this.lastConnectPayload = {
       protocolVersion: PROTOCOL_VERSION,
+      guest: guest || undefined,
       publicKey: identity.publicKey,
       clientId: identity.clientId,
       nickname,
@@ -468,7 +481,8 @@ export class NetworkClient {
           MessageType.AUTH_CONNECT,
           {
             protocolVersion: PROTOCOL_VERSION,
-            protocolOffer: createProtocolOffer('client'),
+            protocolOffer: clientProtocolOffer(),
+            guest: guest || undefined,
             publicKey: identity.publicKey,
             nickname,
             password: password || '',
@@ -660,6 +674,16 @@ export class NetworkClient {
       return;
     }
 
+    if (type === MessageType.IDENTITY_BANNED) {
+      this.emitScoped('network.server_shutdown', { reason: identityBanMessage(payload) });
+      this.disconnect('server');
+      return;
+    }
+    if (type === MessageType.IDENTITY_SESSION_DISCONNECTED && !requestId) {
+      this.emitScoped('network.server_shutdown', { reason: t('identity.sessionDisconnected') });
+      this.disconnect('server');
+      return;
+    }
     if (type === MessageType.SERVER_SHUTDOWN) {
       const parsed = serverShutdownSchema.safeParse(payload);
       if (!parsed.success) {
@@ -698,7 +722,11 @@ export class NetworkClient {
         const authFailed = payload as AuthFailedPayload;
         clientLog.error('NETWORK', 'Authentication failed', { message: authFailed.message });
         // The code tells whether trying again could ever help; servers that send none refuse the identity.
-        this.pendingAuth.reject(new ProtocolRequestError(authFailed.message || t('network.genericConnectError'),
+        const failure = authFailed.code === ProtocolErrorCode.IDENTITY_BANNED ? identityBanMessage(authFailed.ban)
+          : authFailed.code === ProtocolErrorCode.GUEST_OWNER_REQUIRED ? t('identity.guestOwnerRequired')
+            : authFailed.message || t('network.genericConnectError');
+        if (authFailed.code === ProtocolErrorCode.IDENTITY_BANNED) this.emitScoped('network.server_shutdown', { reason: failure });
+        this.pendingAuth.reject(new ProtocolRequestError(failure,
           authFailed.code ?? ProtocolErrorCode.UNAUTHORIZED));
         return;
       }
@@ -711,7 +739,7 @@ export class NetworkClient {
           this.pendingAuth.retriedProtocol = true;
           this.send(MessageType.AUTH_CONNECT, {
             ...this.lastConnectPayload, protocolVersion: fallback,
-            protocolOffer: createProtocolOffer('client'), deviceId: getDeviceId(),
+            protocolOffer: clientProtocolOffer(), deviceId: getDeviceId(),
             appearOffline: settingsStore.appearOffline || undefined,
             brb: (!settingsStore.appearOffline && settingsStore.brb) || undefined,
             customStatus: (!settingsStore.appearOffline && !settingsStore.brb && settingsStore.customStatusActive
@@ -761,8 +789,16 @@ export class NetworkClient {
     try {
       const challenge = authChallengeSchema.safeParse(payload);
       if (!challenge.success) throw new Error(t('network.genericConnectError'));
-      // Which key, if any, this signature may name is the app's call, from its pins (#821).
-      const decision = decideServerKey(challenge.data, connectionStore.serverKeyExpectation(address),
+      if (this.lastConnectPayload?.guest && !challenge.data.protocol?.features.includes('guest-membership')) {
+        auth.reject(new ProtocolRequestError(t('chat.featureUpdateRequired'), ProtocolErrorCode.FEATURE_REQUIRES_UPDATE));
+        return;
+      }
+      // The app's own runtime proves a local key independently of a stale saved pin.
+      const pendingLocalKey = localHostedServerKey(address);
+      const localKey = pendingLocalKey ? await pendingLocalKey : undefined;
+      if (!isCurrent()) return;
+      const expectation = localKey ? { pinned: localKey } : connectionStore.serverKeyExpectation(address);
+      const decision = decideServerKey(challenge.data, expectation,
         key => connectionStore.isServerKeyPinnedElsewhere(key, address));
       if (decision.kind === 'refuse') {
         clientLog.warn('NETWORK', 'Refused the server key presented at sign-in', { reason: decision.reason });
@@ -832,18 +868,23 @@ export class NetworkClient {
     try {
       console.log(`[NetworkClient] Trying to reconnect (attempt ${this.reconnectAttempt})...`);
       clientLog.info('NETWORK', `Reconnection attempt ${this.reconnectAttempt}`);
-      const { clientId, publicKey, nickname, password } = this.lastConnectPayload;
+      const { clientId, publicKey, nickname, password, guest } = this.lastConnectPayload;
       const urlObj = new URL(this.currentServerUrl);
       const host = urlObj.hostname;
       const port = parseInt(urlObj.port, 10);
 
-      const connected = this.connect(host, port, { clientId, publicKey }, nickname, password, true);
+      const connected = this.connect(host, port, { clientId, publicKey, guest }, nickname, password, true);
       connectionId = this.connectionId;
       await connected;
     } catch (error) {
       // A leave, an online event or a manual connection can supersede this
       // attempt while its handshake is pending. Only its owner may retry.
       if (this.manualDisconnect || this.connectionId !== connectionId) return;
+      if (error instanceof ProtocolRequestError && (error.code === ProtocolErrorCode.IDENTITY_BANNED
+        || error.code === ProtocolErrorCode.GUEST_OWNER_REQUIRED || error.code === ProtocolErrorCode.FEATURE_REQUIRES_UPDATE)) {
+        this.disconnect('server');
+        return;
+      }
       clientLog.warn('NETWORK', `Reconnection attempt ${this.reconnectAttempt} failed`, {
         error: error instanceof Error ? error.message : String(error),
       });

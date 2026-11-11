@@ -88,6 +88,20 @@ test('a refused permission or channel stops the message there', async () => {
   }
 });
 
+test('a session revoked while permission checking awaits never reaches the mutation handler', async () => {
+  const options = { revoked: false, permission: true };
+  const f = fixture(options);
+  let handled = false;
+  f.router.register(route({
+    types: [MessageType.IDENTITY_UNBAN], permission: Permission.MANAGE_SERVER,
+    handle: () => { handled = true; },
+  }));
+  const dispatch = f.router.dispatch(session({}), { type: MessageType.IDENTITY_UNBAN, payload: { publicKey: 'key' } });
+  options.revoked = true;
+  await dispatch;
+  assert.equal(handled, false);
+});
+
 test('connections are checked before any route: let go, signing in twice, anonymous and unauthenticated', async () => {
   const revoked = fixture({ revoked: true });
   let handled = 0;

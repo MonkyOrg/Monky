@@ -23,6 +23,21 @@ export interface NativeScreenCallContext {
   readonly announceSources: () => void;
 }
 
+export function createNativeScreenCallConfig(context: NativeScreenCallContext): NativeScreenCallConfig {
+  return {
+    callId: crypto.randomUUID(), sessionId: context.sessionId, channelId: context.channelId, mode: context.mode,
+    iceServers: nativeScreenIceServersSchema.parse(context.client.getIceServers().flatMap(server => {
+      const urls = typeof server.urls === 'string' ? [server.urls] : server.urls;
+      if (!urls.length) throw new Error('An ICE server must contain at least one URL.');
+      return Array.from({ length: Math.ceil(urls.length / 4) }, (_, index) => ({
+        urls: urls.slice(index * 4, index * 4 + 4),
+        ...(server.username === undefined ? {} : { username: server.username }),
+        ...(server.credential === undefined ? {} : { credential: server.credential }),
+      }));
+    })),
+  };
+}
+
 /** The voice call's screens in Main: what this client publishes, what it watches and the work still running for them. */
 export interface Call {
   readonly config: NativeScreenCallConfig;
@@ -167,18 +182,7 @@ export class NativeScreenCalls {
 
   private join(context: NativeScreenCallContext): Call {
     const api = nativeScreenApi();
-    const config: NativeScreenCallConfig = {
-      callId: crypto.randomUUID(), sessionId: context.sessionId, channelId: context.channelId, mode: context.mode,
-      iceServers: nativeScreenIceServersSchema.parse(context.client.getIceServers().flatMap(server => {
-        const urls = typeof server.urls === 'string' ? [server.urls] : server.urls;
-        if (!urls.length) throw new Error('An ICE server must contain at least one URL.');
-        return Array.from({ length: Math.ceil(urls.length / 4) }, (_, index) => ({
-          urls: urls.slice(index * 4, index * 4 + 4),
-          ...(server.username === undefined ? {} : { username: server.username }),
-          ...(server.credential === undefined ? {} : { credential: server.credential }),
-        }));
-      })),
-    };
+    const config = createNativeScreenCallConfig(context);
     const call: Call = {
       config, context, api, connectionId: context.client.getConnectionId(), sources: new Map(), presentations: new Map(),
       sourceTasks: new Map(), watchTasks: new Map(), unbind: [], controls: new Set(), joining: Promise.resolve(),

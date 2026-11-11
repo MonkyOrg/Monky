@@ -10,6 +10,7 @@ import {
   type NativeLiveFormResponse,
   type ResourceAudience,
   type ServerEvent,
+  type EventHistoryCursor,
 } from '@monky/shared';
 import type { IDatabaseDriver } from './SqliteWrapper';
 import { SqliteResourceAudienceRepository } from './SqliteResourceAudienceRepository';
@@ -74,6 +75,37 @@ export class SqliteCommunityRepository {
         .run(event.id, snapshotOf(event), event.status, event.startsAt, event.endsAt);
       this.audiences.replace('event', event.id, event.audience);
     })();
+  }
+
+  private readEvents(rows: SnapshotRow[]): ServerEvent[] {
+    const events = rows.map(row => serverEventSchema.parse(JSON.parse(row.snapshot)));
+    const audiences = this.audiences.loadMany('event', events.map(event => event.id));
+    return events.map(event => ({ ...event, audience: audiences.get(event.id)! }));
+  }
+
+  eventHistory(after: EventHistoryCursor | undefined, limit: number): ServerEvent[] {
+    const rows: SnapshotRow[] = this.db.prepare(`SELECT snapshot FROM server_events
+      WHERE status IN ('ended', 'cancelled')
+        ${after ? 'AND (starts_at < ? OR (starts_at = ? AND id > ?))' : ''}
+      ORDER BY starts_at DESC, id ASC LIMIT ?`)
+      .all(...(after ? [after.startsAt, after.startsAt, after.id] : []), limit);
+    return this.readEvents(rows);
+  }
+
+  eventsByIds(ids: readonly string[]): ServerEvent[] {
+    if (!ids.length) return [];
+    return this.readEvents(this.db.prepare(`SELECT snapshot FROM server_events
+      WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY starts_at DESC, id ASC`).all(...ids));
+  }
+
+  eventInterests(ids: readonly string[], userId: string): Map<string, { interested: boolean; interestedCount: number }> {
+    const interests = new Map(ids.map(id => [id, { interested: false, interestedCount: 0 }]));
+    if (!ids.length) return interests;
+    const rows: Array<{ id: string; count: number; mine: number }> = this.db.prepare(`SELECT event_id AS id,
+      COUNT(*) AS count, MAX(user_id = ?) AS mine FROM server_event_interest
+      WHERE event_id IN (${ids.map(() => '?').join(',')}) GROUP BY event_id`).all(userId, ...ids);
+    for (const row of rows) interests.set(row.id, { interested: row.mine === 1, interestedCount: row.count });
+    return interests;
   }
 
   deleteEvent(id: string): void {

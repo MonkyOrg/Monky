@@ -93,6 +93,7 @@ import type {
   BotScreen,
   BotScreenRef,
   BotScreenCreate,
+  BotBrowserCreate,
   BotScreenPatch,
   BotManifest,
   BotProfileUpdatePayload,
@@ -165,10 +166,21 @@ export class BotClient extends EventEmitter {
     createSelector: (serverId, input) => this.createSelector(serverId, input),
     createLiveAction: (serverId, input) => this.createLiveAction(serverId, input),
     createScreen: (serverId, input) => this.createScreen(serverId, input),
+    closeScreen: (serverId, ref) => this.closeScreen(serverId, ref),
   });
 
   createScreen(serverId: string, input: BotScreenCreate): Promise<BotScreen> {
+    const connection = this.connections.get(serverId);
+    if (input.kind === 'browser' && connection && !connection.protocolFeatures?.includes('miniapp-browser-broadcast')) {
+      return Promise.reject(new BotRequestError('Update the Monky server to use browser miniapps.',
+        ProtocolErrorCode.FEATURE_REQUIRES_UPDATE));
+    }
     return this.screens.createScreen(serverId, input);
+  }
+
+  /** A temporary browser hosted by the invoking session; only its pixels are shared with the room. */
+  createBrowserScreen(serverId: string, input: BotBrowserCreate): Promise<BotScreen> {
+    return this.createScreen(serverId, { ...input, kind: 'browser', html: '', state: null });
   }
 
   updateScreen(serverId: string, ref: BotScreenRef, patch: BotScreenPatch): Promise<BotScreen> {
@@ -1124,7 +1136,7 @@ export type {
 } from './tooling/requirements';
 export type {
   BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic, BotSelectorRespondedPayload,
-  BotScreen, BotScreenRef, BotScreenCreate, BotScreenPatch, BotScreenActionEvent, BotScreenJson, BotScreenRemoved,
+  BotScreen, BotScreenRef, BotScreenCreate, BotScreenCommandCreate, BotBrowserCreate, BotScreenPatch, BotScreenActionEvent, BotScreenJson, BotScreenRemoved,
   BotScreenBridge, BotScreenViewer, BotScreenBeforeCloseEvent, BotScreenBeforeCloseReason, BotScreenCloseEvent, BotScreenCloseReason,
 } from '@monky/shared';
 export type {

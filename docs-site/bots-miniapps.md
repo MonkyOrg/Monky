@@ -21,7 +21,122 @@ e `miniapps`; ele não precisa de `publish_voice`.
 
 Uma tela é um miniapp HTML/CSS/JavaScript apresentado **no palco de voz**. Quem está na sala recebe um convite no mesmo canto dos avisos de compartilhamento de tela e escolhe se quer visualizar. Não há card de miniapp no chat nem abertura automática. Diferentemente dos formulários privados de `ctx.prompt()`, ele aceita vários participantes e continua ativo depois que o handler do comando termina. O `/jogo-da-velha` do MonkyBot demonstra dois jogadores e espectadores; as regras continuam no bot, não no JavaScript de quem está vendo a tela.
 
+### Navegador do host transmitido para a sala
+
+`ctx.createBrowserScreen({ title })` cria um navegador na sala de voz atual.
+Declare `voiceRequirement: 'joined'`, `commands` e `miniapps`, como nas telas
+HTML. O bot não entra no áudio nem captura a tela. A sessão autenticada que
+executou o comando é o único host; outra sessão da mesma identidade não pode
+assumir o navegador.
+
+```ts
+bot.command({
+  name: 'browser',
+  description: 'Abre um navegador e transmite o site para a sala',
+  voiceRequirement: 'joined',
+  handler: async (ctx) => {
+    await ctx.createBrowserScreen({
+      title: ctx.locale === 'en' ? 'Shared browser' : 'Navegador da sala',
+    });
+  },
+});
+```
+
+O retorno é um `BotScreen` com `kind: 'browser'`, `html: ''`, `state: null`,
+`hostSessionId` e `broadcastSource: null`. Esse ACK confirma **somente a
+criação**, não que a transmissão já esteja no ar. O cliente desktop do host
+abre o miniapp automaticamente, captura apenas o documento do site e publica
+pelo transporte de tela P2P/SFU existente. A barra confiável mostra o estado;
+a navegação só é habilitada após um frame real e o ACK de publicação.
+Quando publicado, `broadcastSource` descreve o vídeo H.264, sem áudio.
+A API avulsa é `bot.createBrowserScreen(serverId, { channelId, title, id?,
+invocationId? })`; o canal deve ser de voz e essa modalidade exige uma
+invocação válida para vincular o host. Use o snapshot ou `{ id,
+instanceId }` em `closeScreen()` para encerrar o miniapp. Não há parâmetro
+de URL, HTML, estado ou armazenamento. Updates e ações de estado são recusados
+para essa modalidade.
+
+O host digita o endereço na barra do navegador embutido no próprio miniapp,
+dentro da janela do Monky desktop. Os demais participantes da sala assistem
+ao mesmo vídeo, sem controles de navegação. Espectadores web compatíveis
+também podem assistir; o desktop é obrigatório somente para ser host.
+Não é aberta uma janela separada. Os sites são documentos isolados de nível superior, não iframes ou
+proxies que removem cabeçalhos de segurança. Voltar, avançar, recarregar e parar
+funcionam localmente; `Ctrl+L`/`Cmd+L` seleciona a barra de endereço. Somente URLs
+HTTP(S) são aceitas. Na barra, endereços como `google.com` recebem `https://`
+automaticamente; links e redirecionamentos continuam exigindo uma URL HTTP(S)
+válida. A visualização acompanha o tamanho, a rolagem e a tela cheia do miniapp
+e cede espaço aos menus e diálogos do Monky, sem cobri-los.
+
+Antes de abrir um site, o navegador mostra uma página inicial opaca no tema,
+fonte e idioma do Monky, com orientação para usar a barra de endereço e aviso
+de compartilhamento. Ela pertence ao próprio documento isolado e aparece
+também no vídeo recebido pela sala, não apenas no desktop do host. Navegar
+substitui essa página sem sobrepor o site; uma nova instância começa novamente
+na página inicial.
+
+**Os pixels são intencionalmente compartilhados com a sala.** Tudo que o host
+abrir ou digitar pode aparecer no vídeo. URLs, histórico, cookies e credenciais
+não são sincronizados como dados nem enviados à API do bot. Isso não torna
+secreto o conteúdo visível do site. Cada instância usa uma sessão temporária
+própria, sem compartilhar logins com o Monky ou outros navegadores.
+Fechar a visualização do host, deixar a sala, desconectar ou perder acesso
+encerra captura e transmissão imediatamente e descarta cookies, armazenamento
+e autenticação HTTP. Fechar a visualização de um espectador encerra somente
+sua recepção. Minimizar a janela, ocultar o palco ou abrir um menu/modal não
+encerra a transmissão nem apaga os logins: o vídeo continua sendo apenas o
+site, nunca o desktop, outras janelas ou a interface que o cobriu.
+
+A captura possui uma raiz nativa própria, nunca exibida. A mesma superfície
+do site passa entre essa raiz e o palco: ocultar a janela inteira na bandeja
+também preserva a transmissão, sem recapturar, duplicar o site ou trocar a
+sessão. Os controles continuam pertencendo à janela original do Monky.
+O primeiro quadro é verificado em uma cópia descartável da trilha, sem
+depender de uma prévia visível nem substituir a trilha publicada. Se a captura
+não produzir um quadro, o app informa a falha e encerra o navegador, sem abrir
+uma alternativa pessoal ou capturar o desktop.
+
+O consentimento não autoriza câmera, microfone, localização, captura de tela,
+clipboard ou outras permissões dos sites. Popups e downloads são negados com
+aviso localizado. Os sites não recebem `window.monkyScreen`, o preload do
+Monky, Node, Electron ou a API do aplicativo. Os hooks e `device_storage` das
+telas HTML não se aplicam ao navegador; não há prazo de salvamento ao revogar.
+
+A feature de publicação/recepção é `miniapp-browser-broadcast`; hosts desktop
+também anunciam `miniapp-browser-host`. O protocolo é 41, com pisos 35/24
+inalterados. Sem a feature de transmissão no servidor, a criação rejeita com `BotRequestError` e
+`ProtocolErrorCode.FEATURE_REQUIRES_UPDATE`; trate isso como indisponibilidade,
+nunca como sucesso. Clientes antigos sem a feature não recebem o snapshot
+novo, mas continuam conectados e usando suas telas HTML e transmissões
+existentes. Uma invocação por host web rejeita com
+`ProtocolErrorCode.MINIAPP_BROWSER_DESKTOP_REQUIRED`, localizado pelo cliente.
+Falha de captura ou publicação fecha o navegador com feedback explícito:
+não há browser pessoal, iframe limitado ou navegador externo como alternativa.
+Uma recusa `PERMISSION_DENIED` é explicada como falta de permissão no canal,
+não como falha de captura. O consentimento local não substitui a autorização
+do servidor nem permite que outra sessão assuma o navegador.
+
+Se a invocação for cancelada enquanto `ctx.createBrowserScreen()` aguarda a
+confirmação de criação, o SDK fecha exatamente a instância confirmada antes de
+rejeitar. Uma falha desse cleanup também rejeita, não produz um resultado de
+sucesso. A conclusão normal do handler preserva o convite; a API avulsa exige
+que o chamador gerencie o snapshot retornado.
+
+### Convites e visualizações HTML
+
 O cartão permanece no palco junto de câmeras e compartilhamentos, mesmo com a visualização fechada. **Abrir miniapp** inicia a visualização local e coloca o miniapp em foco no palco, assim como abrir pelo convite, para qualquer participante. **Sair do miniapp** a encerra e devolve o cartão ao estado fechado, sem encerrar o miniapp para os demais. Antes disso, o miniapp pode perguntar algo, como se a pessoa quer salvar a partida (veja [Ciclo de vida da visualização](#ciclo-de-vida-da-visualizacao)). Focar ou voltar à grade só altera o layout: não recarrega a tela nem muda quem ocupa as vagas de jogador. Navegar pelo Monky também não fecha a visualização: enquanto a pessoa continua na chamada, o miniapp fica aberto em segundo plano (veja [Segundo plano](#segundo-plano)). Abrir uma tela para assistir não equivale a entrar na partida.
+
+Disponibilizar e encerrar uma instância na chamada toca os mesmos sons de
+início/fim do compartilhamento de tela, usando os sons personalizados do
+cliente. Entrar na sala e recuperar a lista não repete esses avisos. Abrir,
+sair, focar ou mover somente a visualização local não toca esse som.
+
+Na lista do canal e na lista de membros, o ícone **apps** ao lado de quem chamou
+o comando abre o palco com aquele miniapp em foco, mantendo a confirmação de
+acesso antes de executar o documento. Cada miniapp tem seu próprio atalho.
+Quando não há invocação criadora, o ícone fica no bot se ele estiver na chamada.
+Os atalhos aparecem somente para a chamada e o servidor correspondentes,
+tanto no desktop quanto na versão web.
 
 **Encerrar miniapp** é outra ação: remove a instância, o cartão e os convites
 para todos e fecha as visualizações abertas. Só aparece para quem invocou o

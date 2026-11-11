@@ -734,6 +734,8 @@
   .native-live-form-results-navigation { justify-content: center; }
 }
 .community-history { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-muted); font-size: 12px; margin-top: 12px; }
+.event-history-page { padding-block: 12px; }
+.event-history-page > .btn { display: block; margin-inline: auto; }
 .community-empty { text-align: center; padding: 56px 16px; }
 .community-empty > .material-symbols-outlined { font-size: 42px; padding: 16px; border-radius: 50%; background: var(--bg-card); }
 .community-empty h2 { font-size: 22px; margin-top: 24px; }

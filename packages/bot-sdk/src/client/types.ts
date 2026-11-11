@@ -10,6 +10,8 @@ import type {
   BotPublishedMessageContent,
   BotScreen,
   BotScreenCreate,
+  BotBrowserCreate,
+  BotScreenCommandCreate,
   BotSelector,
   BotSelectorCreate,
   BotSelectorRespondedPayload,
@@ -142,7 +144,9 @@ export interface CommandContext {
   createSelector: (input: Omit<BotSelectorCreate, 'channelId' | 'invokerId' | 'invocationId'>) => Promise<BotSelector>;
   createLiveAction: (input: Omit<LiveActionCreate, 'channelId' | 'invocationId'>) => Promise<LiveAction>;
   /** Open a shared miniapp in the caller's current voice room, independent of this command's lifetime. */
-  createScreen: (input: Omit<BotScreenCreate, 'channelId' | 'invocationId'>) => Promise<BotScreen>;
+  createScreen: (input: BotScreenCommandCreate) => Promise<BotScreen>;
+  /** Publishes a browser invitation in the caller's voice room, never a shared URL or login. */
+  createBrowserScreen: (input: Omit<BotBrowserCreate, 'channelId' | 'invocationId'>) => Promise<BotScreen>;
 }
 
 export interface BotChoice {

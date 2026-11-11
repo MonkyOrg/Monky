@@ -21,7 +21,120 @@ This example extends the [tutorial](/en/bots-desenvolvimento) and requires
 
 A screen is an HTML/CSS/JavaScript miniapp displayed **on the voice stage**. People in the room receive an invitation in the same corner as screen-sharing notices and choose whether to view it. There is no miniapp chat card or automatic opening. Unlike private `ctx.prompt()` forms, it accepts multiple participants and remains active after its command handler finishes. MonkyBot's `/jogo-da-velha` demonstrates two players and spectators; its rules remain in the bot, not in a viewer's JavaScript.
 
+### Host browser broadcast to the room
+
+`ctx.createBrowserScreen({ title })` creates a browser in the caller's current
+voice room. Declare `voiceRequirement: 'joined'`, `commands` and `miniapps`,
+as with HTML screens. The bot neither joins audio nor captures a screen.
+The exact authenticated invoking session is the only host; another session
+of the same identity cannot take over the browser.
+
+```ts
+bot.command({
+  name: 'browser',
+  description: 'Opens a browser and broadcasts its site to the room',
+  voiceRequirement: 'joined',
+  handler: async (ctx) => {
+    await ctx.createBrowserScreen({
+      title: ctx.locale === 'en' ? 'Shared browser' : 'Navegador da sala',
+    });
+  },
+});
+```
+
+The result is a `BotScreen` with `kind: 'browser'`, `html: ''`, `state: null`,
+`hostSessionId` and `broadcastSource: null`. This ACK confirms **creation
+only**, not that transmission is on air. The host's desktop client opens the
+miniapp automatically, captures only the site's document and publishes through
+the existing P2P/SFU screen transport. Trusted chrome shows the status;
+navigation is enabled only after a real frame and the publication ACK.
+Once published, `broadcastSource` describes H.264 video, without audio.
+The standalone API is `bot.createBrowserScreen(serverId, { channelId, title,
+id?, invocationId? })`; the channel must be a voice room and this modality
+requires a valid invocation to bind its host. Pass the snapshot or
+`{ id, instanceId }` to `closeScreen()` to end the miniapp. There is no URL,
+HTML, state or storage parameter. State updates and actions are refused for
+this modality.
+
+The host types an address in the browser embedded in the miniapp, inside
+Monky's desktop window. Other participants in that room watch the same video,
+without navigation controls. Compatible web viewers can also watch;
+desktop is required only to host. No separate window opens.
+Sites are isolated top-level documents, not iframes or proxies stripping
+security headers. Back, forward, reload and stop work locally;
+`Ctrl+L`/`Cmd+L` selects the address bar. Addresses such as `google.com` receive
+`https://` automatically; links and redirects still require valid HTTP(S) URLs.
+The native view follows the miniapp's size, scrolling and fullscreen layout
+and yields to Monky menus and dialogs rather than covering them.
+
+Before opening a site, the browser shows an opaque home page using Monky's
+theme, font and language, with address-bar guidance and a sharing notice.
+It belongs to the isolated document itself and also appears in the room's
+received video, not just on the host's desktop. Navigation replaces it
+without covering the site; a new instance starts at home again.
+
+**Pixels are intentionally shared with the room.** Anything the host opens or
+types may appear in the video. URLs, history, cookies and credentials are not
+synchronized as data or sent to the bot API. That does not make visible site
+content secret. Each instance gets its own temporary session, shared with
+neither Monky nor other browsers.
+Closing the host's view, leaving the room, disconnecting or losing access
+immediately stops capture and transmission and discards cookies, storage and
+HTTP authentication. Closing a viewer's view stops only their reception.
+Minimizing the window, hiding the stage or opening a menu/dialog does not stop
+the broadcast or erase logins: the video remains exclusively the site, never
+the desktop, other windows or the interface covering it.
+
+Capture has its own native root, which is never shown. The same site surface
+moves between that root and the stage: hiding the entire window in the tray
+also preserves the broadcast, without recapturing, duplicating the site or
+changing its session. Controls still belong to the original Monky window.
+The first frame is verified using a disposable track clone, without relying
+on a visible preview or replacing the published track. If capture cannot
+produce a frame, the app reports the failure and closes the browser, without
+opening a personal alternative or capturing the desktop.
+
+Consent does not grant sites camera, microphone, location, screen capture,
+clipboard or other permissions. Popups and downloads are denied with localized
+feedback. Sites receive neither `window.monkyScreen`, Monky's preload, Node,
+Electron nor the application API. HTML screen hooks and `device_storage` do
+not apply to the browser; revocation has no saving grace period.
+
+Publication/reception negotiates `miniapp-browser-broadcast`; desktop hosts
+also advertise `miniapp-browser-host`. Protocol is 41, with unchanged floors
+35/24. Without the broadcast feature on the server, creation rejects with `BotRequestError` and
+`ProtocolErrorCode.FEATURE_REQUIRES_UPDATE`; handle this as unavailable, never
+as success. Clients without the broadcast feature do not receive the new
+snapshot, but remain connected and can keep using HTML miniapps and existing
+transmissions. A web host invocation rejects with localized
+`ProtocolErrorCode.MINIAPP_BROWSER_DESKTOP_REQUIRED`. Capture/publication
+failure closes the browser with explicit feedback: there is no personal-browser,
+limited-iframe or external-browser substitute.
+A `PERMISSION_DENIED` refusal is explained as missing channel permission,
+not as a capture failure. Local consent does not replace server authorization
+or allow another session to take over the browser.
+
+If an invocation is cancelled while `ctx.createBrowserScreen()` awaits its
+creation acknowledgement, the SDK closes that exact acknowledged instance
+before rejecting. Cleanup failure also rejects rather than returning success.
+Normal handler completion preserves the invitation; standalone callers must
+manage the returned snapshot themselves.
+
+### HTML invitations and views
+
 The tile stays on the stage alongside cameras and screen shares, even when its view is closed. **Open miniapp** starts local viewing and focuses the miniapp on the stage, just like opening its invitation, for any participant. **Leave miniapp** ends it and returns the tile to its closed state without closing the miniapp for anyone else. Before that, the miniapp may ask something, such as whether to save the game (see [View lifecycle](#ciclo-de-vida-da-visualizacao)). Focusing or returning to the grid only changes the layout: it does not reload the screen or change player seats. Browsing Monky does not close the view either: while the person stays in the call, the miniapp stays open in the background (see [In the background](#segundo-plano)). Opening a screen to watch is not the same as joining its game.
+
+Making an instance available and ending it in the call play the same
+start/stop sounds as screen sharing, using the client's custom sounds.
+Joining the room and recovering its list do not replay these cues. Opening,
+leaving, focusing or moving only the local view does not play this sound.
+
+In the channel and member lists, the **apps** icon beside the person who invoked
+the command opens the stage focused on that miniapp, keeping the permission
+review before executing its document. Each miniapp has its own shortcut.
+Without a creating invocation, the icon belongs to the bot if it is in the
+call. Shortcuts appear only for the corresponding call and server, on both
+desktop and web.
 
 **End miniapp** is a separate action: it removes the instance, tile, and
 invitations for everyone and closes all open views. It is available only to the

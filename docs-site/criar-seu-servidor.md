@@ -21,8 +21,21 @@ Clique em **Criar e Iniciar Servidor**. O servidor sobe na sua máquina, escuta 
 
 Servidores criados ficam salvos (até 10) e aparecem no trilho como qualquer
 outro servidor. Clique com o botão direito no ícone para **Iniciar** ou
-**Parar**, abrir o **Monitor** (enquanto estiver rodando) ou **Excluir** os
-dados locais.
+**Parar**, abrir o **Monitor** (enquanto estiver rodando) ou **Excluir servidor e
+dados locais**. Excluir é permanente: após confirmação, o Monky para o servidor
+e apaga mensagens, canais, membros e arquivos deste computador. Cancelar a
+parada ou uma falha na exclusão preserva a entrada na lista.
+
+**Remover conexão da lista** aparece para conexões que não são servidores
+criados neste Monky: retira apenas o endereço salvo, sem apagar o servidor.
+Servidores criados continuam no trilho para poderem ser iniciados novamente;
+para apenas deixá-los offline, use **Parar**.
+
+Ao clicar no servidor próprio, o Monky consulta sua instância hospedada, não
+apenas a resposta de rede naquele endereço. Se estiver parado, pede confirmação
+para iniciar. O login só começa depois de a inicialização ser confirmada; se
+falhar, o app informa o erro de início sem tentar entrar em outro processo
+que esteja respondendo na mesma porta.
 
 Você pode manter vários servidores seus rodando ao mesmo tempo, cada um na sua
 porta. O formulário já sugere uma porta livre e não aceita a porta de outro

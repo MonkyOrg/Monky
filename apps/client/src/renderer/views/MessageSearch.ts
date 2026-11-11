@@ -189,6 +189,17 @@ export class MessageSearch {
     this.renderLaunchState();
   }
 
+  public mount(header: HTMLElement, host: HTMLElement): void {
+    this.close(false);
+    header.append(this.bar);
+    for (const surface of [this.panel, this.suggestions]) {
+      cancelSurfaceMotion(surface);
+      surface.hidden = true;
+      surface.replaceChildren();
+      host.append(surface);
+    }
+  }
+
   public open(channelId?: string): void {
     if (!this.options.isCurrent() || !this.options.canRead()) return;
     this.options.setExpanded(true);

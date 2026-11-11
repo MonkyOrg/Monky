@@ -205,6 +205,79 @@ async function* regression(language) {
   const suggestions = () => document.querySelector('.message-search-panel.is-suggestions');
   const form = () => document.querySelector('.message-search-modal');
   check(watches === 1, 'watches installed');
+  {
+    const { MainView } = await import('/views/MainView.ts');
+    const center = document.querySelector('main'), header = document.querySelector('#header');
+    const layout = document.createElement('div');
+    layout.className = 'main-layout';
+    layout.style.cssText = 'height:700px;width:1100px;max-width:100%';
+    const voice = document.createElement('aside');
+    voice.id = 'voice-channel-chat-panel';
+    voice.className = 'voice-channel-chat-panel';
+    voice.innerHTML = `<button class="voice-chat-close">×</button><div class="server-tools voice-chat-search"></div>
+      <div class="voice-chat-content"><div class="chat-container"><header class="content-header">
+      <div class="channel-title-container"><span class="channel-title">Voice channel with a long title</span></div>
+      </header></div></div>`;
+    const centerStyle = center.style.cssText;
+    center.before(layout);
+    layout.append(center, voice);
+    center.style.height = '700px';
+    header.id = 'server-tools';
+    header.hidden = true;
+    const input = center.querySelector('.message-search-launch');
+    const shell = { container: layout, voiceChatChannelId: 'voice', messageSearch: view };
+    channelId = 'voice';
+    MainView.prototype.placeMessageSearch?.call(shell);
+    check(voice.querySelector('.message-search-launch') === input
+      && input.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }),
+    'Voice chat owns a visible search bar instead of the hidden center toolbar');
+    const inputBox = input.getBoundingClientRect(), closeBox = voice.querySelector('.voice-chat-close').getBoundingClientRect();
+    check(inputBox.width >= 72 && inputBox.right < closeBox.left
+      && document.elementFromPoint(inputBox.left + inputBox.width / 2, inputBox.top + inputBox.height / 2) === input,
+    'Voice search has usable width and is hit-testable without overlapping its close button');
+    keyboard('f');
+    await flush();
+    await Promise.all(document.getAnimations().filter(animation =>
+      animation.effect?.getTiming().iterations !== Infinity).map(animation => animation.finished.catch(() => {})));
+    const voiceBox = voice.getBoundingClientRect(), suggestionsBox = suggestions().getBoundingClientRect();
+    check(voice.contains(suggestions()) && !suggestions().hidden && document.activeElement === input
+      && suggestionsBox.top >= voiceBox.top + 48 && suggestionsBox.right <= voiceBox.right + 1
+      && suggestionsBox.bottom <= voiceBox.bottom + 1,
+    'Ctrl+F opens voice suggestions inside the side panel instead of over the stage');
+    const option = suggestions().querySelector('button'), optionBox = option.getBoundingClientRect();
+    check(option.contains(document.elementFromPoint(optionBox.left + optionBox.width / 2, optionBox.top + optionBox.height / 2)),
+      'Voice search dropdown options are hit-testable');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    check(document.activeElement === option, 'Voice search supports ArrowDown into suggestions');
+    keyboard('Escape');
+    check(document.activeElement === input && input.getAttribute('aria-expanded') === 'false',
+      'Escape dismisses voice suggestions and returns focus to their input');
+    keyboard('f');
+    input.value = 'needle';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await flush();
+    await Promise.all(document.getAnimations().filter(animation =>
+      animation.effect?.getTiming().iterations !== Infinity).map(animation => animation.finished.catch(() => {})));
+    check(calls.length === 1 && calls[0].payload.channelIds?.join() === 'voice'
+      && voice.contains(panel()) && !panel().hidden && panel().getBoundingClientRect().right <= voiceBox.right + 1,
+    'Voice search requests the voice channel and keeps its results inside that panel: ' + JSON.stringify({
+      calls: calls.map(call => call.payload), contains: voice.contains(panel()), hidden: panel().hidden,
+      results: panel().getBoundingClientRect().toJSON(), voice: voiceBox.toJSON(),
+    }));
+    shell.voiceChatChannelId = null;
+    MainView.prototype.placeMessageSearch?.call(shell);
+    header.hidden = false;
+    check(header.contains(input) && panel().parentElement === center && suggestions().parentElement === center
+      && layout.querySelectorAll('.message-search-launch').length === 1 && watches === 1 && !expanded,
+    'Closing voice chat returns the same search and dropdowns without duplicate listeners or stale expansion');
+    voice.remove();
+    layout.replaceWith(center);
+    center.style.cssText = centerStyle;
+    header.id = 'header';
+    channelId = 'one';
+    calls = [];
+  }
   const jumpRow = document.createElement('div');
   jumpRow.className = 'chat-message-row';
   document.body.append(jumpRow);

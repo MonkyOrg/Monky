@@ -2,6 +2,21 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { BotScreenClient } = require('../dist/BotScreenClient.js');
 
+test('creation acknowledgments cannot substitute HTML and browser modalities', async () => {
+  const html = { id: 'screen', instanceId: 'instance', channelId: 'voice', botId: 'bot', title: 'Screen',
+    html: '<p>HTML</p>', state: null, revision: 0, createdAt: 1 };
+  const browser = { ...html, kind: 'browser', html: '', hostSessionId: 'host-session', broadcastSource: null };
+  for (const [request, response] of [[html, browser], [browser, html]]) {
+    const client = new BotScreenClient({
+      request: async () => response, report() {}, removed() {}, error(_server, error) { throw error; },
+    });
+    const { id, channelId, title, html: document, state } = request;
+    await assert.rejects(client.createScreen('server', {
+      id, channelId, title, html: document, state, ...(request.kind ? { kind: request.kind } : {}),
+    }), /another modality/);
+  }
+});
+
 test('screen composition binds each request/event to its captured authenticated server', async () => {
   const requests = [];
   const events = [];

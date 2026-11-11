@@ -37,6 +37,7 @@ const FEATURE_NAMES = {
   screenAutoPip: 'desktopOnly.feature.screenAutoPip',
   mediaLibrary: 'desktopOnly.feature.mediaLibrary',
   directMessages: 'desktopOnly.feature.directMessages',
+  miniappBrowser: 'desktopOnly.feature.miniappBrowser',
 } as const satisfies Readonly<Record<string, TranslationKey>>;
 
 export type DesktopFeature = keyof typeof FEATURE_NAMES;

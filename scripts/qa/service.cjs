@@ -33,7 +33,7 @@ async function startServer() {
   const port = await freePort();
   const server = await MonkyServer.create({
     port, dataDir: process.cwd(), password: config.password, serverName: `Monky QA ${config.scenario}`,
-    maxUsers: config.scenario === 'connected' && !config.smoke ? 150 : undefined,
+    maxUsers: config.scenario === 'connected' ? 150 : undefined,
     voiceMode: 'p2p', initialTextChannel: 'qa-chat', initialVoiceChannel: 'QA Voice',
   });
   try {

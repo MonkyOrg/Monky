@@ -18,6 +18,7 @@ import type { SignalingService } from '../../application/services/SignalingServi
 import type { IServerRepository } from '../../domain/repositories';
 import type { BotRecord } from '../../domain/entities';
 import { Logger } from '../logger/Logger';
+import { activeIdentityBan, identityBanNotice } from '../../domain/identityAccess';
 import type { RateLimiter } from '../security/RateLimiter';
 import { CoturnManager } from '../turn/CoturnManager';
 import type { ChannelVisibility } from './access/ChannelVisibility';
@@ -183,6 +184,7 @@ export class AuthHandler {
       requestId,
       payload: {
         nonce: result.nonce,
+        ...(payload.guest ? { protocol: session.protocol } : {}),
         ...(result.serverKey && result.serverSignature
           ? { serverKey: result.serverKey, serverSignature: result.serverSignature } : {}),
       } satisfies AuthChallengePayload,
@@ -207,12 +209,22 @@ export class AuthHandler {
     // only delays the logins that arrive while it runs.
     const turnAvailability = await CoturnManager.availability();
     if (!this.host.isLive(session)) return;
+    await this.host.auth.withIdentityAdmission(session.ws, () => this.admitMember(session, signature, requestId, turnAvailability));
+  }
+
+  private async admitMember(session: ClientSession, signature: string, requestId: string | undefined,
+    turnAvailability: Awaited<ReturnType<typeof CoturnManager.availability>>): Promise<void> {
+    if (!this.host.isLive(session)) return;
     // Nothing from here to AUTH_SUCCESS may wait on a process or the network.
     // A role or channel change landing anyway makes the snapshot stale for this
     // connection alone (see resyncLoginAccess).
     const accessUnchanged = this.host.captureAccess();
     const result = await this.host.auth.verifyChallengeResponse(session.ws, signature);
-    if (!this.host.isLive(session)) return;
+    if (!this.host.isLive(session)) {
+      if (result.user?.guest && this.host.sessionsOfUser(result.user.id).length === 0)
+        this.host.auth.identityAccess?.retireGuest(result.user.id);
+      return;
+    }
 
     if (!result.success || !result.user || !result.serverDetails) {
       if (result.authFailed) {
@@ -221,6 +233,7 @@ export class AuthHandler {
           requestId,
           payload: {
             code: result.errorCode,
+            ...(result.ban && session.protocol?.features.includes('identity-bans') ? { ban: result.ban } : {}),
             message: result.errorMessage || 'Falha na autenticação',
           } satisfies AuthFailedPayload,
         });
@@ -297,6 +310,16 @@ export class AuthHandler {
     // Send AUTH_SUCCESS to the connecting client
     const iceServers = await this.buildIceServersFor(result.user.id, session);
     if (!this.host.isLive(session)) return;
+    const ban = activeIdentityBan(this.host.auth.identityAccess, result.user.publicKey);
+    if (ban) {
+      this.host.send(session.ws, { type: MessageType.AUTH_FAILED, requestId, payload: {
+        code: ProtocolErrorCode.IDENTITY_BANNED, message: 'Esta identidade está banida deste servidor.',
+        ...(session.protocol?.features.includes('identity-bans') ? { ban: identityBanNotice(ban) } : {}),
+      } });
+      session.intentionalLogout = true;
+      session.ws.close();
+      return;
+    }
     const successPayload: AuthSuccessPayload = {
       server: {
         ...result.serverDetails,

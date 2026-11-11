@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MessageType } from '../src/protocol';
+import { identityBanHistoryPageSchema, identityBanHistoryRequestSchema, identityUnbanSchema } from '../src/identityAccess';
 import {
   clientMessage, serverMessage,
   type ClientMessageArgs, type ClientMessageType, type ServerMessage, type ServerMessageType,
@@ -44,4 +45,21 @@ test('clientMessage builds the envelope that travels, held to the payload of its
     { type: MessageType.PONG, payload: { timestamp: 3 } });
   // @ts-expect-error The payload of another message does not fit.
   assert.ok(clientMessage(MessageType.VOICE_LEAVE, { timestamp: 3 }));
+});
+
+test('identity history is bounded and strict, while legacy unban payloads remain valid', () => {
+  assert.ok(identityUnbanSchema.safeParse({ publicKey: 'key' }).success);
+  assert.ok(identityUnbanSchema.safeParse({ publicKey: 'key', banId: 1 }).success);
+  for (const banId of [0, -1, 1.5, '1']) assert.equal(identityUnbanSchema.safeParse({ publicKey: 'key', banId }).success, false);
+  assert.ok(identityBanHistoryRequestSchema.safeParse({ scope: 'all', beforeId: 1 }).success);
+  for (const payload of [{}, { scope: 'unknown' }, { scope: 'all', beforeId: 0 }, { scope: 'all', userId: 'other' }]) {
+    assert.equal(identityBanHistoryRequestSchema.safeParse(payload).success, false);
+  }
+  const entry = { id: 1, publicKey: 'key', nickname: 'Name', reason: 'Private reason', showReason: false,
+    createdAt: 1, expiresAt: null, createdBy: null, endedAt: null, endedBy: null, status: 'active' };
+  assert.ok(identityBanHistoryPageSchema.safeParse({ entries: [entry], nextCursor: null }).success);
+  assert.ok(identityBanHistoryPageSchema.safeParse({ entries: Array.from({ length: 50 }, () => entry), nextCursor: 1 }).success);
+  assert.equal(identityBanHistoryPageSchema.safeParse({ entries: Array.from({ length: 51 }, () => entry), nextCursor: 1 }).success, false);
+  assert.equal(identityBanHistoryPageSchema.safeParse({ entries: [{ ...entry, status: 'unknown' }], nextCursor: null }).success, false);
+  assert.equal(identityBanHistoryPageSchema.safeParse({ entries: [{ ...entry, remoteHtml: '<img>' }], nextCursor: null }).success, false);
 });

@@ -4,6 +4,29 @@ import { showConfirm, showConfirmWithOption } from '../views/Dialog';
 import { t, tCount } from '../i18n';
 import { isLoopbackHost, parseServerUrl } from './serverAddress';
 import { docsUrl } from './docsLinks';
+import { ensureHostedServerStarted } from '../core/hostedServerStart';
+import type { CreatedServer } from '../stores/connectionStore';
+
+/** Network reachability cannot tell whether this app's own server has started. */
+export async function prepareHostedServerJoin(server: CreatedServer, isCurrent: () => boolean): Promise<boolean> {
+  const target = { ...server };
+  if (!window.api?.hostServerStatus) throw new Error(t('navigation.hostingUnavailable'));
+  const status = await window.api.hostServerStatus();
+  if (!isCurrent()) return false;
+  const running = status.servers.some(instance => instance.port === target.port && instance.serverId === target.id);
+  if (!running) {
+    const confirmed = await showConfirm({
+      title: t('main.serverOfflineStartTitle'),
+      message: t('main.serverOfflineStartMessage', { name: target.name }),
+      confirmLabel: t('main.serverOfflineStartConfirm'),
+      variant: 'warning',
+    });
+    if (!confirmed || !isCurrent()) return false;
+  }
+  // Even matching status can have a stop queued; only an acknowledged start is ready.
+  await ensureHostedServerStarted(target);
+  return isCurrent();
+}
 
 /**
  * Number of people connected to the server this app hosts on `port`, or null

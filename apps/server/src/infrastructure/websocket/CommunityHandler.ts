@@ -5,7 +5,7 @@ import { serverMessage,
   eventIdRequestSchema, eventInterestedListSchema, communityImageUploadSchema,
   liveActionIdSchema, liveActionSubmitSchema, validateBotFormValues,
   nativeLiveFormCreateSchema, nativeLiveFormIdSchema, nativeLiveFormResultsRequestSchema,
-  nativeLiveFormSubmitSchema,
+  nativeLiveFormSubmitSchema, eventHistoryRequestSchema,
   type ServerMessage, type ServerEvent, type LiveActionSubmission,
   type EventControl, type ServerAuditAction, type ServerAuditChange, type ServerAuditRef, type ServerMessageArgs,
 } from '@monky/shared';
@@ -18,6 +18,7 @@ import type { BotInteractionSession, SelectorInvocationAuthorization } from './B
 import { RateLimiter } from '../security/RateLimiter';
 import { Logger } from '../logger/Logger';
 import { toProtocolError } from './protocolErrors';
+import { route, type Route } from './routing/MessageRouter';
 
 /** A community change; the server resolves the channel and the member a bot acted for. */
 export interface CommunityAuditInput {
@@ -43,6 +44,14 @@ interface CommunityTransport {
 }
 
 export class CommunityHandler {
+  static routes(current: () => CommunityHandler | undefined): Route[] {
+    return [route({
+      types: [MessageType.EVENT_HISTORY_GET],
+      service: { available: () => !!current(), message: 'Server community unavailable.' },
+      handle: ({ session, type, payload, requestId }) => current()?.handle(session, type, payload, requestId),
+    })];
+  }
+
   private readonly timer: ReturnType<typeof setInterval>;
   private pending: Promise<void> = Promise.resolve();
   /** The refresh waiting its turn in the queue, shared by whoever asks before it starts. */
@@ -142,6 +151,16 @@ export class CommunityHandler {
           const event = await this.service.getEvent(userId, id, assertCurrent);
           assertCurrent();
           this.send(session, MessageType.EVENT_SAVED, { event }, requestId);
+          return;
+        }
+        if (type === MessageType.EVENT_HISTORY_GET) {
+          this.requireHuman(session);
+          if (!session.protocol?.features.includes('event-history-cursor')) {
+            throw new CommunityError('Event history requires an updated client.', ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+          }
+          const result = await this.service.eventHistory(userId, eventHistoryRequestSchema.parse(payload), assertCurrent);
+          assertCurrent();
+          this.send(session, MessageType.EVENT_HISTORY_LIST, result, requestId);
           return;
         }
         if (type === MessageType.EVENT_GET_INTERESTED) {

@@ -26,6 +26,38 @@ export type AudioPreviewSource = {
 };
 ```
 
+## `AutoTlsFailure` {#autotlsfailure}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/dist/tls/errors.d.ts#L3)
+
+```ts
+export class AutoTlsFailure extends Error {
+    readonly code: AutoTlsErrorCode;
+    constructor(code: AutoTlsErrorCode, detail?: string);
+}
+```
+
+## `AutoTlsStatus` {#autotlsstatus}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/autoTls.ts#L36)
+
+```ts
+export interface AutoTlsStatus {
+    /** The owner turned automatic TLS on. */
+    enabled: boolean;
+    /** A valid certificate is installed: new connections may use `wss://`. */
+    active: boolean;
+    /** Issuing, renewing or checking right now. */
+    busy: boolean;
+    /** Address the current certificate covers. */
+    ip: string | null;
+    validUntil: number | null;
+    nextRenewalAt: number | null;
+    /** Last failure since the last success; `ws://` keeps working meanwhile. */
+    lastError: AutoTlsError | null;
+}
+```
+
 ## `BotCarouselComponent` {#botcarouselcomponent}
 
 [Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botCarousels.ts#L39)
@@ -2219,9 +2251,84 @@ type Output = {
 };
 ```
 
+## `BotTls` {#bottls}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tls.ts#L41)
+
+```ts
+export interface BotTls {
+    status(): AutoTlsStatus;
+    /** Reuses the certificate shared on this machine, or issues one and shares it. Rejects with `AutoTlsFailure`. */
+    enable(options?: BotTlsEnableOptions): Promise<AutoTlsStatus>;
+    /** Turns TLS off for this bot; the shared certificate stays for the others. */
+    disable(): Promise<AutoTlsStatus>;
+    /** The certificate being served now, or `null` while TLS is off. */
+    material(): BotTlsMaterial | null;
+    secureContext(): tls.SecureContext | null;
+    /** Loads the saved certificate, renews it ahead of expiry and follows renewals made by other processes. */
+    start(): void;
+    /** Called when the served certificate is installed, renewed or removed. Returns the unsubscribe function. */
+    onChange(listener: (change: BotTlsChange) => void): () => void;
+    /** The last `enable()` found a valid shared certificate and asked the CA for nothing. */
+    readonly reusedSharedCertificate: boolean;
+    dispose(): void;
+}
+```
+
+## `BotTlsChange` {#bottlschange}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tls.ts#L19)
+
+```ts
+export interface BotTlsChange {
+    status: AutoTlsStatus;
+    /** `null` when TLS is off: serve plain connections only. */
+    material: BotTlsMaterial | null;
+}
+```
+
+## `BotTlsEnableOptions` {#bottlsenableoptions}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tls.ts#L36)
+
+```ts
+export interface BotTlsEnableOptions {
+    /** Let the process lift the Linux low-port restriction itself (root or passwordless sudo). */
+    grantPortPermission?: boolean;
+}
+```
+
+## `BotTlsMaterial` {#bottlsmaterial}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tls.ts#L14)
+
+```ts
+export interface BotTlsMaterial {
+    cert: string;
+    key: string;
+}
+```
+
+## `BotTlsOptions` {#bottlsoptions}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tls.ts#L25)
+
+```ts
+export interface BotTlsOptions {
+    /**
+     * Folder holding this bot's own opt-in (`<dataDir>/tls/settings.json`). Defaults to
+     * `MONKY_BOT_TLS_STATE_DIR` (set for bots started by the CLI), then `<cwd>/.monky/tls`.
+     */
+    dataDir?: string;
+    log?: TlsLogger;
+    /** Replaces the lookup of the machine's public IP. */
+    publicIp?: () => Promise<string | null>;
+}
+```
+
 ## `ChatMessage` {#chatmessage}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L218)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L219)
 
 ```ts
 export interface ChatMessage {
@@ -2399,7 +2506,7 @@ export type CommandLocalizations = {
 
 ## `CommandOption` {#commandoption}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L344)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L345)
 
 ```ts
 export interface CommandOption {
@@ -2432,7 +2539,7 @@ export interface CommandPresentation {
 
 ## `CommandResponsePayload` {#commandresponsepayload}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1364)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1387)
 
 ```ts
 export interface CommandResponsePayload {
@@ -2465,10 +2572,18 @@ export type CommandValues = {
 
 ## `CommandVoiceRequirement` {#commandvoicerequirement}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L359)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L360)
 
 ```ts
 export type CommandVoiceRequirement = "joined" | "same-bot-channel";
+```
+
+## `createBotTls` {#createbottls}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/tls.ts#L75)
+
+```ts
+export function createBotTls(options?: BotTlsOptions): BotTls;
 ```
 
 ## `getCommandPresentation` {#getcommandpresentation}
@@ -2484,7 +2599,7 @@ export function getCommandPresentation(command: {
 
 ## `LiveAction` {#liveaction}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L171)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L187)
 
 ```ts
 export type LiveAction = {
@@ -2602,7 +2717,7 @@ export type LiveAction = {
 
 ## `LiveActionCreate` {#liveactioncreate}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L173)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L189)
 
 ```ts
 export type LiveActionCreate = {
@@ -2717,7 +2832,7 @@ export type LiveActionCreate = {
 
 ## `LiveActionSubmission` {#liveactionsubmission}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L175)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L191)
 
 ```ts
 export type LiveActionSubmission = {
@@ -2734,7 +2849,7 @@ export type LiveActionSubmission = {
 
 ## `LiveActionUpdate` {#liveactionupdate}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L174)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/serverCommunity.ts#L190)
 
 ```ts
 export type LiveActionUpdate = {
@@ -2909,9 +3024,17 @@ export type SelectionChoice = {
 };
 ```
 
+## `sharedTlsDirectory` {#sharedtlsdirectory}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/dist/tls/CertificateStore.d.ts#L14)
+
+```ts
+export function sharedTlsDirectory(env?: NodeJS.ProcessEnv): string;
+```
+
 ## `SlashCommand` {#slashcommand}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L362)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L363)
 
 ```ts
 export interface SlashCommand {
@@ -2938,7 +3061,7 @@ export interface SlashCommand {
 
 ## `SoundDownloadFailureReason` {#sounddownloadfailurereason}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/soundDownloads.ts#L46)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/soundDownloads.ts#L67)
 
 ```ts
 export type SoundDownloadFailureReason = "timeout" | "invalid_request" | "no_folder" | "invalid_url" | "blocked_url" | "invalid_file_name" | "unsupported_audio" | "too_large" | "http_error" | "network_error" | "write_failed";
@@ -2946,7 +3069,7 @@ export type SoundDownloadFailureReason = "timeout" | "invalid_request" | "no_fol
 
 ## `SoundDownloadRequest` {#sounddownloadrequest}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/soundDownloads.ts#L45)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/soundDownloads.ts#L66)
 
 ```ts
 export type SoundDownloadRequest = {
@@ -2958,7 +3081,7 @@ export type SoundDownloadRequest = {
 
 ## `SoundDownloadResult` {#sounddownloadresult}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/soundDownloads.ts#L47)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/soundDownloads.ts#L68)
 
 ```ts
 export type SoundDownloadResult = {
@@ -2971,4 +3094,16 @@ export type SoundDownloadResult = {
 } | {
     status: "cancelled";
 };
+```
+
+## `TlsLogger` {#tlslogger}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/dist/tls/errors.d.ts#L17)
+
+```ts
+export interface TlsLogger {
+    info(message: string, meta?: unknown): void;
+    warn(message: string, meta?: unknown): void;
+    error(message: string, meta?: unknown): void;
+}
 ```
