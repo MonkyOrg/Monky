@@ -193,6 +193,7 @@ export class MessageRouter {
     if (route.permission !== undefined && !(await this.host.authorizer.requirePermission(session, route.permission, requestId))) return;
     if (route.channel && !(await this.host.authorizer.authorizeChannel(
       session, route.channel.id(parsed.data), route.channel.permissions ?? [], requestId))) return;
+    if (this.host.isRevoked(session)) return;
     await route.handle({ session, type, payload: parsed.data, requestId });
   }
 

@@ -1,0 +1,94 @@
+.identity-ban-form {
+  display: grid;
+  gap: 18px;
+}
+
+.identity-ban-form > :is(.form-group, .dialog-checkbox, .modal-footer) {
+  margin: 0;
+}
+
+.identity-ban-form [data-ban-time] .form-group {
+  min-width: 0;
+  margin: 0;
+}
+
+.identity-ban-form [data-ban-time] label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.member-ban-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.identity-bans-card {
+  max-width: 640px;
+}
+
+.identity-bans-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.identity-bans-card [data-bans] {
+  display: grid;
+  gap: 12px;
+}
+
+.identity-ban-record {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  overflow-wrap: anywhere;
+}
+
+.identity-ban-record-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.identity-ban-status {
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.identity-ban-status[data-ban-status="active"] {
+  color: var(--danger);
+}
+
+.identity-ban-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+}
+
+.identity-ban-details dt,
+.identity-ban-record small {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.identity-ban-details dd {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.identity-ban-record-reason p {
+  margin-top: 6px;
+  white-space: pre-wrap;
+}
+
+.identity-ban-record > button {
+  justify-self: start;
+}

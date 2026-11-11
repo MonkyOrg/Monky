@@ -202,6 +202,21 @@ async function runOverlayLinkSmoke() {
     };
     const speak = (sessionId, isSpeaking) => session.participants.setSpeaking(sessionId, isSpeaking);
     const allCameras = settingsStore.getOverlayConfig();
+    const cameraA = session.participants.get('cam-a').remoteStream.getVideoTracks()[0];
+    const cameraB = session.participants.get('cam-b').remoteStream.getVideoTracks()[0];
+    const cameraLink = first.linkSession;
+    voiceStore.setCameraWatching('cam-a', false);
+    await until(() => videos().length === 1 && shownCamera() === 'cam-b' && first.videoSenders[0].track === cameraB
+      && first.videoSenders.every(sender => sender.track !== cameraA),
+    'the camera watch event removes only the stopped camera from the overlay');
+    check(session.participants.get('cam-a').voiceState.isCameraOn && cameraA.readyState === 'live',
+      'A local viewing choice cannot turn off the participant camera or pretend it was unpublished');
+    check(cameraB.readyState === 'live' && cameraB.enabled, 'The other camera remains live');
+    voiceStore.setCameraWatching('cam-a', true);
+    await until(() => playingFrom(view.localPeerConnection) === 2, 'watching again restores both cameras in the overlay');
+    check(first.videoSenders[0].track === cameraA && first.linkSession === cameraLink,
+      'Watching again restores the same camera without a new overlay connection');
+
     settingsStore.setOverlayConfig({ ...allCameras, focusActiveSpeaker: true });
     first.syncState();
     await until(() => videos().length === 1 && shownCamera() === 'cam-a', 'the overlay shows only the first camera');

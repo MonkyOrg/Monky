@@ -20,6 +20,8 @@ import {
   type ServerSettingsUpdatedPayload,
 } from '@monky/shared';
 import type { ServerRecord, UserRecord } from '../../domain/entities';
+import { activeIdentityBan, identityBanNotice, type IdentityAccessRepository } from '../../domain/identityAccess';
+import type { IdentityBanNotice } from '@monky/shared';
 import { planServerSettingsUpdate, type ServerSettingsPatch, type ServerSettingsProblem } from '../../domain/serverSettings';
 import { CapacityEstimator } from '../../domain/services/CapacityEstimator';
 import { ICategoryRepository, IChannelRepository, IMentionRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
@@ -68,6 +70,7 @@ export function serverSettingsPayload(server: ServerRecord, attachmentStorage: A
 }
 
 export interface AuthResult {
+  ban?: IdentityBanNotice;
   success: boolean;
   errorCode?: ProtocolErrorCode;
   errorMessage?: string;
@@ -91,6 +94,7 @@ export interface AuthResult {
 }
 
 interface PendingAuthChallenge {
+  guest: boolean;
   publicKey: string;
   clientId: string;
   nickname: string;
@@ -134,6 +138,7 @@ export class AuthService {
   private pendingChallenges = new Map<WebSocket, PendingAuthChallenge>();
   private attempts = new WeakMap<WebSocket, symbol>();
   private challengeTimers = new Map<WebSocket, ReturnType<typeof setTimeout>>();
+  private admissions = new Map<string, Promise<void>>();
 
   constructor(
     private serverRepo: IServerRepository,
@@ -146,7 +151,8 @@ export class AuthService {
     private permissionService: PermissionService,
     private roleService: RoleService,
     private serverIdentity: ServerIdentity,
-    private categoryRepo?: ICategoryRepository
+    private categoryRepo?: ICategoryRepository,
+    readonly identityAccess?: IdentityAccessRepository,
   ) {}
 
   public async createChallenge(
@@ -186,6 +192,10 @@ export class AuthService {
     }
 
     const publicKey = normalizePublicKeyHex(parseResult.data.publicKey);
+    if (parseResult.data.guest && (!this.identityAccess
+      || !payload.protocolOffer?.features.includes('guest-membership'))) {
+      return { success: false, errorCode: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, errorMessage: 'Atualize o Monky para entrar como convidado.' };
+    }
     try {
       this.getNodePublicKey(publicKey);
     } catch {
@@ -227,6 +237,7 @@ export class AuthService {
     const nonce = randomBytes(32).toString('hex');
     const serverKey = bindToServerKey ? this.serverIdentity.publicKey : undefined;
     this.pendingChallenges.set(ws, {
+      guest: parseResult.data.guest === true,
       publicKey,
       clientId: deriveClientIdFromPublicKey(publicKey),
       nickname: parseResult.data.nickname.trim(),
@@ -303,6 +314,34 @@ export class AuthService {
     return await this.finishAuthentication(pending);
   }
 
+  /** Hold one identity's admission through binding the socket, not merely through building its snapshot. */
+  public async withIdentityAdmission(ws: WebSocket, operation: () => Promise<void>): Promise<void> {
+    const pending = this.pendingChallenges.get(ws);
+    if (!pending) return operation();
+    const admit = async () => {
+      try {
+        await operation();
+      } finally {
+        try {
+          if (pending.guest) {
+            const user = await this.userRepo.findByPublicKey(pending.publicKey);
+            if (user && !Array.from(this.getActiveOnlineUsers().values()).some(s => s.user.id === user.id)) {
+              this.identityAccess?.retireGuest(user.id);
+            }
+          }
+        } catch (error) {
+          Logger.error('NETWORK', 'Failed to retire an unused guest admission.', error);
+          throw error;
+        }
+      }
+    };
+    const previous = this.admissions.get(pending.publicKey) ?? Promise.resolve();
+    const admission = previous.then(admit, admit);
+    this.admissions.set(pending.publicKey, admission);
+    try { await admission; }
+    finally { if (this.admissions.get(pending.publicKey) === admission) this.admissions.delete(pending.publicKey); }
+  }
+
   public clearChallenge(ws: WebSocket): void {
     this.attempts.delete(ws);
     const timer = this.challengeTimers.get(ws);
@@ -312,6 +351,9 @@ export class AuthService {
   }
 
   private async finishAuthentication(pending: PendingAuthChallenge): Promise<AuthResult> {
+    const ban = activeIdentityBan(this.identityAccess, pending.publicKey);
+    if (ban) return { success: false, authFailed: true, errorCode: ProtocolErrorCode.IDENTITY_BANNED,
+      errorMessage: 'Esta identidade está banida deste servidor.', ban: identityBanNotice(ban) };
     const server = await this.serverRepo.getServer();
     if (!server) {
       return {
@@ -347,6 +389,16 @@ export class AuthService {
       }
       userRecord = byClientId;
     }
+    // A temporary identity can never turn into a durable member simply by omitting the flag.
+    if (pending.guest && userRecord && !userRecord.guest) {
+      return { success: false, authFailed: true, errorCode: ProtocolErrorCode.BAD_REQUEST,
+        errorMessage: 'Uma identidade permanente não pode ser convertida em convidado.' };
+    }
+    pending.guest ||= Boolean(userRecord?.guest);
+    if (pending.guest && !server.ownerUserId) {
+      return { success: false, authFailed: true, errorCode: ProtocolErrorCode.GUEST_OWNER_REQUIRED,
+        errorMessage: 'Uma identidade permanente precisa assumir este servidor antes da entrada de convidados.' };
+    }
 
     // A member who once signed in bound to this server's key is refused with the
     // bare nonce: a server relaying this one's challenge to an app that never saw
@@ -364,7 +416,8 @@ export class AuthService {
     // Only a brand-new member consumes a slot — an existing member must never be
     // locked out of their own server once it fills up. A cap of
     // MAX_USERS_UNLIMITED means the owner opted out of any limit (#403).
-    if (!userRecord && server.maxUsers > LIMITS.MAX_USERS_UNLIMITED) {
+    const returningGuest = !!userRecord?.guest && !Array.from(onlineMap.values()).some(s => s.user.id === userRecord?.id);
+    if ((!userRecord || returningGuest) && server.maxUsers > LIMITS.MAX_USERS_UNLIMITED) {
       const memberCount = await this.userRepo.count();
       if (memberCount >= server.maxUsers) {
         return {
@@ -421,6 +474,11 @@ export class AuthService {
       userRecord.nickname = trimmedNick;
       userRecord.publicKey = userRecord.publicKey ?? pending.publicKey;
       userRecord.lastSeenAt = now;
+    }
+    if (pending.guest) {
+      if (!this.identityAccess) throw new Error('Guest membership storage is unavailable.');
+      this.identityAccess.registerGuest(userRecord.id);
+      userRecord.guest = true;
     }
 
     let rolesChanged = await this.roleService.ensureDefaultRolesAssigned(userRecord.id);

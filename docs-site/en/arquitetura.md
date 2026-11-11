@@ -559,9 +559,17 @@ anything:
 | Never presented a key | Signs the nonce, as before (older servers keep working) |
 | First key, not pinned by any other saved server | Signs bound to it and pins it on joining |
 | The same pinned key | Signs bound to it |
-| Another key | Refuses (`Key changed`). Only a **new invitation** carrying the new key replaces it |
+| Another key | Refuses (`Key changed`). For a remote server, only a **new invitation** carrying the new key replaces it |
 | No key, after presenting one | Refuses: there is no downgrade to the old format |
 | The key of **another** saved server | Refuses, even from an invitation. A second address of the same server is added from the saved server's menu, under **Add address**, which copies the pinned key |
+
+For a loopback address of a server created and running **in this Monky**, the
+main process supplies the local instance's public key through IPC. Both its
+port and created entry id must match. This key is the challenge's reference
+even when the saved connection holds an old key. The Ed25519 proof remains
+mandatory, and the saved key changes only after authenticated sign-in. A
+created entry without a matching instance, a stopped server or a remote
+address does not receive this recovery.
 
 The server does not accept a downgrade either: after a member's first bound
 sign-in, it refuses that identity's bare-nonce signatures

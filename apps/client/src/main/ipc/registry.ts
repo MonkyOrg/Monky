@@ -3,7 +3,7 @@ import type { IpcEventChannel, IpcEvents, IpcInvokeChannel, IpcInvokeChannels } 
 import type { ContractIpcMain, InvokeListener } from '../ipcContract';
 
 /** The windows whose pages may call Main: the application window and the call overlay. */
-export type IpcSender = 'main' | 'overlay';
+export type IpcSender = 'main' | 'overlay' | 'browser';
 
 type Senders = IpcSender | readonly IpcSender[];
 
@@ -16,7 +16,7 @@ export type IpcPolicy<C extends IpcInvokeChannel> =
   | Senders
   | { readonly from: Senders; readonly refused: IpcInvokeChannels[C]['returnType'] };
 
-const SENDER_NAMES: Record<IpcSender, string> = { main: 'the main window', overlay: 'the overlay' };
+const SENDER_NAMES: Record<IpcSender, string> = { main: 'the main window', overlay: 'the overlay', browser: 'a trusted browser toolbar' };
 
 /** The page of a window while both are alive; reading `webContents` of a destroyed window throws. */
 export function windowContents(window: BrowserWindow | null | undefined): WebContents | null {
@@ -45,13 +45,18 @@ export class IpcRegistry {
 
   constructor(
     private readonly ipc: Pick<ContractIpcMain, 'handle' | 'removeHandler'>,
-    private readonly owners: Readonly<Record<IpcSender, () => WebContents | null>>,
+    private readonly owners: Readonly<Partial<Record<IpcSender, () => WebContents | null | readonly WebContents[]>>>,
   ) {}
 
   /** Whether the request comes from the top frame of `sender`'s window, as it is now. */
   isFrom(event: Pick<IpcMainInvokeEvent, 'sender' | 'senderFrame'>, sender: IpcSender): boolean {
-    const contents = this.owners[sender]();
-    return !!contents && !contents.isDestroyed() && event.sender === contents && event.senderFrame === contents.mainFrame;
+    return this.contents(sender).some(contents =>
+      !contents.isDestroyed() && event.sender === contents && event.senderFrame === contents.mainFrame);
+  }
+
+  private contents(sender: IpcSender): readonly WebContents[] {
+    const owner = this.owners[sender]?.();
+    return owner ? 'mainFrame' in owner ? [owner] : owner : [];
   }
 
   handle<C extends IpcInvokeChannel>(channel: C, policy: IpcPolicy<C>, listener: InvokeListener<C>): void {
@@ -70,7 +75,7 @@ export class IpcRegistry {
 
   /** Sends an event to `to`'s page; nothing happens once that window or this registry is gone. */
   send<E extends IpcEventChannel>(to: IpcSender, channel: E, ...args: IpcEvents[E]): boolean {
-    return !this.disposed && sendEvent(this.owners[to](), channel, ...args);
+    return !this.disposed && this.contents(to).reduce((sent, contents) => sendEvent(contents, channel, ...args) || sent, false);
   }
 
   /** Runs `cleanup` when the registry is disposed, after its channels are removed. */

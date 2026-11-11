@@ -51,6 +51,11 @@
 .message-search-result-file-copy small { color: var(--text-muted); }
 .message-search-result:focus-visible, .message-search-chip:focus-visible, .message-search-launch:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
 .server-tools .message-search-bar > .message-search-launch { flex: 1 1 100px; width: auto; min-width: 72px; height: 24px; padding: 2px; border: 0; border-radius: 0; outline: 0; box-shadow: none; background: transparent; background-color: transparent; cursor: text; color: var(--text-primary); font-size: 11px; }
+.voice-channel-chat-panel > .server-tools { top: 10px; right: 52px; max-width: calc(100% - 68px); }
+.voice-channel-chat-panel .voice-chat-content .content-header { padding-right: 284px; }
+.voice-channel-chat-panel:has(.message-search-close:not([hidden])) .voice-chat-content .content-header { padding-right: min(384px, calc(100% - 72px)); }
+.voice-channel-chat-panel .channel-title-container { min-width: 0; }
+.voice-channel-chat-panel .channel-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-search-panel.is-suggestions { top: 48px; right: 12px; bottom: auto; width: min(340px, calc(100% - 24px)); max-height: min(560px, calc(100vh - 140px)); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px 8px; gap: 4px; box-shadow: 0 8px 24px #0005; overflow-y: auto; }
 .is-suggestions h2 { padding: 4px 10px; font-size: 12px; color: var(--text-muted); }
 .is-suggestions h2.message-search-suggestion-group { margin: 6px 0 0; padding-top: 10px; border-top: 1px solid var(--border-color); }

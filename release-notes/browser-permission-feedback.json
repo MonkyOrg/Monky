@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O navegador compartilhado agora explica quando o servidor recusa uma operação por falta de permissão no canal, em vez de mostrar apenas uma falha genérica de transmissão.",
+  "en": "The shared browser now explains when the server refuses an operation because of channel permissions, instead of only showing a generic broadcast failure."
+}

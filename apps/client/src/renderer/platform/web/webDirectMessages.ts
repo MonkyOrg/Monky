@@ -1,5 +1,5 @@
 import {
-  DmKeyring, DmService, dmResult, installDmCrypto, sha256Hex, type DmExportData,
+  DmKeyring, DmService, MemoryDmFileStore, dmResult, installDmCrypto, sha256Hex, type DmExportData,
 } from '@monky/dm';
 import type { DmApi, DmEvent, DmExportMode, DmResult } from '@monky/shared';
 import { saveBlob } from './webFiles';
@@ -20,7 +20,7 @@ const STORE_PREFIX = 'dm/';
 
 interface OpenService {
   service: DmService;
-  store: WebDmStore;
+  store: WebDmStore | MemoryDmFileStore;
 }
 
 let opening: Promise<OpenService | null> | null = null;
@@ -32,7 +32,7 @@ function currentService(): Promise<OpenService | null> {
     const secret = await webIdentitySecret();
     if (!secret) return null;
     const keyring = new DmKeyring(secret.publicKey, secret.privateKeyDerBase64);
-    const store = await WebDmStore.open(`${STORE_PREFIX}${sha256Hex(keyring.identityPublicKey).slice(0, 16)}/`);
+    const store = secret.guest ? new MemoryDmFileStore() : await WebDmStore.open(`${STORE_PREFIX}${sha256Hex(keyring.identityPublicKey).slice(0, 16)}/`);
     const service = new DmService({
       keyring,
       store,

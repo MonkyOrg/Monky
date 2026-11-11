@@ -4,6 +4,27 @@ description: "Entre em um servidor do Monky por link de convite, pela rede local
 
 # Entrar Em Um Servidor
 
+## Entrada como convidado
+
+Na tela inicial de identidade, **Entrar como convidado** pede apenas o nome,
+no aplicativo e na web. O Monky gera uma chave temporária e prova sua posse
+com a mesma autenticação criptográfica das identidades permanentes. A chave
+não é salva nem exportada; fechar ou recarregar o aplicativo encerra essa
+identidade. Amigos e DMs desse modo também ficam somente na sessão atual.
+
+O convidado participa com as permissões normais enquanto estiver conectado.
+Quando seu último dispositivo sai de um servidor, a membresia e seus acessos
+são removidos imediatamente. Mensagens já publicadas conservam a autoria no
+histórico. Uma queda de conexão também encerra a membresia; a mesma sessão do
+aplicativo pode entrar novamente, sujeita aos limites atuais do servidor.
+
+Hospedagem e propriedade exigem uma identidade permanente. Convidados não
+assumem servidores sem dono e não podem hospedá-los. Para guardar uma
+identidade, crie ou importe uma permanente. Servidores antigos sem suporte
+a convidados recusam a entrada, em vez de cadastrar um membro permanente.
+
+## Entrar no servidor
+
 Na Home, clique no botão **+** no trilho de servidores e escolha
 **Entrar em um servidor**. O modal reúne quatro caminhos.
 
@@ -98,6 +119,18 @@ no botão, após confirmação. Em seguida, o Monky abre o próximo servidor
 conectado; se não houver nenhum, mostra a Home.
 
 ## Vários dispositivos ao mesmo tempo
+
+Em **Configurações → Meu Perfil → Dispositivos conectados**, consulte as
+sessões online da sua própria identidade, agrupadas pelo identificador do
+dispositivo. A lista alcança apenas os servidores atualmente conectados
+neste Monky que oferecem esse recurso; não há serviço central ou histórico
+de dispositivos offline.
+
+**Desconectar dispositivo** encerra suas sessões alcançadas nesses
+servidores em comum. Não fecha o aplicativo remoto, não apaga a identidade e
+não impede uma nova conexão. Uma falha parcial é avisada e a lista pode ser
+atualizada. Dispositivos sem servidor em comum não podem ser vistos ou
+desconectados por esta tela.
 
 Você pode entrar no mesmo servidor a partir de mais de um computador usando a mesma identidade — por exemplo, o desktop e o notebook. Cada dispositivo aparece como uma entrada própria na lista de voz, com um sufixo `(2)`, `(3)` para diferenciar, mas continua sendo uma única pessoa na lista de membros e ocupa apenas uma vaga do servidor.
 

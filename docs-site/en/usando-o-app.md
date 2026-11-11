@@ -78,6 +78,8 @@ chat's left edge to resize it; the chosen width is remembered. Messages,
 attachments, reactions,
 polls, mentions, and search remain available even while you are not connected
 to voice.
+The search bar is in the panel's header; filters and results open inside it.
+Use **Ctrl+F** to search messages in that voice channel.
 
 Right-click a participant to adjust their individual volume. The setting applies only on this computer and to that device: if the same person is connected from two machines, each one gets its own volume.
 
@@ -88,6 +90,12 @@ The call follows you: switching servers in the left column keeps it running, and
 On the media bar: **Camera**, **Share Screen** and **Soundboard**. Choose a screen
 or a specific window; screen-audio availability depends on the platform and
 source. Check what will be captured before starting.
+
+Other participants' cameras appear automatically. On each camera card,
+**Stop watching** stops your viewing; **Watch camera** shows it again.
+This choice applies only to you in the current call, including off stage and
+in the overlay, without turning off anyone's camera or changing voice or screen
+broadcasts. Cameras appear by default again when you join another call.
 
 Under **Settings → Voice and Video → Camera**, preview blur, color or image
 virtual backgrounds and physical-screen chroma key. Effects run locally and

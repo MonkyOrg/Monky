@@ -1,11 +1,13 @@
 import {
-  BOT_SCREEN_PERMISSION_POLICY_VERSION, MessageType, Permission, botDeviceStorageScopeSchema, botScreenSchema, botScreenRemovedSchema,
+  BOT_SCREEN_PERMISSION_POLICY_VERSION, MessageType, Permission, ProtocolErrorCode, botDeviceStorageScopeSchema, botScreenSchema, botScreenRemovedSchema,
   botStorageInfoSchema, botStorageLevelEventSchema,
   type BotDeviceStorageDecision, type BotDeviceStorageGrant, type BotDeviceStorageScope, type BotScreen, type BotScreenAction,
   type BotScreenBeforeCloseReason, type BotScreenCloseReason, type BotScreenRemoved, type BotStorageUsage,
 } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import { currentEventOrigin } from '../core/sessionRouting';
+import { ProtocolRequestError } from '../core/NetworkClient';
+import { clientLog } from '../core/ClientLogService';
 import { getLanguage, t, type TranslationKey } from '../i18n';
 import { settingsStore, type SaveTiming } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
@@ -15,6 +17,11 @@ import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 import { reportError } from '../utils/feedback';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { BotScreenFrame } from './BotScreenFrame';
+import { BotBrowserView } from './BotBrowserView';
+import { BotBrowserViewer } from './BotBrowserViewer';
+import { webRtcManager } from '../core/WebRtcManager';
+import type { BrowserMiniappMediaHandle } from '../core/webrtc/BrowserMiniappMedia';
+import { isDesktopOnly, setDesktopOnly, showDesktopOnly } from '../utils/desktopOnly';
 import { botSettingsModal } from './BotSettingsModal';
 import { StageVolumeControl, type StageVolumeTexts } from './StageVolumeControl';
 import { showConfirm, showConfirmWithChoice } from './Dialog';
@@ -31,7 +38,9 @@ interface StorageOffer {
 /** A persistent stage tile; viewing and layout never change the game's seats. */
 export class BotScreenView {
   readonly element = document.createElement('section');
-  private frame: BotScreenFrame | null = null;
+  private frame: BotScreenFrame | BotBrowserView | BotBrowserViewer | null = null;
+  private browserMedia: BrowserMiniappMediaHandle | null = null;
+  private browserCapture: MediaStream | null = null;
   private title = document.createElement('strong');
   private openButton = document.createElement('button');
   private close = document.createElement('button');
@@ -74,7 +83,7 @@ export class BotScreenView {
     private onConfirmClose: () => void,
   ) {
     if (!this.canRead()) throw new Error(t('protocolError.botVoiceRequired'));
-    this.element.className = 'stage-card stage-bot-screen-card';
+    this.element.className = `stage-card stage-bot-screen-card${screen.kind === 'browser' ? ' stage-bot-browser-card' : ''}`;
     this.element.dataset.botScreenId = screen.id;
     this.element.setAttribute('aria-label', screen.title);
     const header = document.createElement('div');
@@ -139,7 +148,9 @@ export class BotScreenView {
     // Controls must not reach the tile, whose click toggles focus.
     this.volumeControls.addEventListener('click', (event) => event.stopPropagation());
     // The volume overlays the tile's bottom-right corner; right after the toolbar in focus order.
-    this.element.append(header, this.volumeControls, this.storageBadge, this.notice, this.body, this.error);
+    this.element.append(header, this.storageBadge, this.notice, this.body, this.error);
+    if (screen.kind === 'browser') controls.prepend(this.volumeControls);
+    else this.element.insertBefore(this.volumeControls, this.storageBadge);
     this.localize();
     this.syncVolume();
     // A failure shown inside the fullscreen tile is stale once the tile is back on the stage.
@@ -166,6 +177,7 @@ export class BotScreenView {
         this.renderStorageBadge();
       }),
     ];
+    if (screen.kind === 'browser') queueMicrotask(() => { if (this.canRead()) void this.open(); });
   }
 
   get snapshot(): BotScreen { return this.screen; }
@@ -174,6 +186,10 @@ export class BotScreenView {
 
   async open(): Promise<void> {
     if (this.frame || this.pendingConsent || !this.canRead()) return;
+    if (this.screen.kind === 'browser') {
+      await this.openBrowser(this.screen);
+      return;
+    }
     const controller = new AbortController();
     this.pendingConsent = controller;
     const screen = this.screen;
@@ -217,7 +233,7 @@ export class BotScreenView {
         return;
       }
       if (this.screen.id !== screen.id || this.screen.instanceId !== screen.instanceId ||
-          this.screen.botId !== screen.botId || this.screen.html !== screen.html) {
+          this.screen.botId !== screen.botId || this.screen.html !== screen.html || this.screen.kind !== screen.kind) {
         throw new Error('Miniapp changed during permission review.');
       }
       const frame = new BotScreenFrame(this.screen, {
@@ -244,6 +260,62 @@ export class BotScreenView {
       this.renderStorageBadge();
     } finally {
       if (this.pendingConsent === controller) this.pendingConsent = null;
+    }
+  }
+
+  private async openBrowser(screen: Extract<BotScreen, { kind: 'browser' }>): Promise<void> {
+    const host = screen.hostSessionId === this.context.user.sessionId;
+    if (host && isDesktopOnly('miniappBrowser')) {
+      showDesktopOnly('miniappBrowser', this.openButton);
+      return;
+    }
+    if (!host && !screen.broadcastSource) return;
+    const failed = (error: unknown): void => {
+      if (this.destroyed || this.frame !== browser) return;
+      console.error('[Browser miniapp] Broadcast failed.', error);
+      clientLog.logError('SCREEN_SHARE', `Browser miniapp ${host ? 'host' : 'viewer'} failed`, error);
+      this.leave('revoked');
+      this.report(t(error instanceof ProtocolRequestError && error.code === ProtocolErrorCode.PERMISSION_DENIED
+        ? 'browser.broadcastPermissionDenied' : 'browser.broadcastFailed'));
+      appEvents.emit('stage.bot_screens_changed');
+    };
+    const browser = host ? new BotBrowserView({
+      requestId: crypto.randomUUID(), policyVersion: 1, serverKey: this.context.session.key,
+      channelId: screen.channelId, screenId: screen.id, instanceId: screen.instanceId, botId: screen.botId,
+      viewerId: this.context.user.id, viewerSessionId: this.context.user.sessionId!,
+      locale: getLanguage(), title: screen.title,
+    }, () => {
+      if (this.frame !== browser) return;
+      this.leave('leave');
+      appEvents.emit('stage.bot_screens_changed');
+    }, failed, this.stageVisible) : new BotBrowserViewer(screen, failed, () => {
+      if (this.frame !== browser) return;
+      this.leave('ended');
+      appEvents.emit('stage.bot_screens_changed');
+    });
+    this.frame = browser;
+    browser.setVolume(this.outputVolume());
+    this.body.append(browser.element);
+    this.placeholder.hidden = true;
+    this.localize();
+    if (!(browser instanceof BotBrowserView)) return;
+    let publicationStarted = false;
+    try {
+      const stream = await browser.capture();
+      if (!this.canRead() || this.frame !== browser) { stream.getTracks().forEach(track => track.stop()); return; }
+      this.browserCapture = stream;
+      publicationStarted = true;
+      const media = await webRtcManager.browserMiniappMedia.host(screen, stream, failed, browser.signal);
+      if (!this.canRead() || this.frame !== browser) { media.close(); return; }
+      this.browserMedia = media;
+      browser.broadcasting();
+    } catch (error) {
+      failed(error);
+      if (!publicationStarted && this.canRead() && this.context.session.client.getStatus() === 'CONNECTED') {
+        void this.context.session.client.sendRequest<unknown>(MessageType.BOT_SCREEN_END, {
+          id: screen.id, instanceId: screen.instanceId,
+        }).catch(cleanupError => console.error('[Browser miniapp] Failed host cleanup was not acknowledged.', cleanupError));
+      }
     }
   }
 
@@ -311,6 +383,11 @@ export class BotScreenView {
     if (this.requestId) this.context.session.client.cancelRequest(this.requestId);
     this.requestId = null;
     this.confirming = null;
+    this.browserCapture?.getTracks().forEach(track => track.stop());
+    this.browserCapture = null;
+    if (this.screen.kind === 'browser') webRtcManager.browserMiniappMedia.retire(this.screen, reason === 'leave');
+    this.browserMedia?.close();
+    this.browserMedia = null;
     this.frame?.retire(reason);
     this.frame = null;
     this.deviceStorage = null;
@@ -331,12 +408,14 @@ export class BotScreenView {
       this.frame.element.title = screen.title;
       this.frame.update(screen);
     }
+    else if (screen.kind === 'browser' && screen.broadcastSource) queueMicrotask(() => { if (this.canRead()) void this.open(); });
+    this.localize();
   }
 
   setLayout(focused: boolean, miniature: boolean): void {
     const focusChanged = this.focused !== focused;
     this.focused = focused;
-    this.element.className = `${focused ? 'stage-focused-main' : miniature ? 'stage-mini-card stage-mini-card--video' : 'stage-card stage-card--video'} stage-bot-screen-card`;
+    this.element.className = `${focused ? 'stage-focused-main' : miniature ? 'stage-mini-card stage-mini-card--video' : 'stage-card stage-card--video'} stage-bot-screen-card${this.screen.kind === 'browser' ? ' stage-bot-browser-card' : ''}`;
     this.focus.setAttribute('aria-pressed', String(focused));
     if (focusChanged) this.localize();
   }
@@ -398,7 +477,8 @@ export class BotScreenView {
   }
 
   private canEnd(): boolean {
-    return this.canRead() && (this.context.user.id === this.screen.creatorUserId ||
+    return this.canRead() && ((this.screen.kind === 'browser' ? this.screen.hostSessionId === this.context.user.sessionId
+      : this.context.user.id === this.screen.creatorUserId) ||
       this.context.session.serverStore.isAdminMember(this.context.user.id));
   }
 
@@ -420,6 +500,8 @@ export class BotScreenView {
       }
     };
     label(this.openButton, 'botScreen.openView', 'smart_display');
+    if (this.screen.kind === 'browser') setDesktopOnly(this.openButton,
+      this.screen.hostSessionId === this.context.user.sessionId && isDesktopOnly('miniappBrowser') ? 'miniappBrowser' : null);
     const confirmingLeave = this.confirming === 'leave';
     const confirmingEnd = this.confirming === 'end';
     label(this.close, confirmingLeave ? 'botScreen.closeNow' : 'botScreen.close', confirmingLeave ? 'close' : 'visibility_off');
@@ -433,12 +515,13 @@ export class BotScreenView {
     label(this.fullscreen, 'stage.fullscreen', 'fullscreen', false);
     this.close.hidden = !this.isWatching;
     // Only an open view plays audio.
-    this.volumeControls.hidden = !this.isWatching;
+    this.volumeControls.hidden = !this.isWatching || this.screen.kind === 'browser';
     this.volumeControl.localize();
     if (this.confirming) this.element.setAttribute('aria-busy', 'true');
     else this.element.removeAttribute('aria-busy');
     // A live region: only an actual change may be announced.
-    const notice = this.confirming ? t('botScreen.confirmingClose', { title: this.screen.title }) : t('botScreen.publicNotice');
+    const notice = this.confirming ? t('botScreen.confirmingClose', { title: this.screen.title })
+      : t(this.screen.kind === 'browser' ? 'browser.privacy' : 'botScreen.publicNotice');
     if (this.notice.textContent !== notice) this.notice.textContent = notice;
     const hint = t(this.hint);
     if (this.placeholderHint.textContent !== hint) this.placeholderHint.textContent = hint;

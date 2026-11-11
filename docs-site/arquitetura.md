@@ -564,9 +564,17 @@ qualquer coisa:
 | Nunca apresentou chave | Assina o nonce, como antes (servidores antigos continuam funcionando) |
 | Primeira chave, de nenhum outro servidor salvo | Assina vinculado a ela e a fixa ao entrar |
 | A mesma chave fixada | Assina vinculado a ela |
-| Outra chave | Recusa (`Chave mudou`). Só um **convite novo** que traga a chave nova a substitui |
+| Outra chave | Recusa (`Chave mudou`). Para um servidor remoto, só um **convite novo** que traga a chave nova a substitui |
 | Nenhuma chave, depois de já ter apresentado uma | Recusa: não há rebaixamento para o formato antigo |
 | A chave de **outro** servidor salvo | Recusa, mesmo vindo de convite. Um segundo endereço do mesmo servidor entra pelo menu do servidor salvo, em **Adicionar endereço**, que copia a chave fixada |
+
+Para um endereço de loopback de um servidor criado e em execução **neste
+Monky**, o main process informa a chave pública da instância local por IPC.
+Porta e id da entrada criada precisam corresponder. Essa chave é a referência
+para o desafio, mesmo quando a conexão salva guarda uma chave antiga. A prova
+Ed25519 continua obrigatória, e a chave salva só muda depois do login
+autenticado. Uma entrada criada sem instância correspondente, um servidor
+parado ou um endereço remoto não recebe essa recuperação.
 
 O servidor também não aceita rebaixamento: depois do primeiro login vinculado
 de um membro, ele recusa as assinaturas do nonce cru daquela identidade

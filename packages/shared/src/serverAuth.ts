@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ED25519_SPKI_PUBLIC_KEY_DER_PREFIX_HEX } from './constants.js';
+import { protocolOfferSchema } from './protocolCompatibility.js';
 
 /**
  * server-key-auth (#821): a person's sign-in signature names the server it is
@@ -14,6 +15,7 @@ export const SERVER_KEY_AUTH_FEATURE = 'server-key-auth';
 
 const nonceSchema = z.string().regex(/^[0-9a-fA-F]{64}$/).transform(value => value.toLowerCase());
 const signatureSchema = z.string().regex(/^[0-9a-fA-F]{128}$/).transform(value => value.toLowerCase());
+const agreementSchema = protocolOfferSchema.extend({ version: z.number().int().positive() });
 
 /** A server's identity: an Ed25519 public key as SPKI DER, in lowercase hexadecimal. */
 export const serverPublicKeySchema = z.string()
@@ -22,8 +24,8 @@ export const serverPublicKeySchema = z.string()
 
 /** AUTH_CHALLENGE: the bare nonce from servers that never present a key, all three fields otherwise. */
 export const authChallengeSchema = z.union([
-  z.object({ nonce: nonceSchema, serverKey: serverPublicKeySchema, serverSignature: signatureSchema }).strict(),
-  z.object({ nonce: nonceSchema }).strict(),
+  z.object({ nonce: nonceSchema, serverKey: serverPublicKeySchema, serverSignature: signatureSchema, protocol: agreementSchema.optional() }).strict(),
+  z.object({ nonce: nonceSchema, protocol: agreementSchema.optional() }).strict(),
 ]);
 export type AuthChallenge = z.infer<typeof authChallengeSchema>;
 

@@ -21,7 +21,7 @@ const program = ts.createProgram([entry], {
   ...parsed.options,
   noEmit: true,
   baseUrl: root,
-  paths: { '@monky/shared': ['packages/shared/src/index.ts'] },
+  paths: { '@monky/shared': ['packages/shared/src/index.ts'], '@monky/shared/tls': ['packages/shared/src/tls/index.ts'] },
 });
 const checker = program.getTypeChecker();
 const source = program.getSourceFile(entry);
@@ -80,7 +80,7 @@ function groupFor(name, declaration) {
   if (/^[A-Z_]+$/.test(name)) return groups.tools;
   if (/managedTools|[\\/]cli[\\/]|[\\/]tooling[\\/]|[\\/]reachability\.ts|[\\/]constants\.ts|[\\/]protocol\.ts/.test(file)
     && !['BotManifest', 'CommandResponsePayload'].includes(name)) return groups.tools;
-  if (/^(BotVoice|BotScreen|BotDeviceStorage|Local)/.test(name)) return groups.media;
+  if (/^(BotVoice|BotScreen|BotBrowser|BotDeviceStorage|Local)/.test(name)) return groups.media;
   if (path.resolve(file) === entry || path.resolve(file).startsWith(clientSources)
     || /^(BotStor|BotRequestError$)/.test(name)
     || ['BotCapability', 'BotPermissions', 'BotManifest'].includes(name)) return groups.client;

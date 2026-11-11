@@ -20,6 +20,14 @@ participantes, use [Configurações do Servidor](/administrar-servidor).
 | Logs | Eventos locais e diagnóstico do cliente |
 | Sobre e Updates | Versão, atualização, comportamento da janela e comunidade |
 
+As setas ao lado de **mutar** e **ensurdecer** abrem os ajustes rápidos do
+microfone e dos fones. Além dos dispositivos, elas oferecem **Volume de entrada**
+e **Volume de saída**, respectivamente, de 0% a 200%. São os mesmos valores de
+**Voz e Vídeo**: o ajuste é aplicado na hora, fica salvo e se mantém sincronizado
+entre as duas superfícies, tanto no desktop quanto na versão web. 100% mantém o
+ganho original; acima disso, amplifica. Alterar o volume não desmuta nem remove
+restrições da chamada.
+
 ## Meu Perfil
 
 Altere seu nickname e foto nesta aba. **Idioma** aplica Português (Brasil)

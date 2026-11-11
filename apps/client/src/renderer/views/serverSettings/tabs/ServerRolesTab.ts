@@ -8,6 +8,7 @@ import { removeOwnedSurfaces, showWithMotion } from '../../../utils/surfaceMotio
 import { t } from '../../../i18n';
 import type { ServerSettingsContext } from '../ServerSettingsContext';
 import { filterServerMembers, ServerMembersTab } from './ServerMembersTab';
+import { ServerMemberMenu } from '../ServerMemberMenu';
 import { ColorPicker } from '../../ColorPicker';
 import { COLOR_PRESETS, isHexColor } from '../../../utils/colors';
 import { ContextMenu } from '../../ContextMenu';
@@ -34,6 +35,7 @@ export class ServerRolesTab {
   private editor: RoleDialog | null = null;
   private memberPicker: RoleDialog | null = null;
   private readonly roleMenu = new ContextMenu();
+  private readonly memberMenu = new ServerMemberMenu();
   private roleDeletion: { roleId: string; controller: AbortController } | null = null;
   private readonly colorPicker = new ColorPicker({ id: 'role-editor-color', label: 'roles.roleColor' });
 
@@ -363,12 +365,6 @@ export class ServerRolesTab {
 
   private attachControls(container: HTMLElement, context: ServerSettingsContext, signal: AbortSignal): void {
     const options = { signal };
-    const closeMenus = () => {
-      for (const className of ['show', 'open', 'menu-open', 'row-menu-open']) {
-        container.querySelectorAll(`.settings-action-menu.${className}, .settings-action-submenu-wrap.${className}, .settings-action-menu-wrap.${className}, tr.${className}`)
-          .forEach((element) => element.classList.remove(className));
-      }
-    };
     container.addEventListener('click', (event) => {
       if (!(event.target instanceof HTMLElement) || !context.isCurrent()) return;
       const target = event.target.closest<HTMLButtonElement>('button');
@@ -396,37 +392,21 @@ export class ServerRolesTab {
         const search = container.querySelector<HTMLInputElement>('#server-members-search');
         if (search) {
           search.value = '';
+          this.memberMenu.close();
           filterServerMembers(container);
           search.focus();
         }
       } else if (target.classList.contains('member-actions-trigger')) {
-        const wrap = target.closest('.settings-action-menu-wrap');
-        const menu = wrap?.querySelector('.settings-action-menu');
-        const willShow = !menu?.classList.contains('show');
-        closeMenus();
-        if (willShow) {
-          menu?.classList.add('show');
-          wrap?.classList.add('menu-open');
-          target.closest('tr')?.classList.add('row-menu-open');
+        if (target.dataset.userId) {
+          this.memberMenu.open(target, target.dataset.userId, context, (userId, roleId, assign) => this.assignRole(userId, roleId, assign));
         }
-      } else if (target.dataset.memberAction && target.dataset.userId) {
-        const userId = target.dataset.userId;
-        const roleId = target.dataset.roleId;
-        if (target.dataset.memberAction === 'kick') {
-          void context.operations.run(`kick:${userId}`, t('userMenu.kickMember'), Permission.KICK_MEMBERS,
-            () => context.request<unknown>([MessageType.MEMBER_KICK, { targetUserId: userId }], Permission.KICK_MEMBERS));
-        } else if (roleId) {
-          this.assignRole(userId, roleId, !context.store.getUserRoleIds(userId).includes(roleId));
-        }
-        closeMenus();
-      } else if (target.closest('.settings-action-submenu-wrap')) {
-        target.closest('.settings-action-submenu-wrap')?.classList.toggle('open');
-      } else if (!target.closest('.settings-action-menu-wrap')) closeMenus();
+      }
     }, options);
     container.addEventListener('input', (event) => {
       if (event.target instanceof HTMLInputElement && event.target.classList.contains('role-members-search')) {
         this.filterMemberRows(container, event.target.value);
       } else if (event.target instanceof HTMLInputElement && event.target.id === 'server-members-search') {
+        this.memberMenu.close();
         filterServerMembers(container);
       }
     }, options);
@@ -448,6 +428,7 @@ export class ServerRolesTab {
 
   public detachEvents(): void {
     this.roleDeletion?.controller.abort();
+    this.memberMenu.dispose();
     this.roleMenu.close();
     this.editor?.close(true);
     for (const dispose of this.cleanup) dispose();
@@ -689,22 +670,31 @@ export class ServerRolesTab {
     const root = this.root;
     const context = this.context;
     if (!root || !context) return;
-    if (!context.isCurrent() || !context.store.hasPermission(Permission.MANAGE_ROLES)) {
+    this.memberMenu.refresh(context);
+    if (!context.isCurrent()) {
       this.roleDeletion?.controller.abort();
       this.roleMenu.close();
+      this.memberMenu.close();
       removeOwnedSurfaces(root);
       this.editor?.close(true);
       return;
     }
     const { store, operations } = context;
+    if (!store.hasPermission(Permission.MANAGE_ROLES)) {
+      this.roleDeletion?.controller.abort();
+      this.roleMenu.close();
+      this.editor?.close(true);
+    }
     if (this.roleDeletion) {
       const deletingRole = store.getRole(this.roleDeletion.roleId);
       if (!deletingRole || !this.canDeleteRole(deletingRole)) this.roleDeletion.controller.abort();
     }
-    const signature = JSON.stringify([store.everyonePermissions, store.roles, store.userRoles, store.serverDetails?.members, [...store.knownMembers]]);
+    const signature = JSON.stringify([store.ownerId, store.myPermissions, store.everyonePermissions, store.roles,
+      store.userRoles, store.serverDetails?.protocol?.features, store.serverDetails?.members, [...store.knownMembers]]);
     if (signature !== this.stateSignature && !this.draggedRoleId && !operations.isPending('role-order')) {
       this.stateSignature = signature;
       this.roleMenu.close();
+      this.memberMenu.close();
       const body = root.querySelector('#roles-list tbody');
       if (body) body.innerHTML = this.renderRoleRows();
       const members = root.querySelector('#server-members-table tbody');

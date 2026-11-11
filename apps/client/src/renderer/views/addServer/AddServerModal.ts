@@ -13,11 +13,9 @@ import { selectChoiceCard } from '../../utils/formControls';
 import { clientLog } from '../../core/ClientLogService';
 import { assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, updateSessionAvatar } from '../../core/serverConnection';
 import { ensureHostedServerStarted, findOwnedServer } from '../../core/hostedServerStart';
-import { checkServerOnline } from '../../utils/serverStatus';
-import { confirmHostedServerReach } from '../../utils/hostedServer';
+import { confirmHostedServerReach, prepareHostedServerJoin } from '../../utils/hostedServer';
 import { showSecureServerHelp } from '../../utils/secureServerHelp';
 import { parseServerHostInput, setServerTransport } from '../../utils/serverAddress';
-import { showConfirm } from '../Dialog';
 import { joinInviteModal } from '../JoinInviteModal';
 import { onboardingWizard, type WizardExit } from '../OnboardingWizard';
 import { platformSupports } from '../../platform/capabilities';
@@ -517,16 +515,7 @@ class AddServerModal {
       assertServerBrowseAvailable(host, port);
       const owned = findOwnedServer(host, port);
       const connected = getServerSessionForAddress(host, port)?.client.getStatus() === 'CONNECTED';
-      if (owned && !connected && !(await checkServerOnline(host, port))) {
-        const confirmed = await showConfirm({
-          title: t('main.serverOfflineStartTitle'),
-          message: t('main.serverOfflineStartMessage', { name: owned.name }),
-          confirmLabel: t('main.serverOfflineStartConfirm'),
-          variant: 'warning',
-        });
-        if (!confirmed || !isCurrent()) return;
-        await ensureHostedServerStarted(owned);
-      }
+      if (owned && !connected && !(await prepareHostedServerJoin(owned, isCurrent))) return;
       const identity = connectionStore.hasIdentity && connectionStore.clientId && connectionStore.publicKey
         ? { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey }
         : await window.api.getIdentity();

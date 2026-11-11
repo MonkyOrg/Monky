@@ -383,7 +383,6 @@ async function runDropdownSmoke() {
     check(!popup(), 'Repeated initialize/open/dispose leaves no popup behind');
     const menuClasses = [
       'server-dropdown-menu', 'floating-context-menu', 'user-context-menu', 'ctx-submenu',
-      'settings-action-menu', 'settings-action-submenu',
       'command-dropup', 'bot-parameter-menu', 'emoji-picker',
     ];
     container.replaceChildren(...menuClasses.map(className => {

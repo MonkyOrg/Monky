@@ -14,7 +14,7 @@ import {
   bindImageDropzone, editCarouselList, imageCarouselNavigationButton, moveImageCarousel, renderImageCarouselEditor,
   renderImageDropzone,
 } from './ImageCarousel';
-import { renderServerEventCard } from './ServerEventCard';
+import { bindServerEventLocationLinks, renderServerEventCard } from './ServerEventCard';
 import { ResourceAudiencePicker } from './ResourceAudiencePicker';
 import { mountWizard } from './community/wizardShell';
 import { canCreateEvent, canManageEvent, isActivityChannel } from './community/communityAccess';
@@ -320,6 +320,7 @@ export function openServerEventWizard(feed: CommunityFeed, existing?: ServerEven
     }
     wizard.sync();
   }, { signal: modal.signal });
+  bindServerEventLocationLinks(viewport, modal.signal);
   viewport.addEventListener('click', (event) => {
     if (event.target instanceof Element && event.target.closest('[data-resource-audience]')) return;
     const summary = event.target instanceof Element ? event.target.closest('.event-schedule-options > summary') : null;

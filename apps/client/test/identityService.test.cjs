@@ -93,6 +93,48 @@ function identityFiles(directory) {
   return fs.readdirSync(directory).filter((name) => /^\.?identity\./.test(name)).sort();
 }
 
+test('guest keys prove the challenge but are never saved or exported and disappear on relaunch', async t => {
+  const app = launch(t);
+  const guest = app.service.createGuestIdentity('Temporary Guest');
+  assert.equal(guest.guest, true);
+  assert.equal(guest.nickname, 'Temporary Guest');
+  assert.equal(app.service.isGuestIdentity(), true);
+  assert.deepEqual(identityFiles(app.userData), []);
+  const nonce = crypto.randomBytes(32).toString('hex');
+  const proof = app.service.signChallenge(nonce);
+  assert.ok(crypto.verify(null, Buffer.from(nonce, 'hex'),
+    crypto.createPublicKey({ key: Buffer.from(guest.publicKey, 'hex'), format: 'der', type: 'spki' }),
+    Buffer.from(proof.signature, 'hex')));
+  assert.equal(app.service.createDmKeyring().identityPublicKey, guest.publicKey);
+  await assert.rejects(() => app.service.exportIdentity(PASSWORD));
+  assert.throws(() => app.service.createGuestIdentity('   '));
+  assert.deepEqual(identityFiles(app.userData), []);
+  assert.deepEqual(plain(app.relaunch().service.getIdentityStatus()), { state: 'missing' });
+});
+
+test('a guest over an unreadable identity neither deletes it on logout nor archives its temporary private key on import', async t => {
+  const app = launch(t);
+  const original = writeRecord(app.file, '{ unreadable identity');
+  const guest = app.service.createGuestIdentity('Guest');
+  app.service.deleteIdentity();
+  assert.deepEqual(fs.readFileSync(app.file), original);
+  const again = app.service.createGuestIdentity('Guest');
+  assert.notEqual(again.publicKey, guest.publicKey);
+  const source = launch(t);
+  const permanent = source.service.createIdentity();
+  const code = await source.service.exportIdentity(PASSWORD);
+  const confirm = await app.service.importIdentity(code, PASSWORD);
+  assert.equal(confirm.status, 'confirm-replace');
+  const imported = await app.service.importIdentity(code, PASSWORD, permanent.publicKey);
+  assert.equal(imported.status, 'imported');
+  assert.equal(app.service.isGuestIdentity(), false);
+  assert.equal(app.service.getIdentity(false).publicKey, permanent.publicKey);
+  for (const name of identityFiles(app.userData)) {
+    const bytes = fs.readFileSync(path.join(app.userData, name)).toString('utf8');
+    assert.ok(!bytes.includes(guest.publicKey) && !bytes.includes(again.publicKey), 'no guest identity is backed up');
+  }
+});
+
 test('a computer without an identity gets one, written atomically and only readable by the user', (t) => {
   const app = launch(t);
   assert.deepEqual(plain(app.service.getIdentityStatus()), { state: 'missing' });

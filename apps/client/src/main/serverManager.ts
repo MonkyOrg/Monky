@@ -6,6 +6,7 @@ import { LIMITS, isAutoTlsErrorCode, parseTrustedProxies, type AutoTlsEnableResu
 import { mt, type MainTranslationKey } from './i18n';
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from './serverDataDir';
 import { HostedServerCleanupError, HostedServerConflictError, HostedServerLifecycle } from './hostedServerLifecycle';
+import { isGuestIdentity } from './identityService';
 
 export type { HostServerOptions };
 
@@ -34,6 +35,7 @@ export class ServerManager {
   );
 
   public async startServer(options: HostServerOptions): Promise<{ success: boolean; error?: string }> {
+    if (isGuestIdentity()) return { success: false, error: mt('identity.guestHosting') };
     if (
       !options || !Number.isInteger(options.port) || options.port < LIMITS.MIN_PORT || options.port > LIMITS.MAX_PORT ||
       typeof options.serverName !== 'string' ||
@@ -274,6 +276,11 @@ export class ServerManager {
    * as it was started from somewhere else (#333).
    */
   public getStatus(): HostServerStatus {
-    return this.lifecycle.getStatus();
+    return {
+      servers: this.lifecycle.entries().map(({ port, serverId, server }) => ({
+        port, serverId,
+        ...(server.identityPublicKey ? { serverKey: server.identityPublicKey } : {}),
+      })),
+    };
   }
 }

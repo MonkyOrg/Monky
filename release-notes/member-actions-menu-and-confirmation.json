@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O menu de ações dos membros agora fica visível mesmo com uma única pessoa na lista. Remover alguém do servidor pede confirmação e explica a diferença entre remoção e banimento.",
+  "en": "Member actions now remain visible even with a single person in the list. Removing someone from a server asks for confirmation and explains how removal differs from a ban."
+}

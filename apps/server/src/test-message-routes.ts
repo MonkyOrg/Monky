@@ -92,6 +92,12 @@ const ROUTES: Record<ClientMessageType, Checks | null> = {
   [MessageType.ROLE_ASSIGN]: {},
   [MessageType.ROLE_UNASSIGN]: {},
   [MessageType.MEMBER_KICK]: { permission: Permission.KICK_MEMBERS },
+  [MessageType.IDENTITY_SESSIONS_GET]: { unavailable: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
+  [MessageType.IDENTITY_SESSION_DISCONNECT]: { unavailable: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, schema: true },
+  [MessageType.IDENTITY_BAN]: { unavailable: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, schema: true, permission: Permission.MANAGE_SERVER },
+  [MessageType.IDENTITY_UNBAN]: { unavailable: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, schema: true, permission: Permission.MANAGE_SERVER },
+  [MessageType.IDENTITY_BANS_GET]: { unavailable: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, permission: Permission.MANAGE_SERVER },
+  [MessageType.IDENTITY_BAN_HISTORY_GET]: { unavailable: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, schema: true, permission: Permission.MANAGE_SERVER },
   // The server's settings and invitation (ServerSettingsHandler).
   // The handler checks MANAGE_SERVER again after the waits of a save.
   [MessageType.SERVER_UPDATE_SETTINGS]: { schema: true, permission: Permission.MANAGE_SERVER },
@@ -152,6 +158,7 @@ const ROUTES: Record<ClientMessageType, Checks | null> = {
   [MessageType.EVENT_SAVE]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
   [MessageType.EVENT_GET]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
   [MessageType.EVENT_GET_INTERESTED]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
+  [MessageType.EVENT_HISTORY_GET]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
   [MessageType.EVENT_CONTROL]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
   [MessageType.EVENT_INTEREST]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
   [MessageType.LIVE_ACTION_CREATE]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
@@ -199,6 +206,7 @@ const ROUTES: Record<ClientMessageType, Checks | null> = {
   [MessageType.BOT_SCREEN_END]: { service: ProtocolErrorCode.BAD_REQUEST },
   [MessageType.BOT_SCREEN_LIST]: { service: ProtocolErrorCode.BAD_REQUEST },
   [MessageType.BOT_SCREEN_ACTION]: { service: ProtocolErrorCode.BAD_REQUEST },
+  [MessageType.BOT_BROWSER_PUBLISH]: { service: ProtocolErrorCode.BAD_REQUEST },
   [MessageType.BOT_STORAGE_PUT]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
   [MessageType.BOT_STORAGE_GET]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },
   [MessageType.BOT_STORAGE_DELETE]: { service: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE },

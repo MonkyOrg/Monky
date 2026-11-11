@@ -83,13 +83,48 @@ if (require.main === module || process.argv[1] === __filename) {
         features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
       });
       if (!process.argv.includes('--color-picker-only')) {
+        if (process.argv.includes('--web')) {
+          await window.webContents.executeJavaScript(`import('/platform/web/webPlatform.ts').then(({ webCapabilities }) => {
+            window.api = { capabilities: webCapabilities() };
+          })`, true);
+        }
         const checks = await window.webContents.executeJavaScript(`(${runAudioDeviceSmoke.toString()})()`, true);
         console.log(`Audio device smoke: ${checks} checks passed`);
-        const mediaChecks = await window.webContents.executeJavaScript(`(${runMediaSettingsPopoverSmoke.toString()})()`, true);
-        console.log(`Quick camera/noise controls: ${mediaChecks} checks passed`);
+        if (process.argv.includes('--audio-only')) {
+          await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+          await window.webContents.executeJavaScript(`(${renderAudioDevicePreview.toString()})()`, true);
+          try {
+            for (const kind of ['input', 'output']) {
+              const before = await window.webContents.executeJavaScript(`(() => {
+                document.querySelector('[data-audio-device="${kind}"]').click();
+                const slider = document.querySelector('.audio-device-popover:not([data-ui-closing]) [data-volume-direction="${kind}"]');
+                slider.focus(); return Number(slider.value);
+              })()`, true);
+              for (const type of ['keyDown', 'keyUp']) await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+                type, key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39,
+              });
+              await window.webContents.executeJavaScript(`import('/stores/settingsStore.ts').then(({ settingsStore }) => {
+                const slider = document.querySelector('.audio-device-popover:not([data-ui-closing]) [data-volume-direction="${kind}"]');
+                if (Number(slider.value) !== ${Math.min(200, before + 1)}
+                    || settingsStore.${kind}Volume !== Number(slider.value) || document.activeElement !== slider) {
+                  throw new Error('Native keyboard did not apply the ${kind} quick volume while preserving focus');
+                }
+              })`, true);
+            }
+            console.log(`Quick volumes: native keyboard applies input/output gain (${process.argv.includes('--web') ? 'web' : 'desktop'})`);
+          } finally {
+            await window.webContents.executeJavaScript('window.cleanupAudioDevicePreview()', true);
+          }
+        }
+        if (!process.argv.includes('--audio-only')) {
+          const mediaChecks = await window.webContents.executeJavaScript(`(${runMediaSettingsPopoverSmoke.toString()})()`, true);
+          console.log(`Quick camera/noise controls: ${mediaChecks} checks passed`);
+        }
       }
-      const colorChecks = await window.webContents.executeJavaScript(`(${runColorPickerSmoke.toString()})()`, true);
-      console.log(`Shared color picker: ${colorChecks} checks passed`);
+      if (!process.argv.includes('--audio-only')) {
+        const colorChecks = await window.webContents.executeJavaScript(`(${runColorPickerSmoke.toString()})()`, true);
+        console.log(`Shared color picker: ${colorChecks} checks passed`);
+      }
       if (process.argv.includes('--color-picker-only') || process.argv.includes('--color-native')) {
         await window.webContents.executeJavaScript(`(${renderColorPickerPreview.toString()})()`, true);
         try {
@@ -190,10 +225,11 @@ async function renderAudioDevicePreview() {
 
 async function runAudioDeviceSmoke() {
   const [{ bindAudioDevicePopovers }, { bindMicrophoneLevelMeter }, devices, { settingsStore: settings },
-    { voiceStore: voice }, { audioProcessor: audio }, { appEvents }, { settingsModal }] = await Promise.all([
+    { voiceStore: voice }, { audioProcessor: audio }, { appEvents }, { settingsModal }, { VoiceVideoTab }] = await Promise.all([
     import('/views/AudioDevicePopover.ts'), import('/core/MicrophoneLevelMeter.ts'),
     import('/core/AudioDeviceService.ts'), import('/stores/settingsStore.ts'),
     import('/stores/voiceStore.ts'),     import('/core/AudioProcessor.ts'), import('/core/EventBus.ts'), import('/views/SettingsModal.ts'),
+    import('/views/settings/tabs/VoiceVideoTab.ts'),
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
@@ -218,6 +254,7 @@ async function runAudioDeviceSmoke() {
     AudioContext: window.AudioContext, raw: audio.getRawMicrophoneStream,
     sink: HTMLMediaElement.prototype.setSinkId, mic: settings.selectedMicrophoneId,
     speaker: settings.selectedSpeakerId, noiseMode: settings.noiseSuppressionMode, inputMode: settings.inputMode,
+    inputVolume: settings.inputVolume, outputVolume: settings.outputVolume,
     channel: voice.currentVoiceChannelId,
     muted: voice.isMuted, serverMuted: voice.serverMuted,
     raf: window.requestAnimationFrame, cancelRaf: window.cancelAnimationFrame,
@@ -285,6 +322,8 @@ async function runAudioDeviceSmoke() {
   settings.selectedSpeakerId = '';
   settings.noiseSuppressionMode = 'off';
   settings.inputMode = 'voice_activity';
+  settings.inputVolume = 125;
+  settings.outputVolume = 80;
   voice.currentVoiceChannelId = null;
   voice.isMuted = false;
   voice.serverMuted = false;
@@ -298,6 +337,11 @@ async function runAudioDeviceSmoke() {
   const inputTrigger = root.querySelector('[data-audio-device="input"]');
   const outputTrigger = root.querySelector('[data-audio-device="output"]');
   const off = bindAudioDevicePopovers(root);
+  const settingsTab = new VoiceVideoTab();
+  const settingsHost = document.createElement('div');
+  settingsHost.innerHTML = settingsTab.renderHtml();
+  settingsHost.hidden = true;
+  settingsTab.attachEvents(settingsHost);
   const panel = () => document.querySelector('.audio-device-popover:not([data-ui-closing])');
   let offExtra = () => {};
   let offApply = devices.registerAudioDeviceApplier(async () => {});
@@ -309,20 +353,52 @@ async function runAudioDeviceSmoke() {
     check(panel()?.querySelector('select')?.hidden && panel().querySelectorAll('.vad-meter').length === 1,
       'input panel replaces the native picker with a device row and shared meter');
     const inputModes = [...panel().querySelectorAll('[data-input-mode]')];
-    check(panel().querySelectorAll('button').length === 4 && inputModes.length === 2 && !panel().querySelector('input'),
-      'panel contains device navigation, input mode choices and settings access without volume controls');
+    const inputVolume = panel().querySelector('[data-volume-direction=input]');
+    check(panel().querySelectorAll('button').length === 4 && inputModes.length === 2
+      && panel().querySelectorAll('input').length === 1 && inputVolume?.value === '125',
+      'input popup adds only the persisted input gain beside existing device and mode controls');
+    check(inputVolume.min === '0' && inputVolume.max === '200' && inputVolume.step === '1'
+      && inputVolume.labels[0]?.textContent.toLowerCase().includes('volume')
+      && document.getElementById(inputVolume.getAttribute('aria-describedby'))?.textContent,
+      'quick volume exposes a labeled native keyboard slider with the shared bounds and hint');
+    const setVolume = (slider, value) => {
+      slider.value = String(value);
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      slider.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    setVolume(inputVolume, 175);
+    check(settings.inputVolume === 175 && settings.outputVolume === 80
+      && JSON.parse(localStorage.getItem('monky_settings')).inputVolume === 175
+      && settingsHost.querySelector('[data-volume-direction=input]').value === '175'
+      && inputVolume.getAttribute('aria-valuetext') === '175%'
+      && inputVolume.style.getPropertyValue('--slider-progress') === '87.5%',
+      'quick input gain applies/persists immediately and synchronizes the settings slider and accessible percentage');
+    setVolume(settingsHost.querySelector('[data-volume-direction=input]'), 90);
+    check(inputVolume.value === '90' && panel().querySelector('[data-volume-value]').textContent === '90%',
+      'settings changes synchronize the already-open quick gain without remounting it');
+    settings.inputVolume = 130;
+    appEvents.emit('settings.updated', { keys: ['inputVolume'] });
+    check(inputVolume.value === '130', 'a preference from another window synchronizes the quick gain');
+    setVolume(inputVolume, -10);
+    check(settings.inputVolume === 0, 'quick microphone gain can reach silence and cannot go below zero');
+    const savedGain = settings.inputVolume;
     check(inputModes[0].getAttribute('aria-pressed') === 'true'
       && inputModes[0].querySelector('.audio-input-mode-check').textContent === 'check',
     'quick input mode reflects the persisted VAD selection');
-    inputModes[1].click();
-    await wait();
-    check(settings.inputMode === 'push_to_talk' && inputModes[1].getAttribute('aria-pressed') === 'true'
-      && JSON.parse(localStorage.getItem('monky_settings')).inputMode === 'push_to_talk',
-    'quick input mode switches to PTT through the shared persisted setting');
-    inputModes[0].click();
-    await wait();
-    check(settings.inputMode === 'voice_activity' && inputModes[0].getAttribute('aria-pressed') === 'true',
-      'quick input mode switches back to voice activity');
+    if (window.api?.capabilities?.globalShortcuts === false) {
+      check(inputModes[1].getAttribute('aria-disabled') === 'true' && settings.inputMode === 'voice_activity',
+        'web quick input gain remains available while desktop-only PTT stays locked');
+    } else {
+      inputModes[1].click();
+      await wait();
+      check(settings.inputMode === 'push_to_talk' && inputModes[1].getAttribute('aria-pressed') === 'true'
+        && JSON.parse(localStorage.getItem('monky_settings')).inputMode === 'push_to_talk',
+      'quick input mode switches to PTT through the shared persisted setting');
+      inputModes[0].click();
+      await wait();
+      check(settings.inputMode === 'voice_activity' && inputModes[0].getAttribute('aria-pressed') === 'true',
+        'quick input mode switches back to voice activity');
+    }
     check(panel().querySelector('option[value="mic-1"]').textContent === '<b>Microphone</b>' && !panel().querySelector('b'),
       'device labels are escaped by DOM options');
     check(panel().getBoundingClientRect().bottom <= inputTrigger.getBoundingClientRect().top, 'panel opens above anchor');
@@ -358,6 +434,9 @@ async function runAudioDeviceSmoke() {
     await wait();
     check(!panel() && inputTrigger.getAttribute('aria-expanded') === 'false', 'Escape closes panel');
     check(document.activeElement === inputTrigger, 'Escape restores trigger focus');
+    inputVolume.value = '55';
+    inputVolume.dispatchEvent(new Event('input', { bubbles: true }));
+    check(settings.inputVolume === savedGain, 'closed popup gain listeners are removed immediately');
     check(captures.every((stream) => stream.getTracks().every((track) => track.readyState === 'ended')), 'preview tracks stopped');
     check(contexts.every((context) => context.state === 'closed'), 'preview contexts closed');
 
@@ -365,6 +444,26 @@ async function runAudioDeviceSmoke() {
     outputTrigger.click();
     await wait();
     check(!panel().querySelector('.vad-meter') && captures.length === captureCount, 'output selector never captures microphone');
+    const outputVolume = panel().querySelector('[data-volume-direction=output]');
+    check(outputVolume?.value === '80' && !panel().querySelector('[data-volume-direction=input]'),
+      'headphone popup offers only the persisted general output gain');
+    setVolume(outputVolume, 240);
+    check(settings.outputVolume === 200 && settings.inputVolume === 0
+      && JSON.parse(localStorage.getItem('monky_settings')).outputVolume === 200
+      && settingsHost.querySelector('[data-volume-direction=output]').value === '200',
+      'quick output gain uses the shared 200% ceiling and does not alter microphone gain');
+    settings.setOutputVolume(45);
+    check(outputVolume.value === '45' && outputVolume.getAttribute('aria-valuetext') === '45%',
+      'live master gain events synchronize the headphone slider');
+    const saveVolume = settings.save;
+    settings.save = () => { throw new Error('Expected volume persistence failure'); };
+    try {
+      outputVolume.dispatchEvent(new Event('change', { bubbles: true }));
+      const error = document.querySelector('.chat-copy-toast[role=alert]:not([data-ui-closing])');
+      check(error?.textContent.includes('volume') && settings.outputVolume === 45,
+        'volume persistence failure uses the shared alert toast and keeps the live adjustment');
+      error.querySelector('.chat-copy-toast-close').click();
+    } finally { settings.save = saveVolume; }
     const output = panel().querySelector('select');
     panel().querySelector('.audio-device-current').click();
     document.querySelector('.audio-device-options:not([data-ui-closing]) [data-device-id="speaker-1"]').click();
@@ -564,6 +663,7 @@ async function runAudioDeviceSmoke() {
     check(frames.size === 0, 'all preview animation callbacks cancelled');
   } finally {
     off();
+    settingsTab.cleanup();
     offSpeaking();
     offExtra();
     offApply();
@@ -587,6 +687,8 @@ async function runAudioDeviceSmoke() {
     settings.selectedSpeakerId = original.speaker;
     settings.noiseSuppressionMode = original.noiseMode;
     settings.inputMode = original.inputMode;
+    settings.inputVolume = original.inputVolume;
+    settings.outputVolume = original.outputVolume;
     voice.currentVoiceChannelId = original.channel;
     voice.isMuted = original.muted;
     voice.serverMuted = original.serverMuted;

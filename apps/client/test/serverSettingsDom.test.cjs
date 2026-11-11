@@ -147,7 +147,7 @@ async function* runRegression(language, sharedModule) {
     import('/views/ServerSettingsModal.ts'), import('/stores/serverStore.ts'),
     import('/core/NetworkClient.ts'), import('/core/EventBus.ts'),
   ]);
-  const { Permission } = await import(sharedModule);
+  const { Permission, PROTOCOL_VERSION } = await import(sharedModule);
   const { CommunityFeed } = await import('/core/CommunityFeed.ts');
   const { sessionManager } = await import('/core/SessionManager.ts');
   let checks = 0;
@@ -240,6 +240,7 @@ async function* runRegression(language, sharedModule) {
     request.done = true;
     const payload = request.payload;
     let result = {};
+    if (type === 'IDENTITY_BANS_GET') result = { bans: [] };
     if (type === 'SERVER_UPDATE_SETTINGS') {
       const s = store.serverDetails;
       for (const key of ['name', 'maxUsers', 'allowSoundboard', 'recentSoundCacheEnabled', 'recentSoundCacheLimit', 'dmRelayEnabled', 'allowEveryoneMention', 'allowMessageEdit', 'showRoleBadgesToEveryone', 'turnEnabled', 'voiceMode', 'messageDeleteUndoSeconds']) {
@@ -270,7 +271,7 @@ async function* runRegression(language, sharedModule) {
       if (payload.eventsEnabled !== undefined) communitySnapshot.settings.eventsEnabled = payload.eventsEnabled;
       if ('bannerBase64' in payload) communitySnapshot.settings.bannerUrl = payload.bannerBase64;
       void community.load();
-    } else if (type === 'MEMBER_KICK') {
+    } else if (type === 'MEMBER_KICK' || type === 'IDENTITY_BAN') {
       store.removeMemberCompletely(payload.targetUserId);
     } else if (type === 'ROLE_UPDATE') {
       const { roleId, ...patch } = payload;
@@ -412,19 +413,31 @@ async function* runRegression(language, sharedModule) {
   tab('members');
   const memberIds = () => [...document.querySelectorAll('#tab-panel-members .member-actions-trigger')].map(button => button.dataset.userId);
   const memberRow = id => field(`#tab-panel-members .member-actions-trigger[data-user-id="${id}"]`)?.closest('tr');
+  const memberMenu = () => field('.floating-context-menu:not([data-ui-closing])');
+  const memberMenuItem = label => [...memberMenu().querySelectorAll('button')].find(button => button.textContent.includes(label));
+  const openMemberMenu = id => field(`.member-actions-trigger[data-user-id="${id}"]`).click();
+  const chooseMemberRole = (id, label) => {
+    openMemberMenu(id);
+    memberMenuItem(t('userMenu.rolesSubmenu')).click();
+    const submenu = field('.floating-context-submenu:not([data-ui-closing])');
+    [...submenu.querySelectorAll('button')].find(button => button.textContent.includes(label)).click();
+  };
   check(memberIds().join() === 'admin,bob,carol', 'Members settings list every human member once, including persisted offline members, in alphabetical order');
   check(memberRow('carol').querySelector('.member-badge-offline')?.textContent === t('roles.offlineBadge'),
     'Offline members use the existing localized badge');
   check(!memberRow('bob').querySelector('.member-badge-offline'), 'Online members are not labelled offline');
-  check(memberRow('admin').querySelector('[data-member-action="kick"]').disabled, 'The owner remains protected');
-  field('.member-actions-trigger[data-user-id="carol"]').click();
-  field('[data-member-action="toggle-role"][data-user-id="carol"][data-role-id="editors"]').click();
+  openMemberMenu('admin');
+  check(memberMenuItem(t('userMenu.kickMember')).disabled, 'The owner remains protected');
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check(document.activeElement === field('.member-actions-trigger[data-user-id="admin"]'),
+    'Escape restores focus to the member action button');
+  chooseMemberRole('carol', 'Editors');
   await flush();
   check(pendingRequest('ROLE_ASSIGN').payload.userId === 'carol', 'Offline members can be assigned roles from their action menu');
   acknowledge('ROLE_ASSIGN');
   await flush();
   check(memberRow('carol').querySelector('.member-role-tag')?.textContent === 'Editors', 'Offline role changes refresh without reopening settings');
-  field('[data-member-action="toggle-role"][data-user-id="carol"][data-role-id="editors"]').click();
+  chooseMemberRole('carol', 'Editors');
   await flush();
   acknowledge('ROLE_UNASSIGN');
   await flush();
@@ -442,7 +455,37 @@ async function* runRegression(language, sharedModule) {
   check(memberRow('carol').querySelector('.member-badge-offline'), 'Invisible presence remains masked as offline in settings');
   store.removeMember('carol');
   await flush();
-  field('[data-member-action="kick"][data-user-id="carol"]').click();
+  const kicksBeforeConfirmation = requests.filter(request => request.type === 'MEMBER_KICK').length;
+  openMemberMenu('carol');
+  memberMenuItem(t('userMenu.kickMember')).click();
+  await flush();
+  let kickDialog = field('.dialog-card:not([data-ui-closing])');
+  check(kickDialog && kickDialog.textContent.includes(t('roles.confirmKickMember', { name: 'carol' }))
+    && document.activeElement === kickDialog.querySelector('[data-action="cancel"]')
+    && requests.filter(request => request.type === 'MEMBER_KICK').length === kicksBeforeConfirmation,
+    'Removing membership explains the consequences, focuses Cancel and sends nothing before consent');
+  kickDialog.querySelector('[data-action="cancel"]').click();
+  await flush();
+  check(!locked() && memberIds().includes('carol')
+    && requests.filter(request => request.type === 'MEMBER_KICK').length === kicksBeforeConfirmation,
+    'Cancelling membership removal preserves the member and sends no request');
+  openMemberMenu('carol');
+  memberMenuItem(t('userMenu.kickMember')).click();
+  await flush();
+  kickDialog = field('.dialog-card:not([data-ui-closing])');
+  store.myPermissions = Permission.MANAGE_ROLES;
+  appEvents.emit('server.updated');
+  check(!field('.dialog-card:not([data-ui-closing])'), 'Revoking removal permission immediately cancels the confirmation');
+  await flush();
+  check(!locked() && requests.filter(request => request.type === 'MEMBER_KICK').length === kicksBeforeConfirmation,
+    'A revoked confirmation cannot send a late membership removal');
+  store.myPermissions = 0xFFFFFFFF;
+  appEvents.emit('server.updated');
+  await flush();
+  openMemberMenu('carol');
+  memberMenuItem(t('userMenu.kickMember')).click();
+  await flush();
+  field('.dialog-card:not([data-ui-closing]) [data-action="confirm"]').click();
   await flush();
   check(pendingRequest('MEMBER_KICK').payload.targetUserId === 'carol', 'Offline membership can still be removed');
   acknowledge('MEMBER_KICK');
@@ -466,6 +509,22 @@ async function* runRegression(language, sharedModule) {
   await flush();
   check(document.activeElement === search() && search().value === 'BÓB' && shownIds().join() === 'bob',
     'Refreshing the member rows keeps the search text, its focus and the filter');
+  const bobTrigger = field('.member-actions-trigger[data-user-id="bob"]');
+  openMemberMenu('bob');
+  const visibleMemberMenu = memberMenu();
+  const kickButton = memberMenuItem(t('userMenu.kickMember'));
+  const menuRect = visibleMemberMenu.getBoundingClientRect();
+  const kickRect = kickButton.getBoundingClientRect();
+  const hit = document.elementFromPoint(kickRect.left + kickRect.width / 2, kickRect.top + kickRect.height / 2);
+  check(shownIds().length === 1 && visibleMemberMenu.parentElement === document.body
+    && menuRect.left >= 0 && menuRect.right <= innerWidth && menuRect.top >= 0 && menuRect.bottom <= innerHeight
+    && (hit === kickButton || kickButton.contains(hit)),
+    'With exactly one visible member, the floating actions remain on screen and actually clickable outside the table clipping');
+  check(bobTrigger.getAttribute('aria-expanded') === 'true' && visibleMemberMenu.contains(document.activeElement),
+    'Opening the member menu exposes its state and focuses an action');
+  bobTrigger.closest('.settings-table-wrap').dispatchEvent(new Event('scroll'));
+  check(!memberMenu() && bobTrigger.getAttribute('aria-expanded') === 'false',
+    'Scrolling the table closes its floating member menu');
   const bobTags = [...memberRow('bob').querySelectorAll('.member-role-tag')].map(tag => tag.textContent);
   const more = memberRow('bob').querySelector('.member-role-more');
   check(bobTags.join() === 'Mods,VIP' && more?.textContent === '+2' && more.dataset.tooltip === 'DJs\nEditors'
@@ -477,6 +536,92 @@ async function* runRegression(language, sharedModule) {
     && field('#server-members-search-clear').hidden && field('[data-server-members-count]').hidden && mainBackdrop(),
     'Escape clears a typed search before it may close the settings');
   store.updateRoles(rolesBeforeSearch, []);
+  await flush();
+  const memberPermissions = store.myPermissions;
+  const memberProtocol = store.serverDetails.protocol;
+  store.myPermissions = Permission.MANAGE_SERVER;
+  appEvents.emit('server.updated');
+  store.addMember({ ...member('bob'), nickname: 'Bob refreshed' });
+  await flush();
+  check(memberRow('bob').textContent.includes('Bob refreshed'),
+    'Member updates still refresh for a server manager who cannot edit roles');
+  check(field('[data-tab="members"]').hidden && memberRow('bob').querySelector('button').matches(':disabled'),
+    'A legacy server does not offer identity bans or enable a member menu without any permitted actions');
+  store.serverDetails.protocol = { ...memberProtocol, version: PROTOCOL_VERSION,
+    features: [...memberProtocol.features, 'identity-bans'] };
+  appEvents.emit('server.updated');
+  await flush();
+  check(!field('[data-tab="members"]').hidden
+    && !field('#tab-panel-members fieldset').disabled
+    && !memberRow('bob').querySelector('button').matches(':disabled')
+    && memberRow('admin').querySelector('button').matches(':disabled'),
+    'Identity moderation alone enables Members and the target menu, but protects owner and self');
+  tab('members');
+  check(!field('#tab-panel-members #btn-identity-bans').hidden
+    && !document.querySelector('#tab-panel-roles #btn-identity-bans'),
+    'Ban management belongs to Members, never Roles, and requires only server management');
+  const listsBefore = requests.filter(request => request.type === 'IDENTITY_BANS_GET').length;
+  field('#btn-identity-bans').click();
+  await flush();
+  check(document.querySelectorAll('.identity-bans-card').length === 1
+    && requests.filter(request => request.type === 'IDENTITY_BANS_GET').length === listsBefore + 1,
+    'Refreshed Members opens exactly one ban list without duplicating its listener');
+  acknowledge('IDENTITY_BANS_GET');
+  await flush();
+  field('.identity-bans-card').querySelector('[data-modal-close]').click();
+  await flush();
+  openMemberMenu('bob');
+  check(memberMenu().querySelectorAll('button').length === 1 && memberMenuItem(t('identity.banAction'))
+    && !memberMenuItem(t('userMenu.kickMember')) && !memberMenuItem(t('userMenu.rolesSubmenu')),
+    'A manager without role or kick permission is offered only identity ban');
+  const bansBeforeConfirmation = requests.filter(request => request.type === 'IDENTITY_BAN').length;
+  memberMenuItem(t('identity.banAction')).click();
+  await flush();
+  let banForm = field('[data-ban-form]');
+  check(banForm && document.activeElement === field('#identity-ban-reason')
+    && !field('#identity-ban-show').checked
+    && requests.filter(request => request.type === 'IDENTITY_BAN').length === bansBeforeConfirmation,
+    'The member action opens the shared ban dialog with a private reason and sends nothing before submission');
+  store.addMember({ ...member('bob'), nickname: 'Bob refreshed again' });
+  await flush();
+  check(field('[data-ban-form]') === banForm,
+    'A permitted ban dialog survives member refresh even without role-management permission');
+  banForm.querySelector('[data-modal-close]').click();
+  await flush();
+  check(!field('[data-ban-form]') && memberIds().includes('bob')
+    && requests.filter(request => request.type === 'IDENTITY_BAN').length === bansBeforeConfirmation,
+    'Cancelling the shared member ban leaves the identity and requests untouched');
+  openMemberMenu('bob');
+  memberMenuItem(t('identity.banAction')).click();
+  await flush();
+  store.serverDetails.protocol = memberProtocol;
+  appEvents.emit('server.updated');
+  check(!field('[data-ban-form]') && field('[data-tab="members"]').hidden && field('#btn-identity-bans').hidden,
+    'Losing ban support immediately revokes its dialog and the manager-only Members tab');
+  await flush();
+  store.serverDetails.protocol = { ...memberProtocol, version: PROTOCOL_VERSION,
+    features: [...memberProtocol.features, 'identity-bans'] };
+  appEvents.emit('server.updated');
+  await flush();
+  tab('members');
+  openMemberMenu('bob');
+  memberMenuItem(t('identity.banAction')).click();
+  await flush();
+  banForm = field('[data-ban-form]');
+  field('#identity-ban-reason').value = '  Membership regression  ';
+  banForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await flush();
+  const banRequest = pendingRequest('IDENTITY_BAN').payload;
+  check(banRequest.targetUserId === 'bob' && banRequest.reason === 'Membership regression'
+    && banRequest.showReason === false && banRequest.durationSeconds === null,
+    'The shared member ban sends the selected identity and the explicit private permanent-ban payload');
+  acknowledge('IDENTITY_BAN');
+  await flush();
+  check(!memberIds().includes('bob') && !field('[data-ban-form]'),
+    'Acknowledged identity moderation removes the member and closes its dialog');
+  store.serverDetails.protocol = memberProtocol;
+  store.myPermissions = memberPermissions;
+  store.addMember(member('bob'));
   await flush();
   store.removeMemberCompletely('helper');
   tab('general');

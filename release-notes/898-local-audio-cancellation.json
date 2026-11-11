@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Sair da chamada durante a reprodução local de áudio por um bot preserva o cancelamento, mesmo quando a conexão de mídia fecha antes da confirmação do servidor.",
+  "en": "Leaving a call during a bot's local audio playback preserves cancellation even when the media connection closes before the server confirmation."
+}

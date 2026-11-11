@@ -26,9 +26,9 @@ export async function terminateOwnedTree(pid) {
   }
 }
 
-export function startOwnedProcess(command, args, { cwd, env, runId, label, onMessage = () => {}, onFailure = () => {}, timeoutMs = 60_000, windowsHide = true }) {
+export function startOwnedProcess(command, args, { cwd, env, runId, label, onMessage = () => {}, onFailure = () => {}, timeoutMs = 60_000, windowsHide = true, allowNormalExit = false }) {
   const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide });
-  let output = '', exited = false, stopping = false, startupTimeout;
+  let output = '', exited = false, stopping = false, becameReady = false, startupTimeout;
   let resolveReady, rejectReady, resolveClosed;
   const requests = new Map();
   const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
@@ -52,7 +52,9 @@ export function startOwnedProcess(command, args, { cwd, env, runId, label, onMes
     for (const request of requests.values()) { clearTimeout(request.timer); request.reject(new Error(`${label} closed.`)); }
     requests.clear();
     resolveClosed({ code, signal });
-    if (!stopping) fail(new Error(`${label} exited unexpectedly (${code ?? signal}).\n${output}`));
+    if (!stopping && !(allowNormalExit && becameReady && code === 0)) {
+      fail(new Error(`${label} exited unexpectedly (${code ?? signal}).\n${output}`));
+    }
   });
   child.on('message', message => {
     if (!message || typeof message !== 'object') return;
@@ -63,6 +65,7 @@ export function startOwnedProcess(command, args, { cwd, env, runId, label, onMes
     }
     if (message.type === 'qa-service-ready' || (message.type === 'qa-report' && message.report?.phase === 'ready')) {
       clearTimeout(timeout);
+      becameReady = true;
       resolveReady(message.value ?? message.report);
     }
     if (message.type === 'qa-report' && message.report?.phase === 'failed') {

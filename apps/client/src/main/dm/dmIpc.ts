@@ -12,10 +12,10 @@ import {
   type DmFailure,
   type DmResult,
 } from '@monky/shared';
-import { createDmKeyring } from '../identityService';
+import { createDmKeyring, isGuestIdentity } from '../identityService';
 import { isRecord } from '../ipc/guards';
 import type { IpcRegistry } from '../ipc/registry';
-import { DmService, dmResult, type DmExportData } from '@monky/dm';
+import { DmService, MemoryDmFileStore, dmResult, type DmExportData } from '@monky/dm';
 import { nodeDmFileStore, writeDmAttachmentFile } from './nodeDmBackend';
 
 let service: DmService | null = null;
@@ -41,7 +41,7 @@ function currentService(): DmService | null {
   try {
     service = new DmService({
       keyring,
-      store: nodeDmFileStore(path.join(dmRoot(), folder)),
+      store: isGuestIdentity() ? new MemoryDmFileStore() : nodeDmFileStore(path.join(dmRoot(), folder)),
       onEvent: (event) => eventSink?.(event),
     });
   } catch (error) {

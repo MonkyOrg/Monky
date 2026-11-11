@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_PERMISSIONS, MessageType, NATIVE_POLL_VOTER_PREVIEW_LIMIT, PROTOCOL_VERSION, Permission, ProtocolErrorCode, createProtocolOffer, eventTimeInZone, eventOccurrenceStart, eventSaveSchema, eventInterestedListResultSchema, eventResultSchema, type EventSave, type LogEntry, type NativePollEdit } from '@monky/shared';
+import { DEFAULT_PERMISSIONS, EVENT_HISTORY_PAGE_SIZE, MessageType, NATIVE_POLL_VOTER_PREVIEW_LIMIT, PROTOCOL_VERSION, Permission, ProtocolErrorCode, createProtocolOffer, eventTimeInZone, eventOccurrenceStart, eventSaveSchema, eventHistoryResultSchema, eventInterestedListResultSchema, eventResultSchema, type EventHistoryCursor, type EventSave, type LogEntry, type NativePollEdit } from '@monky/shared';
 import { CommunityService, CommunityError } from './application/services/CommunityService';
 import { Logger } from './infrastructure/logger/Logger';
 import { BotSelectorService } from './application/services/BotSelectorService';
@@ -220,6 +220,96 @@ test('event links resolve historical entries outside snapshots and reject delete
   await f.member.peer.error(MessageType.EVENT_GET, { id: event.id }, ProtocolErrorCode.PERMISSION_DENIED);
 });
 
+test('event history reads all 500 entries in bounded cursor pages, including ties, without per-event queries', async t => {
+  const f = await setup(t);
+  const base = await f.service.saveEvent(f.owner.id, f.draft, f.now);
+  f.repository.deleteEvent(base.id);
+  for (let index = 0; index < 500; index++) {
+    f.repository.saveEvent({
+      ...base, id: `history-${String(index).padStart(3, '0')}`, status: index % 2 ? 'cancelled' : 'ended',
+      startsAt: f.now - Math.floor(index / 3), endedAt: f.now,
+    });
+  }
+  f.repository.setInterest('history-000', f.member.id, true);
+  const limits: number[] = [];
+  const query = f.repository.eventHistory.bind(f.repository);
+  t.mock.method(f.repository, 'eventHistory', (after: EventHistoryCursor | undefined, limit: number) => {
+    limits.push(limit);
+    return query(after, limit);
+  });
+  const interestRead = t.mock.method(f.repository, 'interest', () => { throw new Error('History must batch interest reads'); });
+  const ids: string[] = [];
+  let after: EventHistoryCursor | null = null;
+  do {
+    const page = eventHistoryResultSchema.parse(await f.service.eventHistory(f.member.id, {
+      ...(after ? { after } : {}), limit: EVENT_HISTORY_PAGE_SIZE,
+    }));
+    assert.equal(page.events.length, EVENT_HISTORY_PAGE_SIZE);
+    if (!ids.length) {
+      assert.equal(page.events[0].interested, true);
+      assert.equal(page.events[0].interestedCount, 1);
+    }
+    ids.push(...page.events.map(event => event.id));
+    after = page.nextCursor;
+  } while (after);
+  assert.equal(ids.length, 500);
+  assert.equal(new Set(ids).size, 500);
+  assert.deepEqual(ids, Array.from({ length: 500 }, (_, index) => `history-${String(index).padStart(3, '0')}`));
+  assert.equal(limits.length, 25);
+  assert.ok(limits.every(limit => limit === EVENT_HISTORY_PAGE_SIZE + 1));
+  const wirePage = eventHistoryResultSchema.parse((await f.member.peer.request(MessageType.EVENT_HISTORY_GET, {})).payload);
+  assert.equal(wirePage.events.length, EVENT_HISTORY_PAGE_SIZE);
+  assert.equal(wirePage.nextCursor?.id, 'history-019');
+  interestRead.mock.restore();
+  assert.equal((await f.service.snapshot(f.member.id)).events.length, 0);
+  assert.equal((await f.service.snapshot(f.member.id, true)).events.length, 200, 'Legacy snapshots keep their established cap');
+});
+
+test('history pages filter private audiences before pagination and revalidate only requested ids', async t => {
+  const f = await setup(t);
+  const base = await f.service.saveEvent(f.owner.id, f.draft, f.now);
+  f.repository.deleteEvent(base.id);
+  for (let index = 0; index < 30; index++) {
+    f.repository.saveEvent({
+      ...base, id: `hidden-${index}`, status: 'ended', startsAt: f.now + index,
+      audience: { visibility: 'private', userIds: [f.owner.id], roleIds: [] },
+    });
+  }
+  for (let index = 0; index < 3; index++) {
+    f.repository.saveEvent({ ...base, id: `visible-${index}`, status: 'ended', startsAt: f.now - index });
+  }
+  const first = await f.service.eventHistory(f.member.id, { limit: 2 });
+  assert.deepEqual(first.events.map(event => event.id), ['visible-0', 'visible-1']);
+  assert.deepEqual(first.nextCursor, { startsAt: f.now - 1, id: 'visible-1' });
+  const second = await f.service.eventHistory(f.member.id, { limit: 2, after: first.nextCursor! });
+  assert.deepEqual(second.events.map(event => event.id), ['visible-2']);
+  assert.equal(second.nextCursor, null);
+  f.repository.deleteEvent('visible-0');
+  const visible = f.repository.event('visible-1')!;
+  f.repository.saveEvent({ ...visible, audience: { visibility: 'private', userIds: [f.owner.id], roleIds: [] } });
+  const refreshed = await f.service.eventHistory(f.member.id, { ids: ['visible-0', 'visible-1', 'visible-2', 'hidden-0'] });
+  assert.deepEqual(refreshed.events.map(event => event.id), ['visible-2']);
+  assert.equal(refreshed.nextCursor, null);
+  await f.member.peer.error(MessageType.EVENT_HISTORY_GET, { limit: 21 }, ProtocolErrorCode.COMMUNITY_INVALID);
+  await f.member.peer.error(MessageType.EVENT_HISTORY_GET, { ids: Array(21).fill('visible-2') }, ProtocolErrorCode.COMMUNITY_INVALID);
+  await f.member.peer.error(MessageType.EVENT_HISTORY_GET, { ids: ['visible-2'], after: first.nextCursor }, ProtocolErrorCode.COMMUNITY_INVALID);
+  await f.service.updateSettings(f.owner.id, { eventsEnabled: false });
+  await f.member.peer.error(MessageType.EVENT_HISTORY_GET, {}, ProtocolErrorCode.PERMISSION_DENIED);
+});
+
+test('progressive event history is human-only and requires the negotiated feature', async t => {
+  const f = await setup(t);
+  const account = await f.owner.peer.request(MessageType.BOT_CREATE);
+  const bot = await f.bot(text(account.payload.token));
+  await bot.peer.error(MessageType.EVENT_HISTORY_GET, {}, ProtocolErrorCode.PERMISSION_DENIED);
+  const legacy = await f.human('Legacy history viewer', undefined, undefined, false, PROTOCOL_VERSION, {
+    ...createProtocolOffer('client'), features: createProtocolOffer('client').features.filter(feature => feature !== 'event-history-cursor'),
+  });
+  await legacy.peer.error(MessageType.EVENT_HISTORY_GET, {}, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  const snapshot = await legacy.peer.request(MessageType.COMMUNITY_GET, { includeEnded: true });
+  assert.ok(Array.isArray(snapshot.payload.events));
+});
+
 test('event reads never disclose details or interested members when access changes during the lookup', async t => {
   const f = await setup(t);
   const event = await f.service.saveEvent(f.owner.id, f.draft, f.now);
@@ -241,6 +331,9 @@ test('event reads never disclose details or interested members when access chang
     changed = false;
     await f.member.peer.error(type, { id: event.id }, ProtocolErrorCode.PERMISSION_DENIED);
   }
+  changed = false;
+  f.repository.saveEvent({ ...event, status: 'ended' });
+  await f.member.peer.error(MessageType.EVENT_HISTORY_GET, {}, ProtocolErrorCode.PERMISSION_DENIED);
 });
 
 test('calendar recurrence preserves local time, handles DST gaps and clamps monthly dates without drifting', () => {

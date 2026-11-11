@@ -58,15 +58,17 @@ function fixture(ownOtherDevices: string[] = []) {
     async setOutputDeviceIds(voice, screen) { log.push(`output ${voice} ${screen}`); },
   };
   const vads = new Map<string, () => AudioLevelReceiver | null | undefined>();
+  const hiddenCameras = new Set<string>();
   const activity: RemoteVoiceActivity = {
     setupRemoteReceiverVad(peer, receiver) { vads.set(peer, receiver); log.push(`vad ${peer}`); },
     cleanupRemoteVad(peer) { vads.delete(peer); log.push(`vadCleanup ${peer}`); },
     cleanupAll() { vads.clear(); log.push('vadCleanupAll'); },
   };
   const sink = new RemoteMediaSink(() => participants, playback, activity,
-    peer => ownOtherDevices.includes(peer), async deviceId => { log.push(`screens ${deviceId}`); });
+    peer => ownOtherDevices.includes(peer), async deviceId => { log.push(`screens ${deviceId}`); },
+    peer => !hiddenCameras.has(peer));
   const camera = (peer = 'peer') => participants.get(peer)?.remoteStream;
-  return { sink, participants, played, log, vads, camera };
+  return { sink, participants, played, log, vads, camera, hiddenCameras };
 }
 
 /** What a view, the speakers and the voice activity see of a call's remote media. */
@@ -150,6 +152,55 @@ test('a camera keeps its stream for its track, gets a new one for a new track an
   assert.equal(f.camera(), secondStream, 'the stream stays, so the stage keeps its element');
   assert.deepEqual(secondStream?.getTracks(), []);
   assert.equal(second.readyState, 'ended');
+});
+
+test('stopping a camera detaches only its received video and watching restores the same live track', () => {
+  const f = fixture();
+  const camera = track('camera', 'video'), other = track('other', 'video'), mic = track('mic', 'audio');
+  f.sink.trackArrived({ peerSessionId: 'peer', kind: 'camera', track: camera });
+  f.sink.trackArrived({ peerSessionId: 'own-phone', kind: 'camera', track: other });
+  f.sink.trackArrived({ peerSessionId: 'peer', kind: 'mic', track: mic });
+  const stream = f.camera();
+  assert.equal(camera.enabled, true, 'Cameras are watched by default');
+  f.hiddenCameras.add('peer');
+  f.sink.syncCameraWatching('peer');
+  assert.equal(camera.enabled, false);
+  assert.equal(camera.readyState, 'live', 'Stopping reception must remain reversible');
+  assert.deepEqual(stream?.getTracks(), []);
+  assert.equal(other.enabled, true);
+  assert.equal(mic.enabled, true);
+  assert.deepEqual(f.played.at(-1)?.stream.getTracks(), [mic]);
+  f.sink.trackUnmuted('peer', 'camera', camera);
+  assert.deepEqual(stream?.getTracks(), [], 'A delayed unmute cannot resume a stopped camera');
+  f.hiddenCameras.delete('peer');
+  f.sink.syncCameraWatching('peer');
+  assert.equal(f.camera(), stream);
+  assert.deepEqual(stream?.getTracks(), [camera]);
+  assert.equal(camera.enabled, true);
+  f.sink.closeAll();
+});
+
+test('P2P replacements and new SFU consumers respect camera intent before exposing any track', () => {
+  for (const transport of ['p2p', 'sfu']) {
+    const f = fixture();
+    f.hiddenCameras.add('peer');
+    const first = track(`${transport}-first`, 'video'), replacement = track(`${transport}-new`, 'video');
+    f.sink.trackArrived({ peerSessionId: 'peer', kind: 'camera', track: first });
+    assert.equal(first.enabled, false);
+    assert.deepEqual(f.camera()?.getTracks(), []);
+    f.sink.trackArrived({ peerSessionId: 'peer', kind: 'camera', track: replacement });
+    f.sink.trackUnmuted('peer', 'camera', replacement);
+    f.sink.trackEnded('peer', 'camera', first);
+    assert.equal(replacement.enabled, false);
+    assert.deepEqual(f.camera()?.getTracks(), []);
+    f.hiddenCameras.delete('peer');
+    f.sink.syncCameraWatching('peer');
+    assert.deepEqual(f.camera()?.getTracks(), [replacement]);
+    f.sink.trackEnded('peer', 'camera', replacement);
+    f.sink.syncCameraWatching('peer');
+    assert.deepEqual(f.camera()?.getTracks(), [], 'Watching cannot revive an ended track');
+    f.sink.closeAll();
+  }
 });
 
 test('leaving releases the person, closing releases everyone, and one call sets every output device', async () => {

@@ -58,6 +58,7 @@ export class RemoteMediaSink {
     private readonly isOwnOtherDevice: (peerSessionId: string) => boolean,
     /** Output of the screens' audio, played by the native screen owner. */
     private readonly setScreenOutput: (deviceId: string) => Promise<void>,
+    private readonly isCameraWatched: (peerSessionId: string) => boolean,
   ) {}
 
   public trackArrived({ peerSessionId, kind, track, receiver }: RemoteTrack): void {
@@ -70,7 +71,7 @@ export class RemoteMediaSink {
     const media = current?.track === track ? current : { track, stream: new MediaStream([track]) };
     delivered.set(peerSessionId, media);
     if (kind === 'camera') {
-      this.participants().setRemoteStream(peerSessionId, media.stream);
+      this.syncCameraWatching(peerSessionId);
       return;
     }
     this.router.ensureVoiceAudioElement(peerSessionId, media.stream);
@@ -82,7 +83,19 @@ export class RemoteMediaSink {
     const media = (kind === 'mic' ? this.microphones : this.cameras).get(peerSessionId);
     if (media?.track !== track) return;
     if (kind === 'mic') this.router.ensureVoiceAudioElement(peerSessionId, media.stream);
-    else this.participants().setRemoteStream(peerSessionId, media.stream);
+    else this.syncCameraWatching(peerSessionId);
+  }
+
+  public syncCameraWatching(peerSessionId: string): void {
+    const media = this.cameras.get(peerSessionId);
+    if (!media) return;
+    const watching = this.isCameraWatched(peerSessionId);
+    media.track.enabled = watching;
+    if (!watching) media.stream.removeTrack(media.track);
+    else if (media.track.readyState === 'live' && !media.stream.getTracks().includes(media.track)) {
+      media.stream.addTrack(media.track);
+    }
+    this.participants().setRemoteStream(peerSessionId, media.stream);
   }
 
   /**

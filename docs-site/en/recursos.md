@@ -38,6 +38,12 @@ Administrators can create public/private channels, configure roles, moderate
 members, control features and inspect metrics and protected logs. Member
 limits count registrations, not just online people.
 
+In event lists, details and previews, HTTP/HTTPS links in the location open
+in the browser; physical locations remain plain text. With **Show ended events**
+enabled, updated clients and servers load history in pages of 20 as you scroll,
+with skeletons while fetching and a keyboard-accessible **Load more** button.
+Older servers keep the previous list, capped at 200 events.
+
 Start with [Create in the app](/en/criar-seu-servidor). For continuous
 operation, use the [CLI](/en/cli) and [VPS guide](/en/hospedar-em-vps).
 

@@ -35,6 +35,7 @@ test('QA scenarios validate explicit production, fixture and unprepared paths', 
   assert.equal(parseQaArguments(['empty-forum']).scenario, 'empty-forum');
   assert.equal(parseQaArguments([]).realMedia, false);
   assert.equal(parseQaArguments(['connected', '--real-media']).realMedia, true);
+  assert.equal(parseQaArguments(['connected', '--two-clients']).twoClients, true);
   assert.equal(parseQaArguments(['voice']).bot, 'sdk-fixture');
   assert.equal(parseQaArguments(['voice-receive']).bot, 'sdk-fixture');
   assert.equal(parseQaArguments(['tool-consent', '--bot=fixture']).bot, 'sdk-fixture');
@@ -48,10 +49,12 @@ test('QA scenarios validate explicit production, fixture and unprepared paths', 
     ['--bot=fixture', `--bot-root=${repoRoot}`],
     ['voice-receive', `--bot-root=${repoRoot}`],
     ['--smoke', '--real-media'], ['--real-media', '--smoke'],
+    ['voice', '--two-clients'], ['home', '--two-clients'],
   ]) assert.throws(() => parseQaArguments(args), Error, args.join(' '));
   const valid = baseConfig();
   assert.equal(shared.developmentQaConfigSchema.safeParse(valid).success, true);
   assert.equal(shared.developmentQaConfigSchema.safeParse({ ...valid, smoke: false, realMedia: true }).success, true);
+  assert.equal(shared.developmentQaConfigSchema.safeParse({ ...valid, role: 'member' }).success, true);
   for (const config of [
     { ...valid, server: { ...valid.server, host: '0.0.0.0' } },
     { ...valid, server: { ...valid.server, password: 'short' } },
@@ -64,6 +67,8 @@ test('QA scenarios validate explicit production, fixture and unprepared paths', 
     { ...valid, bot: { kind: 'sdk-fixture', manifestUrl: 'http://127.0.0.1:54322/manifest?token=secret' } },
     { ...valid, token: 'must-not-be-accepted' },
     { ...valid, realMedia: true },
+    { ...valid, role: 'administrator' },
+    { ...valid, role: 'member', scenario: 'server-settings' },
   ]) assert.equal(shared.developmentQaConfigSchema.safeParse(config).success, false);
 });
 
@@ -74,9 +79,9 @@ test('physical media is opt-in, keeps normal permissions and is forbidden in smo
   const configure = config => { switches.length = 0; configureDevelopmentQaMedia(commandLine, config); return [...switches]; };
   assert.deepEqual(configure(null), []);
   assert.deepEqual(configure({ ...baseConfig(), smoke: false }),
-    ['use-fake-device-for-media-stream', 'use-fake-ui-for-media-stream']);
+    ['use-fake-device-for-media-stream']);
   assert.deepEqual(configure(baseConfig()),
-    ['use-fake-device-for-media-stream', 'use-fake-ui-for-media-stream', 'mute-audio']);
+    ['use-fake-device-for-media-stream', 'mute-audio']);
   assert.deepEqual(configure({ ...baseConfig(), smoke: false, realMedia: true }), []);
   assert.throws(() => configure({ ...baseConfig(), realMedia: true }), /unattended/);
   assert.deepEqual(switches, []);
@@ -221,11 +226,34 @@ test('owned process readiness requires the actual event and responsive IPC', asy
   assert.equal(alive(child.child.pid), false);
 });
 
+test('a ready QA client may close normally without ending its independently supervised peer', async () => {
+  const failures = [];
+  const runId = randomUUID();
+  const children = [true, false].map(allowNormalExit => startOwnedProcess(process.execPath, [processes, 'ready', runId], {
+    cwd: repoRoot, env: isolatedEnvironment(repoRoot), runId, label: 'normal-close-test',
+    allowNormalExit, onFailure: error => failures.push(error), timeoutMs: 1000,
+  }));
+  try {
+    await Promise.all(children.map(child => child.ready));
+    await children[0].call('qa-close');
+    assert.equal((await children[0].closed).code, 0);
+    assert.equal(failures.length, 0);
+    assert.deepEqual(await children[1].call('qa-ping'), { alive: true });
+    await children[1].call('qa-close');
+    await children[1].closed;
+    assert.equal(failures.length, 1);
+    assert.match(failures[0].message, /exited unexpectedly/);
+  } finally { for (const child of children) await child.stop(); }
+});
+
 test('missing readiness and premature exit fail without leaving a child', async () => {
-  for (const mode of ['no-ready', 'exit']) {
+  for (const mode of ['no-ready', 'exit', 'clean-exit']) {
     const runId = randomUUID();
-    const child = startOwnedProcess(process.execPath, [processes, mode, runId], { cwd: repoRoot, env: isolatedEnvironment(repoRoot), runId, label: mode, timeoutMs: 250 });
-    await assert.rejects(child.ready, mode === 'exit' ? /exited unexpectedly \(23\)/ : /readiness timed out/);
+    const child = startOwnedProcess(process.execPath, [processes, mode, runId], {
+      cwd: repoRoot, env: isolatedEnvironment(repoRoot), runId, label: mode,
+      timeoutMs: mode === 'no-ready' ? 250 : 5000, allowNormalExit: true,
+    });
+    await assert.rejects(child.ready, mode === 'no-ready' ? /readiness timed out/ : /exited unexpectedly/);
     if (mode === 'exit') await assert.rejects(child.stop(), /exited with 23/);
     else await child.stop();
     assert.equal(alive(child.child.pid), false);
@@ -311,9 +339,10 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
           paths.add(state.root);
           const unauthenticated = ['home', 'login'].includes(state.scenario);
           assert.equal(state.ready.connected, !unauthenticated);
-          assert.equal(state.stats.members, unauthenticated ? 0 : state.scenario === 'connected' ? 101 : 1);
+          assert.equal(state.stats.members, unauthenticated ? 0 : state.scenario === 'connected' ? 100 + state.clients.length : 1);
           assert.equal(state.stats.messages, unauthenticated ? 0 : 1);
           if (state.ready.userId) { assert.equal(ids.has(state.ready.userId), false); ids.add(state.ready.userId); }
+          assert.equal(state.clients.length, 1);
           if (state.scenario === 'bot-install') {
             assert.equal(state.ready.botId, undefined);
             assert.equal(state.ready.botPermissions, undefined);
@@ -338,17 +367,57 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
       assert.equal(result, observed);
       assert.ok(result.pids.every(pid => !alive(pid)));
       await assert.rejects(fs.access(result.root), /ENOENT/);
+      for (const client of result.clients) await assert.rejects(fs.access(client.root), /ENOENT/);
+    });
+  }
+});
+
+test('two-client QA prepares distinct real owner/member profiles and the same installed bot', { timeout: 90_000 }, async t => {
+  for (const botArgs of [[], ['--bot=fixture']]) {
+    await t.test(botArgs.length ? 'with installed bot' : 'without bot', async () => {
+      const result = await runQa(parseQaArguments(['connected', '--two-clients', '--smoke', ...botArgs]), {
+        async onReady(state) {
+          assert.equal(state.clients.length, 2);
+          assert.equal(state.windowVisible, false);
+          assert.ok(state.pids.every(alive));
+          assert.equal(state.stats.onlineUsers, 2);
+          assert.equal(state.stats.members, 102);
+          assert.equal(state.stats.messages, 1);
+          const [owner, member] = state.clients;
+          assert.equal(owner.root, state.root);
+          assert.notEqual(member.runId, owner.runId);
+          assert.notEqual(member.root, owner.root);
+          assert.notEqual(member.profile, owner.profile);
+          assert.notEqual(member.pid, owner.pid);
+          assert.equal(member.ready.connected, true);
+          assert.equal(member.ready.serverId, owner.ready.serverId);
+          assert.notEqual(member.ready.userId, owner.ready.userId);
+          assert.equal(member.ready.botPermissions, undefined);
+          assert.equal(member.ready.botId, owner.ready.botId);
+          assert.equal(member.ready.commandCount, owner.ready.commandCount);
+          for (const client of state.clients) {
+            assert.ok(client.root.startsWith(path.join(repoRoot, '.qa', 'runs') + path.sep));
+            assert.equal((await fs.stat(path.join(client.profile, 'identity.json'))).isFile(), true);
+          }
+          const envelope = JSON.parse(await fs.readFile(path.join(member.root, 'launch.json'), 'utf8'));
+          assert.equal(envelope.config.role, 'member');
+          assert.equal(envelope.ownerPid, process.pid);
+          if (botArgs.length) assert.equal(owner.ready.botPermissions.reviewedBy, owner.ready.userId);
+        },
+      });
+      assert.ok(result.pids.every(pid => !alive(pid)));
+      for (const client of result.clients) await assert.rejects(fs.access(client.root), /ENOENT/);
     });
   }
 });
 
 test('failure after actual readiness cleans every real child and its private run directory', { timeout: 60_000 }, async () => {
   let observed;
-  await assert.rejects(runQa(parseQaArguments(['connected', '--bot=fixture', '--smoke']), {
+  await assert.rejects(runQa(parseQaArguments(['connected', '--two-clients', '--bot=fixture', '--smoke']), {
     onReady(state) { observed = state; throw new Error('deliberate post-ready failure'); },
   }), /deliberate post-ready failure/);
   assert.ok(observed.pids.every(pid => !alive(pid)));
-  await assert.rejects(fs.access(observed.root), /ENOENT/);
+  for (const client of observed.clients) await assert.rejects(fs.access(client.root), /ENOENT/);
 });
 
 test('empty forum QA has no threads or messages and exactly 20 members and 10 roles', { timeout: 60_000 }, async () => {

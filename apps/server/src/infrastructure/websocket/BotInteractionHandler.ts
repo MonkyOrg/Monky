@@ -83,6 +83,7 @@ export interface SelectorInvocationAuthorization {
 
 export interface VoiceInvocationAuthorization extends SelectorInvocationAuthorization {
   originChannelId: string;
+  originSession: BotInteractionSession;
 }
 
 interface InteractionTransport {
@@ -1017,7 +1018,9 @@ export class BotInteractionHandler {
     if (await this.gate.check(invocation.invokerId, channelId, BotAccess.voiceRoom(requireSpeak))) return undefined;
     const isCurrent = () => this.isActive(invocation) &&
       this.transport.getVoiceChannelId?.(originSessionId) === channelId;
-    return isCurrent() ? { creatorUserId: invocation.invokerId, originChannelId: invocation.channelId, isCurrent } : undefined;
+    return isCurrent() ? {
+      creatorUserId: invocation.invokerId, originChannelId: invocation.channelId, originSession: invocation.origin, isCurrent,
+    } : undefined;
   }
 
   private async authorizeAutocomplete(pending: Autocomplete): Promise<boolean> {

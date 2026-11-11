@@ -43,6 +43,7 @@ export class VoiceStore {
   public screenAudioShareIds: string[] = [];
   /** Explicit receive intent belongs to the call, never to a mounted view. */
   private watchedScreenShares = new Map<string, Set<string>>();
+  private unwatchedCameraSessions = new Set<string>();
   /** Last published share ids per participant of the call, to tell new sources from old ones. */
   private screenShareRosters = new Map<string, Set<string>>();
   /**
@@ -74,6 +75,17 @@ export class VoiceStore {
 
   public isWatchingScreen(sessionId: string, shareId: string): boolean {
     return this.watchedScreenShares.get(sessionId)?.has(shareId) ?? false;
+  }
+
+  public isWatchingCamera(sessionId: string): boolean {
+    return this.currentVoiceChannelId !== null && !this.unwatchedCameraSessions.has(sessionId);
+  }
+
+  public setCameraWatching(sessionId: string, watching: boolean): void {
+    if (!this.currentVoiceChannelId || this.isWatchingCamera(sessionId) === watching) return;
+    if (watching) this.unwatchedCameraSessions.delete(sessionId);
+    else this.unwatchedCameraSessions.add(sessionId);
+    emitOutsideRouting(() => appEvents.emit('voice.camera_watch_changed', { sessionId, watching }));
   }
 
   public isWatchingAnyScreen(sessionId: string): boolean {
@@ -202,6 +214,7 @@ export class VoiceStore {
     const endedCall = !channelId && this.currentVoiceChannelId !== null;
     if (!channelId || channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
       this.clearScreenWatching();
+      this.unwatchedCameraSessions.clear();
       this.setSpeaking(false);
     }
     const clearedModeration = (!channelId || sessionKey !== this.voiceSessionKey)

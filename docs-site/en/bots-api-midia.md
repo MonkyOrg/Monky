@@ -10,6 +10,19 @@ Complete public signatures of the Monky bot SDK, generated from the TypeScript e
 
 [Bot SDK overview and events](/en/bots-api) · [Voice](/en/bots-voz) · [Miniapps](/en/bots-miniapps) · [Storage](/en/bots-armazenamento) · [Local execution](/en/bots-execucao-local)
 
+## `BotBrowserCreate` {#botbrowsercreate}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L98)
+
+```ts
+export type BotBrowserCreate = {
+    title: string;
+    channelId: string;
+    id?: string | undefined;
+    invocationId?: string | undefined;
+};
+```
+
 ## `BotDeviceStorageStatus` {#botdevicestoragestatus}
 
 [Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botStorage.ts#L230)
@@ -20,7 +33,7 @@ export type BotDeviceStorageStatus = "granted" | "unavailable" | "denied";
 
 ## `BotScreen` {#botscreen}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L104)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L137)
 
 ```ts
 export type BotScreen = {
@@ -33,13 +46,43 @@ export type BotScreen = {
     state: BotScreenJson;
     html: string;
     instanceId: string;
+    kind?: undefined;
+    creatorUserId?: string | undefined;
+} | {
+    title: string;
+    kind: "browser";
+    id: string;
+    channelId: string;
+    botId: string;
+    createdAt: number;
+    revision: number;
+    state: null;
+    html: "";
+    instanceId: string;
+    hostSessionId: string;
+    broadcastSource: {
+        audio: boolean;
+        instanceId: string;
+        shareId: string;
+        video: {
+            width: number;
+            height: number;
+            fps: number;
+            maxBitrateKbps: number;
+        };
+        audience?: {
+            userIds: string[];
+            roleIds: string[];
+        } | undefined;
+        codec?: "h264" | "av1" | undefined;
+    } | null;
     creatorUserId?: string | undefined;
 };
 ```
 
 ## `BotScreenActionEvent` {#botscreenactionevent}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L109)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L144)
 
 ```ts
 export type BotScreenActionEvent = {
@@ -57,7 +100,7 @@ export type BotScreenActionEvent = {
 
 ## `BotScreenBeforeCloseEvent` {#botscreenbeforecloseevent}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L121)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L156)
 
 ```ts
 export interface BotScreenBeforeCloseEvent {
@@ -67,7 +110,7 @@ export interface BotScreenBeforeCloseEvent {
 
 ## `BotScreenBeforeCloseReason` {#botscreenbeforeclosereason}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L113)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L148)
 
 ```ts
 export type BotScreenBeforeCloseReason = "leave" | "end";
@@ -75,7 +118,7 @@ export type BotScreenBeforeCloseReason = "leave" | "end";
 
 ## `BotScreenBridge` {#botscreenbridge}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L140)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L175)
 
 ```ts
 export interface BotScreenBridge {
@@ -126,7 +169,7 @@ export class BotScreenClient {
 
 ## `BotScreenCloseEvent` {#botscreencloseevent}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L125)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L160)
 
 ```ts
 export interface BotScreenCloseEvent {
@@ -136,15 +179,39 @@ export interface BotScreenCloseEvent {
 
 ## `BotScreenCloseReason` {#botscreenclosereason}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L119)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L154)
 
 ```ts
 export type BotScreenCloseReason = "ended" | BotScreenBeforeCloseReason | "revoked";
 ```
 
+## `BotScreenCommandCreate` {#botscreencommandcreate}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L140)
+
+```ts
+export type BotScreenCommandCreate = Omit<{
+    title: string;
+    channelId: string;
+    state: BotScreenJson;
+    html: string;
+    kind?: undefined;
+    id?: string | undefined;
+    invocationId?: string | undefined;
+}, "channelId" | "invocationId"> | Omit<{
+    title: string;
+    kind: "browser";
+    channelId: string;
+    state: null;
+    html: "";
+    id?: string | undefined;
+    invocationId?: string | undefined;
+}, "channelId" | "invocationId">;
+```
+
 ## `BotScreenCreate` {#botscreencreate}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L106)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L139)
 
 ```ts
 export type BotScreenCreate = {
@@ -152,6 +219,15 @@ export type BotScreenCreate = {
     channelId: string;
     state: BotScreenJson;
     html: string;
+    kind?: undefined;
+    id?: string | undefined;
+    invocationId?: string | undefined;
+} | {
+    title: string;
+    kind: "browser";
+    channelId: string;
+    state: null;
+    html: "";
     id?: string | undefined;
     invocationId?: string | undefined;
 };
@@ -159,7 +235,7 @@ export type BotScreenCreate = {
 
 ## `BotScreenJson` {#botscreenjson}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L18)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L32)
 
 ```ts
 export type BotScreenJson = string | number | boolean | BotScreenJson[] | {
@@ -169,7 +245,7 @@ export type BotScreenJson = string | number | boolean | BotScreenJson[] | {
 
 ## `BotScreenPatch` {#botscreenpatch}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L107)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L142)
 
 ```ts
 export type BotScreenPatch = {
@@ -180,7 +256,7 @@ export type BotScreenPatch = {
 
 ## `BotScreenRef` {#botscreenref}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L105)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L138)
 
 ```ts
 export type BotScreenRef = {
@@ -191,7 +267,7 @@ export type BotScreenRef = {
 
 ## `BotScreenRemoved` {#botscreenremoved}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L110)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L145)
 
 ```ts
 export type BotScreenRemoved = {
@@ -275,7 +351,7 @@ export interface BotScreenStorageUsage {
 
 ## `BotScreenViewer` {#botscreenviewer}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L130)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botScreens.ts#L165)
 
 ```ts
 export interface BotScreenViewer {

@@ -414,7 +414,9 @@ test('miniapp updates reach the room once per member and an unchanged server swe
     accessVersion: () => version,
     getVoiceChannelId: sessionId => room.get(sessionId) ?? null,
     send: (entry, message) => { sent.push({ session: entry, message }); },
-    authorizeInvocation: async () => ({ creatorUserId: humans[0].user!.id, originChannelId: f.textId, isCurrent: () => true }),
+    authorizeInvocation: async () => ({
+      creatorUserId: humans[0].user!.id, originChannelId: f.textId, originSession: humans[0], isCurrent: () => true,
+    }),
     endInvocation: () => {},
   });
   t.after(() => handler.close());

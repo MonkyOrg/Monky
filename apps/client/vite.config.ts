@@ -49,6 +49,7 @@ export default defineConfig(({ mode, command }) => {
           : {
             index: path.resolve(__dirname, 'src/renderer/index.html'),
             overlay: path.resolve(__dirname, 'src/renderer/overlay.html'),
+            miniappBrowser: path.resolve(__dirname, 'src/renderer/miniappBrowser.html'),
           },
         output: {
           // Extensionless licenses must not acquire a trailing dot on Windows.

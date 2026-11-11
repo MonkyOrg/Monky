@@ -80,6 +80,7 @@ import { ChatHandler, type ChatHost } from './ChatHandler';
 import { ChannelHandler, type ChannelHost } from './ChannelHandler';
 import { PresenceHandler, type PresenceHost } from './PresenceHandler';
 import { RoleHandler, type RoleHost } from './RoleHandler';
+import { IdentityAccessHandler, type IdentityAccessHost } from './IdentityAccessHandler';
 import { ServerSettingsHandler, type ServerSettingsHost } from './ServerSettingsHandler';
 import { SoundboardHandler, type SoundboardHost } from './SoundboardHandler';
 import { BotManagementHandler, type BotManagementHost } from './BotManagementHandler';
@@ -130,7 +131,7 @@ export interface WebSocketServerDeps {
 }
 
 /** What the modules of the server use of it, each through its own part of it. */
-type ServerHost = AuditRecorderHost & OutboxHost & AuthorizerHost & RouterHost & ChannelVisibilityHost
+type ServerHost = IdentityAccessHost & AuditRecorderHost & OutboxHost & AuthorizerHost & RouterHost & ChannelVisibilityHost
   & AuthHost & ChatHost & PollHost & ChannelHost & PresenceHost & RoleHost & ServerSettingsHost & SoundboardHost & BotManagementHost
   & ScreenAccessHost & RtcSignalHost & SfuSignalingHost & VoiceSessionHost;
 
@@ -194,6 +195,7 @@ export class WebSocketServer {
   private soundboardHandler?: SoundboardHandler;
   private botManagementHandler?: BotManagementHandler;
   private authHandler?: AuthHandler;
+  private identityAccessHandler?: IdentityAccessHandler;
 
   private httpServer: http.Server;
   private authService: AuthService;
@@ -449,6 +451,7 @@ export class WebSocketServer {
         authorizeInvocation: (session, invocationId, channelId) =>
           this.botInteractions.authorizeVoiceScreen(session, invocationId, channelId),
         endInvocation: (session, invocationId) => this.botInteractions.endScreenInvocation(session, invocationId),
+        publishBrowserSource: (session, ref, source) => this.screens.publishMiniappSource(session, ref, source),
       });
     }
     if (monitorService) {
@@ -499,6 +502,7 @@ export class WebSocketServer {
   private buildRouter(): MessageRouter {
     return new MessageRouter(this.host).register(
       ...this.connectionRoutes(), ...this.authentication.routes(), ...this.chatMessages.routes(), ...this.polls.routes(), ...this.channelAdmin.routes(),
+      ...this.identityAccess.routes(),
       ...this.presence.routes(), ...this.roleAdmin.routes(), ...this.serverSettings.routes(), ...this.soundboard.routes(),
       ...this.botManagement.routes(), ...this.callRoutes(), ...this.featureRoutes(), ...this.botRoutes());
   }
@@ -516,6 +520,9 @@ export class WebSocketServer {
   /** Signing in, for people and bots. */
   private get authentication(): AuthHandler {
     return this.authHandler ??= new AuthHandler(this.host);
+  }
+  private get identityAccess(): IdentityAccessHandler {
+    return this.identityAccessHandler ??= new IdentityAccessHandler(this.host);
   }
 
   /** Bots as the server administers them, with their commands and settings. */
@@ -631,6 +638,11 @@ export class WebSocketServer {
       sessions: () => server.sessions.values(),
       sessionsOfUser: (userId) => server.getSessionsOfUser(userId),
       closeSessionsOfUser: (userId) => server.closeSessionsOfUser(userId),
+      disconnectSession: (session) => {
+        session.intentionalLogout = true;
+        server.handleDisconnect(session);
+        session.ws.close();
+      },
       findSession: (sessionId) => server.findSessionById(sessionId),
       findSocket: (sessionId) => server.sessionSockets.get(sessionId),
       bindSocket: (sessionId, ws) => { server.sessionSockets.set(sessionId, ws); },
@@ -941,6 +953,7 @@ export class WebSocketServer {
    */
   private featureRoutes(): Route[] {
     return [
+      ...CommunityHandler.routes(() => this.community),
       route({
         types: [
           MessageType.COMMUNITY_GET, MessageType.COMMUNITY_IMAGE_UPLOAD, MessageType.COMMUNITY_UPDATE_SETTINGS,
@@ -1058,7 +1071,7 @@ export class WebSocketServer {
       route({
         types: [
           MessageType.BOT_SCREEN_CREATE, MessageType.BOT_SCREEN_UPDATE, MessageType.BOT_SCREEN_CLOSE, MessageType.BOT_SCREEN_END,
-          MessageType.BOT_SCREEN_LIST, MessageType.BOT_SCREEN_ACTION,
+          MessageType.BOT_SCREEN_LIST, MessageType.BOT_SCREEN_ACTION, MessageType.BOT_BROWSER_PUBLISH,
         ],
         service: { available: () => !!this.botScreens, legacyCode: ProtocolErrorCode.BAD_REQUEST, message: 'Programmable screens are unavailable.' },
         handle: ({ session, type, payload, requestId }) => this.botScreens?.handle(session, type, payload, requestId),
@@ -1189,7 +1202,7 @@ export class WebSocketServer {
    * must neither be answered nor authenticated.
    */
   private isLive(session: ClientSession): boolean {
-    return !this.closing && this.sessions.get(session.ws) === session && session.ws.readyState === WebSocket.OPEN;
+    return !this.closing && !session.replaced && this.sessions.get(session.ws) === session && session.ws.readyState === WebSocket.OPEN;
   }
 
   private isCurrentSession(session: BotInteractionSession): boolean {
@@ -1240,6 +1253,16 @@ export class WebSocketServer {
     this.disconnectBotScreens(session);
     this.dmRelay.unregister(session);
     this.gameShareRequests.sessionClosed(session);
+    if (registered && session.user?.guest && this.getSessionsOfUser(session.user.id).length === 0) {
+      const userId = session.user.id;
+      this.attachmentService.revokeTokensForUser(userId);
+      this.authService.identityAccess?.retireGuest(userId);
+      // Invalidate operations before another request can use the departed guest's grants.
+      this.epoch.generation++;
+      this.broadcast({ type: MessageType.MEMBER_KICKED, payload: { userId, nickname: session.user.nickname } });
+      void this.roleAdmin.broadcastState(undefined, true)
+        .catch(error => Logger.error('NETWORK', 'Failed to refresh departed guest access.', error));
+    }
     return registered;
   }
 
@@ -1324,13 +1347,13 @@ export class WebSocketServer {
     // Presence in the member list keeps that grace period (#44): the person is
     // still shown as "reconnecting", and the client rejoins the voice channel by
     // itself as soon as it reconnects.
-    if (!session.intentionalLogout && !session.isBot) this.voiceSessions.grantVoiceReturn(user.id, sessionId);
+    if (!session.intentionalLogout && !session.isBot && !user.guest) this.voiceSessions.grantVoiceReturn(user.id, sessionId);
     this.voiceSessions.endVoiceSession(sessionId);
 
     // Graceful logout (user clicked disconnect / switched servers): remove them
     // immediately. Otherwise treat it as a possible temporary connection loss
     // and give them a grace period to reconnect before announcing USER_LEFT.
-    if (session.intentionalLogout || session.isBot) {
+    if (session.intentionalLogout || session.isBot || user.guest) {
       this.finalizeSessionLeave(user, sessionId, session.invisible);
       return;
     }

@@ -5,7 +5,8 @@ import { t, type TranslationKey } from '../i18n';
 import { setButtonLoading } from '../utils/buttonLoading';
 import { html } from '../utils/html';
 import { showErrorToast } from './CopyToast';
-import { showConfirm } from './Dialog';
+import { showConfirm, showConfirmWithText } from './Dialog';
+import { nicknameError } from '../utils/nickname';
 import { showIdentityExportDialog, showIdentityImportDialog } from './IdentityDialogs';
 import { platformSupports } from '../platform/capabilities';
 
@@ -99,6 +100,15 @@ export function showIdentityOnboarding(
       if (next.state === 'unreadable') showErrorToast(t('identity.unreadableStill'));
       return null;
     };
+    const guest = async (): Promise<AppIdentityResult | null> => {
+      const choice = await showConfirmWithText({
+        title: t('identity.guestAction'), message: t('identity.guestHint'),
+        confirmLabel: t('identity.guestAction'),
+        textInput: { label: t('connection.nicknameLabel'), value: '', maxLength: 32, validate: value => nicknameError(value) ?? undefined },
+        variant: 'info',
+      });
+      return choice.confirmed ? window.api.createGuestIdentity(choice.value) : null;
+    };
 
     const bind = (): void => {
       const on = (id: string, failure: TranslationKey, action: () => Promise<AppIdentityResult | null>): void => {
@@ -109,6 +119,7 @@ export function showIdentityOnboarding(
       on('btn-onboard-create', 'identity.createFailed', create);
       on('btn-onboard-import', 'identity.importError', () => showIdentityImportDialog());
       on('btn-onboard-retry', 'identity.unreadableStill', retry);
+      on('btn-onboard-guest', 'identity.createFailed', guest);
     };
 
     const render = (): void => {
@@ -132,6 +143,7 @@ export function showIdentityOnboarding(
                 <span class="material-symbols-outlined md-20" style="margin-right: 8px;" aria-hidden="true">add_circle</span>
                 ${t('identity.onboardingCreate')}
               </button>
+              <button type="button" id="btn-onboard-guest" class="btn btn-secondary">${t('identity.guestAction')}</button>
             </div>
           </div>
         `.toString();
@@ -155,6 +167,7 @@ export function showIdentityOnboarding(
               <span class="material-symbols-outlined md-20" style="margin-right: 8px;">qr_code_scanner</span>
               ${t('identity.onboardingImport')}
             </button>
+            <button type="button" id="btn-onboard-guest" class="btn btn-secondary">${t('identity.guestAction')}</button>
           </div>
         </div>
       `.toString();

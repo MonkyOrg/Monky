@@ -38,6 +38,7 @@ import {
   type ScreenVideoDiagnostics, type NativeScreenSourceWarning,
 } from './webrtc/NativeScreenController';
 import { overlayBridgeService } from './OverlayBridgeService';
+import { BrowserMiniappMedia } from './webrtc/BrowserMiniappMedia';
 import { effectiveAudioOutput, registerAudioOutputConsumer } from './audioOutputRouting';
 
 /**
@@ -60,6 +61,7 @@ export class WebRtcManager {
   private vadMonitor: RemoteVadMonitor;
   private remoteMedia: RemoteMediaSink;
   private nativeScreens: NativeScreenController;
+  readonly browserMiniappMedia: BrowserMiniappMedia;
 
   /** Timer of the call-wide link measurement, running while the call has links. */
   private callStatsTimer: ReturnType<typeof setInterval> | null = null;
@@ -100,6 +102,7 @@ export class WebRtcManager {
       () => this.voiceParticipants, this.mediaRouter, this.vadMonitor,
       peerSessionId => this.isOwnOtherDevice(peerSessionId),
       deviceId => this.nativeScreens.setOutputDeviceId(deviceId),
+      peerSessionId => voiceStore.isWatchingCamera(peerSessionId),
     );
     this.p2p = new P2pMeshTransport({
       client: () => this.signalClient,
@@ -133,6 +136,7 @@ export class WebRtcManager {
     this.nativeScreens = new NativeScreenController(
       () => this.nativeScreenContext(), stream => overlayBridgeService.retireScreenStream(stream), this.mediaRouter,
     );
+    this.browserMiniappMedia = new BrowserMiniappMedia(() => this.nativeScreenContext());
     this.setupSignalListeners();
   }
 
@@ -182,11 +186,12 @@ export class WebRtcManager {
   }
 
   public getLocalScreenState(): VoiceStateUpdatePayload {
-    const screenShareIds = [...voiceStore.screenShareIds];
+    const browsers = this.browserMiniappMedia.localSources();
+    const screenShareIds = [...voiceStore.screenShareIds, ...browsers.map(source => source.shareId)];
     const nativeScreenShares = videoService.getNativeScreenCaptures()
       .map(capture => voiceStore.permissionMuted ? { ...capture.source, audio: false } : capture.source)
-      .filter(source => screenShareIds.includes(source.shareId));
-    return { screenShareIds, nativeScreenShares, isScreenSharing: voiceStore.isScreenSharing,
+      .filter(source => screenShareIds.includes(source.shareId)).concat(browsers);
+    return { screenShareIds, nativeScreenShares, isScreenSharing: screenShareIds.length > 0,
       isSharingScreenAudio: !voiceStore.permissionMuted && nativeScreenShares.some(source => source.audio) };
   }
 
@@ -352,6 +357,7 @@ export class WebRtcManager {
       this.updateScreenAudio();
       void this.nativeScreens.sync().catch(error => this.nativeScreens.report(error));
     });
+    appEvents.on('voice.camera_watch_changed', ({ sessionId }) => this.remoteMedia.syncCameraWatching(sessionId));
     appEvents.on('voice.screen_quality_changed', () => {
       void this.nativeScreens.sync().catch(error => this.nativeScreens.report(error));
     });
@@ -493,6 +499,12 @@ export class WebRtcManager {
     if (watching && (!this.isPeerInOurCall(peerSessionId) || peerSessionId === this.currentSessionId
       || !this.voiceParticipants.get(peerSessionId)?.voiceState?.screenShareIds?.includes(shareId))) return;
     voiceStore.setScreenWatching(peerSessionId, shareId, watching);
+  }
+
+  public setRemoteCameraWatching(peerSessionId: string, watching: boolean): void {
+    if (!this.isPeerInOurCall(peerSessionId) || peerSessionId === this.currentSessionId
+      || !this.voiceParticipants.get(peerSessionId)?.voiceState?.isCameraOn) return;
+    voiceStore.setCameraWatching(peerSessionId, watching);
   }
 
   /** Source discovery is voice metadata, independent of whether RTP is flowing. */
@@ -757,6 +769,7 @@ export class WebRtcManager {
     if (!preserveWatchIntent) voiceStore.retainScreenShares(peerSessionId, []);
     this.p2p.remove(peerSessionId);
     this.remoteMedia.peerGone(peerSessionId);
+    if (!preserveWatchIntent) voiceStore.setCameraWatching(peerSessionId, true);
   }
 
   public suspendForVoiceReconnect(preserveLocalTracks = false): void {
@@ -776,6 +789,7 @@ export class WebRtcManager {
   }
 
   public async prepareForQuit(): Promise<void> {
+    await this.browserMiniappMedia.closeAll();
     await this.nativeScreens.prepareShutdown();
   }
 
@@ -787,6 +801,7 @@ export class WebRtcManager {
   }
 
   private endCallMedia(): void {
+    void this.browserMiniappMedia.closeAll().catch(error => clientLog.error('SCREEN_SHARE', 'Browser media retirement failed', { error: String(error) }));
     void this.nativeScreens.close().catch(error => this.nativeScreens.report(error));
     this.cameraTrackRevision++;
     this.cameraTrackChange = null;

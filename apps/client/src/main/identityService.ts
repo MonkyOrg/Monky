@@ -5,6 +5,7 @@ import path from 'path';
 import {
   SecretEnvelopeError, deriveClientIdFromPublicKey, memberAuthChallenge, normalizePublicKeyHex, openIdentityExport,
   sealIdentityExport, serverAuthChallenge, serverChallengeBindingSchema,
+  nicknameSchema,
   type AppIdentityStatus, type IdentityUnreadableReason, type ServerChallengeBinding, type SignChallengeResult,
 } from '@monky/shared';
 import { fileErrorCode, renameFileSync, writeFileAtomicSync } from './atomicFile';
@@ -22,6 +23,8 @@ interface StoredIdentityRecord {
 }
 
 export interface AppIdentity {
+  guest?: boolean;
+  nickname?: string;
   publicKey: string;
   clientId: string;
 }
@@ -75,6 +78,7 @@ type StoredIdentity =
  * failure used to look like "no identity".
  */
 let loaded: LoadedIdentity | null = null;
+let guestIdentity: LoadedIdentity | null = null;
 
 function getIdentityFilePath(): string {
   return path.join(app.getPath('userData'), IDENTITY_FILE_NAME);
@@ -162,6 +166,7 @@ function readStoredIdentity(): StoredIdentity {
 }
 
 function loadIdentity(): StoredIdentity {
+  if (guestIdentity) return { kind: 'ready', identity: guestIdentity };
   if (loaded) return { kind: 'ready', identity: loaded };
   const stored = readStoredIdentity();
   if (stored.kind === 'ready') loaded = stored.identity;
@@ -195,6 +200,7 @@ function asidePath(kind: 'unreadable' | 'replaced'): string {
  * `identity.replaced-<time>.json`.
  */
 function storeIdentity(identity: LoadedIdentity, current: StoredIdentity = loadIdentity()): void {
+  if (guestIdentity) current = readStoredIdentity();
   if (current.kind === 'unreadable') {
     renameFileSync(getIdentityFilePath(), asidePath('unreadable'));
   } else if (current.kind === 'ready' && current.identity.publicKey !== identity.publicKey) {
@@ -203,6 +209,7 @@ function storeIdentity(identity: LoadedIdentity, current: StoredIdentity = loadI
   }
   persistIdentity(identity);
   loaded = identity;
+  guestIdentity = null;
 }
 
 function generateIdentity(): LoadedIdentity {
@@ -224,7 +231,18 @@ function createFrom(current: StoredIdentity): LoadedIdentity {
 }
 
 function publicIdentity(identity: LoadedIdentity): AppIdentity {
-  return { publicKey: identity.publicKey, clientId: identity.clientId };
+  return { publicKey: identity.publicKey, clientId: identity.clientId,
+    ...(identity.guest ? { guest: true, nickname: identity.nickname } : {}) };
+}
+export function createGuestIdentity(nickname: string): AppIdentity {
+  const name = nicknameSchema.parse(nickname);
+  if (loadIdentity().kind === 'ready') throw new Error('Sign out before entering as a guest.');
+  guestIdentity = { ...generateIdentity(), guest: true, nickname: name };
+  return publicIdentity(guestIdentity);
+}
+
+export function isGuestIdentity(): boolean {
+  return guestIdentity !== null;
 }
 
 export function getIdentityStatus(): AppIdentityStatus {
@@ -253,6 +271,7 @@ function isIdentityFileName(name: string): boolean {
  * cannot be removed leaves the account as it was for another try.
  */
 export function deleteIdentity(): void {
+  if (guestIdentity) { guestIdentity = null; return; }
   const filePath = getIdentityFilePath();
   const directory = path.dirname(filePath);
   let names: string[] = [];
@@ -337,6 +356,7 @@ export function createDmKeyring(): DmKeyring | null {
 
 /** Seals the identity in the format that `monky create` also reads (#490). */
 export async function exportIdentity(password: string, extras?: string, dm?: unknown): Promise<string> {
+  if (guestIdentity) throw new Error('Temporary guest identities cannot be exported.');
   const identity = requireIdentity();
   try {
     return await sealIdentityExport({

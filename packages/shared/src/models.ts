@@ -58,6 +58,7 @@ export interface CustomStatus {
 }
 
 export interface UserSummary {
+  guest?: boolean;
   id: string;
   clientId: string;
   /** Full normalized Ed25519 SPKI public key for human identities. */

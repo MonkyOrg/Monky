@@ -37,6 +37,7 @@ import { UserService } from './application/services/UserService';
 import { listOnlineHumans } from './application/services/onlineHumans';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
+import { SqliteIdentityAccessRepository } from './infrastructure/database/SqliteIdentityAccessRepository';
 import {
   SqliteAttachmentRepository,
   SqliteBotRepository,
@@ -251,6 +252,7 @@ export class MonkyServer {
     serverRepo: SqliteServerRepository,
     private readonly resources: ServerResourceScope,
     private readonly logScope: ServerLogScope,
+    public readonly identityPublicKey: string,
   ) {
     this.dbConn = dbConn;
     this.httpServer = httpServer;
@@ -310,6 +312,8 @@ export class MonkyServer {
     const db = dbConn.getDb();
     const serverRepo = new SqliteServerRepository(db);
     const userRepo = new SqliteUserRepository(db);
+    const identityAccess = new SqliteIdentityAccessRepository(db);
+    identityAccess.retireAllGuests();
     const channelRepo = new SqliteChannelRepository(db);
     const messageRepo = new SqliteMessageRepository(db);
     const mentionRepo = new SqliteMentionRepository(db);
@@ -365,7 +369,8 @@ export class MonkyServer {
       permissionService,
       roleService,
       serverIdentity,
-      channelRepo.categories
+      channelRepo.categories,
+      identityAccess,
     );
 
     const userService = new UserService(
@@ -588,6 +593,7 @@ export class MonkyServer {
       serverRepo,
       resources,
       logScope,
+      serverIdentity.publicKey,
     );
     return instance;
   }

@@ -13,6 +13,7 @@ import { renderRoleTags } from '../../utils/roleTags';
 import { renderAudioMuteIndicators } from '../AudioStateIcon';
 import { userContextMenu } from '../UserContextMenu';
 import { t } from '../../i18n';
+import { openMemberMiniapp, renderMiniappMemberIndicators } from '../MiniappMemberIndicator';
 
 /** Role tags in the narrow member sidebar before the rest collapse into "+N". */
 const SIDEBAR_ROLE_TAGS = 2;
@@ -22,6 +23,7 @@ export interface MemberListHost {
   readonly root: HTMLElement;
   /** Someone's broadcast, after asking. */
   watchLive(sessionId: string): Promise<void>;
+  openMiniapp(id: string): void;
 }
 
 /** Who is in the server on screen, online and offline, with their voice and status. */
@@ -132,6 +134,7 @@ export class MemberList {
                 : html`<button type="button" class="member-live-badge"${livePulseStyle} data-watch-live="${vm.user.sessionId || vm.user.id}"
                     title="${watchLabel}" aria-label="${watchLabel}">LIVE</button>`) : ''}
               ${(!effectiveOffline && voiceState?.isCameraOn) ? html`<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
+              ${!effectiveOffline && voiceState ? trustedHtml(renderMiniappMemberIndicators(m.id, voiceState.channelId)) : ''}
               ${trustedHtml(renderAudioMuteIndicators({ ...voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted }, { showMicrophone: inVoice || isServerMuted || isPermissionMuted }))}
             </div>
             ${trustedHtml(renderRoleTags(userRoles, SIDEBAR_ROLE_TAGS))}
@@ -172,6 +175,12 @@ export class MemberList {
       if (member) userContextMenu.open(event.clientX, event.clientY, member);
     }, { signal });
     list.addEventListener('click', (event) => {
+      const miniapp = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-member-miniapp]') : null;
+      if (miniapp) {
+        event.stopPropagation();
+        openMemberMiniapp(miniapp, id => this.host.openMiniapp(id));
+        return;
+      }
       const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-watch-live]') : null;
       if (!button) return;
       event.stopPropagation();

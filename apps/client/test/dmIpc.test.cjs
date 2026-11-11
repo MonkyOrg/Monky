@@ -3,12 +3,12 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const shared = require('@monky/shared');
-const { DmError, dmResult } = require('@monky/dm');
+const { DmError, MemoryDmFileStore, dmResult } = require('@monky/dm');
 const { loadMain, fakeIpcMain } = require('./mainModules.cjs');
 
 const quiet = { console: { ...console, warn: () => {}, error: () => {} } };
 
-function fixture({ identity = true } = {}) {
+function fixture({ identity = true, guest = false } = {}) {
   const calls = [];
   let flushed = 0;
   let options = null;
@@ -23,9 +23,9 @@ function fixture({ identity = true } = {}) {
   }
   const { registerDmIpc } = loadMain('dm/dmIpc', {
     globals: quiet,
-    packages: { electron: { app: { getPath: () => 'C:\\modeled-profile' }, dialog: {} }, '@monky/dm': { DmService, dmResult } },
+    packages: { electron: { app: { getPath: () => 'C:\\modeled-profile' }, dialog: {} }, '@monky/dm': { DmService, MemoryDmFileStore, dmResult } },
     local: {
-      identityService: { createDmKeyring: () => identity ? { identityPublicKey: Buffer.alloc(32, 7) } : null },
+      identityService: { createDmKeyring: () => identity ? { identityPublicKey: Buffer.alloc(32, 7) } : null, isGuestIdentity: () => guest },
       'dm/nodeDmBackend': { nodeDmFileStore: (dir) => ({ dir }), writeDmAttachmentFile: async () => {} },
     },
   });
@@ -39,6 +39,24 @@ function fixture({ identity = true } = {}) {
   const call = (channel, ...args) => ipc.handlers.get(channel)(event, ...args);
   return { ipc, registry, call, calls, sent, contents, options: () => options, flushed: () => flushed };
 }
+
+test('a guest keeps normal DMs in memory instead of opening a durable profile store', async () => {
+  const f = fixture({ guest: true });
+  assert.deepEqual(await f.call(shared.DM_IPC.snapshot), { ok: true, value: { friends: [] } });
+  assert.ok(f.options().store instanceof MemoryDmFileStore);
+  assert.equal(f.options().store.dir, undefined);
+  const store = f.options().store;
+  store.write('conversation/history', new Uint8Array([1, 2]));
+  store.append('conversation/history', new Uint8Array([3]));
+  assert.deepEqual([...store.read('conversation/history')], [1, 2, 3]);
+  assert.deepEqual(store.list('conversation'), ['history']);
+  const reader = store.openReader('conversation/history');
+  assert.deepEqual([...reader.read(1, 1)], [2]);
+  assert.throws(() => store.write('conversation/history', { *[Symbol.iterator]() { yield new Uint8Array([9]); throw new Error('failed source'); } }));
+  assert.deepEqual([...store.read('conversation/history')], [1, 2, 3], 'a failed full write preserves the preceding data');
+  store.discard();
+  assert.equal(store.read('conversation/history'), null);
+});
 
 test('every DM channel answers the main window as data, and anyone else with forbidden', async () => {
   const f = fixture();

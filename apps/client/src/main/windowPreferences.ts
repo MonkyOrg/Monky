@@ -2,7 +2,7 @@ import path from 'node:path';
 import type { WebPreferences } from 'electron';
 
 /** Preloads bundled into a single file each by `scripts/buildPreloads.mjs`. */
-export type BundledPreload = 'preload' | 'overlayPreload' | 'crashRecoveryPreload' | 'localPreparationDialog';
+export type BundledPreload = 'preload' | 'overlayPreload' | 'crashRecoveryPreload' | 'localPreparationDialog' | 'miniappBrowserPreload';
 
 /**
  * Every Monky window with a preload runs in the operating system sandbox, with

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { PROTOCOL_VERSION } from '../src/constants.js';
 import {
   fetchReleaseCompatibility,
   isReleaseVersion,
@@ -16,7 +17,8 @@ test('release warnings follow the affected protocol floor, not every additive bu
   assert.ok(additive);
   assert.equal(releaseRequiresProtocolUpdate(additive, 'client'), false);
   assert.equal(releaseRequiresProtocolUpdate(additive, 'bot'), false);
-  const future = { ...additive, protocolVersion: 41, minimumBotProtocol: 41, minimumClientProtocol: 41 };
+  const nextProtocol = PROTOCOL_VERSION + 1;
+  const future = { ...additive, protocolVersion: nextProtocol, minimumBotProtocol: nextProtocol, minimumClientProtocol: nextProtocol };
   assert.equal(releaseRequiresProtocolUpdate(future, 'bot'), true);
   assert.equal(releaseRequiresProtocolUpdate({ ...future, minimumBotProtocol: 24 }, 'bot'), false);
   assert.equal(releaseRequiresProtocolUpdate(future, 'client'), true);

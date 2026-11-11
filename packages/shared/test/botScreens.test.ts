@@ -5,14 +5,15 @@ import {
   botScreenRefSchema, botScreenRemovedSchema, botScreenSchema,
 } from '../src/botScreens.js';
 import { PROTOCOL_VERSION } from '../src/constants.js';
+import { miniappBrowserAddress, miniappBrowserUrl, miniappBrowserOpenSchema, miniappBrowserOwnerCommandSchema } from '../src/miniappBrowser.js';
 import { authConnectSchema } from '../src/validators.js';
 import {
-  MIN_CLIENT_PROTOCOL, MIN_BOT_PROTOCOL, createProtocolOffer, negotiateProtocol, legacyProtocolFallback,
+  MIN_CLIENT_PROTOCOL, MIN_BOT_PROTOCOL, PROTOCOL_FEATURES, createProtocolOffer, negotiateProtocol, legacyProtocolFallback,
 } from '../src/protocolCompatibility.js';
 
 test('authentication shape allows negotiation while the compatibility floor rejects obsolete peers', () => {
   const input = { nickname: 'Member', publicKey: 'ab'.repeat(32), protocolVersion: PROTOCOL_VERSION };
-  assert.equal(PROTOCOL_VERSION, 40);
+  assert.equal(PROTOCOL_VERSION, 41);
   assert.equal(MIN_CLIENT_PROTOCOL, 35);
   assert.equal(MIN_BOT_PROTOCOL, 24);
   assert.equal(authConnectSchema.safeParse(input).success, true);
@@ -26,7 +27,7 @@ test('authentication shape allows negotiation while the compatibility floor reje
       assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: version, protocolOffer }).success, true);
       assert.equal(negotiateProtocol(version, protocolOffer, 'client'), null);
       assert.deepEqual(negotiateProtocol(version, protocolOffer, 'bot'), {
-        version: 40, minimumVersion: 24, features: protocolOffer ? ['message-length-setting'] : [],
+        version: PROTOCOL_VERSION, minimumVersion: 24, features: protocolOffer ? ['message-length-setting'] : [],
       });
     }
     assert.equal(legacyProtocolFallback(version, 'client'), null);
@@ -36,25 +37,25 @@ test('authentication shape allows negotiation while the compatibility floor reje
 
 test('DM relay, role models, the channel tree order and poll voters negotiate as human-only features without raising the compatibility floor', () => {
   assert.deepEqual(createProtocolOffer('client'), {
-    minimumVersion: 35, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status', 'bot-key-proof', 'voice-move-id', 'forum-cursor', 'feature-unavailable', 'server-key-auth'],
+    minimumVersion: 35, features: [...PROTOCOL_FEATURES],
   });
-  assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage', 'bot-key-proof', 'feature-unavailable'] });
-  assert.deepEqual(negotiateProtocol(40, undefined, 'client'), { version: 40, ...createProtocolOffer('client') });
-  for (const version of [35, 36, 37, 38, 39]) {
-    assert.deepEqual(negotiateProtocol(version, undefined, 'client'), { version: 40, minimumVersion: 35, features: [] });
+  assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage', 'bot-key-proof', 'feature-unavailable', 'miniapp-browser', 'miniapp-browser-broadcast'] });
+  assert.deepEqual(negotiateProtocol(PROTOCOL_VERSION, undefined, 'client'), { version: PROTOCOL_VERSION, ...createProtocolOffer('client') });
+  for (const version of [35, 36, 37, 38, 39, 40]) {
+    assert.deepEqual(negotiateProtocol(version, undefined, 'client'), { version: PROTOCOL_VERSION, minimumVersion: 35, features: [] });
   }
   for (const version of [31, 32, 33, 34]) assert.equal(negotiateProtocol(version, undefined, 'client'), null);
   assert.deepEqual(negotiateProtocol(35, {
     minimumVersion: 35, features: ['native-polls', 'native-live-forms'],
   }, 'client'), {
-    version: 40, minimumVersion: 35, features: ['native-polls', 'native-live-forms'],
+    version: PROTOCOL_VERSION, minimumVersion: 35, features: ['native-polls', 'native-live-forms'],
   });
   assert.equal(negotiateProtocol(30, undefined, 'client'), null);
   assert.deepEqual(negotiateProtocol(36, { minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo', 'dm-relay', 'unknown'] }, 'client'), {
-    version: 40, minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo', 'dm-relay'],
+    version: PROTOCOL_VERSION, minimumVersion: 35, features: ['chat-blocks', 'message-delete-undo', 'dm-relay'],
   });
-  assert.equal(negotiateProtocol(41, undefined, 'client'), null);
-  assert.equal(negotiateProtocol(41, { minimumVersion: 41, features: [] }, 'client'), null);
+  assert.equal(negotiateProtocol(PROTOCOL_VERSION + 1, undefined, 'client'), null);
+  assert.equal(negotiateProtocol(PROTOCOL_VERSION + 1, { minimumVersion: PROTOCOL_VERSION + 1, features: [] }, 'client'), null);
   for (const offer of [null, { minimumVersion: 29, features: 'chat-blocks' }, { minimumVersion: 30, features: [] }]) {
     assert.equal(negotiateProtocol(29, offer, 'client'), null);
   }
@@ -65,22 +66,23 @@ test('local playlists negotiate per peer so pinned 36/37 clients and bots keep c
   const without = full.filter((feature) => feature !== 'local-youtube-playlist');
   for (const version of [36, 37]) {
     const pinned = negotiateProtocol(version, { minimumVersion: 35, features: without }, 'client');
-    assert.equal(pinned?.version, 40);
+    assert.equal(pinned?.version, PROTOCOL_VERSION);
     assert.equal(pinned?.features.includes('local-youtube-playlist'), false);
     assert.equal(pinned?.features.includes('role-grants'), true);
     assert.equal(negotiateProtocol(version, undefined, 'client')?.features.includes('local-youtube-playlist'), false);
     // The SDK 37 bot (#769) offers only its known features; it keeps working without playlists.
     const pinnedBot = { minimumVersion: 24, features: ['message-length-setting', 'server-community'] };
-    assert.deepEqual(negotiateProtocol(version, pinnedBot, 'bot'), { version: 40, ...pinnedBot });
+    assert.deepEqual(negotiateProtocol(version, pinnedBot, 'bot'), { version: PROTOCOL_VERSION, ...pinnedBot });
     assert.equal(legacyProtocolFallback(version, 'client'), version);
     assert.equal(legacyProtocolFallback(version, 'bot'), version);
   }
   assert.equal(negotiateProtocol(40, { minimumVersion: 35, features: full }, 'client')?.features.includes('local-youtube-playlist'), true);
-  assert.deepEqual(negotiateProtocol(40, createProtocolOffer('bot'), 'bot'), { version: 40, ...createProtocolOffer('bot') });
+  assert.deepEqual(negotiateProtocol(40, createProtocolOffer('bot'), 'bot'), { version: PROTOCOL_VERSION, ...createProtocolOffer('bot') });
   // A newer peer reaching this server keeps only the features this build knows.
-  assert.deepEqual(negotiateProtocol(41, { minimumVersion: 24, features: ['local-youtube-playlist', 'future-feature'] }, 'bot'),
-    { version: 40, minimumVersion: 24, features: ['local-youtube-playlist'] });
-  assert.equal(legacyProtocolFallback(40, 'bot'), null);
+  assert.deepEqual(negotiateProtocol(PROTOCOL_VERSION + 1, { minimumVersion: 24, features: ['local-youtube-playlist', 'future-feature'] }, 'bot'),
+    { version: PROTOCOL_VERSION, minimumVersion: 24, features: ['local-youtube-playlist'] });
+  assert.equal(legacyProtocolFallback(40, 'bot'), 40);
+  assert.equal(legacyProtocolFallback(PROTOCOL_VERSION, 'bot'), null);
 });
 
 test('screen JSON is finite, bounded, cycle-safe and rejects executable values', () => {
@@ -110,6 +112,58 @@ test('create/update/action contracts reject spoofed identities and invalid revis
   assert.equal(botScreenActionSchema.safeParse(action).success, true);
   assert.equal(botScreenActionSchema.safeParse({ ...action, userId: 'admin' }).success, false);
   assert.equal(botScreenActionSchema.safeParse({ ...action, payload: 'x'.repeat(BOT_SCREEN_LIMITS.actionBytes) }).success, false);
+});
+
+test('browser miniapps negotiate separately and cannot carry personal browsing state', () => {
+  const create = { channelId: 'voice', title: 'Browser', kind: 'browser', html: '', state: null };
+  assert.equal(botScreenCreateSchema.safeParse(create).success, true);
+  for (const change of [{ url: 'https://example.com' }, { state: { url: 'https://example.com' } },
+    { html: '<script>steal()</script>' }, { cookies: 'secret' }, { kind: 'other' }]) {
+    assert.equal(botScreenCreateSchema.safeParse({ ...create, ...change }).success, false);
+  }
+  assert.equal(botScreenSchema.safeParse({ ...create, id: 'browser', instanceId: 'instance', botId: 'bot', revision: 0, createdAt: 0,
+    hostSessionId: 'host-session', broadcastSource: null }).success, true);
+  for (const kind of ['client', 'bot'] as const) {
+    assert.ok(createProtocolOffer(kind).features.includes('miniapp-browser'));
+    assert.equal(negotiateProtocol(PROTOCOL_VERSION, { minimumVersion: 24, features: [] }, kind)?.features.includes('miniapp-browser'), false);
+  }
+});
+
+test('browser URLs require unprivileged explicit HTTP(S) and consent is instance-bound', () => {
+  assert.equal(miniappBrowserUrl('https://example.com/path?q=1#anchor'), 'https://example.com/path?q=1#anchor');
+  for (const url of ['file:///C:/secret', 'javascript:alert(1)', 'data:text/html,secret', 'about:blank',
+    'monky-miniapp://secret', 'chrome://settings', 'devtools://devtools', 'https://user:pass@example.com',
+    'https://example.com\\@localhost', '//example.com', 'example.com', ' https://example.com', 'https://example.com/\n']) {
+    assert.equal(miniappBrowserUrl(url), null, url);
+  }
+  assert.equal(miniappBrowserUrl('http://localhost:5173/settings', ['http://localhost:5173']), null);
+  const input = { requestId: '00000000-0000-4000-8000-000000000000', serverKey: 'server', channelId: 'voice',
+    screenId: 'browser', instanceId: 'instance', botId: 'bot', viewerId: 'alice', viewerSessionId: 'device',
+    policyVersion: 1, title: 'Browser', locale: 'en' };
+  assert.equal(miniappBrowserOpenSchema.safeParse(input).success, true);
+  for (const change of [{ instanceId: '' }, { viewerSessionId: '' }, { policyVersion: 0 }, { storage: {} }, { url: 'https://example.com' }]) {
+    assert.equal(miniappBrowserOpenSchema.safeParse({ ...input, ...change }).success, false);
+  }
+});
+
+test('personal address entry supplies HTTPS for domains without weakening internal navigation guards', () => {
+  for (const value of ['google.com', 'www.google.com', 'google.com/search?q=monky#top', 'google.com:8443/path',
+    '127.0.0.1:8080/test', 'localhost:8080', '[::1]:8080', 'münich.example']) {
+    assert.equal(miniappBrowserAddress(value), new URL(`https://${value}`).href, value);
+  }
+  assert.equal(miniappBrowserAddress(' google.com '), 'https://google.com/');
+  assert.equal(miniappBrowserAddress('http://example.com/path'), 'http://example.com/path');
+  for (const value of ['', 'search words', '******example.com', 'javascript:alert(1)', 'file:///C:/secret',
+    'data:text/html,secret', 'monky-miniapp://secret', '//google.com', 'user:password@example.com', 'https://user@example.com',
+    'google.com\\@localhost', 'google.com/\nsecret']) assert.equal(miniappBrowserAddress(value), null, value);
+  assert.equal(miniappBrowserAddress('localhost:5173/path', ['https://localhost:5173']), null);
+  assert.equal(miniappBrowserUrl('google.com'), null, 'Resource and redirect guards never guess a scheme');
+  const placement = { requestId: '00000000-0000-4000-8000-000000000000', action: 'placement', visible: true,
+    bounds: { x: -10, y: 20, width: 500, height: 300 }, clip: { x: 0, y: 20, width: 490, height: 300 } };
+  assert.ok(miniappBrowserOwnerCommandSchema.safeParse(placement).success);
+  for (const width of [-1, NaN, Infinity, '500']) {
+    assert.equal(miniappBrowserOwnerCommandSchema.safeParse({ ...placement, bounds: { ...placement.bounds, width } }).success, false);
+  }
 });
 
 test('end and lifecycle contracts require an exact instance and server-authenticated attribution', () => {

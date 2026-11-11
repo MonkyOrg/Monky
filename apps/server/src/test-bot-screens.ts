@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
+import { z } from 'zod';
 import {
   BOT_SCREEN_LIMITS, MessageType, Permission, ProtocolErrorCode, botScreenActionEventSchema,
-  botScreenListResultSchema, botScreenSchema, botScreenRemovedSchema, type ChannelSummary, type ProtocolMessage,
+  botScreenListResultSchema, botScreenSchema, botScreenRemovedSchema, type ChannelSummary, type ProtocolMessage, type NativeScreenSource,
 } from '@monky/shared';
 import { BotScreenService } from './application/services/BotScreenService';
 import { Logger } from './infrastructure/logger/Logger';
@@ -17,6 +18,7 @@ function fixture() {
   const permissions = new Map<string, number>();
   const roles = new Map<string, string[]>();
   const voiceChannels = new Map<string, string>();
+  const publications: Array<{ session: BotInteractionSession; instanceId: string; source: NativeScreenSource | null }> = [];
   const defaults = Permission.READ_MESSAGES | Permission.SEND_MESSAGES | Permission.USE_BOT_COMMANDS;
   let enabled = true;
   let exists = true;
@@ -87,9 +89,10 @@ function fixture() {
     authorizeInvocation: async (owner, invocationId, channelId) =>
       owner === bot && invocations.has(invocationId) && !endedInvocations.has(invocationId) && channelId === 'voice' && invocationAlive &&
         enabled && voiceChannels.get(alice.sessionId!) === channelId
-        ? { creatorUserId: 'alice', originChannelId: 'chat',
+        ? { creatorUserId: 'alice', originChannelId: 'chat', originSession: alice,
             isCurrent: () => invocationAlive && !endedInvocations.has(invocationId) && enabled && voiceChannels.get(alice.sessionId!) === channelId } : undefined,
     endInvocation: (owner, invocationId) => { if (owner === bot) endedInvocations.add(invocationId); },
+    publishBrowserSource: (owner, ref, source) => { publications.push({ session: owner, instanceId: ref.instanceId, source }); },
   });
   let request = 0;
   const call = async (entry: BotInteractionSession, type: MessageType, payload: unknown) => {
@@ -108,7 +111,7 @@ function fixture() {
     return { id, instanceId: screen.instanceId };
   };
   return {
-    service, handler, bot, otherBot, alice, bob, spectator, stranger, session, current, messages, call, create, ref, permissions, channel,
+    service, handler, bot, otherBot, alice, bob, spectator, stranger, session, current, messages, call, create, ref, permissions, channel, publications,
     startInvocation: (id: string) => { invocations.add(id); invocationAlive = true; },
     defaultPermissions: defaults,
     setRoleAccessVersion: (value: number | null) => { roleVersion = value; },
@@ -125,6 +128,161 @@ function fixture() {
     privatize: () => { channel.isPrivate = true; channel.allowedRoleIds = ['private']; roles.set('alice', ['private']); version++; },
   };
 }
+
+function browserFixture() {
+  const f = fixture();
+  f.bot.protocol = { version: 41, minimumVersion: 24, features: ['miniapp-browser-broadcast'] };
+  f.alice.protocol = f.bob.protocol = { version: 41, minimumVersion: 35, features: ['miniapp-browser-broadcast', 'miniapp-browser-host'] };
+  const createBrowser = (invocationId: string | null = 'invocation') => f.call(f.bot, MessageType.BOT_SCREEN_CREATE, {
+    id: 'browser', channelId: 'voice', title: 'Browser', kind: 'browser', html: '', state: null, invocationId: invocationId ?? undefined,
+  });
+  const publish = (session = f.alice, changes: Partial<NativeScreenSource> = {}) => f.call(session, MessageType.BOT_BROWSER_PUBLISH, {
+    ...f.ref('browser'), source: {
+      shareId: `browser-${f.ref('browser').instanceId}`, instanceId: f.ref('browser').instanceId,
+      audio: false, codec: 'h264', video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 6000 }, ...changes,
+    },
+  });
+  return { ...f, createBrowser, publish };
+}
+
+test('browser host is the exact invocation session; creation ACK is not publication or permission to capture', async t => {
+  const f = browserFixture(); t.after(() => f.handler.close());
+  assert.equal((await f.createBrowser(null)).type, MessageType.SERVER_ERROR);
+  f.alice.protocol = { version: 40, minimumVersion: 35, features: ['miniapp-browser'] };
+  assert.deepEqual((await f.createBrowser()).payload, {
+    code: ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, message: 'Update Monky to host a shared browser.',
+  });
+  f.alice.protocol = { version: 41, minimumVersion: 35, features: ['miniapp-browser-broadcast'] };
+  assert.deepEqual((await f.createBrowser()).payload, {
+    code: ProtocolErrorCode.MINIAPP_BROWSER_DESKTOP_REQUIRED, message: 'Hosting a browser requires Monky desktop.',
+  });
+  f.alice.protocol.features.push('miniapp-browser-host');
+  const initial = botScreenSchema.parse((await f.createBrowser()).payload);
+  assert.ok(initial.kind === 'browser');
+  assert.equal(initial.hostSessionId, f.alice.sessionId);
+  assert.equal(initial.broadcastSource, null);
+  assert.deepEqual(f.publications, []);
+  const samePerson = f.session('alice', false, 'other-device'); f.join(samePerson);
+  samePerson.protocol = f.alice.protocol;
+  assert.equal((await f.publish(samePerson)).type, MessageType.SERVER_ERROR);
+  assert.equal((await f.call(samePerson, MessageType.BOT_SCREEN_END, f.ref('browser'))).type, MessageType.SERVER_ERROR);
+  assert.equal((await f.publish(f.bob)).type, MessageType.SERVER_ERROR);
+  assert.equal((await f.publish(f.bot)).type, MessageType.SERVER_ERROR);
+  for (const changes of [{ audio: true }, { codec: 'av1' }, { shareId: 'another-window' }, { instanceId: 'stale-instance' }] as const) {
+    assert.equal((await f.publish(f.alice, changes)).type, MessageType.SERVER_ERROR);
+  }
+  assert.deepEqual(f.publications, []);
+  const published = botScreenSchema.parse((await f.publish()).payload);
+  assert.ok(published.kind === 'browser' && published.broadcastSource);
+  assert.equal(published.hostSessionId, f.alice.sessionId);
+  assert.equal(published.revision, 1);
+  assert.equal(f.publications.length, 1);
+  assert.equal((await f.publish()).type, MessageType.SERVER_ERROR);
+  assert.equal(f.publications.length, 1, 'A duplicate ACK cannot replace the existing publication');
+  await f.handler.disconnect(samePerson);
+  assert.ok(f.service.get('browser'), 'Another session of the same identity cannot destroy the host');
+  await f.handler.disconnect(f.alice);
+  assert.equal(f.service.get('browser'), undefined);
+  assert.deepEqual(f.publications[1], { session: f.alice, instanceId: initial.instanceId, source: null });
+});
+
+test('browser publication revalidates room/access and withdrawal retires only its exact source', async t => {
+  for (const revoke of ['leave', 'permission', 'disconnect', 'end'] as const) {
+    const f = browserFixture(); t.after(() => f.handler.close());
+    await f.createBrowser();
+    const ref = f.ref('browser');
+    if (revoke === 'permission') {
+      f.race(() => f.revoke('alice'), 'alice');
+      assert.equal((await f.publish()).type, MessageType.SERVER_ERROR);
+      assert.deepEqual(f.publications, []);
+      await f.handler.revokeInvalid();
+    } else {
+      assert.equal((await f.publish()).type, MessageType.BOT_SCREEN_SNAPSHOT);
+      if (revoke === 'leave') { f.leave(f.alice); await f.handler.revokeInvalid(); }
+      if (revoke === 'disconnect') await f.handler.disconnect(f.alice);
+      if (revoke === 'end') assert.equal((await f.call(f.alice, MessageType.BOT_SCREEN_END, ref)).type, MessageType.BOT_SCREEN_REMOVED);
+      assert.equal(f.publications.length, 2);
+      assert.equal(f.publications[1].source, null);
+      assert.equal(f.publications[1].instanceId, ref.instanceId);
+    }
+    assert.equal(f.service.get('browser'), undefined);
+    assert.equal((await f.call(f.alice, MessageType.BOT_BROWSER_PUBLISH, {
+      ...ref, source: { shareId: `browser-${ref.instanceId}`, instanceId: ref.instanceId, audio: false, codec: 'h264',
+        video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 6000 } },
+    })).type, MessageType.SERVER_ERROR, 'A late publish cannot revive the retired miniapp');
+  }
+});
+
+test('browser snapshots are negotiated, private, and revoked through the existing voice lifecycle', async (t) => {
+  const f = fixture(); t.after(() => f.handler.close());
+  const input = { id: 'browser', channelId: 'voice', title: 'Browser', kind: 'browser', html: '', state: null, invocationId: 'invocation' };
+  const refusal = await f.call(f.bot, MessageType.BOT_SCREEN_CREATE, input);
+  assert.equal(refusal.type, MessageType.SERVER_ERROR);
+  assert.ok(refusal.payload && typeof refusal.payload === 'object' && 'code' in refusal.payload);
+  assert.equal(refusal.payload.code, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  f.bot.protocol = { version: 41, minimumVersion: 24, features: ['miniapp-browser', 'miniapp-browser-broadcast'] };
+  f.alice.protocol = f.bob.protocol = { version: 41, minimumVersion: 35, features: [
+    'miniapp-browser', 'miniapp-browser-broadcast', 'miniapp-browser-host',
+  ] };
+  const created = await f.call(f.bot, MessageType.BOT_SCREEN_CREATE, input);
+  assert.equal(created.type, MessageType.BOT_SCREEN_SNAPSHOT);
+  const screen = botScreenSchema.parse(created.payload);
+  assert.equal(screen.kind, 'browser');
+  assert.equal(screen.state, null);
+  assert.equal(screen.html, '');
+  assert.equal(f.messages.some(message => message.session === f.spectator && message.message.type === MessageType.BOT_SCREEN_SNAPSHOT), false);
+  const legacyList = botScreenListResultSchema.parse((await f.call(f.spectator, MessageType.BOT_SCREEN_LIST, { channelId: 'voice' })).payload);
+  assert.equal(legacyList.screens.length, 0);
+  assert.equal((await f.call(f.alice, MessageType.BOT_SCREEN_ACTION, {
+    ...f.ref('browser'), action: 'navigate', payload: { url: 'https://secret.example' }, revision: 0, actionId: 'a',
+  })).type, MessageType.SERVER_ERROR);
+  assert.equal((await f.call(f.bot, MessageType.BOT_SCREEN_UPDATE, {
+    ...f.ref('browser'), state: { cookies: 'private' }, expectedRevision: 0,
+  })).type, MessageType.SERVER_ERROR);
+  assert.equal(f.messages.some(message => message.message.type === MessageType.BOT_SCREEN_ACTION_EVENT), false);
+  f.leave(f.bob);
+  await f.handler.revokeInvalid();
+  assert.ok(f.messages.some(message => message.session === f.bob && message.message.type === MessageType.BOT_SCREEN_REMOVED));
+  f.revoke('alice');
+  await f.handler.revokeInvalid();
+  assert.equal(f.service.get('browser'), undefined);
+});
+
+test('protocol 40 viewers keep their connection and HTML miniapps alongside a protocol 41 browser', async (t) => {
+  const f = fixture(); t.after(() => f.handler.close());
+  f.bot.protocol = { version: 41, minimumVersion: 24, features: ['miniapp-browser', 'miniapp-browser-broadcast'] };
+  f.alice.protocol = { version: 41, minimumVersion: 35, features: ['miniapp-browser', 'miniapp-browser-broadcast', 'miniapp-browser-host'] };
+  f.bob.protocol = { version: 40, minimumVersion: 35, features: ['miniapps'] };
+  const legacyScreen = z.object({
+    id: z.string(), instanceId: z.string(), botId: z.string(), creatorUserId: z.string().optional(),
+    channelId: z.string(), title: z.string(), html: z.string().min(1),
+    state: z.unknown(), revision: z.number(), createdAt: z.number(),
+  }).strict();
+  const legacyList = z.object({ channelId: z.string(), screens: z.array(legacyScreen) }).strict();
+  const html = botScreenSchema.parse((await f.create('html')).payload);
+  legacyScreen.parse(html);
+  const browser = botScreenSchema.parse((await f.call(f.bot, MessageType.BOT_SCREEN_CREATE, {
+    id: 'browser', channelId: 'voice', title: 'Browser', kind: 'browser', html: '', state: null, invocationId: 'invocation',
+  })).payload);
+  assert.equal(browser.kind, 'browser');
+  assert.equal(f.messages.filter(({ session, message }) => session === f.bob &&
+    message.type === MessageType.BOT_SCREEN_SNAPSHOT).length, 1);
+  const list = legacyList.parse((await f.call(f.bob, MessageType.BOT_SCREEN_LIST, { channelId: 'voice' })).payload);
+  assert.deepEqual(list.screens.map(screen => screen.id), ['html']);
+  const action = await f.call(f.bob, MessageType.BOT_SCREEN_ACTION, {
+    ...f.ref('html'), action: 'move', payload: { to: 2 }, revision: html.revision, actionId: 'legacy-move',
+  });
+  assert.equal(action.type, MessageType.BOT_SCREEN_SNAPSHOT);
+  legacyScreen.parse(action.payload);
+  await f.call(f.bot, MessageType.BOT_SCREEN_UPDATE, {
+    ...f.ref('html'), expectedRevision: html.revision, state: { turn: 'bob' },
+  });
+  for (const { session, message } of f.messages) {
+    if (session === f.bob && message.type === MessageType.BOT_SCREEN_SNAPSHOT) legacyScreen.parse(message.payload);
+  }
+  assert.ok(f.current.has(f.bob), 'The old connection stays registered and able to use the HTML miniapp');
+  assert.equal(f.messages.some(({ session, message }) => session === f.bob && message.type === MessageType.SERVER_ERROR), false);
+});
 
 test('screen actions are human-authenticated, independent of command lifetime, and recoverable by spectators/reconnects', async (t) => {
   const f = fixture(); t.after(() => f.handler.close());

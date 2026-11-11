@@ -1,7 +1,7 @@
 import { serverMessage,
   BOT_SCREEN_LIMITS, MessageType, Permission, ProtocolErrorCode, hasPermission,
-  botScreenActionSchema, botScreenCreateSchema, botScreenRefSchema, botScreenListSchema, botScreenUpdateSchema,
-  type BotScreenActionEvent, type BotScreenRef, type BotScreenRemoved, type ServerMessage, type ServerMessageArgs,
+  botBrowserPublishSchema, botScreenActionSchema, botScreenCreateSchema, botScreenRefSchema, botScreenListSchema, botScreenUpdateSchema,
+  type BotScreenActionEvent, type BotScreenRef, type BotScreenRemoved, type ServerMessage, type ServerMessageArgs, type NativeScreenSource,
 } from '@monky/shared';
 import { ZodError } from 'zod';
 import type { BotInteractionSession, VoiceInvocationAuthorization } from './BotInteractionHandler';
@@ -28,6 +28,7 @@ export interface BotScreenTransport {
   send(session: BotInteractionSession, message: ServerMessage): void;
   authorizeInvocation(session: BotInteractionSession, invocationId: string, channelId: string): Promise<VoiceInvocationAuthorization | undefined>;
   endInvocation(session: BotInteractionSession, invocationId: string): void;
+  publishBrowserSource?(session: BotInteractionSession, ref: BotScreenRef, source: NativeScreenSource | null): void;
 }
 
 class ScreenAccessError extends ServiceError {
@@ -47,6 +48,7 @@ export class BotScreenHandler {
   private queued = 0;
   private closed = false;
   private owners = new Map<string, BotInteractionSession>();
+  private hosts = new Map<string, BotInteractionSession>();
   private known = new WeakMap<BotInteractionSession, Set<string>>();
   private rate = new WeakMap<BotInteractionSession, RateWindow>();
   private screenRate = new WeakMap<ActiveBotScreen, RateWindow>();
@@ -83,7 +85,8 @@ export class BotScreenHandler {
         if (type === MessageType.BOT_SCREEN_LIST) {
           const { channelId } = botScreenListSchema.parse(payload);
           const candidates = this.screens.list().filter((entry) =>
-            entry.screen.channelId === channelId && (!session.isBot || entry.screen.botId === session.botId));
+            entry.screen.channelId === channelId && (!session.isBot || entry.screen.botId === session.botId) &&
+            (entry.screen.kind !== 'browser' || session.protocol?.features.includes('miniapp-browser-broadcast')));
           let visible: ActiveBotScreen[] = [];
           const access = this.fanOut();
           await this.stableAccess(async () => {
@@ -109,11 +112,23 @@ export class BotScreenHandler {
         if (type === MessageType.BOT_SCREEN_CREATE) {
           this.requireBot(session);
           const input = botScreenCreateSchema.parse(payload);
+          if (input.kind === 'browser' && !session.protocol?.features.includes('miniapp-browser-broadcast')) {
+            throw new ScreenAccessError('Update Monky to use browser miniapps.', ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+          }
           let invocation: VoiceInvocationAuthorization | undefined;
           const entry = await this.stableAccess(async () => {
             if (input.invocationId) {
               invocation = await this.transport.authorizeInvocation(session, input.invocationId, input.channelId);
               if (!invocation) throw new ScreenAccessError('The caller must currently be in this voice room.');
+            }
+            if (input.kind === 'browser') {
+              if (!invocation) throw new ScreenAccessError('A browser requires a host invocation.', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+              const host = invocation.originSession;
+              this.requireVoiceMembership(host, input.channelId);
+              if (!host.protocol?.features.includes('miniapp-browser-broadcast'))
+                throw new ScreenAccessError('Update Monky to host a shared browser.', ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+              if (!host.protocol.features.includes('miniapp-browser-host'))
+                throw new ScreenAccessError('Hosting a browser requires Monky desktop.', ProtocolErrorCode.MINIAPP_BROWSER_DESKTOP_REQUIRED);
             }
             const principal = invocation?.creatorUserId ?? session.user!.id;
             await this.requirePrincipal(principal, input.channelId, !!invocation, true);
@@ -121,11 +136,36 @@ export class BotScreenHandler {
             if (!this.transport.isCurrent(session) || (invocation && !invocation.isCurrent())) {
               throw new ScreenAccessError('The invocation or bot connection ended.', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
             }
-            const created = this.screens.create(session.botId!, input, invocation?.creatorUserId);
+            if (input.kind === 'browser') this.requireVoiceMembership(invocation!.originSession, input.channelId);
+            const created = this.screens.create(session.botId!, input, invocation?.creatorUserId,
+              input.kind === 'browser' ? invocation!.originSession.sessionId : undefined);
             this.owners.set(created.screen.id, session);
+            if (input.kind === 'browser') this.hosts.set(created.screen.id, invocation!.originSession);
             this.remember(session, created.screen.id);
             this.send(session, MessageType.BOT_SCREEN_SNAPSHOT, created.screen, requestId);
             return created;
+          });
+          await this.notify(entry);
+          return;
+        }
+        if (type === MessageType.BOT_BROWSER_PUBLISH) {
+          const input = botBrowserPublishSchema.parse(payload);
+          const entry = this.requireInstance(input);
+          await this.stableAccess(async () => {
+            if (entry.screen.kind !== 'browser' || this.hosts.get(entry.screen.id) !== session)
+              throw new ScreenAccessError('Only the invoking host session may publish this browser.');
+            await this.requireViewer(session, entry.screen.channelId, true);
+            await this.requireOwner(entry);
+          }, () => {
+            this.requireVoiceMembership(session, entry.screen.channelId);
+            if (input.source.shareId !== `browser-${entry.screen.instanceId}` || input.source.instanceId !== entry.screen.instanceId)
+              throw new ScreenAccessError('The capture does not belong to this browser instance.', ProtocolErrorCode.BOT_INTERACTION_INVALID);
+            if (entry.screen.kind !== 'browser' || entry.screen.broadcastSource)
+              throw new BotScreenError('This browser is already published.', ProtocolErrorCode.BOT_SCREEN_CONFLICT);
+            if (!this.transport.publishBrowserSource) throw new Error('Browser media publication is unavailable.');
+            this.transport.publishBrowserSource(session, input, input.source);
+            this.screens.publishBrowser(entry, input.source);
+            this.send(session, MessageType.BOT_SCREEN_SNAPSHOT, entry.screen, requestId);
           });
           await this.notify(entry);
           return;
@@ -134,6 +174,7 @@ export class BotScreenHandler {
           if (session.isBot) throw new ScreenAccessError('Only authenticated human members may act.');
           const input = botScreenActionSchema.parse(payload);
           const entry = this.requireInstance(input);
+          if (entry.screen.kind === 'browser') throw new ScreenAccessError('Browser navigation is private.', ProtocolErrorCode.BOT_INTERACTION_INVALID);
           await this.stableAccess(async () => {
             await this.requireViewer(session, entry.screen.channelId, true);
             await this.requireOwner(entry);
@@ -169,7 +210,9 @@ export class BotScreenHandler {
           await this.stableAccess(async () => {
             await this.requireViewer(session, entry.screen.channelId, false);
             const context = await this.channels.getAccessContext(session.user!.id);
-            if (session.user!.id !== entry.creatorUserId && !hasPermission(context.permissions, Permission.ADMINISTRATOR)) {
+            const creator = entry.screen.kind === 'browser' ? this.hosts.get(entry.screen.id) === session
+              : session.user!.id === entry.creatorUserId;
+            if (!creator && !hasPermission(context.permissions, Permission.ADMINISTRATOR)) {
               throw new ScreenAccessError('Only the creator or an administrator may end this miniapp.');
             }
             await this.requireOwner(entry);
@@ -222,7 +265,7 @@ export class BotScreenHandler {
   disconnect(session: BotInteractionSession): Promise<void> {
     return this.enqueue(async () => {
       for (const entry of this.screens.list()) {
-        if (this.owners.get(entry.screen.id) === session) this.remove(entry, {
+        if (this.owners.get(entry.screen.id) === session || this.hosts.get(entry.screen.id) === session) this.remove(entry, {
           id: entry.screen.id, instanceId: entry.screen.instanceId, channelId: entry.screen.channelId, reason: 'bot_disconnected',
         });
       }
@@ -236,6 +279,7 @@ export class BotScreenHandler {
     clearInterval(this.timer);
     this.screens.clear();
     this.owners.clear();
+    this.hosts.clear();
   }
 
   private stableAccess<T>(check: () => Promise<void>, use: () => T): Promise<T> {
@@ -313,6 +357,11 @@ export class BotScreenHandler {
 
   private async requireOwner(entry: ActiveBotScreen, reads?: BotAccessReads): Promise<void> {
     const owner = this.requireOwnerSession(entry);
+    if (entry.screen.kind === 'browser') {
+      const host = this.hosts.get(entry.screen.id);
+      if (!host) throw new ScreenAccessError('The browser host ended.');
+      this.requireVoiceMembership(host, entry.screen.channelId);
+    }
     await this.requirePrincipal(entry.creatorUserId ?? owner.user!.id, entry.screen.channelId, !!entry.creatorUserId, true, reads);
   }
 
@@ -355,6 +404,7 @@ export class BotScreenHandler {
     const access = this.fanOut();
     for (const session of this.transport.sessions()) {
       if (!session.user || !this.transport.isCurrent(session)) continue;
+      if (entry.screen.kind === 'browser' && !session.protocol?.features.includes('miniapp-browser-broadcast')) continue;
       // Only the owning bot, the people in the room and those who still hold the screen are concerned (BOTS-3).
       if (session.isBot ? session !== owner : !this.inRoom(session, entry.screen.channelId) && !this.known.get(session)?.has(entry.screen.id)) continue;
       try {
@@ -377,8 +427,12 @@ export class BotScreenHandler {
   private remove(entry: ActiveBotScreen, removed: BotScreenRemoved): void {
     if (this.screens.get(entry.screen.id) !== entry) return;
     const owner = this.owners.get(entry.screen.id);
+    const host = this.hosts.get(entry.screen.id);
+    if (host && entry.screen.kind === 'browser' && entry.screen.broadcastSource)
+      this.transport.publishBrowserSource?.(host, entry.screen, null);
     this.screens.remove(entry.screen, entry.screen.botId);
     this.owners.delete(entry.screen.id);
+    this.hosts.delete(entry.screen.id);
     this.actionIds.delete(entry);
     this.screenRate.delete(entry);
     for (const session of this.transport.sessions()) {

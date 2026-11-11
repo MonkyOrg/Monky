@@ -5,7 +5,10 @@ import type { ConnectionStatus } from './NetworkClient';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 
 /** Capture the call's bundle before any async work; the visible text server may differ. */
-export function bindBotScreenEvents(events: AppEventBus = appEvents): () => void {
+export function bindBotScreenEvents(
+  events: AppEventBus = appEvents,
+  playCue?: (key: 'screen_share_start' | 'screen_share_stop') => void,
+): () => void {
   let context: BotVoiceContext | null = null;
   let connectionId: string | null = null;
   let generation = 0;
@@ -75,11 +78,24 @@ export function bindBotScreenEvents(events: AppEventBus = appEvents): () => void
       const parsed = botScreenSchema.safeParse(payload);
       const voice = getBotVoiceContext();
       if (parsed.success && voice?.session.botScreenStore === getActiveBotScreenStore() &&
-          parsed.data.channelId === voice.channelId) botScreenStore.upsert(parsed.data);
+          parsed.data.channelId === voice.channelId) {
+        const previous = botScreenStore.get(parsed.data.id);
+        botScreenStore.upsert(parsed.data);
+        if (botScreenStore.get(parsed.data.id) === parsed.data && previous?.instanceId !== parsed.data.instanceId) {
+          playCue?.('screen_share_start');
+        }
+      }
     }),
     events.on(`message.${MessageType.BOT_SCREEN_REMOVED}`, (payload: unknown) => {
       const parsed = botScreenRemovedSchema.safeParse(payload);
-      if (parsed.success) botScreenStore.remove(parsed.data);
+      if (!parsed.success) return;
+      const voice = getBotVoiceContext();
+      const current = botScreenStore.get(parsed.data.id);
+      const endsInCall = voice?.session.botScreenStore === getActiveBotScreenStore() &&
+        parsed.data.channelId === voice.channelId && current?.channelId === parsed.data.channelId &&
+        current.instanceId === parsed.data.instanceId && parsed.data.reason !== 'view_revoked';
+      botScreenStore.remove(parsed.data);
+      if (endsInCall) playCue?.('screen_share_stop');
     }),
     events.on('network.status', (status: ConnectionStatus) => {
       if (status !== 'CONNECTED') botScreenStore.clear();

@@ -47,7 +47,7 @@ function runtime(name = 'Synthetic server') {
   };
 }
 
-function fixture(create) {
+function fixture(create, guest = false) {
   const configCalls = [];
   const events = [];
   const errors = [];
@@ -109,6 +109,7 @@ function fixture(create) {
       },
     }],
     ['@monky/shared', { LIMITS, parseTrustedProxies }],
+    ['./identityService', { isGuestIdentity: () => guest }],
     ['@monky/server', {
       readStoredUpdateInventory: async filename => {
         io.snapshots.push(filename);
@@ -203,6 +204,18 @@ test('trusted proxies reach the hosted server only as a list the server accepts 
   assert.deepEqual(f.configCalls[0].trustedProxies, ['127.0.0.1', '10.0.0.0/8']);
   assert.equal((await f.manager.startServer({ ...serverB })).success, true);
   assert.equal(f.configCalls[1].trustedProxies, undefined, 'off unless the person turned it on');
+});
+
+test('hosting status supplies the identity of the actual local runtime, not a saved renderer key', async () => {
+  const server = runtime();
+  server.identityPublicKey = `302a300506032b6570032100${'1'.repeat(64)}`;
+  const f = fixture(async () => server);
+  assert.equal((await f.manager.startServer(serverA)).success, true);
+  const expected = running({ port: 3000, serverId: 'a', serverKey: server.identityPublicKey });
+  assert.deepEqual(structuredClone(f.manager.getStatus()), expected);
+  assert.deepEqual(f.events.at(-1).args, [expected]);
+  await f.manager.stopServer(3000);
+  assert.deepEqual(structuredClone(f.manager.getStatus()), stopped, 'a stopped runtime no longer vouches for a key');
 });
 
 test('two servers run side by side, each with its own stats, logs and stop', async () => {
@@ -511,5 +524,15 @@ test('invalid IPC start inputs are rejected before any filesystem access or serv
     assert.equal(result.error, f.i18n.mt('error.startServerFailed'));
   }
   assert.equal(f.io.directories.length, 0);
+  assert.equal(f.configCalls.length, 0);
+});
+
+test('guest hosting is rejected before filesystem access, server loading or durable ownership', async () => {
+  const f = fixture(async () => assert.fail('A guest must not start a durable server'), true);
+  const result = await f.manager.startServer(serverA);
+  assert.equal(result.success, false);
+  assert.equal(result.error, f.i18n.mt('identity.guestHosting'));
+  assert.equal(f.io.directories.length, 0);
+  assert.equal(f.io.serverLoads, 0);
   assert.equal(f.configCalls.length, 0);
 });

@@ -27,6 +27,7 @@ export class BotScreenClient {
       if (screen.channelId !== input.channelId || (input.id !== undefined && screen.id !== input.id)) {
         throw new Error('The miniapp creation response does not match the request.');
       }
+      if (screen.kind !== input.kind) throw new Error('The miniapp creation response has another modality.');
       return screen;
     }, (screen) => [screen]);
   }

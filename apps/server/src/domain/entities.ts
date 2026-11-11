@@ -56,6 +56,7 @@ export interface ServerRecord {
 export type NewServerRecord = Pick<ServerRecord, 'id' | 'name' | 'passwordHash' | 'createdAt' | 'maxUsers'> & Partial<ServerRecord>;
 
 export interface UserRecord {
+  guest?: boolean;
   id: string;
   clientId: string;
   publicKey: string | null;

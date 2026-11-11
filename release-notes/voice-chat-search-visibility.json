@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A busca no chat dos canais de voz agora mostra a barra, os filtros e os resultados dentro do próprio painel lateral, com espaço para o botão de fechar e suporte a Ctrl+F e teclado.",
+  "en": "Voice-channel chat search now displays its bar, filters and results inside the side panel, with room for the close button and support for Ctrl+F and keyboard navigation."
+}

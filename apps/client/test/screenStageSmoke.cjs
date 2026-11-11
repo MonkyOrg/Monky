@@ -250,6 +250,55 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       check(!root.querySelector('[data-kind="camera"] .stage-viewers'), 'Cameras do not acquire screen viewer badges');
       check(!modeCalls.some(([, id]) => id === 'remote-browser'), 'A legacy/browser share must not invent a native confirmation');
 
+      const cameraCanvas = document.createElement('canvas');
+      cameraCanvas.width = cameraCanvas.height = 32;
+      const watchedCameraStream = cameraCanvas.captureStream(0), cameraTrack = watchedCameraStream.getVideoTracks()[0];
+      try {
+        rtc.remoteMedia.trackArrived({ peerSessionId: remote.sessionId, kind: 'camera', track: cameraTrack });
+        stage.renderParticipants();
+        const cameraCard = () => root.querySelector(`[data-tile-key="${remote.sessionId}:camera"]`);
+        const playing = cameraCard().querySelector('video');
+        const stopCamera = cameraCard().querySelector('.stage-stopwatch-btn');
+        check(voice.isWatchingCamera(remote.sessionId) && cameraTrack.enabled && playing.srcObject.getVideoTracks()[0] === cameraTrack,
+          'A remote camera starts watched without an opt-in');
+        check(stopCamera?.getAttribute('aria-label') === language.t('stage.stopWatching'),
+          'Each remote camera has the same accessible stop control as a screen');
+        stopCamera.focus();
+        stopCamera.click();
+        await settle();
+        const watchCamera = cameraCard().querySelector('.stage-watch-btn');
+        check(!voice.isWatchingCamera(remote.sessionId) && !cameraTrack.enabled && cameraTrack.readyState === 'live',
+          'Stopping the camera disables only the reversible received track');
+        check(!playing.isConnected && playing.srcObject === null && cameraCard().querySelector('video').srcObject === null,
+          'A stopped camera releases playback and cannot display its last frame');
+        check(!stage.getTelemetryTiles().some(tile => tile.key === `${remote.sessionId}:camera`)
+          && !cameraCard().querySelector('[data-telemetry-key]'),
+          'A stopped camera cannot keep sampling telemetry or retain video diagnostics');
+        check(watchCamera?.getAttribute('aria-label') === language.t('stage.watchCamera')
+          && document.activeElement === watchCamera && !cameraCard().querySelector('.stage-loading-overlay'),
+          'The stopped card offers a localized keyboard-focusable way back, without a false loading spinner');
+        check(cameraCard().querySelector('.stage-watch-caption').textContent ===
+          language.t('stage.watchCameraCaption', { name: remote.nickname }), 'Camera captions escape the participant name');
+        stage.renderParticipants();
+        check(cameraCard().querySelector('.stage-watch-btn') === watchCamera, 'Roster redraws keep the stopped camera stopped');
+        watchCamera.click();
+        await settle();
+        const resumedStop = cameraCard().querySelector('.stage-stopwatch-btn');
+        check(voice.isWatchingCamera(remote.sessionId) && cameraTrack.enabled
+          && cameraCard().querySelector('video').srcObject.getVideoTracks()[0] === cameraTrack,
+          'Watching again restores the same camera track');
+        check(document.activeElement === resumedStop && focused().includes(`${remote.sessionId}:camera`),
+          'Watching focuses that camera and keeps keyboard focus on its new stop control');
+        stopCamera.click();
+        check(voice.isWatchingCamera(remote.sessionId), 'An unmounted stop button cannot change camera intent');
+        check(!voice.isWatchingScreen(remote.sessionId, remoteSource.shareId),
+          'Camera watch controls do not subscribe to the participant screen');
+        stage.setFocusedTiles([]);
+      } finally {
+        rtc.remoteMedia.trackEnded(remote.sessionId, 'camera', cameraTrack);
+        cameraTrack.stop();
+      }
+
       const first = start();
       check(!card(local.sessionId, first.id) && focused().length === 0,
         'The early start event must wait for the local source to enter the roster');

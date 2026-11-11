@@ -48,9 +48,15 @@ import { PROTOCOL_VERSION } from './constants.js';
 // signs memberAuthChallenge(), bound to that key (#821). After one bound login the server refuses that member without one,
 // and the app refuses a server it saw with a key once that then presents none or another. Servers that never presented a
 // key keep the bare nonce, and so do people that never offered the feature.
+// Protocol 41 adds event-history-cursor: ended events are read in bounded pages or revalidated by id.
+// Older servers only offer a capped whole snapshot, so clients never request progressive history from them.
 export const MIN_CLIENT_PROTOCOL = 35;
 export const MIN_BOT_PROTOCOL = 24;
-export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status', 'bot-key-proof', 'voice-move-id', 'forum-cursor', 'feature-unavailable', 'server-key-auth'] as const;
+export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo', 'screen-viewers', 'server-community', 'message-search', 'forums', 'native-polls', 'native-live-forms', 'recent-sounds', 'dm-relay', 'role-deny', 'role-grants', 'game-activity', 'game-share-request', 'channel-tree-order', 'poll-voters', 'poll-edit', 'local-youtube-playlist', 'server-audit', 'bot-manifest-url', 'screen-shares-8', 'voice-user-limit', 'afk-channel', 'bot-storage', 'message-forward', 'user-brb', 'custom-status', 'bot-key-proof', 'voice-move-id', 'forum-cursor', 'feature-unavailable', 'server-key-auth', 'event-history-cursor', 'identity-sessions', 'guest-membership', 'identity-bans', 'miniapp-browser', 'identity-ban-history', 'miniapp-browser-broadcast', 'miniapp-browser-host'] as const;
+// identity-sessions: online sessions of one's own identity, with per-server disconnect.
+// guest-membership: temporary signed identities never remain members after their last live socket.
+// identity-bans: identity moderation and private notices before any server content is delivered.
+// identity-ban-history: bounded moderation history with preserved actors and snapshot-bound revocation.
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
 /**
  * What a bot is offered, listed rather than subtracted: a new feature is only
@@ -58,6 +64,7 @@ export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];
  */
 export const BOT_PROTOCOL_FEATURES = [
   'message-length-setting', 'server-community', 'local-youtube-playlist', 'bot-storage', 'bot-key-proof', 'feature-unavailable',
+  'miniapp-browser', 'miniapp-browser-broadcast',
 ] as const satisfies readonly ProtocolFeature[];
 export const protocolOfferSchema = z.object({
   minimumVersion: z.number().int().positive(),

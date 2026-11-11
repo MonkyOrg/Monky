@@ -33,6 +33,7 @@ import { registerShortcutsIpc } from './ipc/shortcutsIpc';
 import { registerSoundboardIpc } from './ipc/soundboardIpc';
 import { registerStickersIpc } from './ipc/stickersIpc';
 import { registerWindowIpc } from './ipc/windowIpc';
+import { registerMiniappBrowserIpc } from './ipc/miniappBrowserIpc';
 
 // Every channel registered here is checked against the contract in @monky/shared.
 const ipcMain: ContractIpcMain = electronIpcMain;
@@ -81,6 +82,7 @@ export function setupIpcHandlers(
     overlay: () => overlayManager.contents(),
   });
   mainWindow.once('closed', () => registry.dispose());
+  const miniappBrowsers = registerMiniappBrowserIpc(mainWindow);
 
   registerWindowIpc(registry, { window: mainWindow, pipWindows: new ScreenPictureInPictureWindows(mainWindow) });
   registerOverlayIpc(registry, overlayManager);
@@ -138,7 +140,7 @@ export function setupIpcHandlers(
     },
     prepareShutdown: async () => {
       localExecution.freezeAdmissions();
-      await Promise.all([desktopSources.close(), nativeScreenSharing.prepareShutdown()]);
+      await Promise.all([desktopSources.close(), nativeScreenSharing.prepareShutdown(), miniappBrowsers.dispose()]);
     },
     async dispose() {
       const results = await Promise.allSettled([desktopSources.close(), nativeScreenSharing.dispose(), localExecution.dispose()]);

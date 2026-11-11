@@ -21,7 +21,20 @@ Click **Create and Start Server**. The server starts on your machine, listens on
 
 Created servers are saved (up to 10) and appear on the rail like any other
 server. Right-click the icon to **Start** or **Stop** it, open **Monitor**
-(while it is running) or **Delete** the local data.
+(while it is running) or **Delete server and local data**. Deletion is permanent:
+after confirmation, Monky stops the server and erases this computer's messages,
+channels, members and files. Cancelling the stop or a failed deletion preserves
+the entry in the list.
+
+**Remove connection from list** appears for connections that are not servers
+created in this Monky: it removes only the saved address, without deleting the
+server. Created servers stay on the rail so they can be started again; to only
+take them offline, use **Stop**.
+
+Clicking your hosted server checks the app's own instance, not just a network
+response at that address. If stopped, it asks for confirmation to start. Sign-in
+begins only after startup is acknowledged; a failure reports the startup error
+without trying to join another process answering on the same port.
 
 You can keep several of your servers running at the same time, each on its own
 port. The form suggests a free port and does not accept a port used by another
