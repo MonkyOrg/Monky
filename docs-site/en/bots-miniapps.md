@@ -89,6 +89,8 @@ Capture has its own native root, which is never shown. The same site surface
 moves between that root and the stage: hiding the entire window in the tray
 also preserves the broadcast, without recapturing, duplicating the site or
 changing its session. Controls still belong to the original Monky window.
+Static pages retain a minimum capture cadence of one frame per second,
+without relying on site animations; the upper limit remains 30 FPS.
 The first frame is verified using a disposable track clone, without relying
 on a visible preview or replacing the published track. If capture cannot
 produce a frame, the app reports the failure and closes the browser, without

@@ -1,5 +1,5 @@
 {
   "group": "correcoes",
-  "pt-BR": "O navegador mantém a mesma página, captura e sessão entre o palco, o segundo plano e a janela minimizada ou oculta, sem prévia visível ou captura do desktop. Seus recursos são liberados ao fechar ou perder acesso.",
-  "en": "The browser preserves the same page, capture and session between the stage, background and a minimized or hidden window, without a visible preview or desktop capture. Its resources are released on close or loss of access."
+  "pt-BR": "O navegador mantém a mesma página, captura e sessão entre o palco, o segundo plano e a janela minimizada ou oculta, sem prévia visível ou captura do desktop. Páginas estáticas continuam fornecendo quadros, sem depender de animações no site. Seus recursos são liberados ao fechar ou perder acesso.",
+  "en": "The browser preserves the same page, capture and session between the stage, background and a minimized or hidden window, without a visible preview or desktop capture. Static pages keep providing frames without relying on site animations. Its resources are released on close or loss of access."
 }

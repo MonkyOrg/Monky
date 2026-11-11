@@ -52,9 +52,10 @@ export class BotBrowserView {
     const sourceId = await window.api.captureMiniappBrowser(this.input.requestId);
     if (this.retired) throw new DOMException('Browser capture was cancelled.', 'AbortError');
     interface TabConstraints extends MediaTrackConstraints {
-      mandatory: { chromeMediaSource: 'tab'; chromeMediaSourceId: string; maxFrameRate: number };
+      mandatory: { chromeMediaSource: 'tab'; chromeMediaSourceId: string; minFrameRate: number; maxFrameRate: number };
     }
-    const video: TabConstraints = { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: sourceId, maxFrameRate: 30 } };
+    // Processor-only consumers need a minimum cadence to refresh an otherwise static tab.
+    const video: TabConstraints = { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: sourceId, minFrameRate: 1, maxFrameRate: 30 } };
     const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
     if (this.retired) {
       stream.getTracks().forEach(track => track.stop());

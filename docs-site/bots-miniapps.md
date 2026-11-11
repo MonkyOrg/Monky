@@ -91,6 +91,8 @@ A captura possui uma raiz nativa própria, nunca exibida. A mesma superfície
 do site passa entre essa raiz e o palco: ocultar a janela inteira na bandeja
 também preserva a transmissão, sem recapturar, duplicar o site ou trocar a
 sessão. Os controles continuam pertencendo à janela original do Monky.
+Páginas estáticas mantêm uma cadência mínima de captura de um quadro por
+segundo, sem depender de animações no site; o limite máximo continua em 30 FPS.
 O primeiro quadro é verificado em uma cópia descartável da trilha, sem
 depender de uma prévia visível nem substituir a trilha publicada. Se a captura
 não produzir um quadro, o app informa a falha e encerra o navegador, sem abrir

@@ -12,6 +12,28 @@ class ProtocolRequestError extends Error {
   constructor(message, code) { super(message); this.code = code; }
 }
 
+test('browser tab capture requests a minimum refresh cadence for static pages', async () => {
+  const requests = [];
+  const stream = { getTracks: () => [] };
+  const filename = path.resolve(__dirname, '..', 'src', 'renderer', 'views', 'BotBrowserView.ts');
+  const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, fileName: filename,
+  }).outputText;
+  const module = { exports: {} };
+  vm.runInNewContext(`(function(exports, require, module) { ${code}\n})`, {
+    window: { api: { captureMiniappBrowser: async requestId => { assert.equal(requestId, 'request'); return 'site-token'; } } },
+    navigator: { mediaDevices: { getUserMedia: async constraints => { requests.push(structuredClone(constraints)); return stream; } } },
+  }, { filename })(module.exports, () => ({}), module);
+  const browser = Object.assign(Object.create(module.exports.BotBrowserView.prototype), {
+    ready: Promise.resolve(), retired: false, input: { requestId: 'request' },
+  });
+  assert.equal(await browser.capture(), stream);
+  assert.deepEqual(requests, [{
+    audio: false,
+    video: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: 'site-token', minFrameRate: 1, maxFrameRate: 30 } },
+  }]);
+});
+
 for (const [label, failure, expected] of [
   ['permission refusal', new ProtocolRequestError('Permission denied', ProtocolErrorCode.PERMISSION_DENIED), 'browser.broadcastPermissionDenied'],
   ['capture failure', new Error('The browser capture produced no video frame.'), 'browser.broadcastFailed'],

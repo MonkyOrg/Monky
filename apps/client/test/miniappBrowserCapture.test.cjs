@@ -87,12 +87,36 @@ if (!process.versions.electron) {
     const bounds = { x: 40, y: 100, width: 360, height: 300 };
     assert.equal(entry.container.getVisible(), false, 'The site has never been displayed');
     const sourceId = manager.captureSourceId(input.requestId);
+    const ts = require('typescript');
+    const module = { exports: {} };
+    const sourceFile = path.join(__dirname, '..', 'src', 'renderer', 'views', 'BotBrowserView.ts');
+    const source = ts.transpileModule(fs.readFileSync(sourceFile, 'utf8'), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, fileName: sourceFile,
+    }).outputText;
+    require('node:vm').runInNewContext(`(function(exports,require,module){${source}\n})`)(
+      module.exports, () => ({}), module);
+    const captureMethod = module.exports.BotBrowserView.prototype.capture.toString();
     await run(host.webContents, `(async () => {
-      window.capture = await navigator.mediaDevices.getUserMedia({ audio:false, video:{
-        mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:${JSON.stringify(sourceId)},maxFrameRate:30}}});
-      const preview=document.createElement('video');preview.muted=true;preview.srcObject=capture;
-      await Promise.all([preview.play(),new Promise(resolve=>preview.requestVideoFrameCallback(resolve))]);
-      preview.pause();preview.srcObject=null;
+      window.api={captureMiniappBrowser:async()=>${JSON.stringify(sourceId)}};
+      window.capture=await ({${captureMethod}}).capture.call({
+        ready:Promise.resolve(),retired:false,input:{requestId:${JSON.stringify(input.requestId)}}
+      });
+      const probe=capture.getVideoTracks()[0].clone();
+      const reader=new MediaStreamTrackProcessor({track:probe,maxBufferSize:1}).readable.getReader();
+      const timestamps=new Set();
+      let timeout;
+      try{
+        await Promise.race([(async()=>{
+          while(timestamps.size<3){
+            const {value:frame}=await reader.read();
+            if(!frame)throw new Error('Static tab capture ended');
+            try{
+              if(!frame.displayWidth||!frame.displayHeight)throw new Error('Static tab has no pixels');
+              timestamps.add(frame.timestamp);
+            }finally{frame.close();}
+          }
+        })(),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(new Error('Static tab stopped refreshing')),15000);})]);
+      }finally{clearTimeout(timeout);probe.stop();await reader.cancel();reader.releaseLock();}
       window.sender = new RTCPeerConnection();
       const clone=capture.getVideoTracks()[0].clone();clone.contentHint='detail';
       await clone.applyConstraints({width:{max:1920},height:{max:1080},frameRate:{max:30}});

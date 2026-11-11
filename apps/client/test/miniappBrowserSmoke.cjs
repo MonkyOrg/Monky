@@ -405,17 +405,23 @@ if (!process.versions.electron) {
     await unclipped;
     step = 'miniapp fullscreen placement and Escape from the focused website';
     const enteredFullscreen = once(owner.webContents, 'enter-html-full-screen');
+    const enteredNativeFullscreen = process.platform === 'darwin' ? once(owner, 'enter-full-screen') : null;
     await run(owner.webContents, 'window.tile.element.requestFullscreen()');
     await enteredFullscreen;
+    step = 'native fullscreen transition completes before testing layout and keyboard';
+    await enteredNativeFullscreen;
     const fullPlaced = placed(stageEntry, browser => browser.bounds.width > 720 && browser.container.getVisible());
     await fullPlaced;
+    step = 'Escape from the focused website exits fullscreen';
     const exitedFullscreen = once(owner.webContents, 'leave-html-full-screen');
+    const exitedNativeFullscreen = process.platform === 'darwin' ? once(owner, 'leave-full-screen') : null;
     await run(owner.webContents, `window.browserFullscreenExited=new Promise(resolve=>document.addEventListener('fullscreenchange',()=>{
       if(!document.fullscreenElement)resolve(true);
     }));true`);
     stageContents.focus();
     stageContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
     await exitedFullscreen;
+    await exitedNativeFullscreen;
     await run(owner.webContents, 'window.browserFullscreenExited');
     assert.equal(await run(owner.webContents, 'document.fullscreenElement === null'), true);
     await placed(stageEntry, browser => browser.container.getVisible());

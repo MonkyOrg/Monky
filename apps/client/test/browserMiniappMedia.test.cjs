@@ -125,8 +125,8 @@ function fixture(t, { sessionId = 'host', current = true, ice = [] } = {}) {
     run(module.exports, request => request === '@monky/shared' ? shared : imports(request), module);
     return module.exports;
   };
-  const config = compile('core\\webrtc\\nativeScreen\\NativeScreenCall.ts', () => ({}));
-  const { BrowserMiniappMedia } = compile('core\\webrtc\\BrowserMiniappMedia.ts', request => {
+  const config = compile(path.join('core', 'webrtc', 'nativeScreen', 'NativeScreenCall.ts'), () => ({}));
+  const { BrowserMiniappMedia } = compile(path.join('core', 'webrtc', 'BrowserMiniappMedia.ts'), request => {
     if (request === './BrowserScreenSubscription') return { BrowserScreenSubscription: Receiver };
     if (request === './nativeScreen/NativeScreenCall') return config;
     if (request.endsWith('browserScreenProfile')) return { browserScreenProfile: value => value };
@@ -135,7 +135,7 @@ function fixture(t, { sessionId = 'host', current = true, ice = [] } = {}) {
     throw new Error(`Unexpected import: ${request}`);
   });
   const media = new BrowserMiniappMedia(() => context);
-  const { BotBrowserViewer } = compile('views\\BotBrowserViewer.ts', request => {
+  const { BotBrowserViewer } = compile(path.join('views', 'BotBrowserViewer.ts'), request => {
     if (request === '../core/WebRtcManager') return { webRtcManager: { browserMiniappMedia: media } };
     if (request === '../i18n') return { t: key => key };
     throw new Error(`Unexpected viewer import: ${request}`);

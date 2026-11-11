@@ -133,6 +133,39 @@ if (process.versions.electron) {
       await new Promise(resolve => site.close(resolve));
     }
   });
+
+  test('browser pixel oracle accepts letterboxing but rejects blank, stale and mixed-color frames', async () => {
+    const vm = require('node:vm');
+    for (const [kind, accepted] of [['letterbox', true], ['blank', false], ['stale', false], ['mixed', false]]) {
+      let stopped = false, cancelled = false, released = false, closed = false, read = false, x = 0, y = 0;
+      const frame = { displayWidth: 1000, displayHeight: 1000, close() { closed = true; } };
+      const reader = {
+        async read() { if (read) return { done: true }; read = true; return { value: frame }; },
+        async cancel() { cancelled = true; },
+        releaseLock() { released = true; },
+      };
+      const sample = vm.runInNewContext(`(${sampleTrack.toString()})`, {
+        performance, setTimeout, clearTimeout,
+        MediaStreamTrackProcessor: class { readable = { getReader: () => reader }; },
+        OffscreenCanvas: class {
+          getContext() {
+            return {
+              drawImage(_frame, sourceX, sourceY) { x = sourceX; y = sourceY; },
+              getImageData() {
+                const color = kind === 'blank' || y < 400 || y > 600 ? [0, 0, 0, 255]
+                  : kind === 'stale' || (kind === 'mixed' && x === 750) ? [0, 0, 255, 255] : [0, 255, 0, 255];
+                return { data: new Uint8ClampedArray(color) };
+              },
+            };
+          }
+        },
+      });
+      const track = { id: kind, clone: () => ({ stop() { stopped = true; } }), getSettings: () => ({ deviceId: kind }) };
+      if (accepted) assert.equal((await sample(track, 'green')).pixels.length, 49);
+      else await assert.rejects(sample(track, 'green'), /Browser video source ended/);
+      assert.ok(stopped && cancelled && released && closed, `${kind} releases every owned probe resource`);
+    }
+  });
 }
 
 function runClient() {
@@ -173,10 +206,19 @@ function runClient() {
         if(!window.browserAppInstrumented){
         window.browserAppInstrumented=true;
         window.browserAppCaptures=[];
+        window.browserAppCaptureEvents=[];
         window.browserAppTrackClones=[];
+        const observeTrack=(track,kind)=>{
+          const record=event=>browserAppCaptureEvents.push({
+            kind,event,id:track.id,muted:track.muted,state:track.readyState,settings:track.getSettings()
+          });
+          record('acquired');
+          for(const event of ['mute','unmute','ended']) track.addEventListener(event,()=>record(event));
+        };
         const clone=MediaStreamTrack.prototype.clone;
         MediaStreamTrack.prototype.clone=function(){
           const track=Reflect.apply(clone,this,[]);
+          observeTrack(track,'clone');
           window.browserAppTrackClones.push({parent:this.id,track});return track;
         };
         window.browserAppPeers=[];
@@ -186,7 +228,8 @@ function runClient() {
         };
         const capture=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
         navigator.mediaDevices.getUserMedia=async constraints=>{
-          try{const stream=await capture(constraints);window.browserAppCaptures.push(stream);return stream;}
+          try{const stream=await capture(constraints);window.browserAppCaptures.push(stream);
+            stream.getTracks().forEach(track=>observeTrack(track,'original'));return stream;}
           catch(error){console.error('[Browser app capture]',error.name,error.message);throw error;}
         };
         }
@@ -403,6 +446,7 @@ function runClient() {
             .filter(element=>element.checkVisibility()).map(element=>({class:element.className,text:element.textContent,
               bounds:element.getBoundingClientRect().toJSON()})),
           captures:window.browserAppCaptures?.map(stream=>stream.getTracks().map(track=>({state:track.readyState,settings:track.getSettings()}))),
+          captureEvents:window.browserAppCaptureEvents,
           videos:[...document.querySelectorAll('video')].map(video=>{
             const canvas=document.createElement('canvas');canvas.width=canvas.height=1;
             const context=canvas.getContext('2d');
@@ -465,14 +509,17 @@ async function sampleTrack(track, color, expected) {
         differences = expected ? pixels.flatMap((pixel, index) =>
           pixel.rgba.some((channel, component) => Math.abs(channel - expected[index].rgba[component]) > 12)
             ? [{ ...pixel, expected: expected[index].rgba }] : []) : undefined;
+        const siteColor = ({ rgba: [red, green, blue] }) => red < 35 &&
+          (color === 'blue' ? blue > 200 && green < 35 : green > 180 && blue < 35);
         const matches = expected
           ? pixels.every((pixel, index) => pixel.rgba.every((channel, component) =>
             Math.abs(channel - expected[index].rgba[component]) <= 12))
           : color === 'home' ? pixels.some(({flat,rgba:[red,green,blue]}) => flat &&
               red > 45 && green > 45 && blue > 130 && blue > red*1.5)
             && pixels.some(({flat,rgba:[red,green,blue]}) => flat && red > 5 && red < 80 && green < 80 && blue < 80)
-            : last.every(({ rgba: [red, green, blue] }) => red < 35 &&
-              (color === 'blue' ? blue > 200 && green < 35 : green > 180 && blue < 35));
+            // Native aspect ratios can letterbox the site. Sender/receiver comparison still covers the full grid.
+            : last.some(siteColor) && last.every(pixel =>
+              siteColor(pixel) || pixel.rgba.slice(0, 3).every(channel => channel < 35));
         if (matches) return { color, track: track.id, device: track.getSettings().deviceId, pixels,
           width: frame.displayWidth, height: frame.displayHeight, timestamp: frame.timestamp,
           codedWidth: frame.codedWidth, codedHeight: frame.codedHeight };
