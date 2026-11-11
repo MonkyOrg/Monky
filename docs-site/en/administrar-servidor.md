@@ -27,6 +27,36 @@ depend on your access.
 | Roles | Organize permissions, hierarchy and membership |
 | Bots | Link bots, review capabilities and unlink registrations |
 
+### Identity bans
+
+With **Manage Server**, use **Members → More options → Ban identity** in
+server settings, or open a person's menu. This action does not require
+**Manage Roles**. The owner, yourself and bots cannot be targeted. Choose **Permanent** or
+**For a set duration**, then enter a whole-number duration and choose **Minutes**, **Hours** or **Days**. A reason is
+required; the switch decides whether the banned person sees it.
+Administrators can still inspect it.
+
+The ban immediately disconnects every device of that identity, ends its
+voice session and revokes delivered access. Reconnecting shows a notice
+with its expiry and, only when authorized, its reason, without delivering
+server content. Under **Members → Bans**, switch between **Active** and
+**Full history**. Records preserve the identity, reason, reason visibility,
+dates and moderators responsible for banning and unbanning. **Unban** requires
+confirmation and allows entry without deleting the record. Timed bans stop
+blocking entry at their exact expiry and remain in history as expired. Load more
+records on demand without discarding earlier pages.
+
+History requires server support; older servers still allow inspecting and
+unbanning active bans. Upgrading preserves bans still stored in the database,
+with an unknown moderator when that information was not recorded. Details of
+bans already deleted by older versions cannot be recovered.
+
+The target is an identity, not an IP: CGNAT, shared networks and VPNs can
+place several people at one address, so an IP ban would punish others.
+This does not prevent someone from generating a different identity.
+Clients must negotiate ban support to administer it; entry restrictions
+still apply to older clients.
+
 ### Immediate application
 
 Switches and selections apply immediately. Names and limits
@@ -374,6 +404,13 @@ The **Members** tab lists everyone registered on the server, including offline
 people. Disconnecting does not remove a person
 from the list; roles and access remain manageable according to your permissions.
 Bots are managed separately in the **Bots** tab.
+
+Use **More options** on a person's row to open their actions. The menu remains
+visible even when search shows a single member, without being clipped by the
+table. Removing someone from the server requires confirmation: it ends their
+connections and removes their roles, but is not a ban and does not prevent
+them from joining again. Cancelling leaves the member unchanged; losing access
+to the action cancels the confirmation.
 
 **Roles → Create role** opens a dedicated dialog for its name, color and
 permissions. The **three-dot menu → Edit role** opens the same editor for an

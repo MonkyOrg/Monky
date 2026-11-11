@@ -82,6 +82,8 @@ export interface PlatformCapabilities {
   localExecution: boolean;
   /** Bot screens and the storage they keep on this device. */
   botScreens: boolean;
+  /** Personal top-level browsing, in a disposable desktop session. */
+  miniappBrowser: boolean;
   /** Friends and direct messages. */
   directMessages: boolean;
   /** Soundboard sounds and stickers. */
@@ -118,6 +120,10 @@ export interface PlatformApi {
   /** Returns the URL of a document only the miniapp's own frame may load. */
   createBotScreenDocument: Invoke<'bot-screen-document:create'>;
   removeBotScreenDocument: Invoke<'bot-screen-document:remove'>;
+  openMiniappBrowser: Invoke<'miniapp-browser:open'>;
+  miniappBrowserCommand: Invoke<'miniapp-browser:owner'>;
+  captureMiniappBrowser: Invoke<'miniapp-browser:capture'>;
+  onMiniappBrowserClosed: Subscribe<'miniapp-browser:closed'>;
   /** How the documents of `createBotScreenDocument` are isolated and loaded. */
   botScreenDocuments: BotScreenDocumentHost;
   botStorage: BotStorageApi;
@@ -142,6 +148,7 @@ export interface PlatformApi {
   getIdentityStatus: Invoke<'identity:status'>;
   /** Creates an identity when there is no readable one; an unreadable file is set aside, never deleted. */
   createIdentity: Invoke<'identity:create'>;
+  createGuestIdentity: Invoke<'identity:guest'>;
   getIdentity: Invoke<'identity:get'>;
   getClientId: Invoke<'identity:get-client-id'>;
   signChallenge: Invoke<'identity:sign-challenge'>;

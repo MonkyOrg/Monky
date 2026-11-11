@@ -92,8 +92,12 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
     const identity = await window.api.getIdentity();
     const auth = await openServerSession(config.server.host, config.server.port, identity, config.nickname, config.server.password, { timeoutMs: 30_000 });
     const session = sessionManager.getActive();
-    if (!session || session.client.getStatus() !== 'CONNECTED' || !session.serverStore.hasPermission(Permission.MANAGE_SERVER)) {
-      throw new Error('Prepared QA did not authenticate as the first real server owner.');
+    const isMember = config.role === 'member';
+    if (!session || session.client.getStatus() !== 'CONNECTED' ||
+        session.serverStore.hasPermission(Permission.MANAGE_SERVER) !== !isMember) {
+      throw new Error(isMember
+        ? 'Prepared QA did not authenticate as an ordinary server member.'
+        : 'Prepared QA did not authenticate as the first real server owner.');
     }
     const text = auth.server.channels.find((channel) => channel.type === 'TEXT');
     const voice = auth.server.channels.find((channel) => channel.type === 'VOICE');
@@ -120,13 +124,13 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
       if (document.querySelector('.forum-post-row') || session.chatStore.getMessages(text.id).length !== 0) {
         throw new Error('The empty QA scenario unexpectedly contains threads or chat messages.');
       }
-    } else {
+    } else if (!isMember) {
       const seed = '**QA preparado / Prepared QA**\nPerfil, servidor e dados isolados / Isolated profile, server and data.';
       session.client.send(MessageType.CHAT_SEND, { channelId: text.id, content: seed });
       await until(() => session.chatStore.getMessages(text.id).some((message) => message.content === seed), 'authenticated seeded message acknowledgement', owner.signal);
     }
 
-    if (config.scenario === 'connected' && !config.smoke) {
+    if (config.scenario === 'connected' && !config.smoke && !isMember) {
       // Outside a call the real client plays a sound locally and keeps it with
       // RECENT_SOUND_RECORD: the server relays SOUNDBOARD_PLAY only to the call
       // its author is in.
@@ -193,7 +197,13 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
       await publish('ready');
       return;
     }
-    if (config.bot) {
+    if (config.bot && isMember) {
+      await until(() => session.chatStore.getCommands().length > 0,
+        'existing authenticated bot command catalog', owner.signal);
+      report.botId = session.chatStore.getCommands()[0]?.botId;
+      if (!report.botId) throw new Error('The QA member did not receive the installed bot command catalog.');
+      report.commandCount = session.chatStore.getCommands().filter(command => command.botId === report.botId).length;
+    } else if (config.bot) {
       if (!session.serverStore.hasPermission(Permission.MANAGE_BOTS)) throw new Error('The QA owner cannot review bot capabilities.');
       const preview = await session.client.sendRequest<BotInstallPreview>(
         MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: config.bot.manifestUrl }, undefined, 30_000);

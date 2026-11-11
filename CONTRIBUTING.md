@@ -190,6 +190,7 @@ npm run qa -- tool-consent --bot=fixture
 npm run qa -- music --bot-root="C:\Projetos\MonkyBot"
 npm run qa -- connected --smoke
 npm run qa -- connected --real-media
+npm run qa -- connected --two-clients --bot-root="C:\Projetos\MonkyBot"
 ```
 
 `--bot=fixture` é uma fixture SDK claramente identificada, nunca substituição do
@@ -214,11 +215,22 @@ do servidor nunca substitui o consentimento local de `tool-consent`/`music`.
 Para testar a admissão do bot na chamada, use `connected --bot-root=...`, não
 `voice`/`voice-receive`/`music`: esses cenários já colocam o bot na voz.
 
+`connected --two-clients` abre duas instâncias reais: **QA Host**, dono do servidor,
+e **QA Espectador**, membro comum. Elas usam perfis e identidades distintos no mesmo
+servidor descartável; a segunda não ganha permissões administrativas, não repete os
+dados de exemplo e não reinstala o bot. Com `--bot-root`, ambas recebem o catálogo
+real já instalado pelo dono. Entre manualmente na mesma sala de voz nas duas
+janelas para testar `/browser`: o invocador controla o site e o outro vê a imagem,
+sem controle remoto. O launcher não executa o comando nem concede consentimento
+local. Fechar uma janela deixa a outra aberta para verificar a retirada do host;
+fechar ambas ou usar `Ctrl+C` encerra o servidor e o bot e apaga os dois perfis.
+
 Aguarde **QA_READY**, não apenas a abertura da janela. O launcher confere que a
 janela está visível no modo interativo e oculta em `--smoke`. Servidor, autenticação,
 mensagem persistida, catálogo e peer de voz são conferidos conforme o cenário.
 Os serviços usam loopback, não anunciam na LAN, e os dados ficam exclusivamente
-em `.qa\runs\<cenário>-<id>`, apagados ao encerrar. Fechar a janela ou usar `Ctrl+C`
+em `.qa\runs\<id-curto>`, apagados ao encerrar. Cada cliente usa o subdiretório
+`client` de um run próprio. Fechar a janela (ambas em `--two-clients`) ou usar `Ctrl+C`
 encerra os processos próprios; falhas de inicialização também fazem essa limpeza.
 
 `--smoke` verifica a prontidão com janela oculta e encerra tudo. Música de produção

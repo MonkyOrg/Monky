@@ -31,6 +31,7 @@ import { peerFailureTooltip } from '../../utils/peerFailureHint';
 import { isParticipantSpeaking, participantConnectionIndicators } from '../../utils/voiceConnection';
 import { renderPresenceTag } from '../../utils/presenceTag';
 import { renderAudioMuteIndicators } from '../AudioStateIcon';
+import { openMemberMiniapp, renderMiniappMemberIndicators } from '../MiniappMemberIndicator';
 import { t } from '../../i18n';
 
 /** A loose channel or a category, the two kinds of entries at the sidebar root. */
@@ -61,6 +62,7 @@ export interface ChannelSidebarHost {
   openVoiceChat(channelId: string): void;
   /** Someone's broadcast, after asking. */
   watchLive(sessionId: string): Promise<void>;
+  openMiniapp(id: string): void;
 }
 
 /**
@@ -349,6 +351,7 @@ export class ChannelSidebar {
                 <span class="material-symbols-outlined md-14" aria-hidden="true">screen_share</span>
               </button>`) : ''}
           ${p.voiceState?.isCameraOn ? html`<span class="material-symbols-outlined md-14 voice-mini-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
+          ${p.voiceState ? trustedHtml(renderMiniappMemberIndicators(p.user.id, p.voiceState.channelId)) : ''}
           ${activity ? (activityIcon
             ? html`<img class="voice-mini-art" src="${activityIcon}" alt="" title="${t('main.playingGame', { game: activity.name })}">`
             : html`<span class="material-symbols-outlined md-18 voice-mini-icon" title="${t('main.playingGame', { game: activity.name })}">sports_esports</span>`) : ''}
@@ -404,6 +407,12 @@ export class ChannelSidebar {
       const add = element?.closest<HTMLButtonElement>('[data-add-category]');
       if (add) {
         createChannelModal.open('TEXT', add.dataset.addCategory || null);
+        return;
+      }
+      const miniapp = element?.closest<HTMLButtonElement>('[data-member-miniapp]');
+      if (miniapp) {
+        event.stopPropagation();
+        openMemberMiniapp(miniapp, id => this.host.openMiniapp(id));
         return;
       }
       // Someone else's share icon opens their broadcast, after asking.

@@ -4,6 +4,7 @@ import type { NativeScreenPresentationController } from '@monky/screen-share/ren
 import * as nativeAudioProtocol from '@monky/shared';
 import {
   APP_RENDERER_READY, APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, AUDIO_PREVIEW_IPC, BOT_SCREEN_DOCUMENT_IPC, BOT_STORAGE_CHANGED,
+  MINIAPP_BROWSER_IPC, MINIAPP_BROWSER_CLOSED,
   BOT_STORAGE_IPC, CRASH_RECOVERY_IPC, DESKTOP_SOURCES_IPC, DEVELOPMENT_QA_IPC, DM_EVENT, DM_IPC, EDITOR_COMMAND_IPC,
   EVENT_CALENDAR_IPC, FILE_BATCH_DOWNLOAD_IPC, HOSTING_SKILL_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC,
   LOCAL_EXECUTION_TASK_FAILED, MEDIA_FOLDERS_IPC, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, SERVER_INVITE_AVAILABLE,
@@ -92,6 +93,7 @@ const api: PlatformApi = {
     browserScreenPicker: false, screenEncoderChoice: true,
     localExecution: true, botScreens: true, directMessages: true, mediaFolders: true, mediaFolderPicker: true, botSoundDownloads: true, folderDownloads: true,
     durableIdentity: true, plainRemoteServers: true,
+    miniappBrowser: true,
   },
   nativeScreenCommand: command => {
     if (command?.action === 'watch') prepareNativeAudio();
@@ -116,6 +118,7 @@ const api: PlatformApi = {
   setLanguage: language => invoke('app:set-language', language),
   getIdentityStatus: () => invoke('identity:status'),
   createIdentity: () => invoke('identity:create'),
+  createGuestIdentity: (nickname) => invoke('identity:guest', nickname),
   getIdentity: () => invoke('identity:get'),
   getClientId: () => invoke('identity:get-client-id'),
   signChallenge: (nonceHex, binding) => invoke('identity:sign-challenge', nonceHex, binding),
@@ -159,6 +162,10 @@ const api: PlatformApi = {
   openBackupFile: () => invoke('backup:open-file'),
   takeServerInvite: () => invoke(SERVER_INVITE_IPC.take),
   createBotScreenDocument: (html, consent) => invoke(BOT_SCREEN_DOCUMENT_IPC.create, html, consent),
+  openMiniappBrowser: input => invoke(MINIAPP_BROWSER_IPC.open, input),
+  miniappBrowserCommand: command => invoke(MINIAPP_BROWSER_IPC.owner, command),
+  captureMiniappBrowser: requestId => invoke(MINIAPP_BROWSER_IPC.capture, requestId),
+  onMiniappBrowserClosed: callback => subscribe(MINIAPP_BROWSER_CLOSED, callback),
   botScreenDocuments: { isolation: 'origin', loaderLoads: 0 },
   removeBotScreenDocument: url => invoke(BOT_SCREEN_DOCUMENT_IPC.remove, url),
   botStorage: {

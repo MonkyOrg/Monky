@@ -44,7 +44,7 @@ import type {
 } from './protocol.js';
 import type { ChatMessage, WebRtcSignalPayload } from './models.js';
 import type {
-  CommunitySettingsUpdate, CommunitySnapshot, EventControl, EventInterestedList, EventInterestedListResult, EventSave,
+  CommunitySettingsUpdate, CommunitySnapshot, EventControl, EventHistoryRequest, EventHistoryResult, EventInterestedList, EventInterestedListResult, EventSave,
   LiveActionCreate, LiveActionRecord, LiveActionSubmission, LiveActionUpdate,
   communityImageUploadResultSchema, communityImageUploadSchema, eventIdRequestSchema, eventInterestSchema, eventListSchema,
   eventResultSchema, eventStartedSchema, liveActionIdSchema, liveActionSubmitSchema,
@@ -56,7 +56,7 @@ import type {
   botSelectorFinalizeSchema, botSelectorIdSchema, botSelectorListSchema, botSelectorRespondSchema, botSelectorUpdateSchema,
 } from './botSelectors.js';
 import type {
-  BotScreen, BotScreenAction, BotScreenActionEvent, BotScreenCreate, BotScreenRemoved,
+  BotScreen, BotScreenAction, BotScreenActionEvent, BotScreenCreate, BotScreenRemoved, BotBrowserPublish,
   botScreenListResultSchema, botScreenListSchema, botScreenRefSchema, botScreenUpdateSchema,
 } from './botScreens.js';
 import type {
@@ -92,6 +92,12 @@ export type EmptyPayload = Record<string, never>;
 
 /** Payload of each message a client sends, a person's app or a bot. */
 export interface ClientToServerPayloads {
+  [MessageType.IDENTITY_SESSIONS_GET]: EmptyPayload;
+  [MessageType.IDENTITY_SESSION_DISCONNECT]: import('./identityAccess.js').IdentitySessionDisconnect;
+  [MessageType.IDENTITY_BAN]: import('./identityAccess.js').IdentityBanRequest;
+  [MessageType.IDENTITY_UNBAN]: import('./identityAccess.js').IdentityUnbanRequest;
+  [MessageType.IDENTITY_BANS_GET]: EmptyPayload;
+  [MessageType.IDENTITY_BAN_HISTORY_GET]: import('./identityAccess.js').IdentityBanHistoryRequest;
   // Connection
   [MessageType.AUTH_CONNECT]: AuthConnectPayload;
   [MessageType.AUTH_CHALLENGE_RESPONSE]: AuthChallengeResponsePayload;
@@ -156,6 +162,7 @@ export interface ClientToServerPayloads {
   [MessageType.COMMUNITY_UPDATE_SETTINGS]: CommunitySettingsUpdate;
   [MessageType.EVENT_SAVE]: EventSave;
   [MessageType.EVENT_GET]: z.input<typeof eventIdRequestSchema>;
+  [MessageType.EVENT_HISTORY_GET]: EventHistoryRequest;
   [MessageType.EVENT_GET_INTERESTED]: EventInterestedList;
   [MessageType.EVENT_CONTROL]: EventControl;
   [MessageType.EVENT_INTEREST]: z.input<typeof eventInterestSchema>;
@@ -247,6 +254,7 @@ export interface ClientToServerPayloads {
   [MessageType.BOT_SCREEN_UPDATE]: z.input<typeof botScreenUpdateSchema>;
   [MessageType.BOT_SCREEN_CLOSE]: z.input<typeof botScreenRefSchema>;
   [MessageType.BOT_SCREEN_END]: z.input<typeof botScreenRefSchema>;
+  [MessageType.BOT_BROWSER_PUBLISH]: BotBrowserPublish;
   [MessageType.BOT_SCREEN_LIST]: z.input<typeof botScreenListSchema>;
   [MessageType.BOT_SCREEN_ACTION]: BotScreenAction;
   [MessageType.BOT_STORAGE_PUT]: BotStoragePut;
@@ -266,6 +274,11 @@ export interface ClientToServerPayloads {
 
 /** Payload of each message the server sends to a person's app or a bot. */
 export interface ServerToClientPayloads {
+  [MessageType.IDENTITY_SESSIONS]: { sessions: import('./identityAccess.js').OwnIdentitySession[] };
+  [MessageType.IDENTITY_SESSION_DISCONNECTED]: { sessionId: string };
+  [MessageType.IDENTITY_BANS]: { bans: import('./identityAccess.js').IdentityBanSummary[] };
+  [MessageType.IDENTITY_BAN_HISTORY]: import('./identityAccess.js').IdentityBanHistoryPage;
+  [MessageType.IDENTITY_BANNED]: import('./identityAccess.js').IdentityBanNotice;
   // Connection
   [MessageType.AUTH_CHALLENGE]: AuthChallengePayload;
   [MessageType.AUTH_SUCCESS]: AuthSuccessPayload;
@@ -316,6 +329,7 @@ export interface ServerToClientPayloads {
   [MessageType.EVENT_SAVED]: z.infer<typeof eventResultSchema>;
   [MessageType.EVENT_STARTED]: z.infer<typeof eventStartedSchema>;
   [MessageType.EVENT_INTERESTED_LIST]: EventInterestedListResult;
+  [MessageType.EVENT_HISTORY_LIST]: EventHistoryResult;
   [MessageType.LIVE_ACTION_SNAPSHOT]: LiveActionRecord;
   [MessageType.LIVE_ACTION_LIST_RESULT]: { liveActions: LiveActionRecord[] };
   [MessageType.LIVE_ACTION_SUBMITTED]: LiveActionSubmission;

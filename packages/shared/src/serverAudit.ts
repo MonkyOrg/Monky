@@ -48,6 +48,8 @@ export const SERVER_AUDIT_ACTIONS = {
   'role.unassign': 'roles',
   'member.join': 'members',
   'member.kick': 'members',
+  'member.ban': 'members',
+  'member.unban': 'members',
   'member.nickname': 'members',
   'voice.mute': 'voice',
   'voice.unmute': 'voice',

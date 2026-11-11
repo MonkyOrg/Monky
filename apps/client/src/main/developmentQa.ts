@@ -11,7 +11,8 @@ export function configureDevelopmentQaMedia(
   if (config.realMedia && config.smoke) throw new Error('Real capture devices cannot be used in unattended QA.');
   if (!config.realMedia) {
     commandLine.appendSwitch('use-fake-device-for-media-stream');
-    commandLine.appendSwitch('use-fake-ui-for-media-stream');
+    // The fake picker bypasses Electron's scoped tab admission and cannot resolve
+    // WebContents media IDs. Keep synthetic devices, but use the real permissions.
   }
   if (config.smoke) commandLine.appendSwitch('mute-audio');
 }

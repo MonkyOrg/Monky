@@ -613,7 +613,7 @@ export type ManagedToolRepository = "yt-dlp/yt-dlp" | "yt-dlp/FFmpeg-Builds" | "
 
 ## `MessageType` {#messagetype}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L85)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L88)
 
 ```ts
 export enum MessageType {
@@ -624,6 +624,8 @@ export enum MessageType {
     COMMUNITY_ACK = 'COMMUNITY_ACK',
     EVENT_SAVE = 'EVENT_SAVE',
     EVENT_GET = 'EVENT_GET',
+    EVENT_HISTORY_GET = 'EVENT_HISTORY_GET',
+    EVENT_HISTORY_LIST = 'EVENT_HISTORY_LIST',
     EVENT_GET_INTERESTED = 'EVENT_GET_INTERESTED',
     EVENT_INTERESTED_LIST = 'EVENT_INTERESTED_LIST',
     EVENT_SAVED = 'EVENT_SAVED',
@@ -665,6 +667,7 @@ export enum MessageType {
     BOT_SCREEN_UPDATE = 'BOT_SCREEN_UPDATE',
     BOT_SCREEN_CLOSE = 'BOT_SCREEN_CLOSE',
     BOT_SCREEN_END = 'BOT_SCREEN_END',
+    BOT_BROWSER_PUBLISH = 'BOT_BROWSER_PUBLISH',
     BOT_SCREEN_LIST = 'BOT_SCREEN_LIST',
     BOT_SCREEN_SNAPSHOT = 'BOT_SCREEN_SNAPSHOT',
     BOT_SCREEN_LIST_RESULT = 'BOT_SCREEN_LIST_RESULT',
@@ -746,6 +749,12 @@ export enum MessageType {
     ADMIN_KICK_VOICE = 'ADMIN_KICK_VOICE',
     ADMIN_MOVE_USER = 'ADMIN_MOVE_USER',
     MEMBER_KICK = 'MEMBER_KICK',
+    IDENTITY_SESSIONS_GET = 'IDENTITY_SESSIONS_GET',
+    IDENTITY_SESSION_DISCONNECT = 'IDENTITY_SESSION_DISCONNECT',
+    IDENTITY_BAN = 'IDENTITY_BAN',
+    IDENTITY_UNBAN = 'IDENTITY_UNBAN',
+    IDENTITY_BANS_GET = 'IDENTITY_BANS_GET',
+    IDENTITY_BAN_HISTORY_GET = 'IDENTITY_BAN_HISTORY_GET',
     RTC_SIGNAL = 'RTC_SIGNAL',
     NATIVE_SCREEN_SIGNAL = 'NATIVE_SCREEN_SIGNAL',
     NATIVE_SCREEN_SIGNAL_ACK = 'NATIVE_SCREEN_SIGNAL_ACK',
@@ -892,6 +901,11 @@ export enum MessageType {
     USER_JOINED = 'USER_JOINED',
     USER_LEFT = 'USER_LEFT',
     MEMBER_KICKED = 'MEMBER_KICKED',
+    IDENTITY_SESSIONS = 'IDENTITY_SESSIONS',
+    IDENTITY_SESSION_DISCONNECTED = 'IDENTITY_SESSION_DISCONNECTED',
+    IDENTITY_BANS = 'IDENTITY_BANS',
+    IDENTITY_BAN_HISTORY = 'IDENTITY_BAN_HISTORY',
+    IDENTITY_BANNED = 'IDENTITY_BANNED',
     USER_UPDATED = 'USER_UPDATED',
     USER_CONNECTION_STATE = 'USER_CONNECTION_STATE',
     CHANNEL_CREATED = 'CHANNEL_CREATED',
@@ -936,7 +950,7 @@ export enum MessageType {
 [Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L1)
 
 ```ts
-export const PROTOCOL_VERSION = 40;
+export const PROTOCOL_VERSION = 41;
 ```
 
 ## `ProtocolErrorCode` {#protocolerrorcode}
@@ -945,6 +959,8 @@ export const PROTOCOL_VERSION = 40;
 
 ```ts
 export enum ProtocolErrorCode {
+    IDENTITY_BANNED = 'IDENTITY_BANNED',
+    GUEST_OWNER_REQUIRED = 'GUEST_OWNER_REQUIRED',
     AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
     NICKNAME_ALREADY_EXISTS = 'NICKNAME_ALREADY_EXISTS',
     NICKNAME_INVALID = 'NICKNAME_INVALID',
@@ -989,6 +1005,7 @@ export enum ProtocolErrorCode {
     BOT_INTERACTION_INVALID = 'BOT_INTERACTION_INVALID',
     BOT_SCREEN_CONFLICT = 'BOT_SCREEN_CONFLICT',
     BOT_SCREEN_NOT_FOUND = 'BOT_SCREEN_NOT_FOUND',
+    MINIAPP_BROWSER_DESKTOP_REQUIRED = 'MINIAPP_BROWSER_DESKTOP_REQUIRED',
     BOT_COMMAND_BUSY = 'BOT_COMMAND_BUSY',
     BOT_VOICE_REQUIRED = 'BOT_VOICE_REQUIRED',
     BOT_VOICE_CHANNEL_MISMATCH = 'BOT_VOICE_CHANNEL_MISMATCH',
@@ -1019,7 +1036,7 @@ export enum ProtocolErrorCode {
 
 ## `runBotCli` {#runbotcli}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L121)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L123)
 
 ```ts
 export function runBotCli(packageRoot: string, args?: string[]): Promise<void>;

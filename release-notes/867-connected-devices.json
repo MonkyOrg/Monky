@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Em Configurações → Meu Perfil → Dispositivos conectados, consulte e desconecte as sessões online da sua identidade nos servidores em comum conectados neste Monky. A ação não apaga a identidade nem impede nova conexão.",
+  "en": "Under Settings → My Profile → Connected devices, inspect and disconnect your identity's online sessions on shared servers connected in this Monky. This does not delete the identity or prevent a new connection."
+}

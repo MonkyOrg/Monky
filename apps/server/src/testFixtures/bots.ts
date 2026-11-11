@@ -35,6 +35,7 @@ import { DatabaseConnection } from '../infrastructure/database/DatabaseConnectio
 import { SqliteBotSettingsRepository } from '../infrastructure/database/SqliteBotSettingsRepository';
 import { SqliteBotSelectorRepository } from '../infrastructure/database/SqliteBotSelectorRepository';
 import { SqliteVoiceRestrictionRepository } from '../infrastructure/database/SqliteVoiceRestrictionRepository';
+import { SqliteIdentityAccessRepository } from '../infrastructure/database/SqliteIdentityAccessRepository';
 import {
   SqliteAttachmentRepository,
   SqliteBotRepository,
@@ -238,7 +239,7 @@ export async function createFixture(options: {
   const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
   const coturnManager = new CoturnManager(dataDir);
   const authService = new AuthService(serverRepo, userRepo, channelRepo, mentionRepo, avatars, () => online(), attachmentService, permissions, roleService,
-    await ServerIdentity.load(serverRepo), channelRepo.categories);
+    await ServerIdentity.load(serverRepo), channelRepo.categories, new SqliteIdentityAccessRepository(db));
   const selectorService = new BotSelectorService(new SqliteBotSelectorRepository(db));
   communityService = new CommunityService(
     new SqliteCommunityRepository(db), channelService, permissions, avatars, selectorService,
@@ -299,7 +300,7 @@ export async function createFixture(options: {
   const human = async (
     nickname: string,
     keys = identity(),
-    deviceId = randomUUID(),
+    deviceId: string = randomUUID(),
     appearOffline = false,
     protocolVersion = PROTOCOL_VERSION,
     protocolOffer?: ProtocolOffer,
@@ -347,6 +348,6 @@ export async function createFixture(options: {
     connect, human, bot, dispose, peers, wsServer, botService, botRepo, roleRepo, avatars,
     channelService, userService, registry, dataDir, messageRepo, channelRepo, userRepo, serverRepo, chatService, attachmentRepo,
     database, permissions, botPermissions, botStorage, signalingService, coturnManager, authService, roleService, rateLimiter,
-    communityService, forumService, searchService,
+    communityService, forumService, searchService, attachmentService,
   };
 }

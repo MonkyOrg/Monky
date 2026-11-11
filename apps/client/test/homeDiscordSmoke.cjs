@@ -301,6 +301,10 @@ async function setupHomeDiscordSmoke() {
   for (const label of portuguese ? ['Iniciar', 'Monitor', 'Excluir'] : ['Start', 'Monitor', 'Delete']) {
     check(menuText.includes(label), `owned server context menu includes ${label}`);
   }
+  check(menuText.includes(portuguese ? 'Excluir servidor e dados locais' : 'Delete server and local data'),
+    'local deletion explicitly names the server and its data');
+  check(!menuText.includes(portuguese ? 'Remover conexão da lista' : 'Remove connection from list'),
+    'a created server has no misleading second removal action');
   check(!menuText.includes(portuguese ? 'Parar' : 'Stop'), 'a stopped server offers Start, not Stop');
   // Once the main process reports it running, the same menu offers Stop instead.
   for (const listener of hostStatusListeners) listener({ servers: [{ port: 5200, serverId: 'owned-fixture' }] });
@@ -311,6 +315,67 @@ async function setupHomeDiscordSmoke() {
   check(!document.querySelector('.floating-context-menu:not([data-ui-closing])').textContent.includes(portuguese ? 'Iniciar' : 'Start'),
     'a running server does not offer Start');
   for (const listener of hostStatusListeners) listener({ servers: [] });
+
+  document.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  const remoteButton = document.querySelector('.server-rail-avatar[data-port="5101"]');
+  remoteButton.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 80, clientY: 80 }));
+  await until(() => !!document.querySelector('.floating-context-menu:not([data-ui-closing])'), 'remote server menu did not open');
+  const remoteText = document.querySelector('.floating-context-menu:not([data-ui-closing])').textContent;
+  check(remoteText.includes(portuguese ? 'Remover conexão da lista' : 'Remove connection from list'),
+    'a remote server offers removal of the saved connection');
+  check(!remoteText.includes(portuguese ? 'Excluir servidor e dados locais' : 'Delete server and local data'),
+    'a remote server never offers deleting hosted data');
+  document.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+  const { deleteOwnedServer } = await import('/views/serverRail/hostedServerActions.ts');
+  const originalApi = { hostServerStatus: window.api.hostServerStatus, hostServerStop: window.api.hostServerStop,
+    hostServerDeleteData: window.api.hostServerDeleteData, hostServerStats: window.api.hostServerStats };
+  const deletionTarget = { id: 'delete-fixture', name: '<Delete Fixture>', port: 5300,
+    textChannel: 'geral', voiceChannel: 'Geral', createdAt: 1, lastStarted: 1 };
+  connection.saveCreatedServer(deletionTarget);
+  const dialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card');
+  for (const scenario of ['cancel-delete', 'cancel-stop', 'stop-fails', 'delete-fails', 'other-instance', 'success']) {
+    let stops = 0, deletions = 0;
+    window.api.hostServerStatus = async () => ({ servers: [
+      { port: 5300, serverId: scenario === 'other-instance' ? 'another-server' : deletionTarget.id },
+    ] });
+    window.api.hostServerStats = async () => ({ onlineUsers: scenario === 'cancel-stop' ? 2 : 0 });
+    window.api.hostServerStop = async () => { stops++; return { success: scenario !== 'stop-fails' }; };
+    window.api.hostServerDeleteData = async () => {
+      deletions++;
+      return { success: scenario === 'success', error: 'Deletion fixture refused' };
+    };
+    let settled = false;
+    const pending = deleteOwnedServer(deletionTarget).then(() => { settled = true; });
+    await until(() => !!dialog(), `delete confirmation missing: ${scenario}`);
+    check(dialog().textContent.includes('<Delete Fixture>') && !dialog().querySelector('delete'),
+      'the deletion warning renders the server name as text');
+    check(dialog().querySelector('[data-action="cancel"]') === document.activeElement,
+      'permanent deletion focuses Cancel');
+    dialog().querySelector(`[data-action="${scenario === 'cancel-delete' ? 'cancel' : 'confirm'}"]`).click();
+    if (scenario === 'cancel-stop') {
+      await until(() => !!dialog(), 'occupied server stop confirmation missing');
+      dialog().querySelector('[data-action="cancel"]').click();
+      await until(() => settled || deletions > 0, 'cancelled stop did not settle');
+      equal(deletions, 0, 'cancelling the stop never proceeds to data deletion');
+    } else if (['stop-fails', 'delete-fails', 'other-instance'].includes(scenario)) {
+      await until(() => !!dialog(), `deletion failure alert missing: ${scenario}`);
+      check(dialog().textContent.includes(scenario === 'stop-fails'
+        ? (portuguese ? 'Não foi possível encerrar' : 'Could not stop') : 'Deletion fixture refused'),
+      'a failed stop or deletion is explicitly reported');
+      dialog().querySelector('[data-action="confirm"]').click();
+    }
+    await pending;
+    equal(stops, ['stop-fails', 'delete-fails', 'success'].includes(scenario) ? 1 : 0,
+      `only the matching server is stopped after consent: ${scenario}`);
+    equal(deletions, ['delete-fails', 'other-instance', 'success'].includes(scenario) ? 1 : 0,
+      `cancellation or a failed stop prevents deletion: ${scenario}`);
+    check(connection.createdServers.some(server => server.id === deletionTarget.id) === (scenario !== 'success'),
+      `the created entry is removed only after successful deletion: ${scenario}`);
+    check(!!connection.findSavedServer({ host: '127.0.0.1', port: 5300 }) === (scenario !== 'success'),
+      `the saved connection survives a failed deletion: ${scenario}`);
+  }
+  Object.assign(window.api, originalApi);
 
   equal(startedHosts.length, 0, 'background auto-connect did not start stopped hosted servers');
   await until(() => sent.some(message => message.type === MessageType.USER_UPDATE_AVATAR), 'background sessions did not receive the global avatar');

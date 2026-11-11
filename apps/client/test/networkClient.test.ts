@@ -3,7 +3,7 @@ import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import {
   MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, ProtocolErrorCode,
-  type AuthConnectPayload, type ClientMessage, type ProtocolMessage, type ServerChallengeBinding, type SignChallengeResult,
+  type AuthConnectPayload, type ClientMessage, type ProtocolMessage, type ServerChallengeBinding, type SignChallengeResult, type HostServerStatus,
 } from '@monky/shared';
 import { NetworkClient, ProtocolRequestError, type ConnectionStatus, type NetworkDisconnectedPayload, type ServerShutdownNotice } from '../src/renderer/core/NetworkClient';
 import { appEvents } from '../src/renderer/core/EventBus';
@@ -72,12 +72,11 @@ function fixture(context: TestContext) {
       this.receive({ type, requestId: request.requestId, payload });
     }
   }
-  const browser = Object.assign(new EventTarget(), {
-    api: {
-      signChallenge: async (_nonce: string, _binding?: ServerChallengeBinding): Promise<SignChallengeResult> =>
-        ({ signature: 'fixture-signature' }),
-    },
-  });
+  const api: {
+    signChallenge: (nonce: string, binding?: ServerChallengeBinding) => Promise<SignChallengeResult>;
+    hostServerStatus?: () => Promise<HostServerStatus>;
+  } = { signChallenge: async () => ({ signature: 'fixture-signature' }) };
+  const browser = Object.assign(new EventTarget(), { api });
   const originalSocket = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: Socket });
@@ -119,6 +118,40 @@ test('initial connection failure rejects without creating an automatic reconnect
   assert.equal(f.client.getStatus(), 'DISCONNECTED');
   assert.equal(f.sockets.length, 1);
 });
+
+test('guests refuse a legacy challenge before signing, and send their temporary flag only with negotiated membership', async context => {
+  const f = fixture(context);
+  let signatures = 0;
+  f.browser.api.signChallenge = async () => { signatures++; return { signature: 'guest-proof' }; };
+  const pending = assert.rejects(f.client.connect('fixture.test', 46332, { ...identity, guest: true }, 'Guest'),
+    (error: unknown) => error instanceof ProtocolRequestError && error.code === ProtocolErrorCode.FEATURE_REQUIRES_UPDATE);
+  const socket = f.lastSocket();
+  socket.open();
+  assert.equal(authPayload(socket.sent[0]).guest, true);
+  socket.auth(MessageType.AUTH_CHALLENGE, { nonce: NONCE });
+  await pending;
+  assert.equal(signatures, 0, 'an older server must never create a permanent record for a guest');
+  assert.equal(socket.sent.filter(m => m.type === MessageType.AUTH_CHALLENGE_RESPONSE).length, 0);
+});
+
+for (const type of [MessageType.IDENTITY_BANNED, MessageType.IDENTITY_SESSION_DISCONNECTED]) {
+  test(`${type} immediately disconnects and never schedules automatic reconnection`, async context => {
+    const f = fixture(context);
+    await f.connected();
+    const notices: ServerShutdownNotice[] = [];
+    const off = appEvents.on('network.server_shutdown', notice => notices.push(notice));
+    context.after(off);
+    f.lastSocket().receive({ type, payload: type === MessageType.IDENTITY_BANNED ? { expiresAt: null } : { sessionId: 'current' } });
+    assert.equal(f.client.getStatus(), 'DISCONNECTED');
+    context.mock.timers.tick(120_000);
+    await setImmediate();
+    assert.equal(f.sockets.length, 1);
+    assert.equal(notices.length, 1);
+    assert.ok(notices[0].reason?.includes(t(type === MessageType.IDENTITY_BANNED ? 'identity.banned' : 'identity.sessionDisconnected')));
+    await f.connected();
+    assert.equal(f.sockets.length, 2, 'a later user-directed connection is still possible');
+  });
+}
 
 for (const serverProtocolVersion of [24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]) {
   test(`the current protocol never falls back to incompatible server protocol ${serverProtocolVersion}`, async context => {
@@ -297,6 +330,21 @@ test('dial and authentication timeouts both advance the reconnect ladder', async
   f.lastSocket().auth();
   await setImmediate();
   assert.equal(f.client.getStatus(), 'CONNECTED');
+});
+
+test('importing a permanent identity clears the temporary flag used for subsequent connections', async context => {
+  const f = fixture(context);
+  const pending = f.client.connect('fixture.test', 46332, { ...identity, guest: true }, 'Guest');
+  f.lastSocket().open();
+  f.lastSocket().auth();
+  await pending;
+  f.client.adoptIdentity({ clientId: 'permanent', publicKey: 'permanent-public-key' });
+  f.lastSocket().drop();
+  context.mock.timers.tick(1000);
+  f.lastSocket().open();
+  const payload = authPayload(f.lastSocket().sent.find(message => message.type === MessageType.AUTH_CONNECT));
+  assert.equal(payload.publicKey, 'permanent-public-key');
+  assert.equal(payload.guest, undefined, 'A permanent key must not rejoin as a guest');
 });
 
 test('a constructor failure during recovery does not strand the retained session', async context => {
@@ -619,6 +667,95 @@ test('a background server update notice reaches global UI and keeps reconnecting
 const SERVER_KEY = `302a300506032b6570032100${'1'.repeat(64)}`;
 const OTHER_KEY = `302a300506032b6570032100${'2'.repeat(64)}`;
 const bound = (serverKey: string) => ({ nonce: NONCE, serverKey, serverSignature: 'c'.repeat(128) });
+
+function hostedFixture(context: TestContext, status: () => Promise<HostServerStatus>) {
+  const f = fixture(context);
+  const previousCreated = connectionStore.createdServers;
+  const previousSaved = [...connectionStore.savedServers];
+  connectionStore.createdServers = [{
+    id: 'owned-key-fixture', name: 'Owned', port: 3000,
+    voiceChannel: 'Geral', textChannel: 'geral', createdAt: 1, lastStarted: 1,
+  }];
+  connectionStore.addSavedServer({ host: '127.0.0.1', port: 3000, name: 'Owned', lastConnected: 1 });
+  connectionStore.pinServerKey({ host: '127.0.0.1', port: 3000 }, SERVER_KEY);
+  f.browser.api.hostServerStatus = status;
+  context.after(() => {
+    connectionStore.createdServers = previousCreated;
+    connectionStore.removeSavedServer('127.0.0.1', 3000);
+    connectionStore.savedServers = previousSaved;
+  });
+  return f;
+}
+
+test('a hosted server replaces a stale local pin only with the key supplied by its own main-process instance', async context => {
+  const f = hostedFixture(context, async () => ({ servers: [
+    { port: 3000, serverId: 'owned-key-fixture', serverKey: OTHER_KEY },
+  ] }));
+  const joined = await signIn(f, '127.0.0.1', bound(OTHER_KEY));
+  assert.equal(joined.outcome, 'joined');
+  assert.deepEqual(joined.signed, [{ binding: { serverKey: OTHER_KEY, serverSignature: 'c'.repeat(128) } }]);
+  assert.equal(connectionStore.findSavedServer({ host: '127.0.0.1', port: 3000 })?.serverKey, OTHER_KEY);
+  const oldKey = await signIn(f, '127.0.0.1', bound(SERVER_KEY));
+  assert.deepEqual([oldKey.outcome, oldKey.signed.length], [t('network.serverKeyChanged'), 0]);
+  const downgraded = await signIn(f, '127.0.0.1', { nonce: NONCE });
+  assert.deepEqual([downgraded.outcome, downgraded.signed.length], [t('network.serverKeyMissing'), 0]);
+});
+
+test('a created entry alone, a stopped server or another instance on its port cannot replace a pin', async context => {
+  for (const servers of [
+    [],
+    [{ port: 3000, serverId: 'another-instance', serverKey: OTHER_KEY }],
+    [{ port: 3001, serverId: 'owned-key-fixture', serverKey: OTHER_KEY }],
+    [{ port: 3000, serverId: 'owned-key-fixture' }],
+  ]) {
+    await context.test(JSON.stringify(servers), async nested => {
+      const f = hostedFixture(nested, async () => ({ servers }));
+      const result = await signIn(f, '127.0.0.1', bound(OTHER_KEY));
+      assert.deepEqual([result.outcome, result.signed.length], [t('network.serverKeyChanged'), 0]);
+      assert.equal(connectionStore.findSavedServer({ host: '127.0.0.1', port: 3000 })?.serverKey, SERVER_KEY);
+    });
+  }
+});
+
+test('a local runtime never vouches for a remote address, even when it has the same port', async context => {
+  const f = hostedFixture(context, async () => { assert.fail('Remote addresses must not consult local hosting'); });
+  connectionStore.addSavedServer({ host: 'owned-remote.test', port: 3000, name: 'Remote', lastConnected: 1 });
+  connectionStore.pinServerKey({ host: 'owned-remote.test', port: 3000 }, SERVER_KEY);
+  context.after(() => connectionStore.removeSavedServer('owned-remote.test', 3000));
+  const result = await signIn(f, 'owned-remote.test', bound(OTHER_KEY));
+  assert.deepEqual([result.outcome, result.signed.length], [t('network.serverKeyChanged'), 0]);
+});
+
+test('a local server must still prove its key, and failed authentication keeps the previous pin', async context => {
+  const f = hostedFixture(context, async () => ({ servers: [
+    { port: 3000, serverId: 'owned-key-fixture', serverKey: OTHER_KEY },
+  ] }));
+  f.browser.api.signChallenge = async () => ({ refused: 'server-signature' });
+  const pending = assert.rejects(f.client.connect('127.0.0.1', 3000, identity, 'Fixture'),
+    { message: t('network.serverKeyInvalid') });
+  f.lastSocket().open();
+  f.lastSocket().auth(MessageType.AUTH_CHALLENGE, bound(OTHER_KEY));
+  await pending;
+  assert.equal(f.lastSocket().sent.some(message => message.type === MessageType.AUTH_CHALLENGE_RESPONSE), false);
+  assert.equal(connectionStore.findSavedServer({ host: '127.0.0.1', port: 3000 })?.serverKey, SERVER_KEY);
+});
+
+test('a cancelled connection cannot sign a challenge after local hosting status arrives late', async context => {
+  let resolveStatus: (status: HostServerStatus) => void = () => assert.fail('Status not requested');
+  const status = new Promise<HostServerStatus>(resolve => { resolveStatus = resolve; });
+  const f = hostedFixture(context, () => status);
+  let signatures = 0;
+  f.browser.api.signChallenge = async () => { signatures++; return { signature: 'fixture-signature' }; };
+  const pending = assert.rejects(f.client.connect('127.0.0.1', 3000, identity, 'Fixture'), { name: 'AbortError' });
+  f.lastSocket().open();
+  f.lastSocket().auth(MessageType.AUTH_CHALLENGE, bound(OTHER_KEY));
+  f.client.disconnect();
+  resolveStatus({ servers: [{ port: 3000, serverId: 'owned-key-fixture', serverKey: OTHER_KEY }] });
+  await pending;
+  await setImmediate();
+  assert.equal(signatures, 0);
+  assert.equal(connectionStore.findSavedServer({ host: '127.0.0.1', port: 3000 })?.serverKey, SERVER_KEY);
+});
 
 /** One sign-in at `host`: the server presents `challenge`, and admits whatever answer comes back. */
 async function signIn(f: ReturnType<typeof fixture>, host: string, challenge: Record<string, unknown>) {

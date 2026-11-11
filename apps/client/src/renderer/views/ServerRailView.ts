@@ -20,9 +20,8 @@ import { reportError } from '../utils/feedback';
 import { insecureServerError } from '../utils/secureServer';
 import { showSecureServerHelp } from '../utils/secureServerHelp';
 import { checkServerOnline, fetchServerPreview } from '../utils/serverStatus';
-import {
-  confirmStopHostedServer,
-} from '../utils/hostedServer';
+import { deleteOwnedServer, stopOwnedServer } from './serverRail/hostedServerActions';
+import { prepareHostedServerJoin } from '../utils/hostedServer';
 import { resolveImageUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
 import { parseServerHostInput, serverAddressKey } from '../utils/serverAddress';
 import { initialImageState } from '../utils/imageFallback';
@@ -795,7 +794,7 @@ export class ServerRailView {
           label: t('connection.deleteSavedServer'),
           icon: 'delete',
           danger: true,
-          onClick: () => { void this.deleteOwnedServer(owned); },
+          onClick: () => { void deleteOwnedServer(owned).then(() => this.render()); },
         },
       );
     }
@@ -831,10 +830,12 @@ export class ServerRailView {
       });
     }
 
-    entries.push({
+    // Created servers are restored into the rail on startup: removing their
+    // saved address would be temporary and looks like a second delete action.
+    if (!owned) entries.push({
       label: t('connection.removeFromSaved'),
       icon: 'close',
-      danger: !owned,
+      danger: true,
       onClick: () => {
         appEvents.emit('connection.manual_disconnect', { key: sessionKeyFor(server.host, server.port) });
         connectionStore.removeSavedServer(server.host, server.port);
@@ -857,43 +858,16 @@ export class ServerRailView {
   }
 
   private async stopOwnedServer(port: number): Promise<void> {
-    if (!window.api?.hostServerStop) return;
-    if (!(await confirmStopHostedServer(port))) return;
-    const result = await window.api.hostServerStop(port);
-    if (!result.success) {
-      await showAlert({ title: t('common.error'), message: t('connection.stopServerError'), variant: 'danger' });
-    }
-    this.render();
-  }
-
-  private async deleteOwnedServer(server: CreatedServer): Promise<void> {
-    const confirmed = await showConfirm({
-      title: t('connection.deleteSavedServer'),
-      message: t('connection.deleteServerMessage', { name: server.name }),
-      confirmLabel: t('common.delete'),
-      cancelLabel: t('common.cancel'),
-      variant: 'danger',
-    });
-    if (!confirmed) return;
     try {
-      const status = await window.api?.hostServerStatus?.();
-      const running = status?.servers.find((item) => item.serverId === server.id || item.port === server.port);
-      if (running) {
-        await this.stopOwnedServer(running.port);
-      }
-      const deleted = await window.api?.hostServerDeleteData?.(server.id);
-      connectionStore.removeCreatedServer(server.id);
-      connectionStore.removeSavedServer('127.0.0.1', server.port);
-      if (deleted && !deleted.success) {
-        await showAlert({ title: t('common.error'), message: deleted.error || t('connection.deleteServerError'), variant: 'danger' });
-      }
+      await stopOwnedServer(port);
     } catch (error: unknown) {
       await showAlert({
         title: t('common.error'),
-        message: error instanceof Error && error.message ? error.message : t('connection.deleteServerError'),
+        message: error instanceof Error && error.message ? error.message : t('connection.stopServerError'),
         variant: 'danger',
       });
     }
+    this.render();
   }
 
   private async editSavedServer(server: SavedServer): Promise<void> {
@@ -1192,7 +1166,7 @@ export class ServerRailView {
     } catch (error: unknown) {
       if (showSecureServerHelp(error)) return;
       await showAlert({
-        title: t('main.serverOfflineTitle'),
+        title: t('connection.connectFailedTitle'),
         message: error instanceof Error && error.message ? error.message : t('connection.connectError'),
         variant: 'danger',
       });
@@ -1206,38 +1180,29 @@ export class ServerRailView {
     // The web cannot even ask a server without TLS whether it is online (#874).
     const insecure = insecureServerError(server.host, server.port);
     if (insecure) throw insecure;
-    // Probe without changing the visible session or the ongoing call.
-    const online = await checkServerOnline(server.host, server.port);
-    if (!isCurrent()) return;
     const mine = findOwnedServer(server.host, server.port);
     const label = server.name || server.host;
 
-    if (!online && !mine) {
-      await showAlert({
-        title: t('main.serverOfflineTitle'),
-        message: t('main.serverOfflineMessage', { name: label }),
-      });
-      return;
-    }
-
     // Starting is independent of both browsing and the current voice session.
-    if (!online && mine) {
-      const confirmed = await showConfirm({
-        title: t('main.serverOfflineStartTitle'),
-        message: t('main.serverOfflineStartMessage', { name: label }),
-        confirmLabel: t('main.serverOfflineStartConfirm'),
-        variant: 'warning',
-      });
-      if (!confirmed || !isCurrent()) return;
-
+    if (mine) {
       try {
-        await ensureHostedServerStarted(mine);
-        if (!isCurrent()) return;
+        if (!(await prepareHostedServerJoin(mine, isCurrent))) return;
       } catch (error: unknown) {
         await showAlert({
           title: t('main.serverStartFailedTitle'),
           message: error instanceof Error && error.message ? error.message : t('main.serverStartFailedMessage'),
           variant: 'danger',
+        });
+        return;
+      }
+    } else {
+      // Probe remote servers without changing the visible session or the ongoing call.
+      const online = await checkServerOnline(server.host, server.port);
+      if (!isCurrent()) return;
+      if (!online) {
+        await showAlert({
+          title: t('main.serverOfflineTitle'),
+          message: t('main.serverOfflineMessage', { name: label }),
         });
         return;
       }
@@ -1268,7 +1233,7 @@ export class ServerRailView {
       // down that still-healthy server and dump the user on the home screen
       // (#400) — showing the error is enough.
       await showAlert({
-        title: t('main.serverOfflineTitle'),
+        title: t('connection.connectFailedTitle'),
         message,
       });
     }

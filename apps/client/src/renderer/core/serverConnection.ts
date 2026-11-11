@@ -18,6 +18,7 @@ import { announceCallJoined, announceCallLeft } from './callCues';
 import { microphoneFailureReason } from './AudioDeviceService';
 
 interface ClientIdentity {
+  guest?: boolean;
   publicKey: string;
   clientId: string;
 }

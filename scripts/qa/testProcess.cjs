@@ -6,10 +6,11 @@ if (mode === 'tree') {
   child = spawn(process.execPath, [__filename, 'idle', runId], { stdio: 'ignore', windowsHide: true });
   process.send({ type: 'qa-descendant', pid: child.pid });
 }
-if (mode === 'exit') process.exit(23);
+if (mode === 'exit' || mode === 'clean-exit') process.exit(mode === 'exit' ? 23 : 0);
 if (mode !== 'no-ready') process.send?.({ type: 'qa-service-ready', value: { actualEvent: true } });
 process.on('message', message => {
   if (message.runId !== runId) return;
   if (message.type === 'qa-ping') process.send({ type: 'qa-response', id: message.id, value: { alive: true } });
+  if (message.type === 'qa-close') process.send({ type: 'qa-response', id: message.id, value: { closing: true } }, () => process.exit(0));
   if (message.type === 'qa-stop' && mode !== 'tree') { clearInterval(timer); process.exit(0); }
 });

@@ -751,6 +751,33 @@ test('a private channel lost just before the server cancellation reports the can
       message.payload.state === 'failed'), false, 'The bot must not report a failure the server did not see.');
   });
 
+for (const pendingOperation of ['playback acknowledgement', 'buffered frame handoff']) {
+  test(`channel closure during ${pendingOperation} preserves the server cancellation verdict`,
+    { timeout: 15000 }, async t => {
+      const f = await fixture(t);
+      const peer = await pairedStream(t, f);
+      const { stream, offer } = peer;
+      const receiver = f.client.tasks.get(offer.taskId).receiver;
+      const iterator = stream.frames[Symbol.asyncIterator]();
+      peer.send({ kind: 'frame', sequence: 0, opus: SILENCE });
+      await until(() => receiver.packets.length === 1);
+      if (pendingOperation === 'playback acknowledgement') await iterator.next();
+      receiver.channel.close();
+      assert.notEqual(receiver.channel.readyState, 'open');
+      if (pendingOperation === 'playback acknowledgement') assert.doesNotThrow(() => stream.markFrameAdvanced());
+      const read = observe(iterator.next());
+      await remainsPending(read);
+      await remainsPending(stream.closed);
+      f.send(MessageType.BOT_LOCAL_TASK_EVENT, { state: 'cancelled', taskId: offer.taskId, cause: 'requester_left_voice' });
+      await assert.rejects(within(stream.closed), isTerminal('cancelled', 'requester_left_voice'));
+      await assert.rejects(within(read), error => error === stream.signal.reason);
+      assert.equal(receiver.playedFrames, 0, 'An unsent acknowledgement cannot count as played.');
+      assert.equal(f.allFrames.some(message => message.type === MessageType.BOT_LOCAL_TASK_EVENT &&
+        message.payload.state === 'failed'), false);
+      assert.deepEqual(f.errors, []);
+    });
+}
+
 test('a private channel lost without any server verdict still fails as a transport failure',
   { timeout: 15000 }, async t => {
     const f = await fixture(t);

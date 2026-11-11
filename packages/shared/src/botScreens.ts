@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { nativeScreenSourceSchema } from './screenSharing.js';
 import type { BotLocale } from './botLocales.js';
 import type { BotScreenStorage } from './botStorage.js';
 
@@ -78,25 +79,44 @@ const id = z.string().min(1).max(128);
 const revision = z.number().int().nonnegative().safe();
 export const botScreenStateSchema = z.custom<BotScreenJson>((value) => isBotScreenJson(value));
 export const botScreenActionJsonSchema = z.custom<BotScreenJson>((value) => isBotScreenJson(value, BOT_SCREEN_LIMITS.actionBytes));
-export const botScreenCreateSchema = z.object({
+const screenCreateBase = z.object({
   id: id.optional(),
   channelId: id,
   title: z.string().trim().min(1).max(200),
+  invocationId: id.optional(),
+}).strict();
+const documentCreateSchema = screenCreateBase.extend({
+  kind: z.never().optional(),
   html: z.string().min(1).max(BOT_SCREEN_LIMITS.htmlBytes)
     .refine((html) => new TextEncoder().encode(html).byteLength <= BOT_SCREEN_LIMITS.htmlBytes),
   state: botScreenStateSchema,
-  invocationId: id.optional(),
 }).strict();
+/** Only pixels are shared: neither an initial URL nor writable browsing state belongs on the wire. */
+export const botBrowserCreateSchema = screenCreateBase.extend({
+  kind: z.literal('browser'), html: z.literal(''), state: z.null(),
+}).strict();
+export type BotBrowserCreate = z.infer<typeof screenCreateBase>;
+export const botScreenCreateSchema = z.union([documentCreateSchema, botBrowserCreateSchema]);
 export const botScreenPatchSchema = z.object({ state: botScreenStateSchema, expectedRevision: revision }).strict();
 export const botScreenIdSchema = z.object({ id }).strict();
 /** A logical ID can be reused, but operations must address the exact server-created instance. */
 export const botScreenRefSchema = botScreenIdSchema.extend({ instanceId: id }).strict();
 export const botScreenUpdateSchema = botScreenPatchSchema.merge(botScreenRefSchema).strict();
 export const botScreenListSchema = z.object({ channelId: id }).strict();
-export const botScreenSchema = botScreenCreateSchema.omit({ invocationId: true }).extend({
+const screenSnapshotFields = {
   id, instanceId: id, botId: id, creatorUserId: id.optional(), revision,
   createdAt: z.number().int().nonnegative().safe(),
+};
+export const botScreenSchema = z.union([
+  documentCreateSchema.omit({ invocationId: true }).extend(screenSnapshotFields).strict(),
+  botBrowserCreateSchema.omit({ invocationId: true }).extend({
+    ...screenSnapshotFields, hostSessionId: id, broadcastSource: nativeScreenSourceSchema.nullable(),
+  }).strict(),
+]);
+export const botBrowserPublishSchema = botScreenRefSchema.extend({
+  source: nativeScreenSourceSchema.refine(source => !source.audio && !source.audience && source.codec === 'h264'),
 }).strict();
+export type BotBrowserPublish = z.infer<typeof botBrowserPublishSchema>;
 export const botScreenListResultSchema = z.object({
   channelId: id, screens: z.array(botScreenSchema).max(BOT_SCREEN_LIMITS.activePerChannel),
 }).strict();
@@ -117,6 +137,8 @@ export const botScreenRemovedSchema = z.discriminatedUnion('reason', [
 export type BotScreen = z.infer<typeof botScreenSchema>;
 export type BotScreenRef = z.infer<typeof botScreenRefSchema>;
 export type BotScreenCreate = z.infer<typeof botScreenCreateSchema>;
+export type BotScreenCommandCreate = Omit<z.infer<typeof documentCreateSchema>, 'channelId' | 'invocationId'>
+  | Omit<z.infer<typeof botBrowserCreateSchema>, 'channelId' | 'invocationId'>;
 export type BotScreenPatch = z.infer<typeof botScreenPatchSchema>;
 export type BotScreenAction = z.infer<typeof botScreenActionSchema>;
 export type BotScreenActionEvent = z.infer<typeof botScreenActionEventSchema>;

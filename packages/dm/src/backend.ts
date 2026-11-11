@@ -100,3 +100,39 @@ export interface DmFileReader {
   read(offset: number, length: number): Uint8Array;
   close(): void;
 }
+
+/** Guest conversations use the same encrypted engine, without a durable platform store. */
+export class MemoryDmFileStore implements DmFileStore {
+  private readonly documents = new Map<string, Uint8Array>();
+  read(name: string): Uint8Array | null { return this.documents.get(name)?.slice() ?? null; }
+  exists(name: string): boolean { return this.documents.has(name); }
+  write(name: string, data: Uint8Array | Iterable<Uint8Array>): void {
+    const pieces = data instanceof Uint8Array ? [data] : [...data];
+    const joined = new Uint8Array(pieces.reduce((total, piece) => total + piece.length, 0));
+    let offset = 0;
+    for (const piece of pieces) { joined.set(piece, offset); offset += piece.length; }
+    this.documents.set(name, joined);
+  }
+  remove(name: string): void { this.documents.delete(name); }
+  rename(name: string, aside: string): void {
+    const data = this.documents.get(name);
+    if (data) { this.documents.set(aside, data); this.documents.delete(name); }
+  }
+  list(folder: string): string[] {
+    const prefix = `${folder}/`;
+    return [...new Set([...this.documents.keys()].filter(name => name.startsWith(prefix)).map(name => name.slice(prefix.length).split('/')[0]))];
+  }
+  append(name: string, data: Uint8Array): void { this.write(name, [this.documents.get(name) ?? new Uint8Array(), data]); }
+  size(name: string): number | null { return this.documents.get(name)?.length ?? null; }
+  truncate(name: string, length: number): void {
+    const data = this.documents.get(name);
+    if (data && data.length > length) this.documents.set(name, data.slice(0, length));
+  }
+  openReader(name: string): DmFileReader | null {
+    const data = this.documents.get(name);
+    return data ? { read: (offset, length) => data.slice(offset, offset + length), close: () => {} } : null;
+  }
+  save(): Promise<void> { return Promise.resolve(); }
+  dispose(): Promise<void> { this.discard(); return Promise.resolve(); }
+  discard(): void { this.documents.clear(); }
+}

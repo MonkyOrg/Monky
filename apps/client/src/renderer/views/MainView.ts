@@ -108,8 +108,12 @@ export class MainView {
       enterVoiceChannel: channelId => this.enterVoiceChannel(channelId),
       openVoiceChat: channelId => this.openVoiceChannelChat(channelId),
       watchLive: sessionId => this.watchLive(sessionId),
+      openMiniapp: id => this.openVoiceStage(undefined, id),
     });
-    this.members = new MemberList({ root: container, watchLive: sessionId => this.watchLive(sessionId) });
+    this.members = new MemberList({
+      root: container, watchLive: sessionId => this.watchLive(sessionId),
+      openMiniapp: id => this.openVoiceStage(undefined, id),
+    });
     this.footer = new UserControlBar({ root: container, toggleCamera: () => this.toggleCamera() });
     this.notices = new CallNotices({
       root: container,
@@ -352,6 +356,17 @@ export class MainView {
       },
       events: session.client,
     });
+    if (this.voiceChatChannelId) this.placeMessageSearch();
+  }
+
+  private placeMessageSearch(): void {
+    const voicePanel = this.container.querySelector<HTMLElement>('#voice-channel-chat-panel');
+    const header = this.voiceChatChannelId
+      ? voicePanel?.querySelector<HTMLElement>('.voice-chat-search')
+      : this.container.querySelector<HTMLElement>('#server-tools');
+    const host = this.voiceChatChannelId
+      ? voicePanel : this.container.querySelector<HTMLElement>('.main-center-column');
+    if (header && host) this.messageSearch?.mount(header, host);
   }
 
   /** What both layouts end with: the call row, the notices above the card and the entry animation. */
@@ -444,6 +459,10 @@ export class MainView {
         this.renderMembers();
       }),
       appEvents.on('server.members_updated', () => this.renderMembers()),
+      appEvents.on('voice.bot_screens_updated', () => {
+        this.renderChannels();
+        this.renderMembers();
+      }),
       appEvents.on('voice.state_updated', () => {
         this.footer.showSpeaking();
         this.channels.updateSpeaking();
@@ -801,6 +820,7 @@ export class MainView {
       <button type="button" class="voice-chat-close" aria-label="${t('voiceChat.close')}" title="${t('voiceChat.close')}">
         <span class="material-symbols-outlined md-20" aria-hidden="true">close</span>
       </button>
+      <div class="server-tools voice-chat-search"></div>
       <div class="voice-chat-content"></div>
     `);
     this.voiceChatChannelId = channelId;
@@ -808,6 +828,7 @@ export class MainView {
     const content = panel.querySelector<HTMLElement>('.voice-chat-content')!;
     this.voiceChatView = new ChatView(content);
     this.voiceChatView.setChannel(channelId);
+    this.placeMessageSearch();
     panel.querySelector<HTMLButtonElement>('.voice-chat-close')?.addEventListener('click', () => {
       this.closeVoiceChannelChat(true);
       this.renderChannels();
@@ -829,6 +850,7 @@ export class MainView {
     this.voiceChatView?.destroy();
     this.voiceChatView = null;
     this.voiceChatChannelId = null;
+    this.placeMessageSearch();
     this.container.querySelector('.main-layout')?.classList.remove('main-layout--voice-chat-open');
     this.voiceStageView?.setChatOpen(false);
     const panel = this.container.querySelector<HTMLElement>('#voice-channel-chat-panel');

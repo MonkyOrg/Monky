@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Miniapps agora abrem um navegador dentro do Monky e transmitem só a imagem do site para a sala, inclusive na web. Quem executa o comando controla no desktop. Fechar o navegador ou sair encerra a transmissão e apaga cookies e logins.",
+  "en": "Miniapps can now open a browser inside Monky and stream only the site's image to the room, including web viewers. The caller controls it on desktop. Closing the browser or leaving ends the stream and erases cookies and logins."
+}

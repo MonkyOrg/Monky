@@ -79,6 +79,8 @@ esquerda do chat para ajustar sua largura; o tamanho escolhido é lembrado.
 Mensagens, anexos, reações,
 enquetes, menções e busca continuam disponíveis mesmo quando você não está
 conectado à voz.
+A barra de busca fica no cabeçalho desse painel; os filtros e os resultados
+abrem dentro dele. Use **Ctrl+F** para buscar mensagens nesse canal de voz.
 
 Use clique direito em um participante para ajustar o volume individual dele. O ajuste vale só neste computador e para aquele dispositivo: se a mesma pessoa estiver conectada de duas máquinas, cada uma tem seu próprio volume.
 
@@ -89,6 +91,12 @@ A chamada acompanha você: se trocar de servidor na coluna da esquerda, ela cont
 Na barra de mídia: **Câmera**, **Compartilhar Tela** e **Soundboard**. Escolha
 uma tela ou janela específica; a disponibilidade de áudio de compartilhamento
 depende da plataforma e da fonte. Confira o que será capturado antes de iniciar.
+
+As câmeras dos outros participantes aparecem automaticamente. No card de cada
+câmera, **Parar de assistir** interrompe sua visualização; **Assistir câmera**
+volta a exibi-la. A escolha vale só para você nessa chamada, inclusive fora do
+palco e no overlay, sem desligar a câmera de ninguém nem alterar voz ou telas
+compartilhadas. Ao entrar em outra chamada, as câmeras voltam a aparecer por padrão.
 
 Em **Configurações → Voz e Vídeo → Câmera**, compare desfoque, fundo virtual
 de cor ou imagem e chroma key de tela física na prévia. Os efeitos são locais

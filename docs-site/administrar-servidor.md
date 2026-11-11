@@ -27,6 +27,38 @@ disponíveis dependem do seu acesso.
 | Cargos | Organizar permissões, hierarquia e membros de cada cargo |
 | Bots | Vincular, revisar capacidades e desvincular bots |
 
+### Banimento por identidade
+
+Com **Gerenciar servidor**, use **Membros → Mais opções → Banir identidade**
+nas configurações do servidor, ou abra o menu de uma pessoa. Essa ação não
+exige **Gerenciar cargos**. Dono, você mesmo e bots não são alvos dessa ação. Escolha
+**Permanente** ou **Por tempo determinado** e informe a duração personalizada
+com um valor inteiro e a unidade **Minutos**, **Horas** ou **Dias**. A justificativa é obrigatória; o switch permite decidir se a
+pessoa banida poderá vê-la. Administradores continuam podendo consultá-la.
+
+O banimento desconecta imediatamente todos os dispositivos daquela
+identidade, encerra sua voz e revoga os acessos entregues. A tentativa de
+reconexão mostra um aviso, com o prazo e a justificativa somente quando
+autorizada, sem entregar o conteúdo do servidor. Em **Membros → Banimentos**,
+alterne entre **Ativos** e **Histórico completo**. Os registros conservam a
+identidade, justificativa, visibilidade do motivo, datas e responsáveis pelo
+banimento e pelo desbanimento. **Desbanir** exige confirmação e libera a entrada,
+sem apagar o registro. Banimentos temporários deixam de bloquear a entrada no
+prazo exato e permanecem no histórico como expirados. A lista carrega mais
+registros sob demanda, sem descartar os anteriores.
+
+O histórico exige suporte do servidor; versões anteriores continuam permitindo
+consultar e desbanir os ativos. Ao atualizar, banimentos ainda armazenados são
+preservados, com responsável desconhecido quando esse dado não existia.
+Detalhes de banimentos que já foram apagados por versões antigas não podem ser
+recuperados.
+
+O alvo é a identidade, não o IP: CGNAT, redes compartilhadas e VPNs podem
+colocar várias pessoas no mesmo endereço, então banir um IP penalizaria
+terceiros. Isso não impede alguém de gerar uma identidade diferente.
+Clientes precisam negociar o recurso de banimento para administrá-lo;
+a restrição de entrada continua valendo para clientes antigos.
+
 ### Aplicação imediata
 
 Switches e seleções aplicam imediatamente. Nomes e limites aplicam
@@ -384,6 +416,12 @@ A aba **Membros** lista todas as pessoas cadastradas no servidor, inclusive
 as offline. Desconectar não remove ninguém
 da lista; cargos e acessos continuam administráveis conforme suas permissões.
 Bots são administrados separadamente na aba **Bots**.
+
+Use **Mais opções** na linha da pessoa para abrir suas ações. O menu permanece
+visível mesmo quando a busca mostra um único membro, sem ficar preso à área da
+tabela. Remover alguém do servidor exige confirmação: encerra suas conexões e
+remove seus cargos, mas não é um banimento e não impede uma nova entrada.
+Cancelar não altera o membro; perder o acesso à ação cancela a confirmação.
 
 **Cargos → Criar cargo** abre um modal próprio para nome, cor e permissões.
 O menu de **três pontos → Editar cargo** abre o mesmo editor para um cargo

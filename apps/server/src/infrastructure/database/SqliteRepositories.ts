@@ -211,32 +211,35 @@ export class SqliteServerRepository implements IServerRepository, IServerIdentit
 
 export class SqliteUserRepository implements IUserRepository {
   constructor(private db: IDatabaseDriver) {}
+  private static readonly COLUMNS = 'id, client_id as clientId, public_key as publicKey, nickname, avatar_path as avatarPath, created_at as createdAt, last_seen_at as lastSeenAt, EXISTS (SELECT 1 FROM guest_memberships g WHERE g.user_id = users.id) AS guest';
+  private static readonly ACTIVE = `NOT EXISTS (SELECT 1 FROM guest_memberships g WHERE g.user_id = users.id AND g.active = 0)
+    AND NOT EXISTS (SELECT 1 FROM identity_bans b WHERE b.public_key = users.public_key AND (b.expires_at IS NULL OR b.expires_at > ?))`;
 
   async findById(id: string): Promise<UserRecord | null> {
     const row = this.db.prepare(
-      'SELECT id, client_id as clientId, public_key as publicKey, nickname, avatar_path as avatarPath, created_at as createdAt, last_seen_at as lastSeenAt FROM users WHERE id = ?'
-    ).get(id) as UserRecord | undefined;
+      `SELECT ${SqliteUserRepository.COLUMNS} FROM users WHERE id = ? AND ${SqliteUserRepository.ACTIVE}`
+    ).get(id, Date.now()) as UserRecord | undefined;
     return row || null;
   }
 
   async findByClientId(clientId: string): Promise<UserRecord | null> {
     const row = this.db.prepare(
-      'SELECT id, client_id as clientId, public_key as publicKey, nickname, avatar_path as avatarPath, created_at as createdAt, last_seen_at as lastSeenAt FROM users WHERE client_id = ?'
+      `SELECT ${SqliteUserRepository.COLUMNS} FROM users WHERE client_id = ?`
     ).get(clientId) as UserRecord | undefined;
     return row || null;
   }
 
   async findByPublicKey(publicKey: string): Promise<UserRecord | null> {
     const row = this.db.prepare(
-      'SELECT id, client_id as clientId, public_key as publicKey, nickname, avatar_path as avatarPath, created_at as createdAt, last_seen_at as lastSeenAt FROM users WHERE public_key = ?'
+      `SELECT ${SqliteUserRepository.COLUMNS} FROM users WHERE public_key = ?`
     ).get(publicKey) as UserRecord | undefined;
     return row || null;
   }
 
   async findByNickname(nickname: string): Promise<UserRecord | null> {
     const row = this.db.prepare(
-      'SELECT id, client_id as clientId, public_key as publicKey, nickname, avatar_path as avatarPath, created_at as createdAt, last_seen_at as lastSeenAt FROM users WHERE nickname = ? COLLATE NOCASE'
-    ).get(nickname) as UserRecord | undefined;
+      `SELECT ${SqliteUserRepository.COLUMNS} FROM users WHERE nickname = ? COLLATE NOCASE AND ${SqliteUserRepository.ACTIVE}`
+    ).get(nickname, Date.now()) as UserRecord | undefined;
     return row || null;
   }
 
@@ -266,12 +269,12 @@ export class SqliteUserRepository implements IUserRepository {
 
   async listAll(): Promise<UserRecord[]> {
     return this.db.prepare(
-      'SELECT id, client_id as clientId, public_key as publicKey, nickname, avatar_path as avatarPath, created_at as createdAt, last_seen_at as lastSeenAt FROM users'
-    ).all() as UserRecord[];
+      `SELECT ${SqliteUserRepository.COLUMNS} FROM users WHERE ${SqliteUserRepository.ACTIVE}`
+    ).all(Date.now()) as UserRecord[];
   }
 
   async count(): Promise<number> {
-    const row = this.db.prepare('SELECT COUNT(*) as total FROM users').get() as { total: number } | undefined;
+    const row = this.db.prepare(`SELECT COUNT(*) as total FROM users WHERE ${SqliteUserRepository.ACTIVE}`).get(Date.now()) as { total: number } | undefined;
     return row?.total ?? 0;
   }
 
@@ -288,7 +291,7 @@ export class SqliteUserRepository implements IUserRepository {
     if (ids.length === 0) return [];
     const placeholders = ids.map(() => '?').join(', ');
     return this.db.prepare(
-      `SELECT id, client_id as clientId, public_key as publicKey, nickname, avatar_path as avatarPath, created_at as createdAt, last_seen_at as lastSeenAt FROM users WHERE id IN (${placeholders})`
+      `SELECT ${SqliteUserRepository.COLUMNS} FROM users WHERE id IN (${placeholders})`
     ).all(...ids) as UserRecord[];
   }
 }

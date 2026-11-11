@@ -608,13 +608,40 @@ async function runUserContextMenuSmoke() {
     network.sendRequest = request;
     await open(user);
     check(!button('toggle-admin') && !!button('toggle-role'), 'Owner keeps roles but not redundant administrator toggle');
-    const { ServerMembersTab } = await import('/views/serverSettings/tabs/ServerMembersTab.ts');
-    const memberRows = () => new ServerMembersTab().renderRows();
-    check(memberRows().includes('data-member-action="toggle-admin"'), 'The owner is offered administrator changes in the Members tab');
-    server.ownerId = 'owner';
-    check(!memberRows().includes('data-member-action="toggle-admin"') && memberRows().includes('data-member-action="toggle-role"'),
-      'The Members tab follows the same owner-only administrator rule as the member menu');
-    server.ownerId = user.id;
+    const [{ ServerMembersTab }, { ServerMemberMenu }] = await Promise.all([
+      import('/views/serverSettings/tabs/ServerMembersTab.ts'), import('/views/serverSettings/ServerMemberMenu.ts'),
+    ]);
+    menu.close();
+    const membersRoot = document.createElement('div');
+    membersRoot.innerHTML = new ServerMembersTab().renderHtml();
+    document.body.appendChild(membersRoot);
+    const memberMenu = new ServerMemberMenu();
+    const memberContext = { store: server, operations: { isPending: () => false }, isCurrent: () => true };
+    const memberAnchor = [...membersRoot.querySelectorAll('.member-actions-trigger')]
+      .find(anchor => anchor.dataset.userId === remote.id);
+    const memberAction = label => [...document.querySelectorAll('.floating-context-menu:not([data-ui-closing]) button')]
+      .find(action => action.textContent.includes(label));
+    const assignments = [];
+    const assignRole = (...args) => assignments.push(args);
+    try {
+      memberMenu.open(memberAnchor, remote.id, memberContext, assignRole);
+      check(!!memberAction(language.t('userMenu.promoteToAdmin')), 'The owner is offered administrator changes in the Members tab');
+      memberAction(language.t('userMenu.promoteToAdmin')).click();
+      check(JSON.stringify(assignments.at(-1)) === JSON.stringify([remote.id, 'admin-role', true]),
+        'The Members tab administrator action addresses the selected identity and administrator role');
+      server.ownerId = 'owner';
+      memberMenu.open(memberAnchor, remote.id, memberContext, assignRole);
+      check(!memberAction(language.t('userMenu.promoteToAdmin')) && !!memberAction(language.t('userMenu.rolesSubmenu')),
+        'The Members tab follows the same owner-only administrator rule as the member menu');
+      memberAction(language.t('userMenu.rolesSubmenu')).click();
+      memberAction('Custom').click();
+      check(JSON.stringify(assignments.at(-1)) === JSON.stringify([remote.id, 'custom-role', true]),
+        'A non-owner role manager can still assign an ordinary role in the Members tab');
+    } finally {
+      memberMenu.dispose();
+      membersRoot.remove();
+      server.ownerId = user.id;
+    }
 
     for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
       await open(user);

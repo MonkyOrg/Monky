@@ -84,11 +84,14 @@ export function buildStageTiles(
   participants: readonly ParticipantViewModel[], own: OwnStageMedia, miniapps: readonly BotScreen[] = [],
 ): StageTile[] {
   const tiles: StageTile[] = [];
+  const browserShares = new Set(miniapps.flatMap(screen => screen.kind === 'browser' && screen.broadcastSource
+    ? [`${screen.hostSessionId}\0${screen.broadcastSource.shareId}`] : []));
   for (const p of participants) {
     const sessionId = sidOf(p);
     const local = sessionId === own.sessionId;
     const cameraOn = local ? own.cameraOn : (p.voiceState?.isCameraOn ?? false);
-    const shareIds = screenShareIds(p, local ? own.screenShareIds : undefined);
+    const shareIds = screenShareIds(p, local ? own.screenShareIds : undefined)
+      .filter(shareId => !browserShares.has(`${sessionId}\0${shareId}`));
     if (cameraOn) tiles.push({ p, kind: 'camera', key: stageTileKey.camera(sessionId), local });
     for (const shareId of shareIds) {
       tiles.push({ p, kind: 'screen', key: stageTileKey.screen(sessionId, shareId), shareId, local });

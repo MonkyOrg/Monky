@@ -206,10 +206,10 @@ async function shellNavigationSmoke() {
   navigator.mediaDevices.getUserMedia = async () => { throw new Error('The shell smoke never captures media'); };
 
   const [{ ShellTestApp }, { sessionManager }, { openServerSession }, { voiceStore }, { appEvents }, { serverRailView },
-    { connectionStore }, shared] = await Promise.all([
+    { connectionStore }, { settingsStore }, shared] = await Promise.all([
     import('/main.ts'), import('/core/SessionManager.ts'), import('/core/serverConnection.ts'),
     import('/stores/voiceStore.ts'), import('/core/EventBus.ts'), import('/views/ServerRailView.ts'),
-    import('/stores/connectionStore.ts'), import('/shell-navigation-shared.js'),
+    import('/stores/connectionStore.ts'), import('/stores/settingsStore.ts'), import('/shell-navigation-shared.js'),
   ]);
   const { MessageType, PROTOCOL_VERSION } = shared;
   const payloadFor = port => {
@@ -467,6 +467,81 @@ async function shellNavigationSmoke() {
   connectionStore.removeSavedServer('d.test', 5404);
   connectionStore.addSavedServer(probedServer);
   check(statusOf(5404) === 'checking', 'a server removed and saved again starts over from checking, not from its last probe');
+
+  phase = 'owned server click: readiness comes from hosting, not HTTP';
+  settingsStore.autoConnectServers = false;
+  settingsStore.save();
+  const { t } = await import('/i18n/index.ts');
+  const oldHostingApi = { hostServerStatus: window.api.hostServerStatus, hostServerStart: window.api.hostServerStart };
+  const oldFetch = window.fetch;
+  let localStatus = { servers: [] };
+  let startFailure = true;
+  let starts = 0;
+  window.api.hostServerStatus = async () => localStatus;
+  window.api.hostServerStart = async options => {
+    starts++;
+    if (startFailure) return { success: false, error: 'Startup fixture failed' };
+    localStatus = { servers: [{ port: options.port, serverId: options.serverId }] };
+    return { success: true };
+  };
+  // Another process can answer /preview on the same port while our server is stopped.
+  window.fetch = async url => new URL(String(url)).port === '5600'
+    ? new Response(JSON.stringify({ name: 'Unrelated online preview' }), { status: 200 })
+    : oldFetch(url);
+  connectionStore.saveCreatedServer({
+    id: 'owned-start-fixture', name: 'Owned startup', port: 5600,
+    voiceChannel: 'Geral', textChannel: 'geral', createdAt: 1, lastStarted: 1,
+  });
+  const dialog = () => document.querySelector('.modal-backdrop:not([data-ui-closing]) .dialog-card');
+  const clickOwned = () => document.querySelector('.server-rail-avatar[data-port="5600"]').click();
+  const confirmStart = async () => {
+    clickOwned();
+    await until(() => !!dialog() || attemptsOn(5600) > 0, 'the owned server click did not react');
+    check(dialog()?.textContent.includes(t('main.serverOfflineStartTitle')),
+      'an online HTTP preview does not skip the owned server start confirmation');
+    check(attemptsOn(5600) === 0, 'the click does not open a login socket before starting');
+  };
+  await confirmStart();
+  dialog().querySelector('[data-action="cancel"]').click();
+  await until(() => !document.querySelector('.server-rail-avatar[data-port="5600"][aria-busy="true"]'),
+    'cancelled start did not release the busy state');
+  check(starts === 0 && attemptsOn(5600) === 0 && sessionManager.isHome(),
+    'cancelling starts neither a server nor a login and keeps Home visible');
+
+  await confirmStart();
+  dialog().querySelector('[data-action="confirm"]').click();
+  await until(() => dialog()?.textContent.includes('Startup fixture failed'), 'the actual startup failure was not shown');
+  check(dialog().textContent.includes(t('main.serverStartFailedTitle')),
+    'a failed startup is reported as startup, not offline or changed identity');
+  check(starts === 1 && attemptsOn(5600) === 0 && !!sessionOn(5401) && sessionManager.isHome(),
+    'failed startup opens no socket and preserves the existing session and visible Home');
+  dialog().querySelector('[data-action="confirm"]').click();
+  await until(() => !document.querySelector('.server-rail-avatar[data-port="5600"][aria-busy="true"]'),
+    'failed start did not release the busy state');
+
+  // A matching status can have a stop queued: the start still needs acknowledgement.
+  localStatus = { servers: [{ port: 5600, serverId: 'owned-start-fixture' }] };
+  clickOwned();
+  await until(() => dialog()?.textContent.includes('Startup fixture failed'), 'matching status bypassed startup acknowledgement');
+  check(starts === 2 && attemptsOn(5600) === 0, 'matching status alone cannot open the login socket');
+  dialog().querySelector('[data-action="confirm"]').click();
+  await until(() => !document.querySelector('.server-rail-avatar[data-port="5600"][aria-busy="true"]'),
+    'acknowledgement failure did not release the busy state');
+
+  localStatus = { servers: [] };
+  startFailure = false;
+  await confirmStart();
+  dialog().querySelector('[data-action="confirm"]').click();
+  await until(() => sessionOn(5600)?.client.getStatus() === 'CONNECTED', 'acknowledged startup did not connect');
+  check(starts === 3 && attemptsOn(5600) === 1, 'only acknowledged startup proceeds to login');
+  document.querySelector('#server-rail-home').click();
+  await until(() => sessionManager.isHome(), 'Home did not return after testing owned startup');
+  sessionOn(5600).client.disconnect();
+  await until(() => !sessionOn(5600), 'owned startup fixture did not disconnect');
+  connectionStore.removeCreatedServer('owned-start-fixture');
+  connectionStore.removeSavedServer('127.0.0.1', 5600);
+  Object.assign(window.api, oldHostingApi);
+  window.fetch = oldFetch;
   return checks;
 }
 

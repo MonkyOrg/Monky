@@ -152,6 +152,7 @@ export class OverlayBridgeService {
     appEvents.on('participants.updated', triggerSync);
     this.unbindListeners.push(appEvents.on('native_screen.updated', triggerSync));
     this.unbindListeners.push(appEvents.on('voice.screen_watch_changed', triggerSync));
+    this.unbindListeners.push(appEvents.on('voice.camera_watch_changed', triggerSync));
     appEvents.on('participants.speaking_changed', triggerSync);
     appEvents.on('settings.updated', triggerSync);
     appEvents.on('overlay_settings.updated', () => {
@@ -512,7 +513,9 @@ export class OverlayBridgeService {
 
       // No modo minimalista, vídeo é desnecessário
       if (!config.minimalistMode) {
-        if (isCamOn) sources.camera = liveVideo(isLocal ? videoService.getCameraState().stream : p.remoteStream);
+        if (isCamOn && (isLocal || voiceStore.isWatchingCamera(sidOf(p)))) {
+          sources.camera = liveVideo(isLocal ? videoService.getCameraState().stream : p.remoteStream);
+        }
 
         // Compartilhamentos de tela (se habilitado)
         if (config.mode === 'cameras-and-screens') {

@@ -2,7 +2,7 @@ import { app, dialog, type BrowserWindow } from 'electron';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
-  createIdentity, deleteIdentity, exportIdentity, getClientId, getIdentity, getIdentityStatus, importIdentity, signChallenge,
+  createGuestIdentity, createIdentity, deleteIdentity, exportIdentity, getClientId, getIdentity, getIdentityStatus, importIdentity, isGuestIdentity, signChallenge,
 } from '../identityService';
 import { exportDirectMessages, importDirectMessages, resetDirectMessages, wipeDirectMessages } from '../dm/dmIpc';
 import { serverChallengeBindingSchema } from '@monky/shared';
@@ -24,6 +24,7 @@ const failure = (error: unknown): { success: false; error: string } =>
 export function registerIdentityIpc(registry: IpcRegistry, { window, sanitizeFileName, quitApplication }: IdentityIpcDeps): void {
   registry.handle('identity:status', 'main', async () => getIdentityStatus());
   registry.handle('identity:create', 'main', async () => createIdentity());
+  registry.handle('identity:guest', 'main', async (_event, nickname) => createGuestIdentity(nickname));
   registry.handle('identity:get', 'main', async () => getIdentity(true));
   registry.handle('identity:get-client-id', 'main', async () => getClientId());
   registry.handle('identity:sign-challenge', 'main', async (_event, nonceHex, binding) => {
@@ -57,8 +58,10 @@ export function registerIdentityIpc(registry: IpcRegistry, { window, sanitizeFil
     if (loggingOut) return { success: true };
     loggingOut = true;
     try {
+      const guest = isGuestIdentity();
       deleteIdentity();
-      await wipeDirectMessages();
+      if (guest) resetDirectMessages();
+      else await wipeDirectMessages();
       await window.webContents.session.flushStorageData();
     } catch (error) {
       loggingOut = false;

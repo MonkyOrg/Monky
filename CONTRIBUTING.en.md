@@ -192,6 +192,7 @@ npm run qa -- tool-consent --bot=fixture
 npm run qa -- music --bot-root="C:\Projects\MonkyBot"
 npm run qa -- connected --smoke
 npm run qa -- connected --real-media
+npm run qa -- connected --two-clients --bot-root="C:\Projects\MonkyBot"
 ```
 
 `--bot=fixture` is an explicitly labeled SDK fixture, never a MonkyBot substitute.
@@ -216,11 +217,22 @@ never substitutes for local consent in `tool-consent`/`music`.
 To test the bot's voice admission, use `connected --bot-root=...`, not
 `voice`/`voice-receive`/`music`: those scenarios already join the bot to the call.
 
+`connected --two-clients` opens two real instances: **QA Host**, the server owner,
+and **QA Espectador**, an ordinary member. They use distinct profiles and identities
+on the same disposable server; the second does not gain administrative permissions,
+repeat the sample data or reinstall the bot. With `--bot-root`, both receive the
+real catalog already installed by the owner. Manually join the same voice room in
+both windows to test `/browser`: the caller controls the site and the other sees
+its image, without remote control. The launcher neither runs the command nor grants
+local consent. Closing one window leaves the other open to check host departure;
+closing both or pressing `Ctrl+C` stops the server and bot and deletes both profiles.
+
 Wait for **QA_READY**, not merely a visible window. The launcher checks that the
 window is visible in interactive mode and hidden with `--smoke`. Server health, authentication,
 persisted chat, command registration and the voice peer are checked as applicable.
 Services use loopback without LAN announcements; all state stays under
-`.qa\runs\<scenario>-<id>` and is deleted on shutdown. Closing the window or
+`.qa\runs\<short-id>` and is deleted on shutdown. Each client uses the `client`
+subdirectory of its own run. Closing the window (both with `--two-clients`) or
 pressing `Ctrl+C` stops owned processes. Startup failures perform the same cleanup.
 
 `--smoke` verifies readiness in a hidden window, then shuts everything down.

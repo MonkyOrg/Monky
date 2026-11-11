@@ -1,6 +1,8 @@
 import type { ServerEventPublic } from '@monky/shared';
 import { getLanguage, t } from '../i18n';
 import { html, trustedHtml, type SafeHtml } from '../utils/html';
+import { findAutomaticLinks } from '../utils/markdown';
+import { openExternalUrl } from '../utils/feedback';
 import { renderImageCarousel } from './ImageCarousel';
 import { locationIcon, privateBadge } from './community/communityMarkup';
 
@@ -17,6 +19,27 @@ export interface EventCardOptions {
    * among those facts, so the card leaves them out.
    */
   detail?: { tabs: SafeHtml; facts: SafeHtml; panel: { id: string; labelledBy: string; hidden: boolean } };
+}
+
+export function renderServerEventLocation(kind: EventCard['location']['kind'], location: string): SafeHtml {
+  if (kind !== 'external') return html`${location}`;
+  const parts: SafeHtml[] = [];
+  let end = 0;
+  for (const link of findAutomaticLinks(location)) {
+    parts.push(html`${location.slice(end, link.from)}<a class="md-link" href="${link.url}" data-event-location-link="${link.url}">${location.slice(link.from, link.to)}</a>`);
+    end = link.to;
+  }
+  return html`${parts}${location.slice(end)}`;
+}
+
+export function bindServerEventLocationLinks(root: HTMLElement, signal: AbortSignal): void {
+  root.addEventListener('click', click => {
+    const link = click.target instanceof Element ? click.target.closest<HTMLAnchorElement>('[data-event-location-link]') : null;
+    if (!link || !root.contains(link)) return;
+    click.preventDefault();
+    const url = link.dataset.eventLocationLink;
+    if (url) void openExternalUrl(url, t('chat.linkOpenFailed'));
+  }, { signal });
 }
 
 export function renderServerEventCard(event: EventCard, location: string, images: string[], options: EventCardOptions = {}): string {
@@ -39,7 +62,7 @@ export function renderServerEventCard(event: EventCard, location: string, images
       ${detail?.facts}
       <p>${event.description}</p>
     </div>
-    <footer class="community-event-footer">${detail ? '' : html`<span class="community-event-location"><span class="material-symbols-outlined md-18">${locationIcon(event.location.kind)}</span>${location}</span>`}
+    <footer class="community-event-footer">${detail ? '' : html`<span class="community-event-location"><span class="material-symbols-outlined md-18">${locationIcon(event.location.kind)}</span>${renderServerEventLocation(event.location.kind, location)}</span>`}
       ${options.actions ? html`<div class="community-actions">${options.actions}</div>` : ''}
     </footer></article>`);
 }

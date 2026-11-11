@@ -20,6 +20,13 @@ preferences. To change something shared with participants, use
 | Logs | Local events and client diagnostics |
 | About and Updates | Version, updates, window behavior and community |
 
+The arrows beside **mute** and **deafen** open quick microphone and headphone
+settings. Besides devices, they offer **Input volume** and **Output volume**,
+respectively, from 0% to 200%. These are the same values as **Voice and Video**:
+changes apply immediately, are saved, and stay synchronized between both
+surfaces on desktop and web. 100% keeps the original gain; higher values amplify
+it. Changing volume does not unmute or remove call restrictions.
+
 ## My Profile
 
 Change your nickname and picture here. **Language** immediately applies

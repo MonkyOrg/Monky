@@ -19,6 +19,9 @@ export class UserService {
   public async isMember(userId: string): Promise<boolean> {
     return (await this.userRepo.findById(userId)) !== null;
   }
+  public member(userId: string): Promise<UserRecord | null> {
+    return this.userRepo.findById(userId);
+  }
 
   /** Current nicknames by id; unknown ids are left out. */
   public async nicknames(userIds: readonly string[]): Promise<Map<string, string>> {
@@ -83,10 +86,10 @@ export class UserService {
       };
     }
 
-    // The record goes first: a member who cannot be removed keeps their picture.
-    await this.userRepo.delete(userId);
-    if (user.avatarPath) {
-      this.avatarStorage.deleteAvatar(user.avatarPath);
+    // Guests are archived by connection teardown, preserving attribution in their published history.
+    if (!user.guest) {
+      await this.userRepo.delete(userId);
+      if (user.avatarPath) this.avatarStorage.deleteAvatar(user.avatarPath);
     }
     Logger.info('NETWORK', `Member ${user.nickname} (${userId}) removed from the server`);
 
@@ -136,6 +139,7 @@ export function toUserSummary(
   user: UserRecord, status: UserSummary['status'], joinedAt: number, session?: { sessionId: string; connectedAt: number },
 ): UserSummary {
   return {
+    ...(user.guest ? { guest: true } : {}),
     id: user.id,
     clientId: user.clientId,
     publicKey: user.publicKey ? normalizePublicKeyHex(user.publicKey) : undefined,

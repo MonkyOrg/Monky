@@ -1,4 +1,6 @@
 import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, MessageType, normalizePublicKeyHex, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
+import { openIdentityBanDialog } from './IdentityBanDialog';
+import { canBanIdentity } from '../utils/identityBan';
 import { escapeHtml, html, trustedHtml } from '../utils/html';
 import { activityIconSrc } from '../utils/activityIcon';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
@@ -62,7 +64,8 @@ export class UserContextMenu {
     const adminRole = serverStore.getAdminRole();
     const isTargetAdmin = !!adminRole && roleIds.has(adminRole.id);
     const canManageAdmin = !user.isBot && user.id !== serverStore.ownerId && canManageAdmins(serverStore);
-    const showAdminSection = canMuteMembers || canDeafenMembers || canKickMembers || canMoveMembers || canManageRoles || canManageAdmin;
+    const canBan = canBanIdentity(serverStore, user.id);
+    const showAdminSection = canBan || canMuteMembers || canDeafenMembers || canKickMembers || canMoveMembers || canManageRoles || canManageAdmin;
 
     // Jogo em andamento (#675) e o pedido para ver a partida (#763).
     const targetActivity = user.activity ?? null;
@@ -173,6 +176,7 @@ export class UserContextMenu {
         ${canMuteMembers ? `<button type="button" class="btn btn-secondary" data-action="server-mute" disabled aria-busy="true">${t('userMenu.loadingRestrictions')}</button>` : ''}
         ${canDeafenMembers ? `<button type="button" class="btn btn-secondary" data-action="server-deafen" disabled aria-busy="true">${t('userMenu.loadingRestrictions')}</button>` : ''}
         ${canKickMembers ? `<button type="button" class="btn btn-secondary" data-action="kick-voice">${t('userMenu.kickFromVoice')}</button>` : ''}
+        ${canBan ? `<button type="button" class="btn btn-danger" data-action="ban-identity">${t('identity.banAction')}</button>` : ''}
         ${canMoveMembers ? `
           <div class="ctx-submenu-wrap">
             <button type="button" class="btn btn-secondary ctx-submenu-trigger">
@@ -531,6 +535,10 @@ export class UserContextMenu {
   private attachEvents(user: UserSummary, targetPermissionMuted = false): void {
     if (!this.menuEl) return;
     this.attachFriendEvents(user);
+    this.menuEl.querySelector('[data-action="ban-identity"]')?.addEventListener('click', () => {
+      this.close();
+      openIdentityBanDialog(user.id);
+    });
 
     this.menuEl.querySelector('[data-action="ask-to-watch-game"]')?.addEventListener('click', () => {
       this.close();

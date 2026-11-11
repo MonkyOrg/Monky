@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Links na localização dos eventos agora abrem no navegador, inclusive nos detalhes e nas prévias. Em servidores atualizados, os eventos encerrados carregam aos poucos ao rolar, em páginas de 20, com skeletons durante a busca. Servidores antigos mantêm o histórico anterior.",
+  "en": "Links in event locations now open in the browser, including in details and previews. On updated servers, ended events load progressively as you scroll, in pages of 20, with skeletons while fetching. Older servers keep their previous history."
+}

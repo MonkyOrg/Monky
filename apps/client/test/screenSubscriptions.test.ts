@@ -221,6 +221,64 @@ test('screen watch intent follows the voice-call session, not a foreground serve
     'the call retiring its source also retires the Watch');
 });
 
+test('camera watch intent defaults on, is per session and lasts only for the current call', () => {
+  const store = new VoiceStore();
+  store.setCameraWatching('peer', false);
+  store.setChannel('room', 'server');
+  assert.equal(store.isWatchingCamera('peer'), true, 'An inactive call cannot accumulate opt-outs');
+  store.setCameraWatching('peer', false);
+  assert.equal(store.isWatchingCamera('peer'), false);
+  assert.equal(store.isWatchingCamera('other-device'), true);
+  store.setScreenWatching('peer', 'screen', true);
+  store.setChannel('room', 'server');
+  assert.equal(store.isWatchingCamera('peer'), false, 'Readmission to the same call keeps the choice');
+  assert.equal(store.isWatchingScreen('peer', 'screen'), true);
+  store.setChannel('other-room', 'server');
+  assert.equal(store.isWatchingCamera('peer'), true);
+  store.setCameraWatching('peer', false);
+  store.setChannel('other-room', 'other-server');
+  assert.equal(store.isWatchingCamera('peer'), true);
+  store.setCameraWatching('peer', false);
+  store.reset();
+  store.setChannel('room', 'server');
+  assert.equal(store.isWatchingCamera('peer'), true);
+  store.reset();
+});
+
+test('camera viewing affects only the remote session in the call and survives a rebuilt link', async t => {
+  const f = await p2pFixture(t);
+  const peer = 'camera-peer';
+  for (const sessionId of [peer, 'publisher', 'another-room']) {
+    f.participants.addUser({ id: sessionId, sessionId, clientId: sessionId, nickname: sessionId, status: 'ONLINE', joinedAt: 1 });
+    f.participants.updateVoiceState({ sessionId, userId: sessionId,
+      channelId: sessionId === 'another-room' ? 'elsewhere' : 'room', isCameraOn: true,
+      isMuted: false, isDeafened: false, isSpeaking: false, isScreenSharing: false,
+      isSharingScreenAudio: false, serverMuted: false, serverDeafened: false });
+  }
+  const first = track('remote-camera', 'video');
+  f.manager['remoteMedia'].trackArrived({ peerSessionId: peer, kind: 'camera', track: first });
+  f.manager.setRemoteCameraWatching('publisher', false);
+  f.manager.setRemoteCameraWatching('another-room', false);
+  f.manager.setRemoteCameraWatching('missing', false);
+  assert.equal(voiceStore.isWatchingCamera('publisher'), true);
+  assert.equal(voiceStore.isWatchingCamera('another-room'), true);
+  f.manager.setRemoteCameraWatching(peer, false);
+  assert.equal(first.enabled, false);
+  assert.deepEqual(f.participants.get(peer)?.remoteStream?.getTracks(), []);
+  assert.equal(f.camera.enabled, true, 'The local camera publication is untouched');
+  f.manager.removePeer(peer, true);
+  assert.equal(voiceStore.isWatchingCamera(peer), false);
+  const replacement = track('replacement-camera', 'video');
+  f.manager['remoteMedia'].trackArrived({ peerSessionId: peer, kind: 'camera', track: replacement });
+  assert.equal(replacement.enabled, false);
+  f.manager.setRemoteCameraWatching(peer, true);
+  assert.equal(replacement.enabled, true);
+  assert.deepEqual(f.participants.get(peer)?.remoteStream?.getTracks(), [replacement]);
+  f.manager.setRemoteCameraWatching(peer, false);
+  f.manager.removePeer(peer);
+  assert.equal(voiceStore.isWatchingCamera(peer), true, 'An actual departure clears this session choice');
+});
+
 test('screen watch intent is call-scoped, source-specific, view-independent and separate from audio mute', () => {
   const store = new VoiceStore();
   store.setChannel('room', 'server-a');

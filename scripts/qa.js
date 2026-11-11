@@ -11,12 +11,13 @@ export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)
 export const scenarios = ['connected', 'empty-forum', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'];
 
 export function parseQaArguments(args) {
-  const result = { scenario: 'connected', smoke: false, realMedia: false, bot: null, botRoot: null };
+  const result = { scenario: 'connected', smoke: false, realMedia: false, twoClients: false, bot: null, botRoot: null };
   let selected = false;
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
     if (argument === '--smoke') result.smoke = true;
     else if (argument === '--real-media') result.realMedia = true;
+    else if (argument === '--two-clients') result.twoClients = true;
     else if (argument === '--bot=fixture') {
       if (result.bot) throw new Error('Choose one explicit bot source.');
       result.bot = 'sdk-fixture';
@@ -33,6 +34,7 @@ export function parseQaArguments(args) {
   }
   if (['home', 'login'].includes(result.scenario) && result.bot) throw new Error('Home/login QA must not install a bot before the tested login.');
   if (result.smoke && result.realMedia) throw new Error('--real-media requires interactive QA; it cannot be combined with --smoke.');
+  if (result.twoClients && result.scenario !== 'connected') throw new Error('--two-clients requires the connected scenario.');
   if (['voice', 'voice-receive'].includes(result.scenario) && !result.bot) result.bot = 'sdk-fixture';
   if (result.scenario === 'voice-receive' && result.bot !== 'sdk-fixture') throw new Error('Voice reception QA uses its explicit SDK fixture.');
   if (['bot-install', 'tool-consent'].includes(result.scenario) && !result.bot) throw new Error('Choose --bot=fixture or an explicit --bot-root for this scenario.');
@@ -73,6 +75,7 @@ export const scenarioPreparation = {
 export async function runQa(options, hooks = {}) {
   if (!scenarios.includes(options.scenario)) throw new Error('Unsupported QA scenario.');
   if (options.smoke && options.realMedia) throw new Error('Real capture devices require interactive QA.');
+  if (options.twoClients && options.scenario !== 'connected') throw new Error('Two real QA clients require the connected scenario.');
   if (options.bot === 'production' ? !options.botRoot : options.botRoot) throw new Error('Production QA requires its explicit bot checkout; no fixture will be substituted.');
   const { developmentQaConfigSchema, developmentQaReportSchema, developmentQaRunName, botManifestSchema, PROTOCOL_VERSION } = require('../packages/shared/dist/index.js');
   for (const filename of ['apps/client/dist/index.html', 'apps/client/dist-electron/main/main.js', 'apps/server/dist/server.js']) {
@@ -109,22 +112,24 @@ export async function runQa(options, hooks = {}) {
   process.once('SIGTERM', interrupt);
   const password = randomBytes(24).toString('hex');
   const startup = promise => Promise.race([promise, failure]);
-  const spawn = (label, command, args, cwd, env, onMessage, windowsHide = true) => {
+  const spawn = (label, command, args, cwd, env, onMessage, windowsHide = true, { childRunId = runId, allowNormalExit = false } = {}) => {
     const child = startOwnedProcess(command, args, {
-      cwd, env, runId, label, onMessage, windowsHide, onFailure: failureReject, timeoutMs: options.smoke ? 60_000 : 180_000,
+      cwd, env, runId: childRunId, label, onMessage, windowsHide, allowNormalExit, onFailure: failureReject, timeoutMs: options.smoke ? 60_000 : 180_000,
     });
     children.push(child);
     return child;
   };
   const serviceFile = path.join(repoRoot, 'scripts', 'qa', 'service.cjs');
-  let result, error;
+  let result, error, memberRoot;
+  const createProfile = async directory => {
+    await fs.mkdir(directory);
+    for (const child of [path.join('AppData', 'Roaming'), path.join('AppData', 'Local'), 'config', 'cache', 'data', 'scratch', 'cli']) {
+      await fs.mkdir(path.join(directory, child), { recursive: true });
+    }
+  };
   try {
     for (const role of ['server', 'client', 'bot']) {
-      const directory = path.join(root, role);
-      await fs.mkdir(directory);
-      for (const child of [path.join('AppData', 'Roaming'), path.join('AppData', 'Local'), 'config', 'cache', 'data', 'scratch', 'cli']) {
-        await fs.mkdir(path.join(directory, child), { recursive: true });
-      }
+      await createProfile(path.join(root, role));
     }
     const serviceEnv = role => isolatedEnvironment(path.join(root, role), {
       MONKY_QA_SERVICE: JSON.stringify({
@@ -166,7 +171,7 @@ export async function runQa(options, hooks = {}) {
       }
     }
     const config = developmentQaConfigSchema.parse({
-      runId, scenario: options.scenario, smoke: options.smoke, nickname: 'QA Tester',
+      runId, scenario: options.scenario, smoke: options.smoke, nickname: options.twoClients ? 'QA Host' : 'QA Tester',
       realMedia: options.realMedia === true,
       server: { host: '127.0.0.1', port: serverReady.port, name: serverReady.name, password },
       ...(botReady ? { bot: botReady } : {}),
@@ -189,7 +194,7 @@ export async function runQa(options, hooks = {}) {
         joining.catch(failureReject);
       }
       if (report.phase === 'waiting-consent') hooks.log?.('QA_PREPARING: real local consent and verified tools are required; not ready yet.');
-    }, options.smoke === true);
+    }, options.smoke === true, { allowNormalExit: options.twoClients === true });
     const ready = await startup(client.ready);
     await startup(joining);
     if (options.scenario === 'connected') {
@@ -201,21 +206,55 @@ export async function runQa(options, hooks = {}) {
         throw new Error('Connected QA live-form fixture was not prepared.');
       }
     }
+    const clients = [{ root, profile, nickname: config.nickname, runId, pid: client.child.pid, ready }];
+    let member;
+    if (options.twoClients) {
+      const memberRunId = randomUUID();
+      const directory = path.join(runs, developmentQaRunName(memberRunId));
+      await fs.mkdir(directory, { mode: 0o700 });
+      memberRoot = directory;
+      const memberProfile = path.join(memberRoot, 'client');
+      await createProfile(memberProfile);
+      const memberConfig = developmentQaConfigSchema.parse({
+        ...config, runId: memberRunId, role: 'member', nickname: 'QA Espectador',
+      });
+      const memberFile = path.join(memberRoot, 'launch.json');
+      await fs.writeFile(memberFile, JSON.stringify({ ownerPid: process.pid, config: memberConfig }), { flag: 'wx', mode: 0o600 });
+      const memberReports = [];
+      member = spawn('QA member', require('electron'), [
+        path.join(repoRoot, 'apps', 'client'), `--user-data-dir=${memberProfile}`,
+      ], path.join(repoRoot, 'apps', 'client'), isolatedEnvironment(
+        memberProfile, { MONKY_QA_CONFIG: memberFile }, { useSystemKeychain: true },
+      ), message => {
+        if (message.type !== 'qa-report') return;
+        const report = developmentQaReportSchema.parse(message.report);
+        if (report.runId !== memberRunId || report.scenario !== 'connected') throw new Error('Mismatched QA member readiness report.');
+        memberReports.push(report);
+      }, options.smoke === true, { childRunId: memberRunId, allowNormalExit: true });
+      const memberReady = await startup(member.ready);
+      if (!memberReady.connected || memberReady.serverId !== ready.serverId || !memberReady.userId ||
+          memberReady.userId === ready.userId || memberReady.botPermissions ||
+          (bot && (memberReady.botId !== ready.botId || memberReady.commandCount !== ready.commandCount))) {
+        throw new Error('The second real client must authenticate as a distinct ordinary member of the same server and see its installed bot.');
+      }
+      clients.push({ root: memberRoot, profile: memberProfile, nickname: memberConfig.nickname,
+        runId: memberRunId, pid: member.child.pid, ready: memberReady, reports: memberReports });
+    }
     let windowVisible;
     for (const child of children) {
       const state = await startup(child.call('qa-ping'));
       if (!state.alive) throw new Error('A QA child failed its readiness ping.');
-      if (child === client) {
+      if (child === client || child === member) {
         windowVisible = state.visible;
         if (windowVisible !== !options.smoke) throw new Error('The QA client window visibility does not match the interactive/smoke scenario.');
       }
     }
     const stats = await startup(server.call('qa-snapshot'));
     const expectsLogin = !['home', 'login'].includes(options.scenario);
-    const expectedMembers = options.scenario === 'connected' ? 101 : options.scenario === 'empty-forum' ? 20 : 1;
+    const expectedMembers = options.scenario === 'connected' ? 100 + clients.length : options.scenario === 'empty-forum' ? 20 : 1;
     const messagesReady = options.scenario === 'empty-forum' ? stats.messages === 0 : stats.messages >= 1;
     if (ready.connected !== expectsLogin || (expectsLogin &&
-        (stats.onlineUsers !== 1 || stats.members !== expectedMembers || !messagesReady)) ||
+        (stats.onlineUsers !== clients.length || stats.members !== expectedMembers || !messagesReady)) ||
         (!expectsLogin && (stats.members !== 0 || stats.messages !== 0))) throw new Error('QA readiness disagrees with the real authenticated server state.');
     if (bot) {
       const state = await startup(bot.call('qa-snapshot'));
@@ -240,10 +279,10 @@ export async function runQa(options, hooks = {}) {
         (options.scenario === 'connected' && !options.smoke
           ? ' Example forum opened with 200 seeded threads for lazy-loading checks.'
           : ''),
-      mediaDevices: options.realMedia ? 'real' : 'synthetic', windowVisible, ready, stats, reports };
+      mediaDevices: options.realMedia ? 'real' : 'synthetic', windowVisible, ready, stats, reports, clients };
     await hooks.onReady?.(result);
     hooks.log?.(`QA_READY ${JSON.stringify(result)}`);
-    if (!options.smoke) await Promise.race([client.closed, failure]);
+    if (!options.smoke) await Promise.race([member ? Promise.all([client.closed, member.closed]) : client.closed, failure]);
   } catch (caught) { if (caught !== interruption) error = caught; }
   finally {
     const failures = [];
@@ -252,8 +291,12 @@ export async function runQa(options, hooks = {}) {
     }
     process.removeListener('SIGINT', interrupt);
     process.removeListener('SIGTERM', interrupt);
-    if (children.every(child => child.isClosed())) await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 });
-    else failures.push(new Error(`Could not confirm owned child termination; preserving QA data at ${root}.`));
+    if (children.every(child => child.isClosed())) {
+      for (const directory of [root, memberRoot].filter(Boolean)) {
+        try { await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 }); }
+        catch (cleanupError) { failures.push(cleanupError); }
+      }
+    } else failures.push(new Error(`Could not confirm owned child termination; preserving QA data at ${[root, memberRoot].filter(Boolean).join(', ')}.`));
     if (failures.length) {
       const causes = [...(error ? [error] : []), ...failures];
       const primary = causes[0];
@@ -267,10 +310,11 @@ export async function runQa(options, hooks = {}) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv.includes('--help')) {
-    console.log('Usage: npm run qa -- [scenario] [--bot=fixture | --bot-root <absolute MonkyBot checkout>] [--smoke | --real-media]\n');
+    console.log('Usage: npm run qa -- [scenario] [--two-clients] [--bot=fixture | --bot-root <absolute MonkyBot checkout>] [--smoke | --real-media]\n');
     for (const scenario of scenarios) console.log(`${scenario}: ${scenarioPreparation[scenario]}`);
     console.log('\nFresh isolated data is removed on shutdown. Ctrl+C closes owned processes. Normal npm start is unchanged.');
     console.log('--real-media explicitly enables physical camera/microphone devices for interactive evaluation. Default and smoke use synthetic capture.');
+    console.log('--two-clients opens connected QA with distinct owner/member profiles on the same server. Closing one leaves the other running; closing both or Ctrl+C ends QA.');
   } else {
     runQa(parseQaArguments(process.argv.slice(2)), { log: console.log })
       .catch(error => { console.error(error); process.exitCode = 1; });

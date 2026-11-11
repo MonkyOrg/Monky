@@ -1,11 +1,13 @@
 import { Permission } from '@monky/shared';
-import { serverStore } from '../../../stores/serverStore';
+import { serverStore, type ServerStore } from '../../../stores/serverStore';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { escapeHtml, html, trustedHtml } from '../../../utils/html';
-import { renderRoleOption } from '../../../utils/roleOption';
 import { renderRoleTags } from '../../../utils/roleTags';
-import { canManageAdmins } from '../../memberActions';
+import { canBanIdentity, canManageIdentityBans } from '../../../utils/identityBan';
 import { t } from '../../../i18n';
+import { openIdentityBansDialog } from '../../IdentityBansDialog';
+import type { ServerSettingsContext } from '../ServerSettingsContext';
+import '../../../styles/identityBan.css';
 
 const VISIBLE_ROLE_TAGS = 2;
 
@@ -43,6 +45,11 @@ export class ServerMembersTab {
   public renderHtml(): string {
     return `
       <div style="display: flex; flex-direction: column; gap: 16px; width: 100%;">
+        <div class="member-ban-actions">
+          <button type="button" class="btn btn-secondary" id="btn-identity-bans" ${canManageIdentityBans(serverStore) ? '' : 'hidden'}>
+            ${t('identity.bansButton')}
+          </button>
+        </div>
         <div data-settings-section="members" data-settings-label="${escapeHtml(t('roles.membersList'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; overflow: visible;">
           <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
             <div>
@@ -79,15 +86,21 @@ export class ServerMembersTab {
     `;
   }
 
+  public attachEvents(root: HTMLElement, context: ServerSettingsContext, signal: AbortSignal): void {
+    root.querySelector('#btn-identity-bans')?.addEventListener('click', () => {
+      if (context.isCurrent() && canManageIdentityBans(context.store)) openIdentityBansDialog();
+    }, { signal });
+  }
+
+  public refreshAccess(root: HTMLElement, store: ServerStore): void {
+    const button = root.querySelector<HTMLButtonElement>('#btn-identity-bans');
+    if (button) button.hidden = !canManageIdentityBans(store);
+  }
+
   /** The member rows alone: refreshing them keeps the search field and its focus. */
   public renderRows(): string {
-    const roles = [...serverStore.roles].sort((a, b) => b.position - a.position);
-    // Admin is toggled through its own action, never listed as a role (#265).
-    const manageableRoles = roles.filter((role) => !role.isDefault && !serverStore.isAdminRole(role));
     const adminRole = serverStore.getAdminRole();
-    const canToggleAdmin = canManageAdmins(serverStore);
     const members = serverStore.getHumanMembersInDisplayOrder().sort((a, b) => a.nickname.localeCompare(b.nickname));
-    const canKickMembers = serverStore.hasPermission(Permission.KICK_MEMBERS);
 
     return members.map((member) => {
       const userRoles = serverStore
@@ -96,6 +109,8 @@ export class ServerMembersTab {
       const avatar = getAvatarUrl(member.avatarUrl);
       const isAdmin = Boolean(adminRole && serverStore.getUserRoleIds(member.id).includes(adminRole.id));
       const isOwner = member.id === serverStore.ownerId;
+      const actionsUnavailable = !serverStore.hasPermission(Permission.MANAGE_ROLES)
+        && !serverStore.hasPermission(Permission.KICK_MEMBERS) && !canBanIdentity(serverStore, member.id);
 
       return html`
         <tr data-member-name="${member.nickname}">
@@ -119,39 +134,12 @@ export class ServerMembersTab {
               : html`<span style="font-size: 11px; color: var(--text-muted);">${t('roles.noExtraRoles')}</span>`}
           </td>
           <td style="text-align: right;">
-            <div class="settings-action-menu-wrap">
-              <button type="button" class="btn btn-secondary btn-icon member-actions-trigger" data-user-id="${member.id}" title="${t('common.moreOptions')}" style="width: 32px; height: 32px; padding: 0; justify-content: center;">
-                <span class="material-symbols-outlined md-18">more_horiz</span>
-              </button>
-              <div class="settings-action-menu">
-                ${canKickMembers ? html`
-                  <button type="button" class="settings-action-menu-item danger" data-member-action="kick" data-user-id="${member.id}" ${isOwner ? 'disabled' : ''}>
-                    ${t('userMenu.kickMember')}
-                  </button>
-                ` : ''}
-                ${adminRole && canToggleAdmin ? html`
-                  <button type="button" class="settings-action-menu-item" data-member-action="toggle-admin" data-user-id="${member.id}" data-role-id="${adminRole.id}" ${isOwner ? 'disabled' : ''}>
-                    <span class="material-symbols-outlined md-16">${isAdmin ? 'remove_moderator' : 'shield_person'}</span>
-                    <span>${isAdmin ? t('userMenu.removeAdmin') : t('userMenu.promoteToAdmin')}</span>
-                  </button>
-                ` : ''}
-                <div class="settings-action-submenu-wrap">
-                  <button type="button" class="settings-action-menu-item" ${manageableRoles.length ? '' : 'disabled'}>
-                    <span>${t('userMenu.rolesSubmenu')}</span>
-                    <span class="material-symbols-outlined md-16">chevron_left</span>
-                  </button>
-                  ${manageableRoles.length ? html`
-                    <div class="settings-action-submenu">
-                      ${manageableRoles.map((role) => html`
-                        <button type="button" class="settings-action-menu-item" data-member-action="toggle-role" data-user-id="${member.id}" data-role-id="${role.id}" ${isOwner ? 'disabled' : ''}>
-                          ${trustedHtml(renderRoleOption(role, serverStore.getUserRoleIds(member.id).includes(role.id)))}
-                        </button>
-                      `)}
-                    </div>
-                  ` : ''}
-                </div>
-              </div>
-            </div>
+            <button type="button" class="btn btn-secondary btn-icon member-actions-trigger" data-user-id="${member.id}"
+              title="${t('common.moreOptions')}" aria-label="${t('common.moreOptions')}" aria-haspopup="menu" aria-expanded="false"
+              ${actionsUnavailable ? 'disabled' : ''}
+              style="width: 32px; height: 32px; padding: 0; justify-content: center;">
+              <span class="material-symbols-outlined md-18" aria-hidden="true">more_horiz</span>
+            </button>
           </td>
         </tr>
       `;

@@ -12,6 +12,7 @@ import { t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { openModal, type ModalShell } from '../utils/modalShell';
 import { reportError } from '../utils/feedback';
+import { canManageIdentityBans } from '../utils/identityBan';
 import { selectChoiceCard } from '../utils/formControls';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { getAvatarUrl } from '../utils/avatar';
@@ -61,6 +62,7 @@ export class ServerSettingsModal {
   private securityTab = new ServerSecurityTab();
   private storageTab = new ServerStorageTab();
   private rolesTab = new ServerRolesTab();
+  private membersTab = new ServerMembersTab();
   private botsTab = new ServerBotsTab();
   private communitySettings: ServerCommunitySettings | null = null;
 
@@ -107,7 +109,7 @@ export class ServerSettingsModal {
       { id: 'voice_video', icon: 'music_note', label: 'serverSettings.tabVoiceVideo', permission: Permission.MANAGE_SERVER, html: new ServerVoiceVideoTab().renderHtml() },
       { id: 'storage', icon: 'cloud', label: 'serverSettings.tabStorage', permission: Permission.MANAGE_SERVER, html: this.storageTab.renderHtml() },
       { id: 'notifications', icon: 'notifications', label: 'serverSettings.tabNotifications', permission: undefined, html: new ServerNotificationsTab().renderHtml() },
-      { id: 'members', icon: 'group', label: 'serverSettings.tabMembers', permission: Permission.MANAGE_ROLES, html: new ServerMembersTab().renderHtml() },
+      { id: 'members', icon: 'group', label: 'serverSettings.tabMembers', permission: undefined, html: this.membersTab.renderHtml() },
       { id: 'roles', icon: 'admin_panel_settings', label: 'serverSettings.tabRoles', permission: undefined, html: this.rolesTab.renderHtml() },
       { id: 'bots', icon: 'smart_toy', label: 'serverSettings.tabBots', permission: Permission.MANAGE_BOTS, html: this.botsTab.renderHtml() },
     ];
@@ -303,6 +305,7 @@ export class ServerSettingsModal {
       }, options);
     });
     this.rolesTab.attachEvents(root, context);
+    this.membersTab.attachEvents(root, context, this.domEvents.signal);
     this.botsTab.attachEvents(root, context);
     const refresh = () => {
       if (!isForegroundEvent()) return;
@@ -447,7 +450,9 @@ export class ServerSettingsModal {
     if (recentLimit) recentLimit.disabled = pending || !allowSoundboard || !recentSounds?.checked;
     for (const [tab, permission] of [['members', Permission.MANAGE_ROLES], ['roles', Permission.MANAGE_ROLES], ['bots', Permission.MANAGE_BOTS]] as const) {
       const button = root.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`);
-      if (button) button.hidden = !store.hasPermission(permission) && !(tab === 'roles' && store.hasPermission(Permission.MANAGE_SERVER));
+      if (button) button.hidden = !store.hasPermission(permission)
+        && !(tab === 'roles' && store.hasPermission(Permission.MANAGE_SERVER))
+        && !(tab === 'members' && canManageIdentityBans(store));
       if (button?.hidden && this.activeTab === tab) this.switchTab('general');
     }
     if (this.invalidated || !context.isCurrent()) {
@@ -491,6 +496,7 @@ export class ServerSettingsModal {
     if (channelCount) channelCount.textContent = t('serverSettings.channelsCount', { count: s.channels.length });
     this.rolesTab.refreshState();
     this.botsTab.refreshPermissions();
+    this.membersTab.refreshAccess(root, store);
     this.storageTab.refreshState(root);
     this.communitySettings?.refreshState(root, context);
   }

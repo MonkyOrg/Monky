@@ -79,6 +79,7 @@ export class ConnectionStore {
   public clientId: string = '';
   public publicKey: string = '';
   public hasIdentity: boolean = false;
+  public guest: boolean = false;
   public lastError: string | null = null;
   public savedServers: SavedServer[] = [];
   public railLayout: RailNode[] = [];
@@ -99,6 +100,7 @@ export class ConnectionStore {
   }
 
   public loadUserProfile(): void {
+    if (this.guest) return;
     try {
       this.savedNickname = localStorage.getItem('monky_nickname') || '';
       this.savedAvatarBase64 = localStorage.getItem('monky_avatar') || '';
@@ -109,6 +111,11 @@ export class ConnectionStore {
   }
 
   public saveUserProfile(nickname: string, avatarBase64?: string | null): void {
+    if (this.guest) {
+      if (nickname) this.savedNickname = nickname;
+      if (avatarBase64 !== undefined) this.savedAvatarBase64 = avatarBase64 ?? '';
+      return;
+    }
     if (nickname) {
       this.savedNickname = nickname;
       try {
@@ -265,7 +272,8 @@ export class ConnectionStore {
   /**
    * Accepting an invitation that names the server's key: its sign-in at this
    * address expects that key instead of a pinned one, until it ends. This is
-   * the only way a pinned key is ever replaced.
+   * Remote pins are replaced only this way; a locally hosted instance can
+   * also supply its key through the main process before a protected sign-in.
    */
   public expectInvitedServerKey(address: ServerAddress, serverKey: string): () => void {
     const key = serverAddressKey(address);
@@ -688,7 +696,9 @@ export class ConnectionStore {
     } catch (e) {}
   }
 
-  public setIdentity(identity: { publicKey: string; clientId: string } | null): void {
+  public setIdentity(identity: { publicKey: string; clientId: string; guest?: boolean; nickname?: string } | null): void {
+    this.guest = identity?.guest === true;
+    if (this.guest) { this.savedNickname = identity?.nickname ?? ''; this.savedAvatarBase64 = ''; }
     clientLog.info('IDENTITY', `Identity ${identity ? 'set' : 'cleared'}`);
     this.publicKey = identity?.publicKey || '';
     this.clientId = identity?.clientId || '';

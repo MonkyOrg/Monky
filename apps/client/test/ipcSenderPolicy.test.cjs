@@ -90,9 +90,11 @@ test('every channel names who may call it, and only three of them admit the over
   assert.deepEqual(found.find(entry => entry.channel === 'overlay:layout-cards').senders, ['overlay'],
     'Only the overlay sizes its own cards');
   for (const entry of found.filter(entry => entry.senders)) {
-    assert.ok(entry.senders.length > 0 && entry.senders.every(sender => sender === 'main' || sender === 'overlay'),
+    assert.ok(entry.senders.length > 0 && entry.senders.every(sender => sender === 'main' || sender === 'overlay' || sender === 'browser'),
       `${entry.channel} admits known senders only: ${entry.senders}`);
   }
+  assert.deepEqual(found.filter(entry => entry.senders?.includes('browser')).map(entry => entry.channel),
+    ['miniapp-browser:control'], 'Browser toolbars reach only their own navigation controls');
   // Modules that still check their senders themselves: the crash recovery and local preparation windows have
   // pages of their own, miniapp documents and storage outlive any one window, and QA drives its own window.
   const ownChecks = new Set([

@@ -5,7 +5,7 @@ import { build } from 'vite';
 const client = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const shared = path.resolve(client, '..', '..', 'packages', 'shared', 'src');
 
-export const PRELOADS = ['preload', 'overlayPreload', 'crashRecoveryPreload', 'localPreparationDialog'];
+export const PRELOADS = ['preload', 'overlayPreload', 'crashRecoveryPreload', 'localPreparationDialog', 'miniappBrowserPreload'];
 
 /**
  * Every window runs sandboxed, and a sandboxed preload can only require

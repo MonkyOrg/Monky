@@ -8,6 +8,8 @@ import { t, type TranslationKey } from './index';
  * code is unknown — e.g. an older client talking to a newer server.
  */
 const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
+  [ProtocolErrorCode.IDENTITY_BANNED]: 'identity.banned',
+  [ProtocolErrorCode.GUEST_OWNER_REQUIRED]: 'identity.guestOwnerRequired',
   [ProtocolErrorCode.AUTH_INVALID_PASSWORD]: 'protocolError.authInvalidPassword',
   [ProtocolErrorCode.NICKNAME_ALREADY_EXISTS]: 'protocolError.nicknameAlreadyExists',
   [ProtocolErrorCode.NICKNAME_INVALID]: 'protocolError.nicknameInvalid',
@@ -21,6 +23,7 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.SERVER_FULL]: 'protocolError.serverFull',
   [ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED]: 'protocolError.protocolVersionUnsupported',
   [ProtocolErrorCode.FEATURE_REQUIRES_UPDATE]: 'chat.featureUpdateRequired',
+  [ProtocolErrorCode.MINIAPP_BROWSER_DESKTOP_REQUIRED]: 'browser.desktopHostRequired',
   [ProtocolErrorCode.FEATURE_UNAVAILABLE]: 'protocolError.featureUnavailable',
   [ProtocolErrorCode.DM_RELAY_DISABLED]: 'protocolError.dmRelayDisabled',
   [ProtocolErrorCode.INTERNAL_ERROR]: 'protocolError.internalError',

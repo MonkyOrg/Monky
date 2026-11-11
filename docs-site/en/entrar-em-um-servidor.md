@@ -4,6 +4,27 @@ description: "Join a Monky server through an invite link, the local network, a s
 
 # Join a Server
 
+## Enter as a guest
+
+On the identity welcome screen, **Enter as a guest** asks only for a name,
+on desktop and web. Monky generates a temporary key and proves ownership
+using the same cryptographic authentication as permanent identities. The
+key is neither saved nor exported; closing or reloading the app ends that
+identity. Friends and DMs in this mode also live only in the current session.
+
+Guests have normal permissions while connected. When their last device
+leaves a server, membership and access are removed immediately. Published
+messages keep their attribution in history. A dropped connection also ends
+membership; the same app session may rejoin, subject to the server's current
+limits.
+
+Hosting and ownership require a permanent identity. Guests cannot claim
+an unowned server or host one. Create or import a permanent identity to keep
+it. Older servers without guest support refuse entry instead of registering
+a permanent member.
+
+## Joining a server
+
 In Home, click the **+** button on the server rail and choose **Join a server**.
 The modal offers four routes.
 
@@ -97,6 +118,16 @@ bottom bar leaves only the server named in its tooltip, after confirmation.
 Monky then opens the next connected server; if none remains, it shows Home.
 
 ## Several devices at once
+
+Under **Settings → My Profile → Connected devices**, inspect online sessions
+of your own identity, grouped by installation identifier. The list reaches
+only servers currently connected in this Monky that provide the feature;
+there is no central service or offline device history.
+
+**Disconnect device** ends reachable sessions on those shared servers. It
+does not close the remote app, delete its identity or prevent a new
+connection. Partial failures are reported and the list can be refreshed.
+Devices without a shared server cannot be seen or disconnected here.
 
 You can join the same server from more than one computer using the same identity — your desktop and your laptop, for instance. Each device shows up as its own entry in the voice list, with a `(2)`, `(3)` suffix to tell them apart, yet you remain a single person in the member list and take up only one server slot.
 

@@ -15,6 +15,7 @@ const loopbackManifest = z.string().max(2048).refine((value) => {
 export const developmentQaConfigSchema = z.object({
   runId: z.string().uuid(),
   scenario: z.enum(DEVELOPMENT_QA_SCENARIOS),
+  role: z.enum(['owner', 'member']).optional(),
   smoke: z.boolean(),
   realMedia: z.boolean().optional(),
   nickname: z.string().min(2).max(32),
@@ -29,6 +30,9 @@ export const developmentQaConfigSchema = z.object({
     manifestUrl: loopbackManifest,
   }).strict().optional(),
 }).strict().superRefine((value, context) => {
+  if (value.role === 'member' && value.scenario !== 'connected') {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'A QA member may only join the prepared connected scenario.' });
+  }
   if (value.smoke && value.realMedia) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Real capture devices require interactive QA; smoke must remain synthetic.' });
   }

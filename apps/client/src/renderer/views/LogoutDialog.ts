@@ -36,6 +36,7 @@ function clearAccountStorage(): void {
  * Leaves every server, forgets what belongs to the identity and asks the main
  * process to delete the identity, friends and DMs. Monky then relaunches on the
  * create/import screen. Device preferences (audio, language, shortcuts) stay.
+ * A guest only releases temporary state; an unreadable previous account stays.
  */
 export async function logOut(): Promise<void> {
   clientLog.info('IDENTITY', 'Logging out: leaving servers and deleting the local account');
@@ -47,9 +48,11 @@ export async function logOut(): Promise<void> {
     });
   }
   await sessionManager.removeAll();
-  connectionStore.clearAccountData();
-  settingsStore.clearAccountData();
-  clearAccountStorage();
+  if (!connectionStore.guest) {
+    connectionStore.clearAccountData();
+    settingsStore.clearAccountData();
+    clearAccountStorage();
+  }
   const result = await window.api.logOut();
   if (!result?.success) throw new Error(result?.error || 'logout failed');
 }
@@ -67,13 +70,13 @@ export function showLogoutDialog(): Promise<void> {
             <span id="logout-dialog-title">${escapeHtml(t('settings.logoutTitle'))}</span>
           </div>
         </div>
-        <div class="dialog-message">${escapeHtml(t('settings.logoutMessage'))}</div>
+        <div class="dialog-message">${escapeHtml(t(connectionStore.guest ? 'identity.guestLogout' : 'settings.logoutMessage'))}</div>
         <div class="dialog-message logout-dialog-keeps">${escapeHtml(t('settings.logoutKeeps'))}</div>
         <div class="modal-footer logout-dialog-footer">
-          <button type="button" class="btn btn-secondary" data-action="export" id="logout-dialog-export">
+          ${connectionStore.guest ? '' : `<button type="button" class="btn btn-secondary" data-action="export" id="logout-dialog-export">
             <span class="material-symbols-outlined md-18" aria-hidden="true">qr_code_2</span>
             <span>${escapeHtml(t('settings.logoutExport'))}</span>
-          </button>
+          </button>`}
           <span class="logout-dialog-spacer"></span>
           <button type="button" class="btn btn-secondary" data-action="cancel" id="logout-dialog-cancel" data-modal-close>${escapeHtml(t('common.cancel'))}</button>
           <button type="button" class="btn btn-danger" data-action="confirm" id="logout-dialog-confirm">${escapeHtml(t('settings.logoutConfirm'))}</button>

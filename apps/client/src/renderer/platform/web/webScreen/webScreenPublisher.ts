@@ -285,12 +285,14 @@ export class WebScreenPublisher {
       .map(pipeline => ({ pipelineId: pipeline.id, profile: pipeline.profile }));
   }
 
-  /** Tells the viewers why the screen ends, then retires every connection and rendition. */
-  public close(reason: NativeScreenFailure = 'source-unavailable'): Promise<void> {
+  /** Notifies viewers unless the server has withdrawn the source, then retires every connection and rendition. */
+  public close(reason: NativeScreenFailure = 'source-unavailable', notifyViewers = true): Promise<void> {
     if (this.closing) return this.closing;
     const viewers = [...this.viewers.values()];
-    const notices = viewers.map(viewer => this.signal(viewer, { action: 'closed', reason }));
+    const notices = notifyViewers ? viewers.map(viewer => this.signal(viewer, { action: 'closed', reason })) : [];
     this.closed = true;
+    // Stop pixels before any network acknowledgement or SFU teardown can delay revocation.
+    for (const pipeline of this.pipelines.values()) { pipeline.video.stop(); pipeline.audio?.stop(); }
     this.closing = (async () => {
       const results = await Promise.allSettled([...notices, ...viewers.map(viewer => this.retireViewer(viewer))]);
       await Promise.allSettled([...this.pending]);

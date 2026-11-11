@@ -1,7 +1,8 @@
 import { connectionStore, type CreatedServer } from '../stores/connectionStore';
 import { t, getLanguage } from '../i18n';
-import { isLoopbackHost } from '../utils/serverAddress';
+import { isLoopbackHost, type ServerAddress } from '../utils/serverAddress';
 import { platformSupports } from '../platform/capabilities';
+import { serverPublicKeySchema } from '@monky/shared';
 
 /** Starts in flight, per server: a second click joins the same start. */
 const pendingStarts = new Map<string, Promise<void>>();
@@ -10,6 +11,21 @@ export function findOwnedServer(host: string, port: number): CreatedServer | und
   // Where the app cannot host (the web version, #858), a created server is just a saved address.
   if (!platformSupports('hostServer') || !isLoopbackHost(host)) return undefined;
   return connectionStore.createdServers.find(server => server.port === port);
+}
+
+/** A saved local address is not proof of ownership: only this app's running instance is. */
+export function localHostedServerKey(address: ServerAddress): Promise<string | undefined> | undefined {
+  const owned = findOwnedServer(address.host, address.port);
+  if (!owned || !window.api?.hostServerStatus) return undefined;
+  const serverId = owned.id;
+  return window.api.hostServerStatus().then(status => {
+    if (findOwnedServer(address.host, address.port)?.id !== serverId) return undefined;
+    const instance = status.servers.find(server => server.port === address.port && server.serverId === serverId);
+    if (!instance?.serverKey) return undefined;
+    const parsed = serverPublicKeySchema.safeParse(instance.serverKey);
+    if (!parsed.success) throw new Error(t('network.serverKeyInvalid'));
+    return parsed.data;
+  });
 }
 
 /**
@@ -26,6 +42,7 @@ export function knownServerPassword(session: { host: string; port: number; passw
  * server, or this server already running elsewhere, is reported instead.
  */
 export function ensureHostedServerStarted(server: CreatedServer): Promise<void> {
+  if (connectionStore.guest) return Promise.reject(new Error(t('identity.guestHosting')));
   const pending = pendingStarts.get(server.id);
   if (pending) return pending;
 

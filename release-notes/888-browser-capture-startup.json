@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O navegador preserva página, captura e sessão no palco e com a janela minimizada ou oculta, sem prévia nem captura do desktop. Páginas estáticas continuam fornecendo quadros. Fechar ou perder acesso libera os recursos.",
+  "en": "The browser preserves its page, capture and session on stage and with a minimized or hidden window, without a preview or desktop capture. Static pages keep providing frames. Closing or losing access releases its resources."
+}

@@ -13374,8 +13374,6 @@ button:hover .role-option-check:not(.checked) {
   background: rgba(255, 255, 255, 0.03);
 }
 
-.settings-data-table tbody tr.row-menu-open,
-.settings-data-table tbody tr:has(.settings-action-menu.show),
 .settings-data-table tbody tr:focus-within {
   z-index: 100;
 }
@@ -13422,128 +13420,6 @@ button:hover .role-option-check:not(.checked) {
 
 .role-editor-tab-panel[hidden] {
   display: none;
-}
-
-.settings-action-menu-wrap {
-  position: relative;
-  display: inline-flex;
-  justify-content: flex-end;
-  overflow: visible;
-  z-index: 5;
-}
-
-.settings-action-menu-wrap.menu-open,
-.settings-action-menu-wrap:has(.settings-action-menu.show),
-.settings-action-menu-wrap:focus-within {
-  z-index: 1000;
-}
-
-.settings-action-menu,
-.settings-action-submenu {
-  min-width: 190px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
-  padding: 6px;
-  z-index: 1001;
-}
-
-.settings-action-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  bottom: auto;
-  right: 0;
-  display: none;
-  flex-direction: column;
-  gap: 4px;
-  overflow: visible;
-}
-
-.settings-action-menu.show {
-  display: flex;
-}
-
-.settings-action-submenu-wrap {
-  position: relative;
-}
-
-.settings-action-submenu {
-  position: absolute;
-  top: -6px;
-  bottom: auto;
-  right: calc(100% + 2px);
-  display: none;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px;
-  z-index: 1002;
-}
-
-/* Bridge the gap between trigger and submenu to prevent hover loss */
-.settings-action-submenu-wrap::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -8px;
-  width: 8px;
-  height: 100%;
-  display: none;
-}
-
-.settings-action-submenu-wrap:hover::before {
-  display: block;
-}
-
-.settings-action-submenu-wrap:hover .settings-action-submenu,
-.settings-action-submenu-wrap.open .settings-action-submenu {
-  display: flex;
-}
-
-/* Only flip upwards for rows near the bottom of longer tables, never on top rows (#281) */
-.settings-data-table tbody tr:not(:first-child):not(:nth-child(2)):nth-last-child(-n + 2) .settings-action-menu {
-  top: auto;
-  bottom: calc(100% + 6px);
-}
-
-.settings-data-table tbody tr:not(:first-child):not(:nth-child(2)):nth-last-child(-n + 2) .settings-action-submenu {
-  top: auto;
-  bottom: 0;
-}
-
-.settings-action-menu-item {
-  width: 100%;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  text-align: left;
-}
-
-.settings-action-menu-item:hover {
-  background: var(--bg-card-hover);
-  color: var(--text-primary);
-}
-
-.settings-action-menu-item.danger {
-  color: #ff8b8d;
-}
-
-.settings-action-menu-item.danger:hover {
-  background: rgba(242, 63, 67, 0.14);
-  color: #ffffff;
-}
-
-.settings-action-menu-item:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 .sb-slider::-moz-range-thumb {

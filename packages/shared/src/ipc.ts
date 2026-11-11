@@ -4,6 +4,7 @@
  */
 
 import { z } from 'zod';
+import type { MiniappBrowserOpen, MiniappBrowserOwnerCommand, MiniappBrowserControl, MiniappBrowserState } from './miniappBrowser.js';
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
 import type { DevelopmentQaConfig, DevelopmentQaReport } from './developmentQa.js';
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
@@ -75,6 +76,16 @@ export const BOT_SCREEN_DOCUMENT_IPC = {
   create: 'bot-screen-document:create',
   remove: 'bot-screen-document:remove',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const MINIAPP_BROWSER_IPC = {
+  open: 'miniapp-browser:open',
+  owner: 'miniapp-browser:owner',
+  control: 'miniapp-browser:control',
+  capture: 'miniapp-browser:capture',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const MINIAPP_BROWSER_STATE = 'miniapp-browser:state' satisfies keyof IpcEvents;
+export const MINIAPP_BROWSER_FOCUS_ADDRESS = 'miniapp-browser:focus-address' satisfies keyof IpcEvents;
+export const MINIAPP_BROWSER_CLOSED = 'miniapp-browser:closed' satisfies keyof IpcEvents;
 
 export const BOT_SCREEN_PERMISSION_POLICY_VERSION = 2;
 export const botScreenDocumentConsentSchema = z.object({
@@ -566,6 +577,8 @@ export interface HostedServerInstance {
   port: number;
   /** Entry of "Meus Servidores" that owns it; null for the legacy flat data folder. */
   serverId: string | null;
+  /** Public identity read from the local runtime, never from a network preview. */
+  serverKey?: string;
 }
 
 /** Every server this app is hosting, sorted by port. */
@@ -599,6 +612,8 @@ export interface ServerStats {
 }
 
 export interface AppIdentityResult {
+  guest?: boolean;
+  nickname?: string;
   publicKey: string;
   clientId: string;
 }
@@ -937,6 +952,10 @@ export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEven
 export interface IpcInvokeChannels extends DmInvokeChannels {
   'bot-screen-document:create': { args: [html: string, consent: BotScreenDocumentConsent]; returnType: string };
   'bot-screen-document:remove': { args: [url: string]; returnType: void };
+  'miniapp-browser:open': { args: [input: MiniappBrowserOpen]; returnType: void };
+  'miniapp-browser:owner': { args: [command: MiniappBrowserOwnerCommand]; returnType: void };
+  'miniapp-browser:control': { args: [command: MiniappBrowserControl]; returnType: MiniappBrowserState | null };
+  'miniapp-browser:capture': { args: [requestId: string]; returnType: string };
   'bot-storage:document-state': { args: [url: string]; returnType: BotDeviceStorageDocumentState };
   'bot-storage:document-request': { args: [url: string, request: unknown]; returnType: BotDeviceStorageResponse };
   'bot-storage:list': { args: []; returnType: BotDeviceStorageEntry[] };
@@ -1009,6 +1028,7 @@ export interface IpcInvokeChannels extends DmInvokeChannels {
   'identity:status': { args: []; returnType: AppIdentityStatus };
   // Cria uma identidade quando não há uma legível; um arquivo ilegível é guardado à parte antes
   'identity:create': { args: []; returnType: AppIdentityResult };
+  'identity:guest': { args: [nickname: string]; returnType: AppIdentityResult };
   'identity:get': { args: []; returnType: AppIdentityResult };
   'identity:get-client-id': { args: []; returnType: string };
   'identity:sign-challenge': { args: [nonceHex: string, binding?: ServerChallengeBinding]; returnType: SignChallengeResult };
@@ -1144,6 +1164,9 @@ export interface IpcInvokeChannels extends DmInvokeChannels {
  * Mapeamento de Eventos Unidirecionais (Main -> Renderer via webContents.send)
  */
 export interface IpcEvents {
+  'miniapp-browser:state': [state: MiniappBrowserState];
+  'miniapp-browser:focus-address': [];
+  'miniapp-browser:closed': [requestId: string];
   'window:inactive': [];
   'window:active': [];
   'native-screen:event': [event: NativeScreenEvent];

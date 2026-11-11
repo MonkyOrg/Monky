@@ -359,6 +359,7 @@ export const customStatusSchema = z.object({
 }));
 
 export const authConnectSchema = z.object({
+  guest: z.boolean().optional(),
   protocolVersion: z.number().int().positive(),
   protocolOffer: protocolOfferSchema.optional(),
   publicKey: z
@@ -652,4 +653,3 @@ export const gameShareResponseSchema = z.object({
   shareRequestId: z.string().uuid(),
   accepted: z.boolean(),
 }).strict();
-
