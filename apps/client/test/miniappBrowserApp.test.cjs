@@ -26,8 +26,9 @@ if (process.versions.electron) {
       response.setHeader('X-Frame-Options', 'DENY');
       response.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
       response.setHeader('Set-Cookie', 'browser-test=temporary; Path=/; SameSite=Strict');
+      // Keep native input borders off the flat-color grid, including H264 ringing around those borders.
       response.end(`<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:${
-        request.url.startsWith('/green') ? 'rgb(0,255,0)' : 'rgb(0,0,255)'}}input{position:absolute;left:0;top:0;width:90px}</style>
+        request.url.startsWith('/green') ? 'rgb(0,255,0)' : 'rgb(0,0,255)'}}input{position:absolute;left:32%;top:32%;width:10%}</style>
         <input id="site-field">`);
     });
     site.listen(0, '127.0.0.1');
@@ -398,10 +399,12 @@ function runClient() {
       assert.equal(await current.site.executeJavaScript('document.querySelector("input").value'), 'kept');
     } else if (name === 'hide-window') {
       owner.hide();
+      await until(() => !owner.isVisible() && !entry().container.getVisible(), 'The hidden owner did not park its site');
       assert.equal(owner.isVisible(), false);
       assert.equal(entry().container.getVisible(), false);
     } else if (name === 'minimize') {
       owner.show(); owner.minimize();
+      await until(() => owner.isMinimized() && !entry().container.getVisible(), 'The minimized owner did not park its site');
       assert.equal(entry().container.getVisible(), false);
     } else if (name === 'close' || name === 'end' || name === 'leave') {
       const browser = entry(), site = browser.view.webContents;
