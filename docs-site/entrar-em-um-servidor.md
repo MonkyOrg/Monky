@@ -120,13 +120,17 @@ conectado; se não houver nenhum, mostra a Home.
 
 ## Vários dispositivos ao mesmo tempo
 
-Em **Configurações → Meu Perfil → Dispositivos conectados**, consulte as
+Em **Configurações → Meu Perfil**, selecione a subseção **Dispositivos
+conectados** no menu lateral. A lista aparece no próprio painel de
+configurações, disponível para identidades permanentes, não para convidados
+ou perfis sem identidade. Nela, consulte as
 sessões online da sua própria identidade, agrupadas pelo identificador do
 dispositivo. A lista alcança apenas os servidores atualmente conectados
 neste Monky que oferecem esse recurso; não há serviço central ou histórico
 de dispositivos offline.
 
-**Desconectar dispositivo** encerra suas sessões alcançadas nesses
+**Desconectar dispositivo** pede confirmação dentro do card, sem abrir outro
+modal, e encerra suas sessões alcançadas nesses
 servidores em comum. Não fecha o aplicativo remoto, não apaga a identidade e
 não impede uma nova conexão. Uma falha parcial é avisada e a lista pode ser
 atualizada. Dispositivos sem servidor em comum não podem ser vistos ou

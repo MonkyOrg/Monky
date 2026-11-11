@@ -282,7 +282,9 @@ async function runRegression(language) {
   const { sessionManager } = await import('/core/SessionManager.ts');
   const { connectionStore } = await import('/stores/connectionStore.ts');
   const { openIdentityBanDialog, openIdentityBansDialog } = await import('/views/IdentityBanDialog.ts');
-  const { openOwnIdentitySessions } = await import('/views/OwnIdentitySessions.ts');
+  const { mountOwnIdentitySessions } = await import('/views/OwnIdentitySessions.ts');
+  const { AccountTab } = await import('/views/settings/tabs/AccountTab.ts');
+  const { SettingsSectionNavigation } = await import('/views/settings/SettingsSectionNavigation.ts');
   const { canBanIdentity } = await import('/utils/identityBan.ts');
   sessionManager.install();
   connectionStore.setIdentity({ publicKey: 'self-key', clientId: 'self-client' });
@@ -301,6 +303,8 @@ async function runRegression(language) {
       createdBy: null, endedAt: null, endedBy: null, status: 'expired',
     }))];
   let remoteConnected = true;
+  let delayedDevices = false;
+  const finishDevices = [];
   let delayedBans = false;
   let invalidHistory = false;
   let finishBans;
@@ -324,6 +328,8 @@ async function runRegression(language) {
         return { entries: entries.slice(0, 50), nextCursor: entries.length > 50 ? entries[49].id : null };
       }
       if (type === MessageType.IDENTITY_SESSION_DISCONNECT) remoteConnected = false;
+      if (type === MessageType.IDENTITY_SESSIONS_GET && delayedDevices)
+        return new Promise(resolve => { finishDevices.push(resolve); });
       if (type === MessageType.IDENTITY_SESSIONS_GET) return { sessions: [
         { sessionId: 'self:here', deviceId: 'here', connectedAt: 1000, current: true },
         ...(remoteConnected ? [{ sessionId: 'self:remote', deviceId: 'remote', connectedAt: 2000, current: false }] : []),
@@ -554,18 +560,86 @@ async function runRegression(language) {
   await dismissToast();
   legacyBans.querySelector('[data-modal-close]').click();
   await waitFor(() => !dialog(), () => 'The legacy active-ban view did not close');
-  openOwnIdentitySessions();
-  const devicesDialog = await waitFor(dialog, () => 'Devices dialog did not open');
+  const account = new AccountTab();
+  const settings = document.createElement('div');
+  settings.className = 'settings-modal-card';
+  settings.innerHTML = '<div class="settings-sidebar"><button class="settings-tab-btn" data-tab="account">Account</button></div>'
+    + '<div class="settings-main-container"><div class="settings-content-body"><div id="tab-panel-account">'
+    + account.renderHtml() + '</div></div></div>';
+  container.append(settings);
+  const navigation = new SettingsSectionNavigation(settings);
+  navigation.setTab('account');
+  const devicesDialog = settings.querySelector('[data-settings-section="identity-sessions"]');
+  check(devicesDialog && !settings.querySelector('#btn-identity-sessions'),
+    'Connected devices has its own profile subsection, not a button hidden in identity');
+  check(!dialog(), 'The device list stays inside settings rather than opening another modal');
+  const subsectionLink = await waitFor(() => [...settings.querySelectorAll('.settings-section-list button')]
+    .find(button => button.textContent === t('identity.sessionsTitle')), () => 'Connected devices is missing from profile navigation');
+  subsectionLink.click();
+  const stopDevices = mountOwnIdentitySessions(settings);
   await waitFor(() => devicesDialog.querySelectorAll('[data-device]').length === 2, () => 'Devices were not aggregated across servers');
   check(devicesDialog.textContent.includes(t('identity.sessionsScope')), 'The device list states its actual server scope');
   check(devicesDialog.querySelector('[data-device="here"]').textContent.includes(t('identity.thisDevice')), 'The current installation is identified');
+  const card = devicesDialog.querySelector('[data-device="remote"]');
+  check(!card.hasAttribute('style') && getComputedStyle(card).backgroundColor === getComputedStyle(settings.querySelector('[data-settings-section="identity"] > div')).backgroundColor,
+    'Device cards use the app card surface without inline layout overrides');
+  check(!devicesDialog.querySelector('img') && devicesDialog.textContent.includes('Server <A>'),
+    'Server names remain escaped text inside the inline device list');
+  devicesDialog.querySelector('[data-refresh]').click();
+  await waitFor(() => devicesDialog.querySelector('[data-identity-sessions]').getAttribute('aria-busy') === 'false',
+    () => 'Refreshing connected devices did not settle');
+  check(devicesDialog.querySelector('[data-device="remote"]') === card, 'An unchanged refresh preserves existing device controls');
+  devicesDialog.querySelector('[data-disconnect-device="remote"]').focus();
   devicesDialog.querySelector('[data-disconnect-device="remote"]').click();
-  const disconnectConfirmation = await waitFor(() => backdrops().find(b => b.querySelector('[data-action="confirm"]')), () => 'Disconnect did not ask for confirmation');
-  disconnectConfirmation.querySelector('[data-action="confirm"]').click();
+  const cancelDisconnect = await waitFor(() => card.querySelector('[data-device-confirmation]:not([hidden])'),
+    () => 'Disconnect did not ask for confirmation');
+  check(!dialog() && settings.isConnected && !settings.hidden && !settings.inert,
+    'Inline disconnect confirmation never stacks a modal or hides settings');
+  check(document.activeElement === cancelDisconnect.querySelector('[data-cancel-disconnect]'),
+    'The safe cancel action receives keyboard focus');
+  check(card.querySelector('[data-disconnect-device]').classList.contains('btn-danger')
+    && cancelDisconnect.querySelector('[data-confirm-disconnect]').classList.contains('btn-danger'),
+    'Both destructive device actions use the app danger color');
+  check(requests.filter(r => r.type === MessageType.IDENTITY_SESSION_DISCONNECT).length === 0,
+    'Opening inline confirmation does not disconnect anything');
+  cancelDisconnect.querySelector('[data-cancel-disconnect]').click();
+  await waitFor(() => !dialog() && !devicesDialog.querySelector('[data-refresh]').disabled, () => 'Cancelled disconnect did not restore controls');
+  check(requests.filter(r => r.type === MessageType.IDENTITY_SESSION_DISCONNECT).length === 0, 'Cancelling keeps every remote session connected');
+  check(document.activeElement === devicesDialog.querySelector('[data-disconnect-device="remote"]'),
+    'Cancelling returns keyboard focus to the same device action');
+  devicesDialog.querySelector('[data-disconnect-device="remote"]').click();
+  const disconnectConfirmation = await waitFor(() => card.querySelector('[data-device-confirmation]:not([hidden])'), () => 'Disconnect did not ask for confirmation');
+  disconnectConfirmation.querySelector('[data-confirm-disconnect]').click();
+  check(disconnectConfirmation.querySelector('[data-confirm-disconnect]').disabled
+    && disconnectConfirmation.querySelector('[data-cancel-disconnect]').disabled,
+    'Pending disconnect disables repeated confirmation and cancellation');
+  disconnectConfirmation.querySelector('[data-confirm-disconnect]').click();
   await waitFor(() => requests.filter(r => r.type === MessageType.IDENTITY_SESSION_DISCONNECT).length === 2, () => 'Shared-server sessions were not all disconnected');
   await waitFor(() => !devicesDialog.querySelector('[data-device="remote"]'), () => 'Offline devices remained in the current list');
-  devicesDialog.querySelector('[data-modal-close]').click();
-  await waitFor(() => !dialog(), () => 'Device list did not close');
+  await waitFor(() => !dialog(), () => 'Disconnect confirmation did not close');
+  delayedDevices = true;
+  devicesDialog.querySelector('[data-refresh]').click();
+  await waitFor(() => finishDevices.length === 2, () => 'The device refresh was not pending');
+  devicesDialog.querySelector('[data-disconnect-device="here"]').click();
+  check(!!devicesDialog.querySelector('[data-device="here"] [data-device-confirmation]:not([hidden])') && !dialog(),
+    'A refresh cannot force an inline confirmation into a second modal');
+  stopDevices();
+  stopDevices();
+  navigation.destroy();
+  settings.remove();
+  finishDevices.splice(0).forEach(resolve => resolve({ sessions: [{ sessionId: 'late', deviceId: 'late-private-device', connectedAt: 1000, current: false }] }));
+  await Promise.resolve();
+  await Promise.resolve();
+  check(!devicesDialog.querySelector('[data-device-confirmation], [data-device]') && !document.body.textContent.includes('late-private-device'),
+    'Settings teardown cancels inline confirmation and rejects late device responses');
+  delayedDevices = false;
+  connectionStore.setIdentity({ publicKey: 'guest-key', clientId: 'guest-client', guest: true, nickname: 'Guest' });
+  check(!new AccountTab().renderHtml().includes('data-settings-section="identity-sessions"'),
+    'Guests do not get the connected-device subsection');
+  connectionStore.setIdentity(null);
+  check(!new AccountTab().renderHtml().includes('data-settings-section="identity-sessions"'),
+    'Signed-out profiles do not get the connected-device subsection');
+  connectionStore.setIdentity({ publicKey: 'self-key', clientId: 'self-client' });
   firstSession.chatStore.messages.set('private-chat', [{ content: 'Previously delivered private content' }]);
   firstSession.botScreenStore.screens.set('private-miniapp', {});
   await sessionManager.removeAll();

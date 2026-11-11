@@ -21,7 +21,7 @@ import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { customStatusLabel } from '../../../utils/presenceTag';
 import type { TranslationKey } from '../../../i18n';
 import { lockedBlock } from '../../../utils/desktopOnly';
-import { openOwnIdentitySessions } from '../../OwnIdentitySessions';
+import { mountOwnIdentitySessions, renderOwnIdentitySessions } from '../../OwnIdentitySessions';
 
 const PRESENCE_OPTIONS: ReadonlyArray<{ status: PresenceStatus; icon: string; label: TranslationKey; description: TranslationKey }> = [
   { status: 'online', icon: 'circle', label: 'main.statusOnline', description: 'settings.presenceOnlineDesc' },
@@ -32,6 +32,7 @@ const PRESENCE_OPTIONS: ReadonlyArray<{ status: PresenceStatus; icon: string; la
 export class AccountTab {
   private detachEmojiPicker: (() => void) | null = null;
   private detachPresenceSync: (() => void) | null = null;
+  private detachIdentitySessions: (() => void) | null = null;
   /**
    * The custom status editor opens inline, under the status cards. Opening it
    * as a second modal replaced the Settings card with a smaller one, which
@@ -256,10 +257,10 @@ export class AccountTab {
               <span class="material-symbols-outlined md-16" style="margin-right: 4px;">qr_code_scanner</span>
               ${t('identity.importAction')}
             </button>
-            <button type="button" id="btn-identity-sessions" class="btn btn-secondary">${t('identity.sessionsTitle')}</button>
           </div>
         </div>
       </div>
+      ${renderOwnIdentitySessions()}
       <div data-settings-section="backup" data-settings-label="${escapeHtml(t('backup.sectionTitle'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">backup</span>
@@ -302,7 +303,8 @@ export class AccountTab {
     const avatarWrapper = container.querySelector<HTMLElement>('#settings-avatar-wrapper');
     const btnExportIdentity = container.querySelector<HTMLButtonElement>('#btn-export-identity');
     const btnImportIdentity = container.querySelector<HTMLButtonElement>('#btn-import-identity-settings');
-    container.querySelector('#btn-identity-sessions')?.addEventListener('click', openOwnIdentitySessions);
+    this.detachIdentitySessions?.();
+    this.detachIdentitySessions = mountOwnIdentitySessions(container);
 
     const btnEmojiNickname = container.querySelector<HTMLElement>('#btn-emoji-nickname');
     if (btnEmojiNickname && inputNickname) {
@@ -408,6 +410,9 @@ export class AccountTab {
     btnImportIdentity?.addEventListener('click', async () => {
       const imported = await showIdentityImportDialog();
       if (imported) {
+        this.detachIdentitySessions?.();
+        this.detachIdentitySessions = null;
+        container.querySelector('[data-settings-section="identity-sessions"]')?.remove();
         if (connectionStore.guest) await sessionManager.removeAll();
         connectionStore.setIdentity(imported);
         connectionStore.loadUserProfile();
@@ -438,6 +443,8 @@ export class AccountTab {
   }
 
   public cleanup(): void {
+    this.detachIdentitySessions?.();
+    this.detachIdentitySessions = null;
     this.customEditor?.destroy();
     this.customEditor = null;
     this.detachEmojiPicker?.();
