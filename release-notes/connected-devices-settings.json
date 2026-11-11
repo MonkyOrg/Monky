@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Dispositivos conectados agora tem uma subseção em Meu Perfil, com visual integrado às configurações. Desconectar usa botões de perigo e confirmação dentro do card, sem abrir outro modal. Disponível para identidades permanentes.",
+  "en": "Connected devices now has a My Profile subsection styled to match settings. Disconnect uses danger buttons and confirmation inside the device card, without opening another modal. Available to permanent identities."
+}

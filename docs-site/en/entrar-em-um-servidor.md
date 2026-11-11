@@ -119,12 +119,15 @@ Monky then opens the next connected server; if none remains, it shows Home.
 
 ## Several devices at once
 
-Under **Settings → My Profile → Connected devices**, inspect online sessions
+Under **Settings → My Profile**, select the **Connected devices** subsection
+in the sidebar. The list appears directly in settings, available to permanent
+identities, not guests or profiles without an identity. Inspect online sessions
 of your own identity, grouped by installation identifier. The list reaches
 only servers currently connected in this Monky that provide the feature;
 there is no central service or offline device history.
 
-**Disconnect device** ends reachable sessions on those shared servers. It
+**Disconnect device** asks for confirmation inside the device card, without
+opening another modal, and ends reachable sessions on those shared servers. It
 does not close the remote app, delete its identity or prevent a new
 connection. Partial failures are reported and the list can be refreshed.
 Devices without a shared server cannot be seen or disconnected here.
