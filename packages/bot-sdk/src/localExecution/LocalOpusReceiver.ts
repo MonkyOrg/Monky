@@ -49,6 +49,7 @@ export class LocalOpusReceiver {
   private iteratorClaimed = false;
   private started = false;
   private readyReported = false;
+  private transportUnavailable = false;
   private closed = false;
   private failure?: Error;
   private closing?: Promise<void>;
@@ -159,7 +160,7 @@ export class LocalOpusReceiver {
       throw new Error('No consumed local Opus frame is awaiting playback.');
     }
     try {
-      this.sendRecord({ kind: 'played', playedFrames: this.flow.playedFrames + 1 });
+      if (!this.sendRecord({ kind: 'played', playedFrames: this.flow.playedFrames + 1 })) return;
       this.checkDrain();
       this.deliverFrame();
     } catch (error) {
@@ -234,11 +235,22 @@ export class LocalOpusReceiver {
     } catch (error) { this.fail(toError(error)); }
   }
 
-  private sendRecord(record: LocalMediaRecord): void {
-    if (!this.started || !this.isConnected() || !this.channel) throw new Error('Local media channel is not writable.');
+  private sendRecord(record: LocalMediaRecord): boolean {
+    if (!this.started) throw new Error('Local media has not started.');
+    if (this.transportUnavailable || !this.isConnected() || !this.channel) {
+      this.transportEnded(new Error('Local media channel is not writable.'));
+      return false;
+    }
     const next = advanceLocalMediaFlow(this.flow, record, 'bot');
-    this.channel.send(Buffer.from(encodeLocalMediaRecord(record)));
+    const bytes = Buffer.from(encodeLocalMediaRecord(record));
+    try { this.channel.send(bytes); }
+    catch (error) {
+      if (this.isConnected()) throw error;
+      this.transportEnded(toError(error));
+      return false;
+    }
     this.flow = next;
+    return true;
   }
 
   private createIterator(): AsyncIterator<Uint8Array> {
@@ -278,13 +290,14 @@ export class LocalOpusReceiver {
     }
     // Do not turn iterator read-ahead into an unbounded queue outside the credit window.
     if (this.flow.consumedFrames !== this.flow.playedFrames) return;
-    const frame = this.packets.shift();
+    const frame = this.packets[0];
     if (!frame) return;
     const consumedFrames = this.flow.consumedFrames + 1;
-    this.sendRecord({
+    if (!this.sendRecord({
       kind: 'credit', consumedFrames,
       windowEnd: Math.min(consumedFrames + LOCAL_MEDIA_FORMAT.creditWindowFrames, LOCAL_MEDIA_FORMAT.maxFrameCount),
-    });
+    })) return;
+    this.packets.shift();
     this.pendingRead = undefined;
     read.resolve({ done: false, value: frame });
   }
@@ -293,7 +306,7 @@ export class LocalOpusReceiver {
     const { finalSequence, playedFrames, consumedFrames, drained } = this.flow;
     if (drained || finalSequence === null || playedFrames !== finalSequence ||
         consumedFrames !== finalSequence || this.packets.length) return;
-    this.sendRecord({ kind: 'drainAck', finalSequence });
+    if (!this.sendRecord({ kind: 'drainAck', finalSequence })) return;
     this.drain.resolve();
   }
 
@@ -409,7 +422,8 @@ export class LocalOpusReceiver {
 
   private transportEnded(error: Error): void {
     // After verified EOF/PLAYED, the owner still requires its bounded server completion ACK.
-    if (this.hasDrained || this.closed) return;
+    if (this.hasDrained || this.closed || this.transportUnavailable) return;
+    this.transportUnavailable = true;
     if (this.options.onTransportLost) this.options.onTransportLost(error);
     else this.fail(error);
   }

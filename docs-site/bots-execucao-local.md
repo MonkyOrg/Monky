@@ -136,6 +136,8 @@ Playlists são um recurso negociado do protocolo. Com um servidor antigo, `clien
 
 O fim do decoder não significa que o último quadro já foi consumido. Preserve a cauda até as confirmações finais: `stream.closed` resolve somente após a drenagem de reprodução e a conclusão confirmada pelo servidor, e rejeita em falha ou cancelamento. Aguarde `stream.close()` para cancelar trabalho ativo ou aguardar a conclusão de um stream já drenado; a rejeição de `closed` por si só não substitui o encerramento. Encerrar um stream não libera automaticamente a referência de sua fonte. No cliente, o processo nativo pode terminar antes das confirmações de reprodução, sem perder a possibilidade de cancelar ou revogar a tarefa restante.
 
+Se a conexão privada fechar durante uma confirmação de reprodução ou entrega de quadro, o SDK interrompe o avanço e aguarda o veredito do servidor pelo mesmo prazo limitado das demais perdas de transporte. Assim, sair da voz preserva o motivo de cancelamento; sem veredito, a operação falha por transporte, sem inventar reprodução ou conclusão.
+
 Usar o computador do solicitante não garante que o provedor aceite uma requisição. A capacidade inicial aceita somente vídeos públicos individuais elegíveis do YouTube e a leitura de playlists públicas e álbuns do YouTube Music, sem mixes, contas, cookies ou contorno de restrições. Recusas do provedor permanecem erros explícitos.
 
 ### Validação integrada no checkout

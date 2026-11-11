@@ -136,6 +136,8 @@ Playlists are a negotiated protocol feature. On an older server, `client.support
 
 Decoder EOF does not mean the last frame has been consumed. Preserve the tail through final acknowledgments: `stream.closed` resolves only after playback drain and server-confirmed completion, and rejects on failure or cancellation. Await `stream.close()` to cancel active work or await completion of an already-drained stream; rejection of `closed` alone does not replace teardown. Closing a stream does not automatically release its source reference. On the client, the native process may finish before playback acknowledgments without losing cancellation or revocation of the remaining task.
 
+If the private connection closes during a playback acknowledgment or frame handoff, the SDK stops advancing and waits for the server verdict within the same bounded deadline used for other transport losses. Leaving voice therefore preserves the cancellation reason; without a verdict, the operation fails as a transport failure, without inventing playback or completion.
+
 Using the requester's computer does not guarantee provider acceptance. The initial capability accepts eligible individual public YouTube videos and reading public playlists and YouTube Music albums only, without mixes, accounts, cookies, or bypassing restrictions. Provider refusals remain explicit errors.
 
 ### Integrated checkout validation
