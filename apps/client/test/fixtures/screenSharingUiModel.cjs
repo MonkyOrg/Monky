@@ -561,7 +561,7 @@ function fixture(language = 'en') {
     'views/ResourceAudiencePicker',
     'utils/feedback', 'utils/screenShareFailure', 'core/ClientLogService',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
-    'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/locales/botStorage', 'i18n/messageSearch',
+    'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/locales/botStorage', 'i18n/locales/browserHome', 'i18n/messageSearch',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits', 'utils/avatar', 'utils/colors',
     'utils/serverAddress', 'utils/rovingFocus', 'platform/capabilities', 'utils/desktopOnly',
   ]);

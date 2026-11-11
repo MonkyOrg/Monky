@@ -17,13 +17,13 @@ function sources(directory = mainRoot) {
   });
 }
 
-/** The `webPreferences` of every `new BrowserWindow({...})` written in Main. */
-function windowPreferences() {
+/** The `webPreferences` of each matching Electron constructor written in Main. */
+function windowPreferences(kind = 'BrowserWindow') {
   const found = [];
   for (const file of sources()) {
     const source = ts.createSourceFile(file, fs.readFileSync(file, 'utf8'), ts.ScriptTarget.ES2022, true);
     const visit = node => {
-      if (ts.isNewExpression(node) && node.expression.getText(source) === 'BrowserWindow') {
+      if (ts.isNewExpression(node) && node.expression.getText(source) === kind) {
         const options = node.arguments?.[0];
         const property = options && ts.isObjectLiteralExpression(options) && options.properties
           .find(entry => ts.isPropertyAssignment(entry) && entry.name.getText(source) === 'webPreferences');
@@ -58,8 +58,19 @@ test('every Main window with a preload gets it through isolatedWebPreferences, s
     overlayPreload: 'overlayManager.ts',
     crashRecoveryPreload: 'crashRecovery.ts',
     localPreparationDialog: path.join('localExecution', 'preparationWindow.ts'),
-    miniappBrowserPreload: 'miniappBrowserWindows.ts',
   });
+});
+
+test('the miniapp toolbar gets its isolated preload through WebContentsView', () => {
+  const toolbars = windowPreferences('WebContentsView')
+    .filter(({ file }) => file === 'miniappBrowserWindows.ts');
+  assert.equal(toolbars.length, 1);
+  const { value, source } = toolbars[0];
+  assert.ok(value && ts.isCallExpression(value));
+  assert.equal(value.expression.getText(source), 'isolatedWebPreferences');
+  const [name] = value.arguments;
+  assert.ok(ts.isStringLiteral(name));
+  assert.equal(name.text, 'miniappBrowserPreload');
 });
 
 test('window options cannot turn the sandbox, isolation or Node integration back off', () => {

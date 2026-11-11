@@ -228,15 +228,36 @@ async function runRendererSecurity() {
   inert(settingsRoot, 'Server settings');
   check([...settingsRoot.querySelectorAll('.member-actions-trigger')].some(button => button.dataset.userId === HOSTILE),
     'Member ids round-trip as attribute text');
-  check([...settingsRoot.querySelectorAll('[data-member-action="toggle-role"]')].some(button => button.dataset.roleId === HOSTILE)
-    && [...settingsRoot.querySelectorAll('[data-member-action="toggle-admin"]')].some(button => button.dataset.roleId === adminRole.id),
-  'Role ids in the member menu round-trip as attribute text');
+  const { ServerMemberMenu } = await import('/views/serverSettings/ServerMemberMenu.ts');
+  const memberMenu = new ServerMemberMenu();
+  const assignments = [];
+  const memberAnchor = [...settingsRoot.querySelectorAll('.member-actions-trigger')]
+    .find(button => button.dataset.userId === HOSTILE);
+  const memberAction = label => [...document.querySelectorAll('.floating-context-menu:not([data-ui-closing]) button')]
+    .find(button => button.textContent.includes(label));
+  const memberContext = { store: session.serverStore, operations: { isPending: () => false }, isCurrent: () => true };
+  try {
+    memberMenu.open(memberAnchor, HOSTILE, memberContext, (...args) => assignments.push(args));
+    inert(document.querySelector('.floating-context-menu:not([data-ui-closing])'), 'Member actions');
+    memberAction(language.t('userMenu.promoteToAdmin')).click();
+    check(assignments.at(-1)?.[0] === HOSTILE && assignments.at(-1)?.[1] === adminRole.id && assignments.at(-1)?.[2] === true,
+      'The administrator action round-trips hostile member and role ids without interpreting markup');
+    memberMenu.open(memberAnchor, HOSTILE, memberContext, (...args) => assignments.push(args));
+    memberAction(language.t('userMenu.rolesSubmenu')).click();
+    const submenu = document.querySelector('.floating-context-submenu:not([data-ui-closing])');
+    inert(submenu, 'Member role submenu');
+    check(submenu.querySelector('button > span:not([aria-hidden])')?.textContent === hostileRole.name,
+      'The member role submenu renders hostile role names as text');
+    memberAction(hostileRole.name).click();
+    check(assignments.at(-1)?.[0] === HOSTILE && assignments.at(-1)?.[1] === HOSTILE && assignments.at(-1)?.[2] === false,
+      'Removing a role round-trips hostile member and role ids without HTML attributes');
+  } finally {
+    memberMenu.dispose();
+  }
   check([...settingsRoot.querySelectorAll('.role-table-row')].some(row => row.dataset.roleId === HOSTILE),
     'Role rows keep hostile ids as text');
   check(![...settingsRoot.querySelectorAll('[style]')].some(node => node.getAttribute('style').includes('red;')),
     'A role color that is not hex never reaches a style');
-  check(!!settingsRoot.querySelector('[data-member-action="toggle-role"] .role-option'),
-    'The member menu uses the shared, escaping role option');
   check([...settingsRoot.querySelectorAll('img[data-fallback="avatar"]')].every(image =>
     image.getAttribute('src') !== HOSTILE), 'Member avatars never keep a hostile address');
   check(settingsRoot.querySelector('#server-icon-preview').getAttribute('src') === DEFAULT_AVATAR_URL,

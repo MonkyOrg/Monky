@@ -115,6 +115,7 @@ test('authentication supplies the current identity restriction before voice, aft
   const service = signaling(restrictions);
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   const auth = Object.create(AuthService.prototype) as AuthService;
+  auth['pendingChallenges'] = new Map();
   server['authService'] = auth;
   server['signalingService'] = service;
   server['sessions'] = new Map();

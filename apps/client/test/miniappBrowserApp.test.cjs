@@ -69,8 +69,9 @@ if (process.versions.electron) {
           const pixels = async (phase, color) => {
             await call(clients[0], 'navigate', `http://127.0.0.1:${site.address().port}/${color}-${receipt.length}`);
             const captured = await call(clients[0], 'sample', color);
-            const received = await call(clients[1], 'pixels', captured);
-            receipt.push({ phase, captured, received });
+            const result = { phase, captured, received: null };
+            receipt.push(result);
+            result.received = await call(clients[1], 'pixels', captured);
           };
           const home = async phase => {
             const document = await call(clients[0], 'home');
@@ -432,7 +433,7 @@ async function sampleTrack(track, color, expected) {
   const reader = new MediaStreamTrackProcessor({ track: clone, maxBufferSize: 1 }).readable.getReader();
   const canvas = new OffscreenCanvas(1, 1), context = canvas.getContext('2d');
   const deadline = performance.now() + 15000;
-  let retired = false, last;
+  let retired = false, last, differences;
   try {
     while (performance.now() < deadline) {
       let timer;
@@ -441,7 +442,7 @@ async function sampleTrack(track, color, expected) {
       let result;
       try {
         result = await Promise.race([read, new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`No new ${color} browser frame; last=${JSON.stringify(last)}`)),
+          timer = setTimeout(() => reject(new Error(`No new ${color} browser frame; last=${JSON.stringify(last)}; differences=${JSON.stringify(differences)}`)),
             Math.max(1, deadline - performance.now()));
         })]);
       } finally { clearTimeout(timer); }
@@ -461,6 +462,9 @@ async function sampleTrack(track, color, expected) {
           pixels.push({ x, y, rgba, ...(color === 'home' ? {flat} : {}) });
         }
         last = pixels.filter(pixel => [.25,.5,.75].includes(pixel.x) && [.25,.5,.75].includes(pixel.y));
+        differences = expected ? pixels.flatMap((pixel, index) =>
+          pixel.rgba.some((channel, component) => Math.abs(channel - expected[index].rgba[component]) > 12)
+            ? [{ ...pixel, expected: expected[index].rgba }] : []) : undefined;
         const matches = expected
           ? pixels.every((pixel, index) => pixel.rgba.every((channel, component) =>
             Math.abs(channel - expected[index].rgba[component]) <= 12))
