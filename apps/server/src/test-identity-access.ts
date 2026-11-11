@@ -398,11 +398,17 @@ test('a connection cancelled before its guest snapshot completes leaves no membe
   const original = f.userRepo.listAll.bind(f.userRepo);
   f.userRepo.listAll = async () => { started(); await gate; return original(); };
   const originalAdmission = f.authService.withIdentityAdmission.bind(f.authService);
-  f.authService.withIdentityAdmission = async (ws, action) => { try { await originalAdmission(ws, action); } finally { completed(); } };
+  let disconnected!: Promise<unknown[]>;
+  f.authService.withIdentityAdmission = async (ws, action) => {
+    disconnected = once(ws, 'close');
+    try { await originalAdmission(ws, action); } finally { completed(); }
+  };
   t.after(() => { release(); f.userRepo.listAll = original; f.authService.withIdentityAdmission = originalAdmission; });
   peer.send(MessageType.AUTH_CHALLENGE_RESPONSE, { signature: sign(null, challengeBytes(challenge.payload), keys.privateKey).toString('hex') }, 'guest-auth');
   await start;
   await peer.close();
+  // The client's terminate() does not wait for the server to observe the disconnect.
+  await disconnected;
   release();
   await done;
   const archived = await f.userRepo.findByPublicKey(keys.publicKey);
