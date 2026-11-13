@@ -1,5 +1,5 @@
 {
   "group": "correcoes",
-  "pt-BR": "Dispositivos conectados agora tem uma subseção em Meu Perfil, com visual integrado às configurações. Desconectar usa botões de perigo e confirmação dentro do card, sem abrir outro modal. Disponível para identidades permanentes.",
-  "en": "Connected devices now has a My Profile subsection styled to match settings. Disconnect uses danger buttons and confirmation inside the device card, without opening another modal. Available to permanent identities."
+  "pt-BR": "Dispositivos conectados fica em Meu Perfil nas configurações, com visual do app e confirmação de desconexão no card, sem outro modal. Mostra sessões online nos servidores conectados compatíveis. Disponível para identidades permanentes, não para convidados.",
+  "en": "Connected devices is in My Profile in settings, with app styling and disconnect confirmation in the card, without another modal. Shows online sessions on compatible connected servers. Available to permanent identities, not guests."
 }
