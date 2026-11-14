@@ -31,6 +31,7 @@ import { sortVideoCodecs } from './codecPreferences';
 import { applyMediaEncodingPolicy, getMediaEncodingPolicy, type OutboundMediaKind } from './mediaEncodingPolicy';
 import { updateRtpSenderParameters } from './rtpSenderParameters';
 import { candidateRoute } from './rtcStats';
+import type { CallStatsSample, LinkStatsSample } from './voiceQuality';
 
 /** Replies carry mediasoup structures as `unknown`; this engine reads them with mediasoup-client's types. */
 type RouterCapabilitiesResponse = Omit<SfuRouterRtpCapabilitiesPayload, 'rtpCapabilities'> & {
@@ -799,19 +800,34 @@ export class SfuClientEngine {
     return null;
   }
 
-  /** Round trip to the server over the worse connected transport, read from the pair carrying media. */
-  public async getPing(): Promise<number | null> {
+  /**
+   * Round trip to the server over the worse connected transport, read from the
+   * pair carrying media, and the stats it was read from.
+   */
+  public async sampleStats(): Promise<CallStatsSample> {
     const pings: number[] = [];
-    for (const transport of [this.sendTransport, this.recvTransport]) {
+    const links: LinkStatsSample[] = [];
+    const transports = [['send', this.sendTransport], ['recv', this.recvTransport]] as const;
+    for (const [link, transport] of transports) {
       if (!transport || transport.connectionState !== 'connected') continue;
       try {
-        const rttMs = candidateRoute(await transport.getStats())?.rttMs;
+        const stats = await transport.getStats();
+        const rttMs = candidateRoute(stats)?.rttMs;
         if (rttMs !== null && rttMs !== undefined) pings.push(rttMs);
+        links.push({ link, stats, senderOf: trackId => this.senderOfTrack(trackId) });
       } catch {
         // A closing send transport must not hide a still-live receive RTT.
       }
     }
-    return pings.length ? Math.max(...pings) : null;
+    return { ping: pings.length ? Math.max(...pings) : null, links };
+  }
+
+  /** The session that published a track we receive. */
+  private senderOfTrack(trackId: string): string | null {
+    for (const [producerId, consumer] of this.consumers) {
+      if (consumer.track.id === trackId) return this.consumerMeta.get(producerId)?.producerSessionId ?? null;
+    }
+    return null;
   }
 
   public leave(): void {

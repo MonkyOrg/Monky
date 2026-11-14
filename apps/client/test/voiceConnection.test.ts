@@ -615,9 +615,9 @@ test('SFU ping samples receive-only clients and uses the worse active direction'
     sendTransport: { value: transport('new', 0), writable: true },
     recvTransport: { value: transport('connected', 0.075), writable: true },
   });
-  assert.equal(await engine.getPing(), 75);
+  assert.equal((await engine.sampleStats()).ping, 75);
   Object.defineProperty(engine, 'sendTransport', { value: transport('connected', 0.15), writable: true });
-  assert.equal(await engine.getPing(), 150);
+  assert.equal((await engine.sampleStats()).ping, 150);
 });
 
 test('SFU ping is read from the candidate pair carrying media, not the first one that succeeded', async (t) => {
@@ -632,7 +632,7 @@ test('SFU ping is read from the candidate pair carrying media, not the first one
       ['transport', { type: 'transport', selectedCandidatePairId: 'tcp-pair' }],
     ]),
   } });
-  assert.equal(await engine.getPing(), 180);
+  assert.equal((await engine.sampleStats()).ping, 180);
 });
 
 test('an ended microphone track keeps the SFU call listen-only instead of failing the transport', async (t) => {

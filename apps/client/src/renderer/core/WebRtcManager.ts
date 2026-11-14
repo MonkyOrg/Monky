@@ -31,6 +31,8 @@ import { RemoteVadMonitor } from './webrtc/RemoteVadMonitor';
 import { P2pMeshTransport } from './webrtc/p2p/P2pMeshTransport';
 import { SfuCallSession } from './webrtc/sfu/SfuCallSession';
 import type { VoiceTransport } from './webrtc/VoiceTransport';
+import { VoiceQualityMonitor } from './webrtc/voiceQuality';
+import { cameraEffectsStore } from '../stores/cameraEffectsStore';
 import { t } from '../i18n';
 import { ScreenShareUserError } from '../utils/screenShareFailure';
 import {
@@ -70,6 +72,11 @@ export class WebRtcManager {
   private callStatsSampling = false;
   /** Last measured ping of the call, shared by every view that shows it. */
   private callPing: number | null = null;
+  /** Logs when the call's audio breaks up, from the same measurement as the ping. */
+  private readonly voiceQuality = new VoiceQualityMonitor({
+    warn: (message, data) => clientLog.warn('AUDIO', message, data),
+    info: (message, data) => clientLog.info('AUDIO', message, data),
+  }, () => this.voiceQualityContext());
   private localAudioTrack: MediaStreamTrack | null = null;
   private localCameraTrack: MediaStreamTrack | null = null;
   private cameraTrackRevision = 0;
@@ -542,6 +549,7 @@ export class WebRtcManager {
     this.callStatsTimer = null;
     this.callStatsEpoch++;
     this.callStatsSampling = false;
+    this.voiceQuality.reset();
     if (this.callPing !== null) this.publishCallPing(null);
   }
 
@@ -556,11 +564,29 @@ export class WebRtcManager {
     this.callStatsSampling = true;
     try {
       const sfu = (this.activeTransport ?? (this.isSfuMode() ? 'sfu' : 'p2p')) === 'sfu';
-      const ping = await (sfu ? this.sfu : this.p2p).samplePing();
-      if (epoch === this.callStatsEpoch) this.publishCallPing(ping);
+      const sample = await (sfu ? this.sfu : this.p2p).sampleStats();
+      if (epoch !== this.callStatsEpoch) return;
+      this.publishCallPing(sample.ping);
+      this.voiceQuality.sample(sample);
     } finally {
       if (epoch === this.callStatsEpoch) this.callStatsSampling = false;
     }
+  }
+
+  /** What else the call is doing, logged with its voice quality to tell the causes apart. */
+  private voiceQualityContext(): Record<string, unknown> {
+    const channelId = voiceStore.currentVoiceChannelId;
+    const screens = this.getLocalScreenState();
+    return {
+      transport: this.activeTransport ?? (this.isSfuMode() ? 'sfu' : 'p2p'),
+      participants: channelId ? this.voiceParticipants.getInVoiceChannel(channelId).length : 0,
+      noiseSuppression: settingsStore.noiseSuppressionMode,
+      camera: videoService.getCameraState().publishing ? cameraEffectsStore.snapshot.settings.mode : 'off',
+      screens: screens.screenShareIds?.length ?? 0,
+      nativeScreens: (screens.nativeScreenShares ?? []).map(source =>
+        `${source.codec ?? 'h264'} ${source.video.height}p${source.video.fps}${source.audio ? '+audio' : ''}`),
+      visibility: typeof document === 'undefined' ? null : document.visibilityState,
+    };
   }
 
   private publishCallPing(ping: number | null): void {

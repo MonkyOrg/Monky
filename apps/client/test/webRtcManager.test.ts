@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import { after, before, test, type TestContext } from 'node:test';
 import { MessageType, QUALITY_PRESETS, type WebRtcSignalPayload } from '@monky/shared';
 import { appEvents } from '../src/renderer/core/EventBus';
@@ -12,6 +12,7 @@ import type { RemoteMediaKind, RemoteTrack } from '../src/renderer/core/webrtc/R
 import { RtcDiagnosticsCollector } from '../src/renderer/core/webrtc/RtcDiagnosticsCollector';
 import { averageRoundTrip, candidateRoute, diagnosticCandidateRoute } from '../src/renderer/core/webrtc/rtcStats';
 import type { VoiceTransport } from '../src/renderer/core/webrtc/VoiceTransport';
+import { VoiceQualityMonitor } from '../src/renderer/core/webrtc/voiceQuality';
 import { voiceStore } from '../src/renderer/stores/voiceStore';
 import { voiceConnectionIndicator } from '../src/renderer/utils/voiceConnection';
 
@@ -926,12 +927,129 @@ for (const [mode, open] of [['p2p', meshUnderTest], ['sfu', sfuUnderTest]] as co
 
   test(`VoiceTransport (${mode}): the ping waits for a measured path, and a receiver is found by its track`, async t => {
     const subject = await open(t, track('microphone', 'audio'));
-    assert.equal(await subject.transport.samplePing(), null, 'nothing is measured before media flows');
+    assert.equal((await subject.transport.sampleStats()).ping, null, 'nothing is measured before media flows');
     subject.measure(40);
-    assert.equal(await subject.transport.samplePing(), 40, 'the pair carrying media, not the first one listed');
+    assert.equal((await subject.transport.sampleStats()).ping, 40, 'the pair carrying media, not the first one listed');
 
     const { peerSessionId, trackId, receiver } = subject.remote;
     assert.equal(subject.transport.receiverForTrack(peerSessionId, trackId), receiver);
     assert.equal(subject.transport.receiverForTrack(peerSessionId, 'unknown'), null);
   });
 }
+
+interface AudioInterval {
+  received: number;
+  lost?: number;
+  concealed?: number;
+  /** Seconds of microphone audio produced. */
+  mic?: number;
+  /** Mean time the received audio waited in the jitter buffer. */
+  bufferedMs?: number;
+}
+
+/** Cumulative stats of one SFU transport after `intervals`, two seconds apart, as `getStats()` reports them. */
+function voiceStats(intervals: readonly AudioInterval[]): Map<string, object> {
+  const total = intervals.reduce<Required<AudioInterval>>((sum, step) => ({
+    received: sum.received + step.received,
+    lost: sum.lost + (step.lost ?? 0),
+    concealed: sum.concealed + (step.concealed ?? 0),
+    mic: sum.mic + (step.mic ?? 2),
+    bufferedMs: sum.bufferedMs + step.received * (step.bufferedMs ?? 40) / 1000,
+  }), { received: 0, lost: 0, concealed: 0, mic: 0, bufferedMs: 0 });
+  const timestamp = intervals.length * 2000;
+  return new Map<string, object>([
+    ['in', { id: 'in', type: 'inbound-rtp', kind: 'audio', trackIdentifier: 'alice-mic', timestamp,
+      packetsReceived: total.received, packetsLost: total.lost, totalSamplesReceived: total.received * 960,
+      concealedSamples: total.concealed, silentConcealedSamples: 0, jitter: 0.004,
+      jitterBufferEmittedCount: total.received, jitterBufferDelay: total.bufferedMs }],
+    ['out', { id: 'out', type: 'outbound-rtp', kind: 'audio', packetsSent: intervals.length * 100 }],
+    ['source', { id: 'source', type: 'media-source', kind: 'audio', timestamp, totalSamplesDuration: total.mic }],
+  ]);
+}
+
+function voiceQualityFixture() {
+  const logged: { level: 'warn' | 'info'; message: string; data: Record<string, unknown> }[] = [];
+  let clock = 0;
+  const intervals: AudioInterval[] = [];
+  const monitor = new VoiceQualityMonitor({
+    warn: (message, data) => logged.push({ level: 'warn', message, data }),
+    info: (message, data) => logged.push({ level: 'info', message, data }),
+  }, () => ({ noiseSuppression: 'gtcrn' }), () => clock);
+  const step = (interval: AudioInterval) => {
+    intervals.push(interval);
+    clock += 2000;
+    return monitor.sample({ ping: 30, links: [{
+      link: 'recv', stats: voiceStats(intervals), senderOf: trackId => trackId === 'alice-mic' ? 'alice' : null,
+    }] });
+  };
+  return { logged, monitor, step };
+}
+
+const clean: AudioInterval = { received: 100 };
+
+test('Voice quality: received audio that breaks up is logged once it repeats, naming the sender, until it recovers', () => {
+  const { logged, step } = voiceQualityFixture();
+  assert.equal(step(clean), null, 'the first reading only sets the baseline');
+  step(clean);
+  // 10% of the received audio invented by the decoder, 5% of the packets lost.
+  const choppy: AudioInterval = { received: 95, lost: 5, concealed: 9120 };
+  const metrics = step(choppy);
+  assert.equal(metrics?.concealedPct, 10);
+  assert.equal(metrics?.inboundLossPct, 5);
+  assert.equal(metrics?.worstSender, 'alice');
+  assert.equal(logged.length, 0, 'a single bad interval is a hiccup');
+
+  step(choppy);
+  step(choppy);
+  assert.deepEqual(logged.map(entry => entry.message), ['Voice quality degraded'], 'logged once, not every interval');
+  assert.deepEqual(logged[0].data.reasons, ['inbound-loss', 'concealment']);
+  assert.deepEqual(logged[0].data.context, { noiseSuppression: 'gtcrn' });
+
+  step(clean);
+  step(clean);
+  assert.equal(logged.length, 1, 'recovery waits for the audio to stay clean');
+  step(clean);
+  assert.equal(logged[1].message, 'Voice quality recovered');
+  assert.equal(logged[1].data.durationMs, 8000);
+  assert.deepEqual(logged[1].data.reasons, ['inbound-loss', 'concealment']);
+});
+
+test('Voice quality: a microphone pipeline falling behind real time is told apart from the network', () => {
+  const { logged, step } = voiceQualityFixture();
+  step(clean);
+  // 1.7 s of audio produced in 2 s: what an overloaded noise suppressor does.
+  step({ received: 100, mic: 1.7 });
+  const metrics = step({ received: 100, mic: 1.7 });
+  assert.equal(metrics?.micCapturePct, 85);
+  assert.equal(metrics?.concealedPct, 0);
+  assert.deepEqual(logged.map(entry => [entry.message, entry.data.reasons]), [['Voice quality degraded', ['mic-capture']]]);
+});
+
+test('Voice quality: an idle sender is not bad audio, and the call ending logs its summary once', () => {
+  const { logged, monitor, step } = voiceQualityFixture();
+  step(clean);
+  // A muted sender sends nothing: the decoder fills silence, which says nothing about quality.
+  const muted = step({ received: 0, concealed: 96_000 });
+  assert.equal(muted?.inboundStreams, 0);
+  step({ received: 0, concealed: 96_000 });
+  step({ received: 95, lost: 5, concealed: 9120 });
+  assert.equal(logged.length, 0);
+
+  monitor.reset();
+  monitor.reset();
+  assert.deepEqual(logged.map(entry => entry.message), ['Voice quality summary']);
+  assert.deepEqual({ ...logged[0].data, worst: undefined }, {
+    periodMs: 4000, samples: 3, degradedSamples: 1, episodes: 0, reasons: { 'inbound-loss': 1, concealment: 1 },
+    worst: undefined, context: { noiseSuppression: 'gtcrn' },
+  });
+});
+
+test('Voice quality: received audio heard seconds late is degraded even with nothing lost', () => {
+  const { logged, step } = voiceQualityFixture();
+  step(clean);
+  // What a stall leaves behind: everything arrives, but piled up in the jitter buffer.
+  step({ received: 100, bufferedMs: 3000 });
+  const metrics = step({ received: 100, bufferedMs: 3000 });
+  assert.equal(metrics?.jitterBufferMs, 3000);
+  assert.deepEqual(logged.map(entry => [entry.message, entry.data.reasons]), [['Voice quality degraded', ['buffer-delay']]]);
+});

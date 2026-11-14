@@ -1,4 +1,5 @@
 import type { QualityPresetType, QualityProfile } from '@monky/shared';
+import type { CallStatsSample } from './voiceQuality';
 
 /** Restores what a microphone switch changed, if it has to be undone. */
 export type Rollback = () => Promise<void>;
@@ -35,8 +36,8 @@ export interface VoiceTransport {
   detachCamera(track: MediaStreamTrack): Promise<void>;
   /** The shared encoding policy on what is published, until `isCurrent` says a newer one won. */
   applyQuality(preset: QualityPresetType, profile: QualityProfile, isCurrent: () => boolean): Promise<void>;
-  /** Round trip of the media path in milliseconds, or null while none is measured. */
-  samplePing(): Promise<number | null>;
+  /** Round trip of the media path in milliseconds, null while none is measured, and the stats it was read from. */
+  sampleStats(): Promise<CallStatsSample>;
   /** Every sender of the local camera (#493). */
   cameraSenders(): RTCRtpSender[];
   /** The receiver of one remote track, for its inbound stats (#340). */
