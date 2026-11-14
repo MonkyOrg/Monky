@@ -163,6 +163,13 @@ class ModelElement {
     return child;
   }
   append(...children) { for (const child of children) this.appendChild(child); }
+  prepend(...children) {
+    for (const child of [...children].reverse()) {
+      child.remove();
+      this.children.unshift(child);
+      child.parentElement = this;
+    }
+  }
   replaceChildren(...children) {
     for (const child of this.children) if (typeof child !== 'string') child.parentElement = null;
     this.children = [];
@@ -457,6 +464,8 @@ function fixture(language = 'en') {
   }
   const mediaQuery = new ModelElement(document);
   mediaQuery.matches = true;
+  const compactViewport = new ModelElement(document);
+  compactViewport.matches = false;
   const api = {
     platform: 'win32', nativeScreenCommand: async command => {
       if (command.action === 'probe-encoding') return { kind: 'encoding', availability: await controls.encoding(command) };
@@ -545,6 +554,8 @@ function fixture(language = 'en') {
     'utils/surfaceMotion': {
       animateEnter() {},
       cancelSurfaceMotion() {},
+      cancelCompactPageTransition() {},
+      transitionCompactPage(_root, update) { update(); },
       removeWithMotion(element) { element.remove(); },
       hideWithMotion(element, _kind, onHidden) { element.hidden = true; onHidden?.(); },
       ownSurface(surface, anchor) {
@@ -560,7 +571,8 @@ function fixture(language = 'en') {
     'views/screenShare/extraScreens', 'views/screenShare/screenFormatChoices', 'utils/formControls',
     'views/ResourceAudiencePicker',
     'utils/feedback', 'utils/screenShareFailure', 'core/ClientLogService',
-    'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
+    'views/settings/SettingsSectionNavigation', 'views/settings/CompactSettingsNavigation', 'utils/viewport',
+    'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
     'i18n/locales/community', 'i18n/locales/serverAudit', 'i18n/locales/botStorage', 'i18n/locales/browserHome', 'i18n/messageSearch',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits', 'utils/avatar', 'utils/colors',
     'utils/serverAddress', 'utils/rovingFocus', 'platform/capabilities', 'utils/desktopOnly',
@@ -577,7 +589,8 @@ function fixture(language = 'en') {
     modules.set(name, module.exports);
     vm.runInNewContext(compiled.get(filename), {
       module, exports: module.exports, document, window: {
-        api, matchMedia: () => mediaQuery, setTimeout, clearTimeout, innerWidth: 1280, innerHeight: 800,
+        api, matchMedia: query => query.includes('max-width') ? compactViewport : mediaQuery,
+        setTimeout, clearTimeout, innerWidth: 1280, innerHeight: 800,
         addEventListener() {}, removeEventListener() {},
       },
       localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
