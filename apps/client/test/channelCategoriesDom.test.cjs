@@ -24,6 +24,8 @@ if (!process.versions.electron) {
   });
 } else {
   const { app, BrowserWindow } = require('electron');
+  const { emulateViewport } = require('./mobileViewport.cjs');
+  const { installReorderClock } = require('./pointerReorderClock.cjs');
   app.setPath('userData', process.env.MONKY_CATEGORY_PROFILE);
   app.on('window-all-closed', () => {});
   let vite, browser, timeout;
@@ -47,7 +49,7 @@ if (!process.versions.electron) {
           server.middlewares.use((request, response, next) => {
             if (request.url !== '/__categories__') return next();
             response.setHeader('Content-Type', 'text/html');
-            response.end(`<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css">${fonts}</head><body></body></html>`);
+            response.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css">${fonts}</head><body></body></html>`);
           });
         },
       }],
@@ -60,6 +62,10 @@ if (!process.versions.electron) {
       contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true,
     } });
     browser.webContents.debugger.attach('1.3');
+    const touch = (type, point) => browser.webContents.debugger.sendCommand('Input.dispatchTouchEvent', {
+      type, touchPoints: point ? [{ x: point.x, y: point.y }] : [],
+    });
+    const frames = () => browser.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     // Native input and its effects land asynchronously; poll instead of trusting a fixed sleep.
     const pageBecomes = (expression, timeout = 5000) => browser.webContents.executeJavaScript(`new Promise(resolve => {
       const started = performance.now();
@@ -237,17 +243,22 @@ if (!process.versions.electron) {
       await new Promise(resolve => setTimeout(resolve, 80));
       return { targetBefore, targetAfter };
     };
-    timeout = setTimeout(() => { console.error('Category DOM timeout'); void finish(1); }, 90000);
+    let phase = 'loading';
+    timeout = setTimeout(() => { console.error(`Category DOM timeout: ${phase}`); void finish(1); }, 90000);
     for (const locale of ['pt-BR', 'en']) {
+      phase = `${locale} loading`;
       await browser.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/__categories__`);
+      await emulateViewport(browser.webContents, 1100, 850, { mobile: false });
       await resize(1100);
       await browser.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
       await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
         features: [{ name: 'prefers-reduced-motion', value: locale === 'pt-BR' ? 'reduce' : 'no-preference' }],
       });
+      phase = `${locale} forms`;
       const initial = await browser.webContents.executeJavaScript(`(${regression.toString()})(${JSON.stringify(locale)})
         .then(() => null).catch(error => ({ failure: error.stack || String(error) }))`, true);
       if (initial?.failure) throw new Error(initial.failure);
+      phase = `${locale} desktop controls`;
       await browser.webContents.executeJavaScript(
         'Promise.allSettled(document.getAnimations({ subtree: true }).map(animation => animation.finished))'
       );
@@ -428,6 +439,7 @@ if (!process.versions.electron) {
         throw new Error('Saving synchronization did not preserve live category inheritance');
       }
       // Shared root: loose channels sit anywhere among categories, moved with a real pointer.
+      phase = `${locale} desktop shared root`;
       const treeLayout = adjacent => browser.webContents.executeJavaScript(`window.categoryTreeFixture(${adjacent})`);
       const layout = await treeLayout(false);
       if (JSON.stringify(layout) !== JSON.stringify(['gap:', 'category:voice|text', ':loose', 'destination:', ':tail', 'end:'])) {
@@ -499,6 +511,74 @@ if (!process.versions.electron) {
       await browser.webContents.executeJavaScript(`document.querySelector('[data-category-channels=""]').style.minHeight = ''`);
       await dragChannelToSelector(await rootPoint('.channel-item[data-channel-id="loose"]'), '.channel-tree-end-dropzone', 0.5, false);
       await rootRequest(['category', 'destination', 'tail', 'loose'], 'A loose channel did not move to the end of the list');
+      await installReorderClock(browser.webContents);
+      await emulateViewport(browser.webContents, 412, 915);
+      for (const kind of ['channel', 'category']) {
+        phase = `${locale} mobile ${kind}`;
+        await treeLayout(false);
+        const from = await rootPoint(kind === 'channel'
+          ? '.channel-item[data-channel-id="voice"]'
+          : '[data-category-id="destination"] > .category-title');
+        await touch('touchStart', from);
+        if (!await pageBecomes('window.reorderHold.pending() === 1')) throw new Error(`Touch did not arm ${kind} reordering`);
+        await browser.webContents.executeJavaScript('window.reorderHold.activate()');
+        const active = kind === 'channel' ? '.channel-dragging' : '.category-dragging';
+        if (!await pageBecomes(`!!document.querySelector('${active}')`)) throw new Error(`Holding did not highlight the ${kind}`);
+        await frames();
+        await browser.webContents.executeJavaScript(`Promise.allSettled(document.querySelector('.channels-list-container')
+          .getAnimations({ subtree: true }).map(animation => animation.finished))`);
+        const to = await rootPoint(kind === 'channel'
+          ? '.channel-item[data-channel-id="text"]'
+          : '[data-category-id="category"] > .category-title', kind === 'channel' ? 0.9 : 0.2);
+        await touch('touchMove', to);
+        await frames();
+        if (!await pageBecomes(`!!document.querySelector('${active}')`)) throw new Error(`Native pan took over the held ${kind}`);
+        await touch('touchEnd');
+        const request = kind === 'channel'
+          ? `payload.categoryId === 'category' && payload.orderedIds.join(',') === 'text,voice'`
+          : `payload.categoryId === null && payload.orderedIds.join(',') === 'destination,category,loose,tail'`;
+        if (!await pageBecomes(`window.categoryTestRequests.some(({type,payload}) => type === 'CHANNEL_REORDER' && ${request})`)) {
+          throw new Error(`Held ${kind} did not commit its touch drop: ${JSON.stringify(await browser.webContents.executeJavaScript('window.categoryTestRequests'))}`);
+        }
+        phase = `${locale} mobile scrolling`;
+        if (!await pageBecomes(`!document.querySelector('${active}')`)) throw new Error(`Touch release left the ${kind} highlighted`);
+      }
+      const scrollStart = await browser.webContents.executeJavaScript('window.categoryTouchScrollFixture()');
+      await touch('touchStart', scrollStart);
+      for (let step = 1; step <= 8; step++) {
+        await touch('touchMove', { x: scrollStart.x, y: scrollStart.y - step * 14 });
+      }
+      await touch('touchEnd');
+      if (!await pageBecomes(`document.querySelector('.channels-list-container').scrollTop > 40`)) {
+        throw new Error('An immediate real touch on channel handles did not scroll the overflowing list');
+      }
+      if (!await browser.webContents.executeJavaScript(`window.reorderHold.pending() === 0
+        && window.categoryTestRequests.length === 0 && !document.querySelector('.channel-dragging, .category-dragging')`)) {
+        throw new Error('Scrolling channels left a pending hold or changed their order');
+      }
+      // Stop the previous native fling before the independent teardown gesture.
+      await touch('touchStart', scrollStart);
+      await touch('touchCancel');
+      await frames();
+      await browser.webContents.executeJavaScript('window.categoryTouchScrollFixture()');
+      await frames();
+      phase = `${locale} mobile teardown`;
+      const pendingFrom = await rootPoint('.channel-item[data-channel-id="voice"]');
+      await touch('touchStart', pendingFrom);
+      if (!await pageBecomes('window.reorderHold.pending() === 1')) {
+        const probe = await browser.webContents.executeJavaScript(`({
+          point: ${JSON.stringify(pendingFrom)},
+          hit: document.elementFromPoint(${pendingFrom.x}, ${pendingFrom.y})?.outerHTML.slice(0, 400),
+          scrollTop: document.querySelector('.channels-list-container').scrollTop,
+          events: window.categoryTestMouseEvents.slice(-5)
+        })`);
+        throw new Error(`The teardown probe did not arm a hold: ${JSON.stringify(probe)}`);
+      }
+      await browser.webContents.executeJavaScript('window.categoryTestCleanup()');
+      if (!await browser.webContents.executeJavaScript('window.reorderHold.pending() === 0')) {
+        throw new Error('Destroying the view did not cancel its pending reorder hold');
+      }
+      await touch('touchEnd');
       console.log(`Category DOM ${locale}: forms, mixed groups, keyboard, menus, scoped persistence passed`);
     }
     await finish(0);
@@ -1201,6 +1281,24 @@ async function regression(locale) {
     return [...document.querySelectorAll('#channel-categories-list > *')].map(element =>
       `${element.classList.contains('channel-tree-end-dropzone') ? 'end' : element.matches('[data-root-gap]') ? 'gap' : element.dataset.categoryId}:` +
       [...element.querySelectorAll('.channel-item')].map(item => item.dataset.channelId).join('|'));
+  };
+  window.categoryTouchScrollFixture = () => {
+    window.categoryTreeFixture();
+    store.setServerDetails({ ...store.serverDetails, channels: [...store.serverDetails.channels,
+      ...Array.from({ length: 20 }, (_, index) => ({ ...channel(`scroll-${index}`, 'TEXT', category.id), position: index + 10 })),
+    ] }, user);
+    view.renderChannels();
+    list.style.height = '260px';
+    list.style.flex = 'none';
+    list.scrollTop = 0;
+    const bounds = list.getBoundingClientRect();
+    const items = [...list.querySelectorAll('.channel-reorder-handle')].filter(item => {
+      const box = item.getBoundingClientRect();
+      return box.top >= bounds.top + 16 && box.bottom <= bounds.bottom - 16;
+    });
+    const box = items.at(-1)?.getBoundingClientRect();
+    if (!box || list.scrollHeight <= list.clientHeight) throw new Error('The channel touch fixture must overflow with a visible handle');
+    return { x: Math.round(box.left + 60), y: Math.round(box.top + box.height / 2) };
   };
   // Kept for the real key event dispatched from Electron after returning.
   window.categoryTestCleanup = () => { off(); view.destroy(); };

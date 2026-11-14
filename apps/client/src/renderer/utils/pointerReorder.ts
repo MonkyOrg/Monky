@@ -6,11 +6,14 @@
  * picture of the row, or of the server icon.
  */
 
+import { COMPACT_VIEWPORT_QUERY } from './viewport';
+
 /** Distance, in px, a press travels before it becomes a drag; shorter is a click. */
 export const REORDER_THRESHOLD_PX = 6;
+export const REORDER_HOLD_MS = 450;
 
 /** What of a press the drag reads. */
-export type ReorderPress = Pick<PointerEvent, 'button' | 'isPrimary' | 'pointerId' | 'clientX' | 'clientY'>;
+export type ReorderPress = Pick<PointerEvent, 'button' | 'isPrimary' | 'pointerId' | 'pointerType' | 'clientX' | 'clientY' | 'target'>;
 
 /**
  * Whether a pointer event presses the primary button. Pointer events send
@@ -35,7 +38,7 @@ export interface PointerReorder {
    * lists redraw their rows during a drag, and a removed element loses the
    * capture.
    */
-  capture: Pick<Element, 'setPointerCapture' | 'releasePointerCapture' | 'hasPointerCapture'>;
+  capture: Pick<Element, 'isConnected' | 'setPointerCapture' | 'releasePointerCapture' | 'hasPointerCapture'>;
   /** Aborting it ends the press, or cancels the drag, e.g. when the list is torn down. */
   signal?: AbortSignal;
   /** The press became a drag. */
@@ -49,19 +52,20 @@ export interface PointerReorder {
 }
 
 /**
- * Follows a primary press that may become a reorder drag. Past
- * REORDER_THRESHOLD_PX the pointer is captured and its moves reported, and
- * releasing drops. Escape cancels the drag and goes no further. The click a
- * release produces belongs to the drag: it never opens what the drag started
- * on, even after Escape.
+ * Desktop dragging starts past REORDER_THRESHOLD_PX. Touch and compact layouts
+ * require a stationary hold instead; moving sooner leaves native scrolling
+ * untouched. The list captures an activated drag. Escape cancels it, and its
+ * release never opens what was dragged, even after Escape.
  */
 export function followPointerReorder(press: ReorderPress, reorder: PointerReorder): void {
   if (press.button !== 0 || !press.isPrimary || reorder.signal?.aborted) return;
-  const { pointerId } = press;
+  const needsHold = press.pointerType === 'touch' || window.matchMedia(COMPACT_VIEWPORT_QUERY).matches;
+  const { pointerId, target } = press;
   const following = new AbortController();
   const signal = following.signal;
   let dragging = false;
   let cancelled = false;
+  let hold: ReturnType<typeof setTimeout> | undefined;
 
   const releaseCapture = () => {
     try {
@@ -70,6 +74,7 @@ export function followPointerReorder(press: ReorderPress, reorder: PointerReorde
   };
   const finish = (release: PointerEvent | null) => {
     if (signal.aborted) return;
+    clearTimeout(hold);
     following.abort();
     if (!dragging) return;
     if (release) swallowReleaseClick();
@@ -78,6 +83,34 @@ export function followPointerReorder(press: ReorderPress, reorder: PointerReorde
     if (release) reorder.onDrop(release.clientX, release.clientY);
     else reorder.onCancel();
   };
+  const start = () => {
+    hold = undefined;
+    if (signal.aborted) return;
+    if (!reorder.capture.isConnected || (target && 'isConnected' in target && !target.isConnected)) {
+      finish(null);
+      return;
+    }
+    dragging = true;
+    try { reorder.capture.setPointerCapture(pointerId); } catch { /* Released meanwhile; the window still hears it. */ }
+    reorder.onStart();
+  };
+  if (needsHold) {
+    hold = setTimeout(start, REORDER_HOLD_MS);
+    window.addEventListener('scroll', () => { if (!dragging) finish(null); }, { capture: true, signal });
+    window.addEventListener('resize', () => finish(null), { signal });
+    window.addEventListener('pointerdown', event => { if (event.pointerId !== pointerId) finish(null); }, { capture: true, signal });
+    window.addEventListener('contextmenu', event => {
+      if (!dragging) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, { capture: true, signal });
+    if (press.pointerType === 'touch') {
+      // Changing touch-action after pointerdown is too late to stop native pan.
+      window.addEventListener('touchmove', event => {
+        if (dragging && !cancelled && event.cancelable) event.preventDefault();
+      }, { capture: true, passive: false, signal });
+    }
+  }
 
   window.addEventListener('pointermove', event => {
     if (event.pointerId !== pointerId) return;
@@ -89,10 +122,13 @@ export function followPointerReorder(press: ReorderPress, reorder: PointerReorde
     if (cancelled) return;
     if (!dragging) {
       if (Math.hypot(event.clientX - press.clientX, event.clientY - press.clientY) < REORDER_THRESHOLD_PX) return;
-      dragging = true;
-      try { reorder.capture.setPointerCapture(pointerId); } catch { /* Released meanwhile; the window still hears it. */ }
-      reorder.onStart();
+      if (needsHold) {
+        finish(null);
+        return;
+      }
+      start();
     }
+    if (signal.aborted) return;
     reorder.onMove(event.clientX, event.clientY);
   }, { signal });
   window.addEventListener('pointerup', event => { if (event.pointerId === pointerId) finish(event); }, { signal });
@@ -100,7 +136,11 @@ export function followPointerReorder(press: ReorderPress, reorder: PointerReorde
   window.addEventListener('blur', () => finish(null), { signal });
   // Stopped on its way down, before the document and its elements: Escape ends the drag and closes nothing else.
   window.addEventListener('keydown', event => {
-    if (event.key !== 'Escape' || !dragging || cancelled) return;
+    if (event.key !== 'Escape' || cancelled) return;
+    if (!dragging) {
+      if (needsHold) finish(null);
+      return;
+    }
     event.preventDefault();
     event.stopImmediatePropagation();
     cancelled = true;

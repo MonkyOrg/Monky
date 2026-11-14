@@ -1062,6 +1062,8 @@
 .server-rail-item[data-rail-draggable='true'],
 .server-rail-folder-header[data-rail-draggable='true'] {
   cursor: grab;
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 
 .server-rail--dragging,
@@ -2359,7 +2361,9 @@
 .category-reorder-handle,
 .channel-reorder-handle {
   cursor: grab;
-  touch-action: none;
+  touch-action: pan-y pinch-zoom;
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 
 .category-reorder-handle:active,

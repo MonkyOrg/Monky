@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { followPointerReorder, isPrimaryPress, REORDER_THRESHOLD_PX, type PointerReorder } from '../src/renderer/utils/pointerReorder';
+import { followPointerReorder, isPrimaryPress, REORDER_HOLD_MS, REORDER_THRESHOLD_PX, type PointerReorder } from '../src/renderer/utils/pointerReorder';
 
 /** The window the drag listens to: events reach its listeners in the order they were added. */
-function fakeWindow(context: { after: (fn: () => void) => void }): EventTarget {
+function fakeWindow(context: { after: (fn: () => void) => void }, compact = false): EventTarget {
   const original = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const target = new EventTarget();
-  Object.defineProperty(globalThis, 'window', { configurable: true, value: target });
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: Object.assign(target, { matchMedia: () => ({ matches: compact }) }),
+  });
   context.after(() => {
     if (original) Object.defineProperty(globalThis, 'window', original);
     else Reflect.deleteProperty(globalThis, 'window');
@@ -16,6 +19,7 @@ function fakeWindow(context: { after: (fn: () => void) => void }): EventTarget {
 
 /** A list that keeps the pointer, recording what was asked of it. */
 class CaptureRecorder {
+  isConnected = true;
   readonly calls: string[] = [];
   private readonly held = new Set<number>();
   constructor(private readonly refuse = false) {}
@@ -33,7 +37,7 @@ class CaptureRecorder {
   }
 }
 
-function follow(capture: CaptureRecorder, signal?: AbortSignal) {
+function follow(capture: CaptureRecorder, signal?: AbortSignal, pointerType = 'mouse', target: EventTarget | null = null) {
   const log: string[] = [];
   const reorder: PointerReorder = {
     capture,
@@ -43,7 +47,7 @@ function follow(capture: CaptureRecorder, signal?: AbortSignal) {
     onDrop: (x, y) => log.push(`drop ${x},${y}`),
     onCancel: () => log.push('cancel'),
   };
-  followPointerReorder({ button: 0, isPrimary: true, pointerId: 1, clientX: 100, clientY: 100 }, reorder);
+  followPointerReorder({ button: 0, isPrimary: true, pointerId: 1, pointerType, clientX: 100, clientY: 100, target }, reorder);
   return log;
 }
 
@@ -69,6 +73,129 @@ test('a press that stays within the threshold is a click: nothing is dragged, ca
   assert.deepEqual(log, []);
   assert.deepEqual(capture.calls, []);
   assert.equal(clickReaches(target), true, 'the click of a plain press opens what was pressed');
+});
+
+test('moving a finger before the hold scrolls instead of reordering, even at desktop size', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const target = fakeWindow(context);
+  const capture = new CaptureRecorder();
+  const log = follow(capture, undefined, 'touch');
+  const movement = pointer('pointermove', 100, 160);
+  target.dispatchEvent(movement);
+  target.dispatchEvent(pointer('pointerup', 100, 200));
+  context.mock.timers.tick(REORDER_HOLD_MS);
+  assert.deepEqual(log, []);
+  assert.deepEqual(capture.calls, []);
+  assert.equal(movement.defaultPrevented, false);
+  assert.equal(clickReaches(target), true, 'a plain tap remains available to the page');
+});
+
+test('compact navigation leaves mouse and pen drags to scrolling instead of reordering', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const target = fakeWindow(context, true);
+  for (const pointerType of ['mouse', 'pen']) {
+    const capture = new CaptureRecorder();
+    const log = follow(capture, undefined, pointerType);
+    const movement = pointer('pointermove', 100, 160);
+    target.dispatchEvent(movement);
+    target.dispatchEvent(pointer('pointerup', 100, 200));
+    context.mock.timers.tick(REORDER_HOLD_MS);
+    assert.deepEqual(log, [], pointerType);
+    assert.deepEqual(capture.calls, [], pointerType);
+    assert.equal(movement.defaultPrevented, false, pointerType);
+  }
+});
+
+test('holding a finger activates reordering, prevents native pan and context menus, and drops on release', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const target = fakeWindow(context);
+  const capture = new CaptureRecorder();
+  const log = follow(capture, undefined, 'touch');
+  const before = new Event('touchmove', { cancelable: true });
+  target.dispatchEvent(before);
+  assert.equal(before.defaultPrevented, false, 'scrolling is not blocked during the hold');
+  context.mock.timers.tick(REORDER_HOLD_MS - 1);
+  assert.deepEqual(log, []);
+  target.dispatchEvent(pointer('pointermove', 102, 101));
+  context.mock.timers.tick(1);
+  assert.deepEqual(log, ['start']);
+  assert.deepEqual(capture.calls, ['set 1']);
+  const move = new Event('touchmove', { cancelable: true });
+  target.dispatchEvent(move);
+  assert.equal(move.defaultPrevented, true, 'the browser cannot take over an activated drag');
+  const menu = new Event('contextmenu', { cancelable: true });
+  target.dispatchEvent(menu);
+  assert.equal(menu.defaultPrevented, true, 'the hold cannot open a competing menu');
+  target.dispatchEvent(pointer('pointermove', 100, 160));
+  target.dispatchEvent(pointer('pointerup', 100, 170));
+  assert.deepEqual(log, ['start', 'move 100,160', 'drop 100,170']);
+  assert.equal(capture.hasPointerCapture(1), false);
+  const after = new Event('touchmove', { cancelable: true });
+  target.dispatchEvent(after);
+  assert.equal(after.defaultPrevented, false, 'native scrolling is restored after dropping');
+});
+
+test('compact mouse and pen reordering require a hold, not an ordinary scrolling drag', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const target = fakeWindow(context, true);
+  for (const pointerType of ['mouse', 'pen']) {
+    const capture = new CaptureRecorder();
+    const log = follow(capture, undefined, pointerType);
+    context.mock.timers.tick(REORDER_HOLD_MS);
+    assert.deepEqual(log, ['start'], pointerType);
+    target.dispatchEvent(pointer('pointermove', 100, 160));
+    target.dispatchEvent(pointer('pointerup', 100, 170));
+    assert.deepEqual(log, ['start', 'move 100,160', 'drop 100,170'], pointerType);
+  }
+});
+
+test('an interrupted hold never activates later or interferes with scrolling', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const target = fakeWindow(context, true);
+  for (const interruption of ['release', 'move', 'cancel', 'abort', 'blur', 'scroll', 'resize', 'escape', 'second finger']) {
+    const capture = new CaptureRecorder();
+    const lifetime = new AbortController();
+    const log = follow(capture, lifetime.signal, 'touch');
+    switch (interruption) {
+      case 'release': target.dispatchEvent(pointer('pointerup', 100, 100)); break;
+      case 'move': target.dispatchEvent(pointer('pointermove', 100, 100 + REORDER_THRESHOLD_PX)); break;
+      case 'cancel': target.dispatchEvent(pointer('pointercancel', 100, 100)); break;
+      case 'abort': lifetime.abort(); break;
+      case 'escape': target.dispatchEvent(key('Escape')); break;
+      case 'second finger': target.dispatchEvent(pointer('pointerdown', 100, 100, 2)); break;
+      default: target.dispatchEvent(new Event(interruption)); break;
+    }
+    context.mock.timers.tick(REORDER_HOLD_MS);
+    target.dispatchEvent(pointer('pointermove', 100, 160));
+    target.dispatchEvent(pointer('pointerup', 100, 170));
+    assert.deepEqual(log, [], interruption);
+    assert.deepEqual(capture.calls, [], interruption);
+    const move = new Event('touchmove', { cancelable: true });
+    target.dispatchEvent(move);
+    assert.equal(move.defaultPrevented, false, interruption);
+  }
+});
+
+test('a detached item or list cannot activate a hold, and a second finger cancels an active touch drag', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const target = fakeWindow(context);
+  const capture = new CaptureRecorder();
+  const detached = follow(capture, undefined, 'touch');
+  capture.isConnected = false;
+  context.mock.timers.tick(REORDER_HOLD_MS);
+  assert.deepEqual(detached, []);
+  capture.isConnected = true;
+  const item = Object.assign(new EventTarget(), { isConnected: true });
+  const replaced = follow(capture, undefined, 'touch', item);
+  item.isConnected = false;
+  context.mock.timers.tick(REORDER_HOLD_MS);
+  assert.deepEqual(replaced, [], 'a repainted item no longer owns the pending hold');
+  const active = follow(capture, undefined, 'touch');
+  context.mock.timers.tick(REORDER_HOLD_MS);
+  target.dispatchEvent(pointer('pointerdown', 100, 100, 2));
+  target.dispatchEvent(pointer('pointerup', 100, 170));
+  assert.deepEqual(active, ['start', 'cancel']);
+  assert.equal(capture.hasPointerCapture(1), false);
 });
 
 test('past the threshold the list keeps the pointer, moves are reported and the release drops', (context) => {
@@ -146,8 +273,8 @@ test('only a primary left press is followed, and a capture the browser refuses s
     capture: new CaptureRecorder(),
     onStart: () => log.push('start'), onMove: () => log.push('move'), onDrop: () => log.push('drop'), onCancel: () => log.push('cancel'),
   };
-  followPointerReorder({ button: 2, isPrimary: true, pointerId: 1, clientX: 0, clientY: 0 }, reorder);
-  followPointerReorder({ button: 0, isPrimary: false, pointerId: 3, clientX: 0, clientY: 0 }, reorder);
+  followPointerReorder({ button: 2, isPrimary: true, pointerId: 1, pointerType: 'mouse', clientX: 0, clientY: 0, target: null }, reorder);
+  followPointerReorder({ button: 0, isPrimary: false, pointerId: 3, pointerType: 'touch', clientX: 0, clientY: 0, target: null }, reorder);
   target.dispatchEvent(pointer('pointermove', 50, 50));
   target.dispatchEvent(pointer('pointermove', 50, 50, 3));
   assert.deepEqual(log, [], 'a right press or a second finger reorders nothing');
