@@ -15,7 +15,7 @@ export interface StatsReportLike {
   forEach(callback: (value: unknown) => void): void;
 }
 
-type StatsRecord = Readonly<Record<string, unknown>>;
+export type StatsRecord = Readonly<Record<string, unknown>>;
 
 export interface CandidateEndpoint {
   /** `host`, `srflx`, `prflx` or `relay`. */
@@ -38,17 +38,18 @@ function isRecord(value: unknown): value is StatsRecord {
   return typeof value === 'object' && value !== null;
 }
 
-function readString(record: StatsRecord, key: string): string | null {
+export function readString(record: StatsRecord, key: string): string | null {
   const value = record[key];
   return typeof value === 'string' ? value : null;
 }
 
-function readNumber(record: StatsRecord, key: string): number | null {
+export function readNumber(record: StatsRecord, key: string): number | null {
   const value = record[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function records(stats: StatsReportLike, type: string): StatsRecord[] {
+/** Every report of one type, in the order the engine listed them. */
+export function records(stats: StatsReportLike, type: string): StatsRecord[] {
   const matching: StatsRecord[] = [];
   stats.forEach(value => {
     if (isRecord(value) && value.type === type) matching.push(value);

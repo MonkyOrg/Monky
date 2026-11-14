@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Os logs de diagnóstico agora registram quando a voz falha ou picota numa chamada, separando a rede, o microfone e a supressão de ruído, junto do que mais a chamada fazia no momento.",
+  "en": "Diagnostic logs now record when a call's voice breaks up, telling the network apart from the microphone and noise suppression, along with what else the call was doing at the time."
+}

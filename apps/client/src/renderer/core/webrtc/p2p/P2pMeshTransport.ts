@@ -8,9 +8,10 @@ import { clientLog } from '../../ClientLogService';
 import { applyVideoCodecPreferences } from '../codecPreferences';
 import { applyMediaEncodingPolicy, getMediaEncodingPolicy } from '../mediaEncodingPolicy';
 import type { RemoteMediaSink, RemoteTrack } from '../RemoteMediaSink';
-import { averageRoundTrip, candidateRoute, type CandidateRoute } from '../rtcStats';
+import { averageRoundTrip, candidateRoute } from '../rtcStats';
 import { updateRtpSenderParameters } from '../rtpSenderParameters';
 import type { MicrophoneChange, Rollback, VoiceTransport } from '../VoiceTransport';
+import type { CallStatsSample, LinkStatsSample } from '../voiceQuality';
 import {
   cameraTransceiver, closeLink, hasUnnegotiatedSenders, microphoneTransceiver, type PeerLink, type PeerNegotiation,
 } from './PeerLink';
@@ -39,6 +40,12 @@ export interface P2pMeshHost {
   reconnect(peerSessionId: string, initiator: boolean): Promise<void>;
   /** Takes out a participant whose link cannot be kept, as if they had left. */
   removePeer(peerSessionId: string): void;
+}
+
+/** One measured link of the mesh: its round trip and the stats it was read from. */
+interface SampledLink {
+  readonly rttMs: number | null;
+  readonly sample: LinkStatsSample;
 }
 
 /**
@@ -714,11 +721,16 @@ export class P2pMeshTransport implements VoiceTransport {
     }
   }
 
-  /** The ping of the mesh: the average of the links carrying media. */
-  public async samplePing(): Promise<number | null> {
-    return averageRoundTrip(await Promise.all([...this.peers.values()]
+  /** The ping of the mesh, the average of the links carrying media, and the stats of each link. */
+  public async sampleStats(): Promise<CallStatsSample> {
+    const sampled = (await Promise.all([...this.peers.values()]
       .filter(link => link.pc.connectionState === 'connected')
-      .map(link => this.sampleRoute(link))));
+      .map(link => this.sampleLink(link))))
+      .filter((link): link is SampledLink => link !== null);
+    return {
+      ping: averageRoundTrip(sampled.map(link => link.rttMs)),
+      links: sampled.map(({ sample }) => sample),
+    };
   }
 
   /**
@@ -732,11 +744,11 @@ export class P2pMeshTransport implements VoiceTransport {
    * promotes the direct pair a moment later. Reading it once at `connected`
    * left calls that had gone direct permanently labelled as relayed (#466).
    */
-  private async sampleRoute(link: PeerLink): Promise<number | null> {
+  private async sampleLink(link: PeerLink): Promise<SampledLink | null> {
     const peerSessionId = link.peerSessionId;
-    let route: CandidateRoute | null;
+    let stats: RTCStatsReport;
     try {
-      route = candidateRoute(await link.pc.getStats());
+      stats = await link.pc.getStats();
     } catch (error) {
       if (this.isCurrent(link)) {
         clientLog.warn('WEBRTC', `Failed to read the route of peer ${peerSessionId}`, {
@@ -745,7 +757,10 @@ export class P2pMeshTransport implements VoiceTransport {
       }
       return null;
     }
-    if (!route || !this.isCurrent(link)) return null;
+    if (!this.isCurrent(link)) return null;
+    const sample: LinkStatsSample = { link: peerSessionId, stats, senderOf: () => peerSessionId };
+    const route = candidateRoute(stats);
+    if (!route) return { rttMs: null, sample };
     if ((route.local || route.remote) && link.isRelayed !== route.relayed) {
       link.isRelayed = route.relayed;
       this.host.participants().setPeerRelayed(peerSessionId, route.relayed);
@@ -760,7 +775,7 @@ export class P2pMeshTransport implements VoiceTransport {
         `[WebRTC] Peer ${peerSessionId} route: ${route.relayed ? 'TURN relay' : 'direct'} (${route.local?.type} / ${route.remote?.type})`
       );
     }
-    return route.rttMs;
+    return { rttMs: route.rttMs, sample };
   }
 
   /** A dead link goes before it is rebuilt; playback waits for the new one. */

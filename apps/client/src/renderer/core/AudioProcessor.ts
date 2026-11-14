@@ -64,7 +64,14 @@ export class AudioProcessor {
     } catch (err: unknown) {
       if (generation !== this.captureGeneration) throw new DOMException('Microphone startup was cancelled', 'AbortError');
       if (targetDeviceId) {
-        clientLog.warn('AUDIO', 'Could not open specific mic, falling back to default', { error: err instanceof Error ? err.message : String(err) });
+        // OverconstrainedError has an empty message: what failed is in its name and constraint.
+        const constraint = typeof err === 'object' && err !== null && 'constraint' in err
+          && typeof err.constraint === 'string' ? err.constraint : undefined;
+        clientLog.warn('AUDIO', 'Could not open specific mic, falling back to default', {
+          name: err instanceof Error ? err.name : undefined,
+          error: err instanceof Error ? err.message : String(err),
+          constraint,
+        });
         console.warn('[AudioProcessor] Could not open specific mic, falling back to default mic:', err);
         rawStream = await navigator.mediaDevices.getUserMedia({
           audio: microphoneConstraints('', settingsStore.noiseSuppressionMode), video: false,

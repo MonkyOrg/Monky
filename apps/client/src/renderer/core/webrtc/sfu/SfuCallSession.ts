@@ -7,6 +7,7 @@ import { voiceStore } from '../../../stores/voiceStore';
 import type { RemoteMediaSink } from '../RemoteMediaSink';
 import { SfuClientEngine } from '../SfuClientEngine';
 import type { MicrophoneChange, Rollback, VoiceTransport } from '../VoiceTransport';
+import type { CallStatsSample } from '../voiceQuality';
 
 /** What the SFU session needs from the call it carries. */
 export interface SfuCallHost {
@@ -437,8 +438,8 @@ export class SfuCallSession implements VoiceTransport {
   }
 
   /** The SFU reports the worse of its two transports, which lead to the same server. */
-  public samplePing(): Promise<number | null> {
-    return this.engine.getPing();
+  public sampleStats(): Promise<CallStatsSample> {
+    return this.engine.sampleStats();
   }
 
   public cameraSenders(): RTCRtpSender[] {
