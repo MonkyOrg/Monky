@@ -135,11 +135,12 @@ if (process.versions.electron) {
     }
   });
 
-  test('browser pixel oracle accepts letterboxing but rejects blank, stale and mixed-color frames', async () => {
+  test('browser pixel oracle accepts letterboxing and home landmarks but rejects blank, stale and mixed-color frames', async () => {
     const vm = require('node:vm');
     for (const [kind, accepted, aspect] of [
       ['letterbox', true], ['blank', false], ['stale', false], ['mixed', false],
       ['letterbox-edge', true, 2], ['blank', false, 2], ['stale-edge', false, 2], ['mixed-edge', false, 2],
+      ['home-landmark', true, 1], ['home-blank', false, 1], ['home-stale', false, 1],
     ]) {
       let stopped = false, cancelled = false, released = false, closed = false, read = false, x = 0, y = 0;
       const frame = { displayWidth: 1000, displayHeight: 1000, close() { closed = true; } };
@@ -155,20 +156,35 @@ if (process.versions.electron) {
           getContext() {
             return {
               drawImage(_frame, sourceX, sourceY) { x = sourceX; y = sourceY; },
-              getImageData() {
+              getImageData(left = 0, top = 0, width = 1, height = 1) {
                 const edge = kind.endsWith('-edge');
-                const color = kind === 'blank' || y < (edge ? 250 : 400) || y > (edge ? 750 : 600) ? [0, 0, 0, 255]
-                  : kind.startsWith('stale') || (kind.startsWith('mixed') && x === 750) ? [0, 0, 255, 255]
-                    : edge && (y === 250 || y === 750) ? [46, 237, 47, 255] : [0, 255, 0, 255];
-                return { data: new Uint8ClampedArray(color) };
+                const data = [];
+                for (let row = 0; row < height; row++) for (let column = 0; column < width; column++) {
+                  const px = x + left + column, py = y + top + row;
+                  let color;
+                  if (kind.startsWith('home-')) {
+                    const mark = px >= 484 && px <= 496 && py >= 484 && py <= 496;
+                    if (kind === 'home-blank') color = [0, 0, 0, 255];
+                    else if (!mark) color = [17, 21, 28, 255];
+                    else color = kind === 'home-stale' ? [0, 255, 0, 255] : [88, 101, 242, 255];
+                  } else {
+                    color = kind === 'blank' || py < (edge ? 250 : 400) || py > (edge ? 750 : 600) ? [0, 0, 0, 255]
+                      : kind.startsWith('stale') || (kind.startsWith('mixed') && px === 750) ? [0, 0, 255, 255]
+                        : edge && (py === 250 || py === 750) ? [46, 237, 47, 255] : [0, 255, 0, 255];
+                  }
+                  data.push(...color);
+                }
+                return { data: new Uint8ClampedArray(data) };
               },
             };
           }
         },
       });
       const track = { id: kind, clone: () => ({ stop() { stopped = true; } }), getSettings: () => ({ deviceId: kind }) };
-      if (accepted) assert.equal((await sample(track, 'green', undefined, aspect)).pixels.length, 49);
-      else await assert.rejects(sample(track, 'green', undefined, aspect), /Browser video source ended/);
+      const home = kind.startsWith('home-'), color = home ? 'home' : 'green';
+      const point = home ? { x: .49, y: .49 } : undefined;
+      if (accepted) assert.equal((await sample(track, color, undefined, aspect, point)).pixels.length, home ? 442 : 49);
+      else await assert.rejects(sample(track, color, undefined, aspect, point), /Browser video source ended/);
       assert.ok(stopped && cancelled && released && closed, `${kind} releases every owned probe resource`);
     }
   });
@@ -204,8 +220,8 @@ function runClient() {
   };
   async function action(name, value) {
     if (name === 'join') {
-      // This desktop capture regression must not inherit the compact first-launch window.
-      owner.setContentSize(1100, 850);
+      // Keep desktop mode at the constrained height available on hosted macOS.
+      owner.setContentSize(1100, 686);
       await until(() => run(`!!document.querySelector('.main-layout:not([data-compact])')`),
         'Desktop publication viewport did not settle');
       await run(`document.querySelector('[data-channel-type="VOICE"]:not([data-afk-channel])').click()`);
@@ -315,15 +331,19 @@ function runClient() {
         return browserAppPeers.flatMap(peer=>peer.getSenders()).filter(sender=>sender.track?.kind==='video'&&
           browserAppTrackClones.some(copy=>copy.parent===original.id&&copy.track===sender.track)).length===1;
       })()`), 'The browser rendition was not attached to its actual sender');
-      const viewport = await current.site.executeJavaScript('({width:innerWidth,height:innerHeight,dpr:devicePixelRatio})');
+      const viewport = await current.site.executeJavaScript(`(()=>{
+        const mark=document.querySelector('[data-miniapp-browser-home] .mark')?.getBoundingClientRect();
+        return {width:innerWidth,height:innerHeight,dpr:devicePixelRatio,
+          homePoint:mark?{x:(mark.left+mark.width/4)/innerWidth,y:(mark.top+mark.height/4)/innerHeight}:null};
+      })()`);
       const samples = await run(`(async()=>{
         const original=browserAppCaptures.at(-1).getVideoTracks()[0];
         const senders=browserAppPeers.flatMap(peer=>peer.getSenders()).filter(sender=>sender.track?.kind==='video'&&
           browserAppTrackClones.some(copy=>copy.parent===original.id&&copy.track===sender.track));
         if(senders.length!==1) throw new Error('Exactly one actual browser rendition sender is required');
         const sent=senders[0].track;
-        const samples=await Promise.all([(${sampleTrack.toString()})(original,${JSON.stringify(value)},undefined,${viewport.width / viewport.height}),
-          (${sampleTrack.toString()})(sent,${JSON.stringify(value)},undefined,${viewport.width / viewport.height})]);
+        const samples=await Promise.all([(${sampleTrack.toString()})(original,${JSON.stringify(value)},undefined,${viewport.width / viewport.height},${JSON.stringify(viewport.homePoint)}),
+          (${sampleTrack.toString()})(sent,${JSON.stringify(value)},undefined,${viewport.width / viewport.height},${JSON.stringify(viewport.homePoint)})]);
         return {original:samples[0],sent:samples[1],senderExact:senders[0].track===sent,
           captures:browserAppCaptures.length};
       })()`);
@@ -485,7 +505,7 @@ function runClient() {
   require('../dist-electron/main/main.js');
 }
 
-async function sampleTrack(track, color, expected, sourceAspect) {
+async function sampleTrack(track, color, expected, sourceAspect, homePoint) {
   const clone = track.clone();
   const reader = new MediaStreamTrackProcessor({ track: clone, maxBufferSize: 1 }).readable.getReader();
   const canvas = new OffscreenCanvas(1, 1), context = canvas.getContext('2d');
@@ -510,10 +530,13 @@ async function sampleTrack(track, color, expected, sourceAspect) {
         const frameAspect = frame.displayWidth / frame.displayHeight;
         const contentWidth = sourceAspect ? Math.min(1, sourceAspect / frameAspect) : 1;
         const contentHeight = sourceAspect ? Math.min(1, frameAspect / sourceAspect) : 1;
-        const points = expected || axis.flatMap(y => axis.map(x => ({
+        const documentPoints = axis.flatMap(y => axis.map(x => ({ x, y })));
+        // The logo's narrow solid padding can fall between distributed grid points.
+        if (color === 'home' && homePoint) documentPoints.push(homePoint);
+        const points = expected || documentPoints.map(({ x, y }) => ({
           x: (1 - contentWidth) / 2 + x * contentWidth,
           y: (1 - contentHeight) / 2 + y * contentHeight,
-        })));
+        }));
         canvas.width = canvas.height = color === 'home' ? 7 : 1;
         for (const {x,y} of points) {
           const radius = color === 'home' ? 3 : 0, size = radius*2+1;
