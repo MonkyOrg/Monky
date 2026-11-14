@@ -24,6 +24,8 @@ if (!process.versions.electron) {
   });
 } else {
   const { app, BrowserWindow } = require('electron');
+  const { emulateViewport } = require('./mobileViewport.cjs');
+  const { installReorderClock } = require('./pointerReorderClock.cjs');
   app.setPath('userData', process.env.MONKY_RAIL_REORDER_PROFILE);
   app.on('window-all-closed', () => {});
   let vite, browser, timeout;
@@ -46,7 +48,7 @@ if (!process.versions.electron) {
           server.middlewares.use((request, response, next) => {
             if (request.url !== '/__rail__') return next();
             response.setHeader('Content-Type', 'text/html');
-            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"></head>' +
+            response.end('<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles/theme.css"></head>' +
               '<body><div class="server-rail" id="server-rail" style="height: 560px"></div></body></html>');
           });
         },
@@ -56,10 +58,13 @@ if (!process.versions.electron) {
       vite.httpServer.once('error', reject);
       vite.httpServer.listen(0, '127.0.0.1', resolve);
     });
-    browser = new BrowserWindow({ show: false, width: 400, height: 600, webPreferences: {
+    browser = new BrowserWindow({ show: false, width: 1100, height: 700, webPreferences: {
       contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true,
     } });
     const evaluate = (code) => browser.webContents.executeJavaScript(code, true);
+    const touch = (type, point) => browser.webContents.debugger.sendCommand('Input.dispatchTouchEvent', {
+      type, touchPoints: point ? [{ x: point.x, y: point.y }] : [],
+    });
     const frames = () => evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     // Chromium delivers mouse moves aligned to animation frames, so on a slow
     // runner they can still be queued when the next script runs: wait for the
@@ -107,8 +112,10 @@ if (!process.versions.electron) {
         features: [{ name: 'prefers-reduced-motion', value }],
       });
       await motion('no-preference');
+      await emulateViewport(browser.webContents, 1600, 900, { mobile: false });
       const setup = await evaluate(`(${setupRail.toString()})().then(() => null).catch(error => ({ failure: error.stack || String(error) }))`);
       if (setup?.failure) throw new Error(setup.failure);
+      await installReorderClock(browser.webContents);
       const order = () => evaluate('window.railOrder()');
       const check = async (condition, message) => {
         if (!condition) throw new Error(`${message}: ${JSON.stringify(await evaluate('window.railState()'))}`);
@@ -181,7 +188,7 @@ if (!process.versions.electron) {
       await check(await evaluate('window.connectCalls === 1'), 'releasing a cancelled drag over its server does not open it');
       await check(JSON.stringify(await order()) === '[5103,5102,5101]', 'a cancelled drag moves nothing');
 
-      // Touch scrolls the rail, as it always has: a finger never starts a reorder.
+      // Moving before the hold leaves the finger free to scroll.
       await check(await evaluate(`(() => {
         const item = document.querySelector('.server-rail-item[data-port="5102"]');
         const box = item.getBoundingClientRect();
@@ -334,6 +341,122 @@ if (!process.versions.electron) {
       await check(await evaluate(`!!document.querySelector('#server-rail-discord')`), 'the Discord button is in the rail by default');
       await check(!(await discordButtonWith(false)), 'turned off, the Discord button leaves the rail');
       await check(await discordButtonWith(true), 'turned back on, the Discord button returns to the rail');
+
+      const compactOrder = JSON.stringify(await order());
+      for (const [width, height, mobile] of [[390, 844, false], [412, 915, true], [1032, 1376, true]]) {
+        await emulateViewport(browser.webContents, width, height, { mobile });
+        const from = await center('.server-rail-item[data-port="5102"]');
+        const to = await center('.server-rail-item[data-port="5103"]');
+        await drag(from, { x: to.x, y: to.bottom - 4 }, null, async () => {
+          await check(await evaluate(`!document.querySelector('.server-rail--dragging')`),
+            `compact ${width}x${height} does not start reordering with a mouse`);
+        });
+        await check(JSON.stringify(await order()) === compactOrder, `compact ${width}x${height} preserves the saved order`);
+        await check(await evaluate('window.reorderHold.pending() === 0'), 'scrolling does not leave a hold timer behind');
+      }
+
+      for (const [width, height] of [[412, 915], [1032, 1376]]) {
+        await emulateViewport(browser.webContents, width, height);
+        const before = await order();
+        let calls = await evaluate('window.connectCalls');
+        const from = await center(`.server-rail-item[data-port="${before[0]}"] .server-rail-avatar`);
+        await touch('touchStart', from);
+        await touch('touchEnd');
+        await check(await waitFor(`window.connectCalls === ${calls + 1}`), 'a quick tap still opens the server');
+        calls++;
+        await check(await evaluate('window.reorderHold.pending() === 0'), 'a quick tap clears its hold timer');
+        await check(JSON.stringify(await order()) === JSON.stringify(before), 'a quick tap preserves the server order');
+        await touch('touchStart', from);
+        await check(await waitFor('window.reorderHold.pending() === 1'), 'a real finger arms the hold');
+        await check(await evaluate(`!document.querySelector('.server-rail--dragging')`), 'touching alone does not activate reordering');
+        await evaluate('window.reorderHold.activate()');
+        await check(await evaluate(`!!document.querySelector('.server-rail--dragging .dragging')`), 'holding highlights the dragged server');
+        await check(await evaluate(`(() => {
+          const item = document.querySelector('.server-rail-avatar');
+          return !item.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+            && !document.querySelector('.floating-context-menu:not([data-ui-closing])');
+        })()`), 'a hold does not open the server context menu');
+        const to = await center(`.server-rail-item[data-port="${before.at(-1)}"]`);
+        for (let step = 1; step <= 5; step++) {
+          await touch('touchMove', { x: from.x, y: Math.round(from.y + (to.bottom - 4 - from.y) * step / 5) });
+          await frames();
+          await check(await evaluate(`!!document.querySelector('.server-rail--dragging')`), 'native panning cannot cancel a held reorder');
+        }
+        await touch('touchEnd');
+        await check(await waitFor(`!document.querySelector('.server-rail--dragging')`), 'releasing ends the touch drag');
+        await check(JSON.stringify(await order()) === JSON.stringify([...before.slice(1), before[0]]),
+          `a real held touch reorders servers at ${width}x${height}`);
+        await check(await evaluate('window.connectCalls') === calls, 'dropping a held server never opens it');
+        const cancelFrom = await center(`.server-rail-item[data-port="${before[1]}"]`);
+        const afterDrop = JSON.stringify(await order());
+        await touch('touchStart', cancelFrom);
+        await check(await waitFor('window.reorderHold.pending() === 1'), 'a subsequent hold is armed');
+        await evaluate('window.reorderHold.activate()');
+        await touch('touchCancel');
+        await check(await waitFor(`!document.querySelector('.server-rail--dragging')`), 'touch cancellation clears the highlight');
+        await check(JSON.stringify(await order()) === afterDrop, 'a cancelled touch commits no reordering');
+        await check(await evaluate('window.connectCalls') === calls, 'a cancelled touch opens no server');
+        await touch('touchStart', cancelFrom);
+        await check(await waitFor('window.reorderHold.pending() === 1'), 'a stationary hold is armed');
+        await evaluate('window.reorderHold.activate()');
+        await touch('touchEnd');
+        await frames();
+        await check(JSON.stringify(await order()) === afterDrop, 'holding and releasing in place preserves the order');
+        await check(await evaluate('window.connectCalls') === calls, 'holding and releasing in place does not open the server');
+      }
+
+      await emulateViewport(browser.webContents, 412, 915);
+      await evaluate('window.addScrollServers()');
+      const beforeScroll = JSON.stringify(await order());
+      const callsBeforeScroll = await evaluate('window.connectCalls');
+      const start = await evaluate(`(() => {
+        const list = document.querySelector('.server-rail-list');
+        const box = list.getBoundingClientRect();
+        if (list.scrollHeight <= list.clientHeight) throw new Error('The touch regression needs an overflowing server list');
+        return { x: box.left + box.width / 2, y: Math.min(box.bottom - 24, box.top + 280), scrollTop: list.scrollTop };
+      })()`);
+      await browser.webContents.debugger.sendCommand('Input.dispatchTouchEvent', {
+        type: 'touchStart', touchPoints: [{ x: start.x, y: start.y }],
+      });
+      for (let step = 1; step <= 10; step++) {
+        await browser.webContents.debugger.sendCommand('Input.dispatchTouchEvent', {
+          type: 'touchMove', touchPoints: [{ x: start.x, y: start.y - step * 16 }],
+        });
+        await frames();
+        await check(await evaluate(`!document.querySelector('.server-rail--dragging')`), 'a real finger scroll never starts reordering');
+      }
+      await browser.webContents.debugger.sendCommand('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await check(await waitFor(`document.querySelector('.server-rail-list').scrollTop > ${start.scrollTop} + 40`),
+        'a real finger gesture scrolls the overflowing server list');
+      await check(JSON.stringify(await order()) === beforeScroll, 'touch scrolling preserves every saved server position');
+      await check(await evaluate('window.connectCalls') === callsBeforeScroll, 'touch scrolling does not open a server');
+      await check(await evaluate('window.reorderHold.pending() === 0'), 'native scrolling cancels the pending hold');
+      const visible = await evaluate(`(() => {
+        const list = document.querySelector('.server-rail-list');
+        const bounds = list.getBoundingClientRect();
+        return [...list.querySelectorAll('.server-rail-item')].filter(item => {
+          const box = item.getBoundingClientRect();
+          return box.top >= bounds.top + 8 && box.bottom <= bounds.bottom - 8;
+        }).slice(0, 3).map(item => Number(item.dataset.port));
+      })()`);
+      await check(visible.length === 3, 'the overflowing list has three visible drag targets');
+      const fullOrder = await order();
+      const heldFrom = await center(`.server-rail-item[data-port="${visible[0]}"]`);
+      await touch('touchStart', heldFrom);
+      await check(await waitFor('window.reorderHold.pending() === 1'), 'holding inside a scrolled list is armed');
+      await evaluate('window.reorderHold.activate()');
+      const scrollWhileHeld = await evaluate(`document.querySelector('.server-rail-list').scrollTop`);
+      const heldTo = await center(`.server-rail-item[data-port="${visible[2]}"]`);
+      await touch('touchMove', { x: heldTo.x, y: heldTo.bottom - 4 });
+      await frames();
+      await check(await evaluate(`!!document.querySelector('.server-rail--dragging')
+        && document.querySelector('.server-rail-list').scrollTop === ${scrollWhileHeld}`),
+      'holding switches an overflowing list from native scrolling to reordering');
+      await touch('touchEnd');
+      const reordered = fullOrder.filter(port => port !== visible[0]);
+      reordered.splice(reordered.indexOf(visible[2]) + 1, 0, visible[0]);
+      await check(JSON.stringify(await order()) === JSON.stringify(reordered), 'a held touch commits the intended position in an overflowing list');
+      await check(await evaluate('window.connectCalls') === callsBeforeScroll, 'a held drag in a scrolled list never opens a server');
       console.log('Server rail reorder DOM passed');
       await finish(0);
     } catch (error) {
@@ -388,6 +511,9 @@ async function setupRail() {
   };
   window.railOrder = () => connectionStore.railLayout.flatMap(node => node.type === 'server'
     ? [node.port] : node.children.map(child => `folder:${child.port}`));
+  window.addScrollServers = () => {
+    for (let index = 0; index < 12; index++) connectionStore.addSavedServer(saved(`scroll-${index}.test`, 5200 + index, 0));
+  };
   window.railState = () => {
     const rail = document.querySelector('#server-rail');
     return {

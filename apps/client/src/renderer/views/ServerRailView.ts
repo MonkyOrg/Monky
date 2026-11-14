@@ -974,8 +974,7 @@ export class ServerRailView {
 
     for (const element of draggableNodes) {
       onPrimaryPress(element, (event) => {
-        // Touch scrolls the rail, as it always has; the mouse and the pen reorder it.
-        if (event.pointerType === 'touch' || this.connectingKey || this.draggedRailItem) return;
+        if (this.connectingKey || this.draggedRailItem) return;
         const item = this.railItemOf(element);
         if (!item) return;
         // The rail outlives the repaints that replace its items mid-drag; it keeps the pointer.
