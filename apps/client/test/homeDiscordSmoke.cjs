@@ -349,7 +349,7 @@ async function setupHomeDiscordSmoke() {
     const pending = deleteOwnedServer(deletionTarget).then(() => { settled = true; });
     await until(() => !!dialog(), `delete confirmation missing: ${scenario}`);
     check(dialog().textContent.includes('<Delete Fixture>') && !dialog().querySelector('delete'),
-      'the deletion warning renders the server name as text');
+      `the deletion warning renders the server name as text: ${scenario}; ${dialog().textContent.slice(0, 200)}`);
     check(dialog().querySelector('[data-action="cancel"]') === document.activeElement,
       'permanent deletion focuses Cancel');
     dialog().querySelector(`[data-action="${scenario === 'cancel-delete' ? 'cancel' : 'confirm'}"]`).click();
@@ -366,6 +366,7 @@ async function setupHomeDiscordSmoke() {
       dialog().querySelector('[data-action="confirm"]').click();
     }
     await pending;
+    await until(() => !dialog(), `previous deletion dialog did not close: ${scenario}`);
     equal(stops, ['stop-fails', 'delete-fails', 'success'].includes(scenario) ? 1 : 0,
       `only the matching server is stopped after consent: ${scenario}`);
     equal(deletions, ['delete-fails', 'other-instance', 'success'].includes(scenario) ? 1 : 0,

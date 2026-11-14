@@ -82,7 +82,7 @@ export function initTooltips(doc: Document = document): () => void {
     timer = undefined;
     if (shown) {
       shown = false;
-      hideWithMotion(tooltip, 'popover', () => { content.textContent = ''; });
+      hideWithMotion(tooltip, 'view', () => { content.textContent = ''; });
     }
     if (anchor) {
       const ids = (anchor.getAttribute('aria-describedby') ?? '').split(/\s+/)
@@ -212,7 +212,7 @@ export function initTooltips(doc: Document = document): () => void {
     content.textContent = textFor(anchor);
     const entering = !shown;
     shown = true;
-    if (entering) showWithMotion(tooltip, 'popover');
+    if (entering) showWithMotion(tooltip, 'view');
     const ids = new Set((anchor.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean));
     ids.add(tooltip.id);
     anchor.setAttribute('aria-describedby', [...ids].join(' '));

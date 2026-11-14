@@ -234,7 +234,10 @@ export class SettingsModal {
     });
     this.sectionNavigation.setTab(this.activeTab);
     if (section && this.activeTab !== 'local_tools') this.sectionNavigation.revealSection(section);
-    if (this.sectionNavigation.pageVisible) active.show?.(shell.element);
+    if (this.sectionNavigation.pageVisible) {
+      if (this.activeTab === 'voice_video') this.voiceVideoTab.activateCameraPreview();
+      else active.show?.(shell.element);
+    }
     const modal = shell.element;
     await Promise.all([
       this.voiceVideoTab.refreshDevices(modal).then(() => {

@@ -565,8 +565,13 @@ async function runLiveMarkdownSmoke(window) {
     await draft('', 0, 0);
     const [initialWidth, initialHeight] = window.getContentSize();
     const originalPlaceholder = await evaluate(`document.getElementById('chat-message-input').placeholder`);
+    const originalCompactPlaceholder = await evaluate(`document.getElementById('chat-message-input').getAttribute('compact-placeholder')`);
     window.setContentSize(450, initialHeight);
-    await evaluate(`document.getElementById('chat-message-input').placeholder=${JSON.stringify(originalPlaceholder.repeat(4))}`);
+    await evaluate(`(() => {
+      const input = document.getElementById('chat-message-input');
+      input.placeholder = ${JSON.stringify(originalPlaceholder.repeat(4))};
+      input.setAttribute('compact-placeholder', input.placeholder);
+    })()`);
     await fixture('settle()');
     const emptyCaret = await evaluate(`(() => {
       const input=document.getElementById('chat-message-input');
@@ -587,6 +592,12 @@ async function runLiveMarkdownSmoke(window) {
       `The native caret stays visible and single-line before and after typing: empty=${emptyCaret.height}, typed=${typedCaretHeight}`);
     window.setContentSize(initialWidth, initialHeight);
     await evaluate(`document.getElementById('chat-message-input').placeholder=${JSON.stringify(originalPlaceholder)}`);
+    await evaluate(`(() => {
+      const input = document.getElementById('chat-message-input');
+      const compact = ${JSON.stringify(originalCompactPlaceholder)};
+      if (compact === null) input.removeAttribute('compact-placeholder');
+      else input.setAttribute('compact-placeholder', compact);
+    })()`);
     await draft('', 0, 0);
     const source = '# Heading\n\nA **bold** and *italic* with ~~strike~~ and `inline`.\n\n> Quote\n\n4. Four\n5. Five\n\n```js\nconst answer = 42;\n```';
     await insert(source);
@@ -1206,14 +1217,23 @@ async function runEditorContextSmoke(window, locale) {
 }
 
 async function installFixture() {
-  const [{ ChatView }, { sessionManager }, chats, { appEvents }, routing, language, { selectEnhancer }, { runScopeHandlers }, { Permission }] = await Promise.all([
+  const [{ ChatView }, { sessionManager }, chats, { appEvents }, routing, language, { selectEnhancer }, { runScopeHandlers }, { Permission }, { COMPACT_VIEWPORT_QUERY }] = await Promise.all([
     import('/views/ChatView.ts'), import('/core/SessionManager.ts'), import('/stores/chatStore.ts'),
     import('/core/EventBus.ts'), import('/core/sessionRouting.ts'), import('/i18n/index.ts'),
     import('/core/SelectEnhancer.ts'), import('/@id/@codemirror/view'),
-    import('/@id/@monky/shared'),
+    import('/@id/@monky/shared'), import('/utils/viewport.ts'),
   ]);
-  const root = document.getElementById('app');
+  const shell = document.createElement('div');
+  shell.className = 'main-layout';
+  shell.style.cssText = 'height:100vh;width:100%;display:flex;flex-direction:column;padding:0;';
+  const viewport = matchMedia(COMPACT_VIEWPORT_QUERY);
+  const updateViewport = () => shell.toggleAttribute('data-compact', viewport.matches);
+  viewport.addEventListener('change', updateViewport);
+  updateViewport();
+  document.getElementById('app').append(shell);
+  const root = document.createElement('div');
   root.style.cssText = 'height:100vh;width:100%;display:flex;flex-direction:column;';
+  shell.append(root);
   const user = { id: 'author', clientId: 'author-device', nickname: 'Author', status: 'ONLINE', joinedAt: 1 };
   const original = { id: 'original', channelId: 'chat', userId: user.id, userNickname: user.nickname,
     content: '\nOriginal line\nSecond line', createdAt: 100, isSystem: false };
@@ -2095,8 +2115,9 @@ async function installFixture() {
       routing.setSessionEventRouter((_key, _event, emit) => emit());
       document.removeEventListener('input', inputListener, true);
       document.removeEventListener('keydown', keyListener, true);
+      viewport.removeEventListener('change', updateViewport);
       document.getElementById('fixture-other-control')?.remove();
-      root.innerHTML = '';
+      shell.remove();
     },
   };
 }

@@ -195,9 +195,11 @@ function move(element: HTMLElement, kind: SurfaceKind, leaving: boolean, finish?
     duration, easing, fill: 'both',
   }));
   if (card) {
+    const popoverOffset = kind === 'popover' ? Math.max(0, Math.min(compact ? 16 : 4,
+      viewportBounds().bottom - card.getBoundingClientRect().bottom - 8)) : compact ? 16 : 4;
     const offset = sheet ? '0 100%' : kind === 'modal' && compact
       ? card.matches('.settings-modal-card') ? '100% 0' : '0 100%'
-      : kind === 'panel' ? '10px 0' : kind === 'modal' ? '0 8px' : compact ? '0 16px' : '0 4px';
+      : kind === 'panel' ? '10px 0' : kind === 'modal' ? '0 8px' : `0 ${popoverOffset}px`;
     motion.animations.push(card.animate(
       leaving ? [{ translate: translation ?? '0 0' }, { translate: offset }]
         : [{ translate: translation ?? offset }, { translate: '0 0' }],

@@ -199,6 +199,10 @@ function runClient() {
   };
   async function action(name, value) {
     if (name === 'join') {
+      // This desktop capture regression must not inherit the compact first-launch window.
+      owner.setContentSize(1100, 850);
+      await until(() => run(`!!document.querySelector('.main-layout:not([data-compact])')`),
+        'Desktop publication viewport did not settle');
       await run(`document.querySelector('[data-channel-type="VOICE"]:not([data-afk-channel])').click()`);
       await until(() => run(`!!document.querySelector('#voice-connection-row') &&
         !document.querySelector('#voice-connection-row').matches('.connecting,.reconnecting')`), 'Real voice join failed');

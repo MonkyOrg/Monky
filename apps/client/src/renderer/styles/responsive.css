@@ -1,10 +1,10 @@
 /* The same renderer serves Web and Electron; compact layout follows space, not the platform. */
-.compact-navigation,
-.compact-footer,
-.compact-settings-index-header,
-.compact-settings-back,
-.compact-call-options,
-.compact-home-heading {
+:root .compact-navigation,
+:root .compact-footer,
+:root .compact-settings-index-header,
+:root .compact-settings-back,
+:root .compact-call-options,
+:root .compact-home-heading {
   display: none;
 }
 

@@ -556,6 +556,18 @@ async function* regression() {
   await settle(consent);
   check(!document.querySelector(motion.ACTIVE_MODAL_SELECTOR), 'No active modal or delayed cleanup remains');
   yield 'compact';
+  const edgePopup = document.createElement('div');
+  edgePopup.style.cssText = 'position:fixed;bottom:8px;left:8px;width:120px;height:120px;background:var(--bg-panel)';
+  document.body.append(edgePopup);
+  motion.animateEnter(edgePopup);
+  check(edgePopup.getAnimations().length > 0 && edgePopup.getBoundingClientRect().bottom <= innerHeight - 7,
+    'A compact popup stays inside the viewport from the first animated frame, not just after settling');
+  await settle(edgePopup);
+  motion.removeWithMotion(edgePopup);
+  for (const animation of edgePopup.getAnimations()) animation.currentTime = animation.effect.getComputedTiming().endTime;
+  check(edgePopup.isConnected && edgePopup.getBoundingClientRect().bottom <= innerHeight - 7,
+    'A compact popup also stays inside the viewport during its exit');
+  await settle(edgePopup);
   const page = document.createElement('section');
   page.style.cssText = 'position:fixed;inset:0;view-transition-name:fixture-page;background:var(--bg-panel)';
   page.innerHTML = '<button style="position:fixed;left:19px;top:23px">Fixed menu</button><div>Private content</div>';

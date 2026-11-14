@@ -391,8 +391,11 @@ if (!process.versions.electron) {
     await waitFor(async () => await run(aliceWindow, '!!document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card")'), 'review before any execution');
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").click()');
     assert.equal(await run(aliceWindow, 'document.querySelectorAll(".modal-backdrop:not([data-ui-closing]) .dialog-card").length'), 1, 'Repeated opening does not stack permission prompts');
-    aliceWindow.setContentSize(800, 600);
-    await waitFor(async () => await run(aliceWindow, 'innerHeight === 600'), 'small review viewport');
+    aliceWindow.setContentSize(800, 400);
+    await waitFor(async () => await run(aliceWindow, 'innerHeight === 400'), 'short mobile review viewport');
+    await run(aliceWindow, `Promise.all(document.querySelector(".modal-backdrop:not([data-ui-closing])")
+      .getAnimations({ subtree: true }).filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime))
+      .map(animation => animation.finished)).then(() => null)`);
     assert.equal(await run(aliceWindow, `(() => {
       const message = document.querySelector(".dialog-message");
       const card = document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card").getBoundingClientRect();
