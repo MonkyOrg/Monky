@@ -2,6 +2,7 @@ import { appEvents } from '../core/EventBus';
 import { isForegroundEvent } from '../core/sessionRouting';
 import { nextIndex } from '../utils/rovingFocus';
 import { animateEnter, ownSurface, removeWithMotion, topModal } from '../utils/surfaceMotion';
+import { viewportBounds } from '../utils/viewport';
 
 export interface ContextMenuItem {
   label: string;
@@ -159,13 +160,16 @@ export class ContextMenu {
 
   private positionMenu(menu: HTMLElement, x: number, y: number): void {
     // Keep the menu within the viewport.
+    const viewport = viewportBounds();
+    menu.style.maxWidth = `${Math.max(0, viewport.width - 24)}px`;
+    menu.style.maxHeight = `${Math.max(0, viewport.height - 24)}px`;
     const rect = menu.getBoundingClientRect();
     let posX = x;
     let posY = y;
-    if (posX + rect.width > window.innerWidth - 12) posX = window.innerWidth - rect.width - 12;
-    if (posY + rect.height > window.innerHeight - 12) posY = window.innerHeight - rect.height - 12;
-    if (posX < 12) posX = 12;
-    if (posY < 12) posY = 12;
+    if (posX + rect.width > viewport.right - 12) posX = viewport.right - rect.width - 12;
+    if (posY + rect.height > viewport.bottom - 12) posY = viewport.bottom - rect.height - 12;
+    if (posX < viewport.left + 12) posX = viewport.left + 12;
+    if (posY < viewport.top + 12) posY = viewport.top + 12;
     menu.style.left = `${posX}px`;
     menu.style.top = `${posY}px`;
   }

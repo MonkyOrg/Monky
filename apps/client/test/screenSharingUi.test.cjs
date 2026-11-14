@@ -531,8 +531,11 @@ for (const language of ['pt-BR', 'en']) {
     const f = fixture(language);
     t.after(() => f.close());
     const root = f.document.createElement('main');
+    root.className = 'settings-modal-card';
     root.innerHTML = `<aside class="settings-sidebar"><button class="settings-tab-btn" data-tab="quality">Quality</button></aside>
-      <div class="settings-content-body"><div id="tab-panel-quality">${f.quality.renderHtml()}</div></div>`;
+      <div class="settings-main-container"><div class="settings-content-header"></div>
+        <div class="settings-content-body"><div id="tab-panel-quality">${f.quality.renderHtml()}</div></div>
+      </div>`;
     f.document.body.appendChild(root);
     f.quality.attachEvents(root);
     const section = root.querySelector('[data-settings-section="screen-preview"]');

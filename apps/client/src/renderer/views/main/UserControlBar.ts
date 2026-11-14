@@ -42,6 +42,7 @@ export interface UserControlBarHost {
   readonly root: HTMLElement;
   /** The camera of the call; a stage on screen redraws its own tile. */
   toggleCamera(): Promise<void>;
+  openVoiceStage(): void;
 }
 
 function presenceIndicator(): { className: PresenceStatus; label: string; style: string } {
@@ -276,15 +277,15 @@ export class UserControlBar {
 
     slot.innerHTML = String(html`
       <div class="voice-connection-row ${connectionClass}" id="voice-connection-row">
-        <div class="voice-conn-info">
+        <button type="button" class="voice-conn-info" aria-label="${t('responsive.returnToCall')}: ${vc.name}">
           <span class="material-symbols-outlined md-16 voice-conn-signal ${quality}" aria-hidden="true">${icon}</span>
-          <div class="voice-conn-text">
+          <span class="voice-conn-text">
             <span class="voice-conn-status" role="status">${statusText}</span>
             <span class="voice-conn-channel" id="sidebar-voice-channel">${vc.name}</span>
             ${serverName ? html`<span class="voice-conn-server">${serverName}</span>` : ''}
-          </div>
+          </span>
           <span class="voice-conn-ping" id="sidebar-voice-ping" title="${t('main.averagePing')}">-- ms</span>
-        </div>
+        </button>
         <div class="voice-conn-actions">
           <div class="audio-control-group noise-control-group">
             <button type="button" id="sidebar-btn-rnnoise" class="btn btn-icon voice-conn-rnnoise ${noiseEnabled ? 'rnnoise-active' : ''}" title="${noiseTitle}" aria-label="${noiseTitle}" aria-pressed="${noiseEnabled}">
@@ -301,6 +302,7 @@ export class UserControlBar {
       </div>
     `);
 
+    slot.querySelector('.voice-conn-info')?.addEventListener('click', () => this.host.openVoiceStage());
     const btnRnnoise = slot.querySelector<HTMLButtonElement>('#sidebar-btn-rnnoise');
     btnRnnoise?.addEventListener('click', async () => {
       if (btnRnnoise.disabled) return;

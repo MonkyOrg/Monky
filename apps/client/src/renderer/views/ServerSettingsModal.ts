@@ -153,9 +153,9 @@ export class ServerSettingsModal {
       </div>`,
       initialFocus: false,
       // Closing first commits a field being typed; it waits while any edit is still being applied.
-      canClose: () => {
+      canClose: reason => {
         this.finishEditing();
-        return !this.context?.operations.pendingCount;
+        return !this.context?.operations.pendingCount && (reason !== 'escape' || !this.sectionNavigation?.goBack());
       },
       onClose: () => this.teardown(),
     });
@@ -163,7 +163,7 @@ export class ServerSettingsModal {
     this.modalEl = shell.element;
     this.domEvents = new AbortController();
     this.attachEvents();
-    this.sectionNavigation = new SettingsSectionNavigation(this.modalEl);
+    this.sectionNavigation = new SettingsSectionNavigation(this.modalEl, { initialDetail: !!initialTab });
     this.switchTab(this.activeTab);
     this.refreshState();
     shell.card.querySelector<HTMLElement>(`[data-tab="${this.activeTab}"]`)?.focus({ preventScroll: true });

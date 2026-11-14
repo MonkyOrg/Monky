@@ -38,6 +38,7 @@ import { MemberList } from './main/MemberList';
 import { ServerHeader } from './main/ServerHeader';
 import { UserControlBar } from './main/UserControlBar';
 import { CallNotices } from './main/CallNotices';
+import { ResponsiveShell } from './main/ResponsiveShell';
 
 /**
  * The screen around the conversation: a server's layout (rail, header,
@@ -73,8 +74,13 @@ export class MainView {
   private readonly members: MemberList;
   private readonly footer: UserControlBar;
   private readonly notices: CallNotices;
+  private readonly responsive = new ResponsiveShell();
 
   public setActiveContentView(view: 'chat' | 'stage'): void {
+    // Compact voice chat replaces the stage; desktop voice chat accompanies it.
+    if (view === 'stage' && this.voiceChatChannelId && this.container.querySelector('.main-layout[data-compact]')) {
+      this.closeVoiceChannelChat(false);
+    }
     const changed = this.activeContentView !== view;
     if (changed && view === 'chat') this.voiceStageView?.openAutomaticPictureInPicture();
     this.activeContentView = view;
@@ -97,6 +103,7 @@ export class MainView {
 
   constructor(container: HTMLElement, private readonly homeView?: HomeView) {
     this.container = container;
+    if (homeView) homeView.onNavigate = () => this.responsive.showContent();
     // The parts call back through these methods, so a navigation always takes the same path.
     this.header = new ServerHeader(container);
     this.channels = new ChannelSidebar({
@@ -114,7 +121,9 @@ export class MainView {
       root: container, watchLive: sessionId => this.watchLive(sessionId),
       openMiniapp: id => this.openVoiceStage(undefined, id),
     });
-    this.footer = new UserControlBar({ root: container, toggleCamera: () => this.toggleCamera() });
+    this.footer = new UserControlBar({
+      root: container, toggleCamera: () => this.toggleCamera(), openVoiceStage: () => this.openVoiceStage(),
+    });
     this.notices = new CallNotices({
       root: container,
       contentView: () => this.activeContentView,
@@ -371,6 +380,8 @@ export class MainView {
 
   /** What both layouts end with: the call row, the notices above the card and the entry animation. */
   private finishLayout(navigating: boolean): void {
+    const layout = this.container.querySelector<HTMLElement>('.main-layout');
+    if (layout) this.unbindEvents.push(this.responsive.bind(layout));
     this.footer.updateVoiceConnectionRow();
     this.notices.renderAll();
     gameShareSuggestion.render(false);
@@ -426,6 +437,7 @@ export class MainView {
     this.viewedVoiceSessionKey = sessionKey;
     this.setActiveContentView('stage');
     this.voiceStageView?.setChannel(channelId);
+    this.responsive.showContent();
     this.updateScreenShareNotice();
   }
 
@@ -572,6 +584,7 @@ export class MainView {
   /** Folding is a layout preference, so it is saved and applied by classes: a re-render of the layout reads it again. */
   private bindSidebarToggles(): () => void {
     const toggle = (sidebar: 'navigation' | 'members'): void => {
+      if (this.responsive.toggle(sidebar)) return;
       const hidden = !(sidebar === 'navigation' ? settingsStore.navigationSidebarHidden : settingsStore.membersSidebarHidden);
       settingsStore.setSidebarHidden(sidebar, hidden);
       this.container.querySelector('.main-layout')?.classList.toggle(`main-layout--${sidebar}-hidden`, hidden);
@@ -624,6 +637,7 @@ export class MainView {
     this.messageSearch?.destroy();
     categoryModal.close();
     this.homeView?.suspend();
+    if (this.homeView) this.homeView.onNavigate = null;
     this.channels.destroy();
     this.unbindListeners();
     soundboardPlayersBar.unmount();
@@ -685,6 +699,7 @@ export class MainView {
     this.viewedVoiceSessionKey = sessionKey;
     this.setActiveContentView('stage');
     this.voiceStageView?.setChannel(channelId);
+    this.responsive.showContent();
     if (watchSessionId) this.voiceStageView?.watchScreenShare(watchSessionId);
     if (botScreenId) this.voiceStageView?.watchBotScreen(botScreenId);
     this.renderChannels();
@@ -778,6 +793,7 @@ export class MainView {
     serverStore.setActiveTextChannel(channelId);
     this.setActiveContentView('chat');
     this.showSelectedChannel(channelId);
+    this.responsive.showContent();
     this.renderChannels();
     this.updateScreenShareNotice();
   }
@@ -791,6 +807,7 @@ export class MainView {
     this.setActiveContentView('stage');
     this.voiceStageView?.setChannel(channelId);
     this.mountVoiceChannelChat(channelId, true);
+    this.responsive.showContent();
     this.renderChannels();
     this.updateScreenShareNotice();
   }

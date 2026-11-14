@@ -63,10 +63,11 @@ async function runQualitySettingsSmoke() {
   media.getUserMedia = denyMedia;
   media.getDisplayMedia = denyMedia;
   const [{ SettingsModal }, { settingsStore }, { appEvents }, { initTooltips }, language, { videoService },
-    { webRtcManager }, { ScreenSharePickerModal }, { SelectEnhancer }] = await Promise.all([
+    { webRtcManager }, { ScreenSharePickerModal }, { SelectEnhancer }, { COMPACT_VIEWPORT_QUERY }] = await Promise.all([
     import('/views/SettingsModal.ts'), import('/stores/settingsStore.ts'), import('/core/EventBus.ts'),
     import('/core/TooltipService.ts'), import('/i18n/index.ts'), import('/core/VideoService.ts'),
     import('/core/WebRtcManager.ts'), import('/views/ScreenSharePickerModal.ts'), import('/core/SelectEnhancer.ts'),
+    import('/utils/viewport.ts'),
   ]);
   const originalLanguage = language.getLanguage();
   const originalApi = window.api;
@@ -826,8 +827,11 @@ async function runQualitySettingsSmoke() {
           'Game entries are advice, not controls that can select a window or start capture.');
         const guideBounds = guide.getBoundingClientRect();
         const guideBody = guide.querySelector('.game-capture-guide-body');
-        check(guideBounds.left >= 23 && guideBounds.top >= 23 && guideBounds.right <= innerWidth - 23 &&
-          guideBounds.bottom <= innerHeight - 23 && guide.scrollWidth <= guide.clientWidth + 1,
+        const compactGuide = matchMedia(COMPACT_VIEWPORT_QUERY).matches;
+        const guideMargin = compactGuide ? 0 : 23;
+        check(guideBounds.left >= guideMargin && guideBounds.top >= guideMargin &&
+          guideBounds.right <= innerWidth - guideMargin && guideBounds.bottom <= innerHeight - guideMargin &&
+          (!compactGuide || guideBounds.width === innerWidth) && guide.scrollWidth <= guide.clientWidth + 1,
         `The bilingual guide must fit the viewport: ${JSON.stringify(guideBounds.toJSON())}`);
         check(guideBody.clientHeight >= 48 && guideBody.scrollHeight > guideBody.clientHeight &&
           [guideSearch, guideClose, guide.querySelector('#game-capture-guide-source')].every(element => {
@@ -1021,8 +1025,12 @@ async function runQualitySettingsSmoke() {
         gameMethod.scrollIntoView({ block: 'nearest', behavior: 'instant' });
         await wait();
         const bounds = pickerRoot.getBoundingClientRect();
-        check(bounds.left >= 23 && bounds.top >= 23 && bounds.right <= innerWidth - 23 && bounds.bottom <= innerHeight - 23,
-          'The picker must retain a 24px viewport margin without provisional verification guidance.');
+        const compactPicker = matchMedia(COMPACT_VIEWPORT_QUERY).matches;
+        const pickerMargin = compactPicker ? 0 : 23;
+        check(bounds.left >= pickerMargin && bounds.top >= pickerMargin &&
+          bounds.right <= innerWidth - pickerMargin && bounds.bottom <= innerHeight - pickerMargin &&
+          (!compactPicker || bounds.width === innerWidth),
+          'The picker must retain desktop margins or fill the compact viewport without provisional verification guidance.');
         check(pickerRoot.scrollWidth <= pickerRoot.clientWidth + 1 &&
           [windowMethod, gameMethod, refresh, pickerRoot.querySelector('.share-aspect-option')]
             .every(element => element.scrollWidth <= element.clientWidth + 1),

@@ -44,7 +44,7 @@ if (!process.versions.electron) {
         server.middlewares.use((request, response, next) => {
           if (request.url !== '/__surfaces__') return next();
           response.setHeader('Content-Type', 'text/html');
-          response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css"></head><body><button id="origin">Origin</button></body></html>');
+          response.end('<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css"></head><body><button id="origin">Origin</button></body></html>');
         });
       } }],
     });
@@ -81,6 +81,8 @@ if (!process.versions.electron) {
         await browser.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
           features: [{ name: 'prefers-reduced-motion', value: step.value === 'reduce' ? 'reduce' : 'no-preference' }],
         });
+      } else if (step.value === 'compact' || step.value === 'compact-short') {
+        await require('./mobileViewport.cjs').emulateViewport(browser.webContents, 390, step.value === 'compact-short' ? 340 : 844);
       } else if (step.value === 'nested-aria') {
         const { nodes } = await browser.webContents.debugger.sendCommand('Accessibility.getFullAXTree');
         const dialogs = nodes.filter(node => !node.ignored && node.role?.value === 'dialog').map(node => node.name?.value);
@@ -553,5 +555,108 @@ async function* regression() {
   check(resolution === true && consent.hasAttribute('data-ui-closing'), 'Trusted consent resolves before visual exit completes');
   await settle(consent);
   check(!document.querySelector(motion.ACTIVE_MODAL_SELECTOR), 'No active modal or delayed cleanup remains');
+  yield 'compact';
+  const edgePopup = document.createElement('div');
+  edgePopup.style.cssText = 'position:fixed;bottom:8px;left:8px;width:120px;height:120px;background:var(--bg-panel)';
+  document.body.append(edgePopup);
+  motion.animateEnter(edgePopup);
+  check(edgePopup.getAnimations().length > 0 && edgePopup.getBoundingClientRect().bottom <= innerHeight - 7,
+    'A compact popup stays inside the viewport from the first animated frame, not just after settling');
+  await settle(edgePopup);
+  motion.removeWithMotion(edgePopup);
+  for (const animation of edgePopup.getAnimations()) animation.currentTime = animation.effect.getComputedTiming().endTime;
+  check(edgePopup.isConnected && edgePopup.getBoundingClientRect().bottom <= innerHeight - 7,
+    'A compact popup also stays inside the viewport during its exit');
+  await settle(edgePopup);
+  const page = document.createElement('section');
+  page.style.cssText = 'position:fixed;inset:0;view-transition-name:fixture-page;background:var(--bg-panel)';
+  page.innerHTML = '<button style="position:fixed;left:19px;top:23px">Fixed menu</button><div>Private content</div>';
+  page.setAttribute('aria-hidden', 'false');
+  const hiddenPanel = document.createElement('div');
+  hiddenPanel.style.display = 'none';
+  hiddenPanel.innerHTML = '<div>Hidden desktop navigation</div>';
+  page.append(hiddenPanel);
+  document.body.append(page);
+  document.documentElement.style.setProperty('--motion-step-duration', '1000ms');
+  const wait = async predicate => {
+    for (let attempt = 0; attempt < 120; attempt++) {
+      if (predicate()) return;
+      await frame();
+    }
+    throw new Error('Compact page transition did not reach its expected state');
+  };
+  const slides = () => document.getAnimations().filter(animation =>
+    animation.effect?.pseudoElement?.includes('compact-page'));
+  let updates = 0;
+  motion.transitionCompactPage(page, () => { updates++; }, 1);
+  await wait(() => slides().length === 2);
+  check(updates === 1 && getComputedStyle(page).transform === 'none',
+    'Mobile navigation slides real browser snapshots without transforming live view ancestors');
+  check(getComputedStyle(document.documentElement).viewTransitionName === 'none',
+    'Only the navigating surface is captured, leaving content outside it live for immediate revocation');
+  const fixed = page.querySelector('button').getBoundingClientRect();
+  check(fixed.left === 19 && fixed.top === 23, 'Fixed menus retain viewport positioning during the page slide');
+  check(slides().some(animation => animation.effect.getKeyframes()[0].transform === 'translateX(100%)'),
+    'Forward navigation enters from the right');
+  hiddenPanel.innerHTML = '<div>Updated hidden desktop navigation</div>';
+  hiddenPanel.hidden = false;
+  hiddenPanel.inert = true;
+  hiddenPanel.setAttribute('aria-hidden', 'true');
+  await frame();
+  check(slides().length === 2, 'Rebuilding CSS-hidden desktop controls does not cancel a visible mobile page slide');
+  page.setAttribute('aria-hidden', 'false');
+  await frame();
+  check(slides().length === 2, 'Idempotent ARIA updates do not cancel the mobile slide');
+  page.querySelector('div').hidden = true;
+  await wait(() => !document.documentElement.hasAttribute('data-compact-transition'));
+  check(slides().length === 0 && page.style.viewTransitionName === 'fixture-page',
+    'Revocation drops captured private content immediately and restores the original snapshot name');
+  let stale = 0;
+  motion.transitionCompactPage(page, () => { stale++; }, 1);
+  motion.transitionCompactPage(page, () => { updates++; }, -1);
+  await wait(() => slides().length === 2);
+  check(stale === 0 && updates === 2, 'A superseded page callback cannot overwrite newer navigation');
+  check(slides().some(animation => animation.effect.getKeyframes()[0].transform === 'translateX(-100%)'),
+    'Back navigation enters from the left');
+  await wait(() => !document.documentElement.hasAttribute('data-compact-transition'));
+  const outgoing = page.querySelector('div');
+  outgoing.hidden = false;
+  motion.transitionCompactPage(page, () => { updates++; outgoing.hidden = true; }, 1);
+  await wait(() => slides().length === 2);
+  outgoing.textContent = '';
+  await wait(() => !document.documentElement.hasAttribute('data-compact-transition'));
+  check(slides().length === 0, 'Revocation also drops private content captured only in the outgoing page');
+  yield 'reduce';
+  await wait(() => !document.documentElement.hasAttribute('data-compact-transition'));
+  motion.transitionCompactPage(page, () => { updates++; }, 1);
+  check(updates === 4 && slides().length === 0, 'Reduced motion commits navigation synchronously without snapshots');
+  yield 'motion';
+  motion.transitionCompactPage(page, () => { stale++; }, 1);
+  motion.cancelCompactPageTransition(page);
+  page.remove();
+  await frame();
+  check(stale === 0 && !document.documentElement.hasAttribute('data-compact-transition'),
+    'Teardown cancels pending page callbacks without delayed DOM updates');
+  document.documentElement.style.removeProperty('--motion-step-duration');
+  const mobilePicker = new EmojiPicker({ container: document.body, anchor: origin, emojiOnly: true, onSelectEmoji() {} });
+  await mobilePicker.open();
+  const mobileSheet = document.querySelector('.emoji-picker');
+  check(mobileSheet.getAnimations().some(animation => /^0(?:px)? 100%$/.test(animation.effect.getKeyframes()[0].translate ?? '')),
+    'The mobile emoji sheet slides in from below instead of using the desktop popover offset');
+  await settle(mobileSheet);
+  const emojiSearch = mobileSheet.querySelector('input');
+  emojiSearch.focus();
+  emojiSearch.value = 'smile';
+  emojiSearch.dispatchEvent(new Event('input'));
+  yield 'compact-short';
+  await wait(() => mobileSheet.getBoundingClientRect().bottom <= innerHeight + 1);
+  check(mobilePicker.isOpen() && document.activeElement === emojiSearch && emojiSearch.value === 'smile',
+    'Resizing for the mobile keyboard preserves the open emoji search, focus and query');
+  const sheetBounds = mobileSheet.getBoundingClientRect();
+  check(sheetBounds.top >= 0 && sheetBounds.height <= innerHeight,
+    'The emoji sheet stays inside a keyboard-height mobile viewport');
+  mobilePicker.destroy();
+  await settle(mobileSheet);
+  check(!mobileSheet.isConnected, 'Mobile picker teardown releases the sheet and viewport listeners');
   return checks;
 }

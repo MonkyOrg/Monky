@@ -310,12 +310,16 @@ if (!process.versions.electron) {
       throw new Error(`Native resize must enlarge the dialog and editor on both axes: ${JSON.stringify({before, after})}`);
     }
     await evaluate(`document.querySelector('.code-modal-card').style.cssText = 'width:4000px;height:4000px'`);
+    const compactQuery = await evaluate(`import('/utils/viewport.ts').then(module => module.COMPACT_VIEWPORT_QUERY)`);
     for (const [width, height] of [[1100, 850], [560, 440]]) {
       window.setContentSize(width, height);
       await new Promise(resolve => setTimeout(resolve, 100));
       const bounds = await rect();
-      if (bounds.left < 23 || bounds.top < 23 || bounds.right > width - 23 || bounds.bottom > height - 23) {
-        throw new Error(`Resized code dialog must retain a 24px viewport margin: ${JSON.stringify({width, height, bounds})}`);
+      const compact = await evaluate(`matchMedia(${JSON.stringify(compactQuery)}).matches`);
+      const margin = compact ? 0 : 23;
+      if (bounds.left < margin || bounds.top < margin || bounds.right > width - margin || bounds.bottom > height - margin
+        || compact && bounds.width !== width) {
+        throw new Error(`Resized code dialog must retain desktop margins or fill the compact viewport: ${JSON.stringify({width, height, bounds})}`);
       }
       if (!await evaluate(`document.querySelector('#code-body').value === 'const answer = 42;'`)) throw new Error('Resizing must preserve code');
     }

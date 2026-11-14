@@ -111,6 +111,12 @@ if (!process.versions.electron) {
         preview.destroy();
       }
     };
+    if (process.argv.includes('--settings-only')) {
+      const checks = await window.webContents.executeJavaScript(`(${runSettingsNavigationSmoke.toString()})()`, true);
+      console.log(`Settings preview lifecycle: ${checks} checks passed`);
+      await finish(0);
+      return;
+    }
     if (process.argv.includes('--sidebar-only')) {
       const checks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
       await captureBotVoiceIndicators();
@@ -2692,6 +2698,8 @@ async function runSettingsNavigationSmoke() {
   };
   try {
     await modal.open();
+    check(!document.querySelector('.compact-settings-back').checkVisibility(),
+      'Desktop settings do not show the compact back control or let it change the header height');
     check(starts === 0 && cameraActivations === 0, 'Opening account settings must not start hidden media previews');
     check(qualityActivations === 0, 'Opening settings on another tab must not start the screen encoder checks');
     modal.close();

@@ -12,6 +12,28 @@ is underneath.
 
 <AppScreenshot src="/screenshots/conversa-en.png" alt="A demo conversation with servers and channels on the left, messages in the center and members on the right." caption="Windows client capture using demo data. The names, conversation and bot were created for this guide." />
 
+## Small screens
+
+In the browser and the app, windows up to 960 pixels wide show one panel at a
+time. On touch screens without a hovering pointer, this mode also covers
+tablets up to 1440 pixels wide in either orientation. Navigation brings together
+the server rail, channels or direct messages,
+and your profile card. Selecting a conversation opens it full-screen; the
+header's back arrow or **Esc** returns to navigation without losing the draft.
+On a server, the members button opens the member list separately.
+
+Conversations have a rounded composer that grows with the text, with actions
+and the character count on their own row, without keyboard hints in the
+placeholder or the desktop control footer. Menus and dialogs enter and leave
+smoothly; screen navigation slides when supported by the browser and respects
+reduced-motion preferences. During a call, the stage has its own
+compact controls; **More actions** opens additional options in a bottom sheet.
+Away from the stage, the call notice lets you disconnect. Voice chat and forum
+discussions use the available width. Settings open as a vertical category
+index: choosing a category opens a full page, and the back arrow or **Esc**
+returns to the index. Widening the window restores your desktop panel
+preferences.
+
 ## Channels and categories
 
 People allowed to manage channels can drag channels to reorder them or move them

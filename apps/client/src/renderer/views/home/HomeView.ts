@@ -12,6 +12,7 @@ import { friendsHomeModel, type FriendsHomeModel } from './FriendsHomeModel';
 import { HomeSidebar } from './HomeSidebar';
 
 export class HomeView {
+  public onNavigate: (() => void) | null = null;
   private readonly sidebar = new HomeSidebar();
   private readonly friendsView: FriendsView;
   private conversationView: DmConversationView | null = null;
@@ -50,6 +51,7 @@ export class HomeView {
   /** Opens a DM from anywhere in the app (e.g. a member's context menu). */
   public openConversation(peer: string): void {
     this.selectedPeer = peer;
+    this.onNavigate?.();
     if (this.active) {
       this.renderSidebar();
       this.renderCenter();
@@ -58,6 +60,7 @@ export class HomeView {
 
   public showFriends(): void {
     this.selectedPeer = null;
+    this.onNavigate?.();
     if (this.active) {
       this.renderSidebar();
       this.renderCenter();
@@ -167,6 +170,7 @@ export class HomeView {
     const target = event.target as HTMLElement;
     if (target.closest('#home-nav-friends')) {
       if (this.selectedPeer !== null) this.showFriends();
+      else this.onNavigate?.();
       return;
     }
     const item = target.closest<HTMLElement>('.home-dm-item[data-dm-id]');
@@ -178,7 +182,10 @@ export class HomeView {
       if (this.selectedPeer === peer) this.showFriends();
       return;
     }
-    if (target.closest('[data-dm-open]') && this.selectedPeer !== peer) this.openConversation(peer);
+    if (target.closest('[data-dm-open]')) {
+      if (this.selectedPeer !== peer) this.openConversation(peer);
+      else this.onNavigate?.();
+    }
   }
 
   private onSidebarContextMenu(event: MouseEvent): void {

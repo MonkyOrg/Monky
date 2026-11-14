@@ -40,6 +40,7 @@ export class HomeSidebar {
     const friendsSelected = this.selectedId === null;
     return `
       <nav class="home-sidebar" aria-label="${escapeHtml(t('home.sidebarLabel'))}">
+        <h1 class="compact-home-heading">${t('home.directMessages')}</h1>
         <button type="button" id="home-nav-friends" class="home-nav-entry${friendsSelected ? ' selected' : ''}" ${friendsSelected ? 'aria-current="page"' : ''}>
           <span class="material-symbols-outlined md-20" aria-hidden="true">group</span>
           <span>${t('home.friendsTitle')}</span>

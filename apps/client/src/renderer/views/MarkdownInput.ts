@@ -9,6 +9,7 @@ import { findAutomaticLinks } from '../utils/markdown';
 import { bindCodeComposer, renderCodeComposer, type CodeComposerValue } from './CodeComposer';
 import { showAlert } from './Dialog';
 import { t } from '../i18n';
+import { COMPACT_VIEWPORT_QUERY } from '../utils/viewport';
 import { formattingEdit, inlineFormats, selectedFormats, setTypingFormats, typingFormats, type InlineFormat } from './MarkdownFormatting';
 import '../styles/markdownInput.css';
 
@@ -239,7 +240,7 @@ function selectedClipboard(view: EditorView) {
 
 /** Markdown is the document model; decorations never rewrite the user's text. */
 export class MarkdownInput extends HTMLElement {
-  static observedAttributes = ['placeholder', 'readonly', 'disabled', 'aria-label', 'aria-describedby', 'aria-invalid',
+  static observedAttributes = ['placeholder', 'compact-placeholder', 'readonly', 'disabled', 'aria-label', 'aria-describedby', 'aria-invalid',
     'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant', 'role'];
   private editor: EditorView | null = null;
   private documentValue = '';
@@ -248,6 +249,8 @@ export class MarkdownInput extends HTMLElement {
   private silent = false;
   private composition: { from: number; flags: number } | null = null;
   private placeholderSize: ResizeObserver | null = null;
+  private compactViewport: MediaQueryList | null = null;
+  private readonly onViewportChange = () => this.attributeChangedCallback();
   private readonly configuration = new Compartment();
 
   constructor() {
@@ -260,6 +263,10 @@ export class MarkdownInput extends HTMLElement {
 
   connectedCallback(): void {
     if (this.editor) return;
+    if (this.hasAttribute('compact-placeholder')) {
+      this.compactViewport = matchMedia(COMPACT_VIEWPORT_QUERY);
+      this.compactViewport.addEventListener('change', this.onViewportChange);
+    }
     this.editor = new EditorView({
       parent: this,
       state: this.createState(),
@@ -274,6 +281,8 @@ export class MarkdownInput extends HTMLElement {
   }
 
   destroy(): void {
+    this.compactViewport?.removeEventListener('change', this.onViewportChange);
+    this.compactViewport = null;
     this.placeholderSize?.disconnect();
     this.placeholderSize = null;
     this.composition = null;
@@ -295,8 +304,10 @@ export class MarkdownInput extends HTMLElement {
       const value = this.getAttribute(name);
       if (value !== null) attributes[name] = value;
     }
+    const hint = this.compactViewport?.matches && !this.readOnly && !this.disabled
+      ? this.getAttribute('compact-placeholder') ?? this.placeholder : this.placeholder;
     return [EditorState.readOnly.of(this.readOnly || this.disabled), EditorView.editable.of(!this.disabled),
-      EditorView.contentAttributes.of(attributes), placeholder(this.placeholder)];
+      EditorView.contentAttributes.of(attributes), placeholder(hint)];
   }
 
   private createState(): EditorState {

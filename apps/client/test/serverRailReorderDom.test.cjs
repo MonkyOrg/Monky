@@ -229,6 +229,8 @@ if (!process.versions.electron) {
       // Settings: name and colour.
       await evaluate(`window.openFolderSettings()`);
       await check(await waitFor(`!!document.querySelector('.folder-settings-modal')`), 'folder settings open');
+      await evaluate(`Promise.all(document.querySelector('.folder-settings-modal')
+        .getAnimations().map(animation => animation.finished)).then(() => null)`);
       await evaluate(`(() => {
         const input = document.querySelector('#folder-settings-name');
         input.value = 'Amigos';

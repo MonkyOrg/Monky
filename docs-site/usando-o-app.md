@@ -12,6 +12,28 @@ liberar o que estiver embaixo deles.
 
 <AppScreenshot src="/screenshots/conversa-pt.png" alt="Conversa demonstrativa com servidores e canais à esquerda, mensagens ao centro e membros à direita." caption="Captura do cliente para Windows com dados demonstrativos. Nomes, conversas e bot foram criados para este guia." />
 
+## Telas pequenas
+
+No navegador e no aplicativo, janelas de até 960 pixels de largura mostram um
+painel por vez. Em telas operadas por toque, sem cursor de hover, esse modo
+também atende tablets de até 1440 pixels, nas duas orientações. A navegação
+reúne a barra de servidores, os canais ou mensagens
+diretas e seu cartão de perfil. Selecionar uma conversa abre o conteúdo em tela
+cheia; a seta do cabeçalho ou **Esc** retorna à navegação sem perder o rascunho.
+Em um servidor, o botão de membros abre a lista separadamente.
+
+Na conversa, o campo de mensagem arredondado cresce com o texto e mantém as
+ações e o contador em uma linha própria, sem atalhos de teclado no placeholder
+nem o rodapé de controles do desktop. Menus e diálogos abrem e fecham suavemente;
+a navegação entre telas desliza quando o navegador oferece suporte e respeita
+a preferência por movimento reduzido. Durante uma chamada, o palco tem
+seus próprios controles compactos; **Mais ações** abre as opções adicionais em
+um painel inferior. Ao sair do palco, o aviso de chamada permite desconectar.
+O chat de voz e as discussões de um fórum usam toda a largura disponível.
+As configurações abrem como uma lista vertical de categorias: tocar em uma
+delas abre uma página inteira, e a seta ou **Esc** volta à lista. Ao ampliar a
+janela, o layout desktop recupera suas preferências de painéis.
+
 ## Canais e categorias
 
 Quem possui permissão para gerenciar canais pode arrastar canais para reordenar

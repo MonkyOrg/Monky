@@ -47,7 +47,7 @@ if (!process.versions.electron) {
           server.middlewares.use((request, response, next) => {
             if (request.url !== '/__identity_onboarding__') return next();
             response.setHeader('Content-Type', 'text/html');
-            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css"></head><body><div id="app"></div></body></html>');
+            response.end('<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css"><link rel="stylesheet" href="/styles/responsive.css"></head><body><div id="app"></div></body></html>');
           });
         },
       }],
@@ -70,11 +70,13 @@ if (!process.versions.electron) {
       callback({ cancel: new URL(details.url).origin !== origin });
     });
     timeout = setTimeout(() => { console.error('Identity onboarding DOM regression timed out'); void finish(1); }, 90000);
-    for (const language of ['pt-BR', 'en']) {
+    const { emulateViewport } = require('./mobileViewport.cjs');
+    for (const [language, width] of [['pt-BR', 1000], ['en', 1000], ['pt-BR', 390], ['en', 390]]) {
       await browser.loadURL(`${origin}/__identity_onboarding__`);
+      await emulateViewport(browser.webContents, width, 844);
       const checks = await browser.webContents.executeJavaScript(`(${runRegression.toString()})(${JSON.stringify(language)})`, true);
       if (browser.isVisible()) throw new Error('The identity onboarding regression must remain offscreen');
-      console.log(`Identity onboarding (${language}): ${checks} checks passed`);
+      console.log(`Identity onboarding (${language}, ${width}px): ${checks} checks passed`);
     }
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
@@ -387,7 +389,10 @@ async function runRegression(language) {
   }
   const titles = [...durationCards.querySelectorAll('.input-mode-card-title')];
   check(Math.abs(titles[0].getBoundingClientRect().top - titles[1].getBoundingClientRect().top) <= 1,
-    'Duration card titles follow the same horizontal alignment');
+    'Duration card titles follow the same horizontal alignment: ' + JSON.stringify(titles.map(title => ({
+      top: title.getBoundingClientRect().top, card: title.parentElement.getBoundingClientRect().toJSON(),
+      align: getComputedStyle(title.parentElement).alignContent, columns: getComputedStyle(durationCards).gridTemplateColumns,
+    }))));
   check(Math.abs(durationCards.getBoundingClientRect().left - reasonGroup.getBoundingClientRect().left) <= 1
     && Math.abs(durationCards.getBoundingClientRect().right - reasonGroup.getBoundingClientRect().right) <= 1,
     'Duration choices and form fields follow the same left and right edges');
@@ -573,9 +578,17 @@ async function runRegression(language) {
   check(devicesDialog && !settings.querySelector('#btn-identity-sessions'),
     'Connected devices has its own profile subsection, not a button hidden in identity');
   check(!dialog(), 'The device list stays inside settings rather than opening another modal');
-  const subsectionLink = await waitFor(() => [...settings.querySelectorAll('.settings-section-list button')]
-    .find(button => button.textContent === t('identity.sessionsTitle')), () => 'Connected devices is missing from profile navigation');
-  subsectionLink.click();
+  if (innerWidth > 960) {
+    const subsectionLink = await waitFor(() => [...settings.querySelectorAll('.settings-section-list button')]
+      .find(button => button.textContent === t('identity.sessionsTitle')), () => 'Connected devices is missing from profile navigation');
+    subsectionLink.click();
+  } else {
+    settings.querySelector('.settings-tab-btn').click();
+    await waitFor(() => devicesDialog.checkVisibility() && !devicesDialog.closest('[inert]'),
+      () => 'Mobile account details did not open');
+    check(!settings.querySelector('.settings-section-list button'),
+      'Mobile profile keeps connected devices inline without desktop subsection navigation');
+  }
   const stopDevices = mountOwnIdentitySessions(settings);
   await waitFor(() => devicesDialog.querySelectorAll('[data-device]').length === 2, () => 'Devices were not aggregated across servers');
   check(devicesDialog.textContent.includes(t('identity.sessionsScope')), 'The device list states its actual server scope');

@@ -123,6 +123,7 @@ export class BotSettingsModal {
       backdropClass: 'bot-settings-modal',
       card: `<div class="modal-card settings-modal-card bot-settings-card" id="bot-settings-card" aria-labelledby="bot-settings-title" tabindex="-1"></div>`,
       initialFocus: false,
+      canClose: reason => reason !== 'escape' || !this.sectionNavigation?.goBack(),
       onClose: () => { if (this.shell === shell) this.teardown(); },
     });
     this.shell = shell;
@@ -401,6 +402,7 @@ export class BotSettingsModal {
     const selection = focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement
       ? { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection } : null;
     const scrollTop = this.root.querySelector('.bot-settings-body')?.scrollTop ?? 0;
+    const compactDetail = this.sectionNavigation?.compactDetail ?? true;
     this.sectionNavigation?.destroy();
     this.sectionNavigation = null;
     audioPreviewService.release(this.root);
@@ -523,10 +525,10 @@ export class BotSettingsModal {
       });
       this.storageSettings.mount(storageRoot);
     }
-    this.sectionNavigation = new SettingsSectionNavigation(this.root);
+    this.sectionNavigation = new SettingsSectionNavigation(this.root, { initialDetail: compactDetail });
     this.sectionNavigation.setTab(snapshot ? this.scope : 'catalog');
     const restored = focused?.id ? this.root?.querySelector<HTMLElement>(`#${CSS.escape(focused.id)}`) : null;
-    if (restored && this.root.contains(restored)) {
+    if (restored && this.root.contains(restored) && !restored.closest('[inert]')) {
       restored.focus({ preventScroll: true });
       if (selection?.start !== null && selection?.start !== undefined && selection.end !== null &&
           (restored instanceof HTMLInputElement || restored instanceof HTMLTextAreaElement)) {
