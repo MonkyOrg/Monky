@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "O núcleo do Monky Light agora lê o histórico dos canais de texto, envia mensagens e recebe as novas em tempo real, só enquanto o chat está aberto, para não gastar nada quando ninguém está lendo.",
+  "en": "The Monky Light core can now read text channel history, send messages, and receive new ones live, only while chat is open, so it spends nothing when nobody is reading."
+}

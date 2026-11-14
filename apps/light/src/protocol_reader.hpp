@@ -68,13 +68,21 @@ bool signal(const Json& payload);
 void sfu(const std::string& type, const Json& payload, const std::string& room,
          const std::map<std::string, Participant>& participants, const Json* request);
 
-// The messages this client acts on; anything else is dropped unread.
-bool relevant(std::string_view type);
+// A chat message reduced to what a text interface shows: identity, channel,
+// author, text and time are required; edits, deletion, files (names only),
+// replies, forwards and system/bot marks are read when well formed and
+// otherwise left out. A deleted message keeps its row with empty content.
+Json chatMessage(const Json& value);
+
+// The messages this client acts on; anything else is dropped unread. Chat is
+// read only while an interface watches it, so a busy server costs nothing to
+// a Light nobody is reading.
+bool relevant(std::string_view type, bool chat);
 // True only for a frame whose top-level type was read and is not one this
 // client acts on. Reads that type without building the frame, so the
 // transport can drop it before it takes room in the event queue. A frame
 // without a readable type is kept, to be reported as malformed.
-bool discardable(std::string_view frame);
+bool discardable(std::string_view frame, bool chat);
 
 }  // namespace reader
 }  // namespace monky::light

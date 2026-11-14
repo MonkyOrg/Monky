@@ -320,6 +320,61 @@ for (const voiceMode of ['p2p', 'sfu']) {
   });
 }
 
+test('text chat is read only on demand, pages history, sends and outlives the call', { timeout: 60_000 }, async t => {
+  const fixture = await createServerFixture(t);
+  const human = await fixture.connectHuman('Ana');
+  const light = new NativeClient(fixture, { nickname: 'Light Chat' });
+  const auth = await light.wait('authenticated');
+  const text = auth.channels.find(channel => channel.type === 'TEXT').id;
+  const voice = auth.channels.find(channel => channel.type === 'VOICE').id;
+  const say = content => human.peer.request(MessageType.CHAT_SEND, { channelId: text, content },
+    [MessageType.CHAT_MESSAGE]);
+
+  await say('antes');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.ok(!light.events.some(event => event.event === 'chat-message'), 'Chat must not be read before it is opened');
+
+  // The call is independent: chat keeps working across joining and leaving it.
+  await light.join(voice);
+  let since = light.events.length;
+  assert.equal((await light.command('chat-history', { channelId: text })).event, 'command-accepted');
+  const history = await light.wait(event => event.event === 'chat-history', since);
+  assert.equal(history.channelId, text);
+  const before = history.messages.find(message => message.content === 'antes');
+  assert.ok(before && before.author === 'Ana' && typeof before.createdAt === 'number',
+    'History must carry the message sent before chat was opened');
+
+  since = light.events.length;
+  await say('depois');
+  const live = await light.wait(event => event.event === 'chat-message' && event.message.content === 'depois', since);
+  assert.equal(live.message.channelId, text);
+
+  await light.command('leave');
+  since = light.events.length;
+  const humanSince = human.peer.messages.length;
+  await light.command('chat-send', { channelId: text, content: 'do light \u00e1' });
+  const sent = await light.wait(event => event.event === 'chat-sent', since);
+  assert.equal(sent.message.content, 'do light \u00e1');
+  await light.wait(event => event.event === 'chat-message' && event.message.id === sent.message.id, since);
+  await human.peer.wait(message => message.type === MessageType.CHAT_MESSAGE &&
+    message.payload.content === 'do light \u00e1', humanSince);
+
+  since = light.events.length;
+  await light.command('chat-send', { channelId: 'no-such-channel', content: 'perdida' });
+  const refused = await light.wait(event => event.event === 'command-error' && event.code, since);
+  assert.ok(refused.code.length > 0, 'A refused message must carry the server code');
+  assert.ok(!light.events.slice(since).some(event => event.event === 'session-error'),
+    'A refused message is not a session failure');
+
+  since = light.events.length;
+  await light.command('chat-watch', { enabled: false });
+  await say('fechado');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.ok(!light.events.slice(since).some(event => event.event === 'chat-message'),
+    'Closing chat must stop reading it');
+  await light.close();
+});
+
 test('native calls survive both live P2P/SFU topology transitions and preserve moderation', { timeout: 60_000 }, async t => {
   const fixture = await createServerFixture(t);
   const admin = await fixture.connectHuman('Fixture admin');
