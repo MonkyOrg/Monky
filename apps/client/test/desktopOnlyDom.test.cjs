@@ -50,7 +50,7 @@ if (!process.versions.electron) {
           server.middlewares.use((request, response, next) => {
             if (request.url !== '/__desktop_only__') return next();
             response.setHeader('Content-Type', 'text/html');
-            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"></head>'
+            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/theme.css"></head>'
               + '<body><div id="app"></div></body></html>');
           });
         },
@@ -297,6 +297,29 @@ if (!process.versions.electron) {
         await evaluate('window.qa.settings.close()');
         await waitFor('!document.querySelector(".settings-modal-card")', 'Settings closed');
 
+        for (const width of [320, 390, 600]) {
+          browser.setContentSize(width, 844);
+          await frames();
+          await evaluate('void window.qa.settings.open()');
+          await waitFor('document.querySelectorAll(".settings-sidebar .settings-tab-btn > .desktop-only-badge").length >= 2',
+            'The settings index has its desktop-only category badges');
+          await evaluate('document.fonts.ready');
+          await evaluate(`Promise.allSettled(document.getAnimations().filter(animation =>
+            animation.effect?.getComputedTiming().iterations !== Infinity).map(animation => animation.finished))`);
+          const badgeEnds = await evaluate(`(() => {
+            const badges = [...document.querySelectorAll(".settings-sidebar .settings-tab-btn > .desktop-only-badge")];
+            return badges.map(badge => badge.parentElement.getBoundingClientRect().right - badge.getBoundingClientRect().right);
+          })()`);
+          if (!badgeEnds.every(end => end >= 32 && end <= 56) || Math.max(...badgeEnds) - Math.min(...badgeEnds) > 1) {
+            throw new Error(`At ${width}px, settings badges must align beside their chevrons: ${JSON.stringify(badgeEnds)}`);
+          }
+          checks++;
+          await evaluate('window.qa.settings.close()');
+          await waitFor('!document.querySelector(".settings-modal-card")', 'Compact settings closed');
+        }
+        browser.setContentSize(1000, 800);
+        await frames();
+
         // Add Server: the dialog explains its locked options once, at the top; they stay quiet.
         await evaluate('import("/views/addServer/AddServerModal.ts").then(({ addServerModal }) => { window.qa.addServer = addServerModal; addServerModal.open(); })');
         await waitFor(`${summary('#add-server-modal')}?.textContent.includes(window.qa.t("desktopOnly.someOptionsDialog"))`,
@@ -388,7 +411,7 @@ async function setup(language) {
   const { UserControlBar } = await import('/views/main/UserControlBar.ts');
   const footer = document.createElement('div');
   footer.id = 'qa-footer';
-  footer.innerHTML = new UserControlBar({ root: footer, toggleCamera: async () => {} })
+  footer.innerHTML = new UserControlBar({ root: footer, toggleCamera: async () => {}, openVoiceStage() {} })
     .markup({ nickname: 'QA', avatarUrl: null }).toString();
   qa.footerIcons = ['#media-btn-screen', '#media-btn-soundboard'].map((selector) => {
     const button = footer.querySelector(selector);

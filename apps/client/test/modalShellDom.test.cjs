@@ -49,7 +49,7 @@ if (!process.versions.electron) {
           server.middlewares.use((request, response, next) => {
             if (request.url !== '/__modal_shell__') return next();
             response.setHeader('Content-Type', 'text/html');
-            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/theme.css"></head><body></body></html>');
+            response.end('<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/responsive.css"></head><body></body></html>');
           });
         },
       }],
@@ -72,12 +72,17 @@ if (!process.versions.electron) {
       callback({ cancel: new URL(details.url).origin !== origin });
     });
     timeout = setTimeout(() => { console.error('Modal shell DOM regression timed out'); void finish(1); }, 100000);
-    for (const language of ['pt-BR', 'en']) {
+    const { emulateViewport } = require('./mobileViewport.cjs');
+    for (const [language, width, height] of [
+      ['pt-BR', 1100, 900], ['en', 1100, 900], ['pt-BR', 390, 844],
+      ['en', 390, 844], ['pt-BR', 844, 390], ['en', 844, 390],
+    ]) {
       await browser.loadURL(`${origin}/__modal_shell__`);
+      await emulateViewport(browser.webContents, width, height);
       await browser.webContents.executeJavaScript('localStorage.clear(); sessionStorage.clear();', true);
       const checks = await browser.webContents.executeJavaScript(`(${runRegression.toString()})(${JSON.stringify(language)})`, true);
       if (browser.isVisible()) throw new Error('The modal shell regression must remain offscreen');
-      console.log(`Modal shell (${language}): ${checks} checks passed`);
+      console.log(`Modal shell (${language}, ${width}x${height}): ${checks} checks passed`);
     }
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
@@ -237,6 +242,13 @@ async function runRegression(language) {
     check(!element.style.zIndex, `${name} has no fixed z-index`);
     if (focusInside) check(dialogCard.contains(document.activeElement), `${name} takes the focus`);
     check(!dialogCard.querySelector('.error-banner, [data-community-error], .dialog-input-error'), `${name} has no loose error area`);
+    if (matchMedia('(max-width: 960px)').matches) {
+      await Promise.allSettled(element.getAnimations({ subtree: true }).map(animation => animation.finished));
+      const box = dialogCard.getBoundingClientRect();
+      check(box.left >= -1 && box.right <= innerWidth + 1 && box.top >= -1 && box.bottom <= innerHeight + 1,
+        `${name} fits the mobile viewport`);
+      check(dialogCard.scrollWidth <= dialogCard.clientWidth + 1, `${name} has no horizontal clipping on mobile`);
+    }
     key('Escape');
     await until(() => !element.isConnected || element.hasAttribute('data-ui-closing'), `${name} did not close on Escape`);
     check(document.activeElement === trigger, `${name} gives the focus back`);

@@ -217,23 +217,28 @@ export class SettingsModal {
       </div>
     `,
       initialFocus: `.settings-tab-btn[data-tab="${this.activeTab}"]`,
+      canClose: reason => reason !== 'escape' || !this.sectionNavigation?.goBack(),
       onClose: () => { if (this.shell === shell) this.teardown(); },
     });
     this.shell = shell;
     this.modalEl = shell.element;
 
     const localToolsReady = this.attachEvents(shell.element);
-    this.sectionNavigation = new SettingsSectionNavigation(shell.element);
+    this.sectionNavigation = new SettingsSectionNavigation(shell.element, {
+      initialDetail: !!tab,
+      onPageVisibilityChanged: visible => {
+        const current = this.tab(this.activeTab);
+        if (visible) current.show?.(shell.element);
+        else current.hide?.();
+      },
+    });
     this.sectionNavigation.setTab(this.activeTab);
     if (section && this.activeTab !== 'local_tools') this.sectionNavigation.revealSection(section);
-    if (this.activeTab === 'voice_video') {
-      this.voiceVideoTab.activateCameraPreview();
-    }
-    if (this.activeTab === 'quality') this.qualityTab.activate();
+    if (this.sectionNavigation.pageVisible) active.show?.(shell.element);
     const modal = shell.element;
     await Promise.all([
       this.voiceVideoTab.refreshDevices(modal).then(() => {
-        if (this.modalEl === modal && this.activeTab === 'voice_video') this.voiceVideoTab.startVadMeter(modal);
+        if (this.modalEl === modal && this.activeTab === 'voice_video' && this.sectionNavigation?.pageVisible) this.voiceVideoTab.startVadMeter(modal);
       }),
       this.aboutTab.loadAppVersion(modal),
       localToolsReady.then(() => {
@@ -280,7 +285,7 @@ export class SettingsModal {
     if (header) header.innerHTML = renderSettingsTabLabel(next).toString();
     this.sectionNavigation?.setTab(id);
     previous.hide?.();
-    next.show?.(root);
+    if (this.sectionNavigation?.pageVisible) next.show?.(root);
   }
 
   public close(): void {

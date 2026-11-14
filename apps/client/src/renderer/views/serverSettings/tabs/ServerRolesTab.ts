@@ -43,7 +43,7 @@ export class ServerRolesTab {
     return `
       <div style="display: flex; flex-direction: column; gap: 16px; width: 100%;">
         <fieldset class="server-settings-fieldset" data-server-permission="${Permission.MANAGE_SERVER}">
-        <div data-settings-section="role-badges" data-settings-label="${escapeHtml(t('roles.badgeVisibility'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+        <div class="settings-switch-row" data-settings-section="role-badges" data-settings-label="${escapeHtml(t('roles.badgeVisibility'))}" style="background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
           <div>
             <label for="checkbox-show-role-badges" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
               <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">visibility</span>
@@ -106,7 +106,7 @@ export class ServerRolesTab {
               <div style="font-size: 11px; color: var(--text-muted);">${t('roles.colorPaletteHint')}</div>
               ${this.colorPicker.renderHtml(COLOR_PRESETS[0])}
             </div>
-            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary);">
+            <div class="settings-switch-row" style="padding: 10px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary);">
               <div style="min-width: 0;">
                 <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">${t('roles.autoAssign')}</div>
                 <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('roles.autoAssignEditorHint')}</div>
@@ -209,7 +209,7 @@ export class ServerRolesTab {
   /** Everyone is the base; a role switch grants on top of it and never takes anything away. */
   private renderPermissionSwitches(): string {
     return this.permissionItems().map((item) => `
-      <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary);">
+      <div class="settings-switch-row" style="padding: 10px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary);">
         <div style="min-width: 0;">
           <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">${item.label}</div>
           <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${item.description}</div>

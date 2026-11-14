@@ -1,5 +1,6 @@
 import { scrollWithin, smoothScrollTo } from '../../utils/scroll';
 import { animateEnter, cancelSurfaceMotion, motionDuration } from '../../utils/surfaceMotion';
+import { CompactSettingsNavigation, type CompactSettingsOptions } from './CompactSettingsNavigation';
 
 interface SectionLink {
   target: HTMLElement;
@@ -27,6 +28,7 @@ export class SettingsSectionNavigation {
   private nextElementId = 0;
   private readonly menus = new Map<string, SectionMenu>();
   private readonly reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  private readonly compactNavigation: CompactSettingsNavigation;
   private readonly observer: MutationObserver;
   private readonly resizeObserver: ResizeObserver;
   private panel: HTMLElement | null = null;
@@ -37,12 +39,13 @@ export class SettingsSectionNavigation {
   private needsRefresh = false;
   private destroyed = false;
 
-  constructor(private readonly root: HTMLElement) {
+  constructor(private readonly root: HTMLElement, options: CompactSettingsOptions = {}) {
     const sidebar = root.querySelector<HTMLElement>('.settings-sidebar');
     const body = root.querySelector<HTMLElement>('.settings-content-body');
     if (!sidebar || !body) throw new Error('Settings section navigation requires a sidebar and content body');
     this.sidebar = sidebar;
     this.body = body;
+    this.compactNavigation = new CompactSettingsNavigation(root, sidebar, options, () => this.schedule(true));
 
     for (const trigger of sidebar.querySelectorAll<HTMLButtonElement>('.settings-tab-btn[data-tab]')) {
       const tab = trigger.dataset.tab!;
@@ -143,6 +146,10 @@ export class SettingsSectionNavigation {
     if (changed) smoothScrollTo(this.body, { top: 0 });
     this.refresh();
   }
+
+  public get pageVisible(): boolean { return this.compactNavigation.visible; }
+  public get compactDetail(): boolean { return this.compactNavigation.detail; }
+  public goBack(): boolean { return this.compactNavigation.goBack(); }
 
   private finishMenuMotion(group: SectionMenu): void {
     const animation = group.animation;
@@ -283,6 +290,7 @@ export class SettingsSectionNavigation {
 
   public revealSection(key: string): boolean {
     if (this.destroyed) return false;
+    this.compactNavigation.showDetail();
     this.refresh();
     const section = this.sections.find((entry) => entry.key === key);
     if (!section) {
@@ -304,6 +312,7 @@ export class SettingsSectionNavigation {
     this.observer.disconnect();
     if (this.panel) cancelSurfaceMotion(this.panel);
     this.resizeObserver.disconnect();
+    this.compactNavigation.destroy();
     for (const group of this.menus.values()) this.finishMenuMotion(group);
     this.unbind.forEach((off) => off());
     this.unbind.length = 0;

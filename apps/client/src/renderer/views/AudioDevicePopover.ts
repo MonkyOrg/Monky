@@ -14,6 +14,7 @@ import '../styles/mediaPopovers.css';
 import { reportError } from '../utils/feedback';
 import { isDesktopOnly, setDesktopOnly } from '../utils/desktopOnly';
 import { bindMasterVolumeControls, renderMasterVolumeControl } from './MasterVolumeControl';
+import { viewportBounds } from '../utils/viewport';
 
 let nextId = 0;
 type PopoverKind = 'input' | 'output' | 'camera' | 'noise';
@@ -174,19 +175,22 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       const position = () => {
         if (!trigger.isConnected) { close(); return; }
         const rect = trigger.getBoundingClientRect();
-        const availableAbove = rect.top - 16;
-        const availableBelow = innerHeight - rect.bottom - 16;
+        const viewport = viewportBounds();
+        const availableAbove = rect.top - viewport.top - 16;
+        const availableBelow = viewport.bottom - rect.bottom - 16;
         const opensAbove = availableAbove >= panel.offsetHeight || availableAbove >= availableBelow;
+        panel.style.maxWidth = `${Math.max(0, viewport.width - 16)}px`;
         panel.style.maxHeight = `${Math.max(0, opensAbove ? availableAbove : availableBelow)}px`;
-        panel.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - panel.offsetWidth - 8))}px`;
-        panel.style.top = `${Math.max(8, opensAbove ? rect.top - panel.offsetHeight - 8 : rect.bottom + 8)}px`;
+        panel.style.left = `${Math.max(viewport.left + 8, Math.min(rect.left, viewport.right - panel.offsetWidth - 8))}px`;
+        panel.style.top = `${Math.max(viewport.top + 8, opensAbove ? rect.top - panel.offsetHeight - 8 : rect.bottom + 8)}px`;
         if (!options.hidden) {
-          options.style.maxHeight = `${Math.min(360, innerHeight - 16)}px`;
+          options.style.maxWidth = `${Math.max(0, viewport.width - 16)}px`;
+          options.style.maxHeight = `${Math.max(0, Math.min(360, viewport.height - 16))}px`;
           const row = deviceRow.getBoundingClientRect();
           const right = row.right + 6;
-          const left = right + options.offsetWidth <= innerWidth - 8 ? right : row.left - options.offsetWidth - 6;
-          options.style.left = `${Math.max(8, Math.min(left, innerWidth - options.offsetWidth - 8))}px`;
-          options.style.top = `${Math.max(8, Math.min(row.top, innerHeight - options.offsetHeight - 8))}px`;
+          const left = right + options.offsetWidth <= viewport.right - 8 ? right : row.left - options.offsetWidth - 6;
+          options.style.left = `${Math.max(viewport.left + 8, Math.min(left, viewport.right - options.offsetWidth - 8))}px`;
+          options.style.top = `${Math.max(viewport.top + 8, Math.min(row.top, viewport.bottom - options.offsetHeight - 8))}px`;
         }
       };
       const clearSubmenuTimer = () => {

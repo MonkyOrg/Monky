@@ -61,6 +61,7 @@ import { syncSavedServer } from './core/savedServerSync';
 import { bindUserNotices } from './core/userNotices';
 import { bindTraySync } from './core/traySync';
 import { bindKeybindActions } from './core/keybindActions';
+import { bindViewportSize } from './utils/viewport';
 
 class App {
   private appContainer: HTMLElement;
@@ -128,6 +129,7 @@ class App {
     this.appContainer = document.getElementById('app')!;
     installImageFallback();
     const disposeTooltips = initTooltips();
+    const disposeViewport = bindViewportSize();
   installDesktopOnlyGate();
     selectEnhancer.init();
     dateTimeControls.init();
@@ -141,6 +143,7 @@ class App {
       selectEnhancer.dispose();
       dateTimeControls.dispose();
       disposeTooltips();
+      disposeViewport();
     }, { once: true });
 
     // The overlay window loads overlay.html, not this app: microphone, push-to-talk,

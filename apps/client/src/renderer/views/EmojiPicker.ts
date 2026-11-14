@@ -5,12 +5,13 @@ import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
 import { t, tCount, TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
-import { animateEnter, ownSurface, removeWithMotion } from '../utils/surfaceMotion';
+import { animateEnter, ownSurface, positionAnchoredSurface, removeWithMotion } from '../utils/surfaceMotion';
 import { normalizeSearchString } from '../utils/search';
 import { scrollWithin, smoothScrollTo } from '../utils/scroll';
 import { requestIdle } from '../utils/idleCallback';
 import { platformSupports } from '../platform/capabilities';
 import { mediaFolderLabel, mediaSourceButton, picksMediaFolder } from '../platform/mediaFolders';
+import { COMPACT_VIEWPORT_QUERY, viewportBounds } from '../utils/viewport';
 
 type PickerTab = 'emojis' | 'stickers';
 
@@ -131,11 +132,12 @@ export class EmojiPicker {
     root.setAttribute('role', 'dialog');
     root.setAttribute('aria-label', t('chat.emojiPickerTitle'));
     root.innerHTML = this.renderShell();
-    this.options.container.appendChild(root);
+    const compact = matchMedia(COMPACT_VIEWPORT_QUERY).matches;
+    (compact ? document.body : this.options.container).appendChild(root);
     this.root = root;
     this.options.anchor.setAttribute('aria-expanded', 'true');
 
-    if (this.options.floating) {
+    if (compact || this.options.floating) {
       this.positionFloating(root);
     }
 
@@ -144,33 +146,29 @@ export class EmojiPicker {
     this.unbind.push(ownSurface(root, this.options.anchor));
     animateEnter(root);
 
-    root.querySelector<HTMLInputElement>('.emoji-picker-search-input')?.focus({ preventScroll: true });
+    if (matchMedia('(hover: none) and (pointer: coarse)').matches) {
+      root.tabIndex = -1;
+      root.focus({ preventScroll: true });
+    } else root.querySelector<HTMLInputElement>('.emoji-picker-search-input')?.focus({ preventScroll: true });
   }
 
   private positionFloating(root: HTMLElement): void {
-    const anchorRect = this.options.anchor.getBoundingClientRect();
-    const pickerWidth = 360;
-    const pickerHeight = this.options.emojiOnly ? 380 : 420;
-
-    // By default, open below the anchor if there is room, otherwise open above
-    let top = anchorRect.bottom + 6;
-    if (top + pickerHeight > window.innerHeight - 12) {
-      top = Math.max(12, anchorRect.top - pickerHeight - 6);
-    }
-
-    // Align right edge of picker with right edge of anchor
-    let left = anchorRect.right - pickerWidth;
-    if (left < 12) {
-      left = 12;
-    }
-    if (left + pickerWidth > window.innerWidth - 12) {
-      left = Math.max(12, window.innerWidth - pickerWidth - 12);
-    }
-
     root.style.position = 'fixed';
-    root.style.top = `${Math.round(top)}px`;
-    root.style.left = `${Math.round(left)}px`;
     root.style.zIndex = '10005';
+    const compact = matchMedia(COMPACT_VIEWPORT_QUERY).matches;
+    root.classList.toggle('emoji-picker--compact', compact);
+    if (compact) {
+      const viewport = viewportBounds();
+      const height = Math.min(420, viewport.height);
+      Object.assign(root.style, {
+        left: `${viewport.left}px`, top: 'auto', bottom: `${Math.max(0, innerHeight - viewport.bottom)}px`,
+        width: `${viewport.width}px`, height: `${height}px`, maxHeight: `${height}px`,
+      });
+      return;
+    }
+    positionAnchoredSurface(root, this.options.anchor, {
+      matchWidth: false, alignEnd: true, margin: 12, maxHeight: this.options.emojiOnly ? 380 : 420,
+    });
   }
 
   public close(): void {
@@ -207,6 +205,12 @@ export class EmojiPicker {
     `;
 
     return `
+      <div class="emoji-picker-mobile-header">
+        <strong>${t('chat.emojiPickerTitle')}</strong>
+        <button type="button" class="btn btn-icon" data-picker-close aria-label="${t('common.close')}">
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
+        </button>
+      </div>
       ${tabsHtml}
       <div class="emoji-picker-search">
         <span class="material-symbols-outlined md-16">search</span>
@@ -220,6 +224,13 @@ export class EmojiPicker {
   private bindShell(): void {
     const root = this.root;
     if (!root) return;
+    const close = root.querySelector<HTMLButtonElement>('[data-picker-close]');
+    const onClose = () => {
+      this.close();
+      this.options.anchor.focus({ preventScroll: true });
+    };
+    close?.addEventListener('click', onClose);
+    this.unbind.push(() => close?.removeEventListener('click', onClose));
 
     root.querySelectorAll<HTMLElement>('[data-picker-tab]').forEach((btn) => {
       const onClick = () => {
@@ -230,7 +241,7 @@ export class EmojiPicker {
         const search = root.querySelector<HTMLInputElement>('.emoji-picker-search-input');
         if (search) search.value = '';
         this.renderBody();
-        search?.focus();
+        if (!matchMedia('(hover: none) and (pointer: coarse)').matches) search?.focus();
       };
       btn.addEventListener('click', onClick);
       this.unbind.push(() => btn.removeEventListener('click', onClick));
@@ -320,16 +331,24 @@ export class EmojiPicker {
     document.addEventListener('keydown', onKeyDown, true);
     this.unbind.push(() => document.removeEventListener('keydown', onKeyDown, true));
 
-    if (this.options.floating) {
+    if (this.options.floating || root.classList.contains('emoji-picker--compact')) {
       const onScroll = (event: Event) => {
         if (!(event.target instanceof Node) || !root.contains(event.target)) this.close();
       };
-      const onResize = () => this.close();
+      const onResize = () => {
+        if (root.classList.contains('emoji-picker--compact') && matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
+          this.positionFloating(root);
+        } else this.close();
+      };
       window.addEventListener('scroll', onScroll, true);
       window.addEventListener('resize', onResize);
+      window.visualViewport?.addEventListener('resize', onResize);
+      window.visualViewport?.addEventListener('scroll', onResize);
       this.unbind.push(() => {
         window.removeEventListener('scroll', onScroll, true);
         window.removeEventListener('resize', onResize);
+        window.visualViewport?.removeEventListener('resize', onResize);
+        window.visualViewport?.removeEventListener('scroll', onResize);
       });
     }
   }

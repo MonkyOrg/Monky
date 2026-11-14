@@ -3,6 +3,7 @@
 @import './messageEditing.css';
 @import './base.css';
 @import './audioStateIcon.css';
+@import './responsive.css';
 
 .bot-screen-header, .bot-screen-controls {
   display: flex;
@@ -3051,6 +3052,7 @@
   flex-direction: column;
   padding: 6px;
   gap: 2px;
+  overflow-y: auto;
 }
 
 .floating-context-menu .server-dropdown-item {
@@ -3566,6 +3568,13 @@
 }
 
 .voice-conn-info {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4602,7 +4611,7 @@
 .message-selection-action--danger:not([aria-disabled="true"]) { color: var(--danger); }
 .message-selection-action--danger:hover:not([aria-disabled="true"]) { border-color: var(--danger); }
 .message-selection-cancel { padding: 0 8px; }
-@media (max-width: 960px) {
+@media (max-width: 960px), (max-width: 1440px) and (hover: none) and (pointer: coarse) {
   .message-selection-action { padding: 0 10px; }
   .message-selection-action-label { display: none; }
 }
@@ -6352,6 +6361,19 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.bot-install-controls,
+.bot-link-heading {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+.bot-install-controls > div { min-width: 0; }
+.bot-link-heading {
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
 .bot-command-actions {
   flex-wrap: wrap;
   margin-top: 12px;
@@ -7230,6 +7252,10 @@
 }
 
 /* --- Emoji and sticker picker (#356) --- */
+.emoji-picker-mobile-header {
+  display: none;
+}
+
 .emoji-picker {
   position: absolute;
   bottom: calc(100% - 8px);
@@ -13648,6 +13674,13 @@ button:hover .role-option-check:not(.checked) {
 }
 
 /* Toggle Switch (#249) */
+.settings-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.settings-switch-row > :first-child { min-width: 0; }
 .toggle-switch {
   position: relative;
   display: inline-block;

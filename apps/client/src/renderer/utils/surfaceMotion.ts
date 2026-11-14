@@ -1,3 +1,5 @@
+import { COMPACT_VIEWPORT_QUERY, viewportBounds } from './viewport';
+
 export type SurfaceKind = 'modal' | 'popover' | 'panel' | 'notice' | 'view';
 
 interface Motion {
@@ -12,6 +14,14 @@ const owners = new Map<HTMLElement, HTMLElement>();
 // Revocation must also remove portals whose logical owner was released for an exit.
 const lastOwners = new WeakMap<HTMLElement, HTMLElement>();
 let preference: MediaQueryList | undefined;
+let pageTransition: {
+  root: HTMLElement;
+  transition: ViewTransition;
+  name: string;
+  commit: () => void;
+  observer: MutationObserver;
+  animations: Animation[];
+} | null = null;
 
 export const ACTIVE_MODAL_SELECTOR = '.modal-backdrop:not([data-ui-closing]):not([hidden])';
 
@@ -25,6 +35,7 @@ export function reducedMotion(): boolean {
     preference.addEventListener('change', () => {
       if (preference?.matches) {
         for (const [element, motion] of [...motions]) settle(element, motion);
+        pageTransition?.transition.skipTransition();
       }
     });
   }
@@ -62,6 +73,99 @@ export function cancelSurfaceMotion(element: HTMLElement): void {
   restore(element, previous);
 }
 
+export function cancelCompactPageTransition(root: HTMLElement): void {
+  if (pageTransition?.root !== root) return;
+  const current = pageTransition;
+  pageTransition = null;
+  current.transition.skipTransition();
+  current.observer.disconnect();
+  current.animations.forEach(animation => animation.cancel());
+  root.style.viewTransitionName = current.name;
+  delete document.documentElement.dataset.compactTransition;
+}
+
+/** Slide browser snapshots, never live view ancestors that contain fixed-position menus. */
+export function transitionCompactPage(root: HTMLElement, update: () => void, direction: 1 | -1): void {
+  if (pageTransition) {
+    if (pageTransition.root !== root) pageTransition.commit();
+    cancelCompactPageTransition(pageTransition.root);
+  }
+  if (!matchMedia(COMPACT_VIEWPORT_QUERY).matches || reducedMotion()
+    || !document.startViewTransition || document.visibilityState === 'hidden') {
+    update();
+    return;
+  }
+  const name = root.style.viewTransitionName;
+  root.style.viewTransitionName = 'compact-page';
+  document.documentElement.dataset.compactTransition = '';
+  let committed = false;
+  const hiddenBranches = (parent: Element): Element[] => {
+    const hidden: Element[] = [];
+    for (const child of parent.children) {
+      if (getComputedStyle(child).display === 'none') hidden.push(child);
+      else hidden.push(...hiddenBranches(child));
+    }
+    return hidden;
+  };
+  let uncaptured = hiddenBranches(root);
+  const observation: MutationObserverInit = {
+    childList: true, subtree: true, attributes: true, attributeOldValue: true,
+    attributeFilter: ['hidden', 'inert', 'aria-hidden'],
+  };
+  const observer = new MutationObserver(records => {
+    if (records.some(record => {
+      if (!(record.target instanceof Element)) return false;
+      if (uncaptured.some(branch => branch.contains(record.target) && getComputedStyle(branch).display === 'none')) return false;
+      return record.type === 'childList' || !!record.attributeName
+        && record.oldValue !== record.target.getAttribute(record.attributeName);
+    })) transition.skipTransition();
+  });
+  const commit = (): void => {
+    if (committed || pageTransition !== current || !root.isConnected) return;
+    committed = true;
+    observer.disconnect();
+    update();
+    const previousHidden = uncaptured;
+    // Ignore only branches absent from both snapshots; an outgoing private page still needs revocation.
+    uncaptured = hiddenBranches(root).flatMap(branch => previousHidden.flatMap(previous =>
+      previous.contains(branch) ? [branch] : branch.contains(previous) ? [previous] : []));
+    // Permission revocation or newer content must replace a captured page immediately.
+    observer.observe(root, observation);
+  };
+  observer.observe(root, observation);
+  const transition = document.startViewTransition(commit);
+  const animations: Animation[] = [];
+  const current = { root, transition, name, commit, observer, animations };
+  pageTransition = current;
+  void transition.ready.then(() => {
+    if (pageTransition !== current || reducedMotion()) return;
+    const options: KeyframeAnimationOptions = {
+      duration: motionDuration('step'), easing: 'cubic-bezier(0.2, 0, 0, 1)', fill: 'both',
+    };
+    current.animations.push(document.documentElement.animate([
+      { transform: 'translateX(0)', opacity: 1 },
+      { transform: `translateX(${-direction * 25}%)`, opacity: 0 },
+    ], { ...options, pseudoElement: '::view-transition-old(compact-page)' }));
+    current.animations.push(document.documentElement.animate([
+      { transform: `translateX(${direction * 100}%)` }, { transform: 'translateX(0)' },
+    ], { ...options, pseudoElement: '::view-transition-new(compact-page)' }));
+  }, (error: unknown) => {
+    if (!(error instanceof DOMException && error.name === 'AbortError')) {
+      console.warn('[Motion] Compact page transition unavailable', error);
+    }
+  });
+  void transition.updateCallbackDone.catch((error: unknown) => { queueMicrotask(() => { throw error; }); });
+  const finish = () => {
+    observer.disconnect();
+    current.animations.forEach(animation => animation.cancel());
+    if (pageTransition !== current) return;
+    root.style.viewTransitionName = name;
+    delete document.documentElement.dataset.compactTransition;
+    pageTransition = null;
+  };
+  void transition.finished.then(finish, finish);
+}
+
 function move(element: HTMLElement, kind: SurfaceKind, leaving: boolean, finish?: () => void): void {
   const previous = motions.get(element);
   const opacity = previous ? getComputedStyle(element).opacity : leaving ? '1' : '0';
@@ -81,7 +185,9 @@ function move(element: HTMLElement, kind: SurfaceKind, leaving: boolean, finish?
     settle(element, motion);
     return;
   }
-  const duration = motionDuration(kind);
+  const compact = matchMedia(COMPACT_VIEWPORT_QUERY).matches;
+  const sheet = compact && card?.matches('.emoji-picker--compact');
+  const duration = motionDuration(sheet ? 'modal' : kind);
   const easing = getComputedStyle(document.documentElement).getPropertyValue('--motion-easing').trim()
     || 'cubic-bezier(0.2, 0, 0, 1)';
   element.dataset.uiMotion = '';
@@ -89,7 +195,9 @@ function move(element: HTMLElement, kind: SurfaceKind, leaving: boolean, finish?
     duration, easing, fill: 'both',
   }));
   if (card) {
-    const offset = kind === 'panel' ? '10px 0' : kind === 'modal' ? '0 8px' : '0 4px';
+    const offset = sheet ? '0 100%' : kind === 'modal' && compact
+      ? card.matches('.settings-modal-card') ? '100% 0' : '0 100%'
+      : kind === 'panel' ? '10px 0' : kind === 'modal' ? '0 8px' : compact ? '0 16px' : '0 4px';
     motion.animations.push(card.animate(
       leaving ? [{ translate: translation ?? '0 0' }, { translate: offset }]
         : [{ translate: translation ?? offset }, { translate: '0 0' }],
@@ -178,20 +286,19 @@ export function removeOwnedSurfaces(root: HTMLElement): void {
 export function positionAnchoredSurface(
   surface: HTMLElement,
   anchor: HTMLElement,
-  { gap = 6, margin = 8, maxHeight = 360, matchWidth = true, minimumHeight = 240 } = {},
+  { gap = 6, margin = 8, maxHeight = 360, matchWidth = true, minimumHeight = 240, alignEnd = false } = {},
 ): void {
   const rect = anchor.getBoundingClientRect();
-  const width = document.documentElement.clientWidth;
-  const height = document.documentElement.clientHeight;
-  const below = Math.max(0, height - rect.bottom - margin - gap);
-  const above = Math.max(0, rect.top - margin - gap);
+  const viewport = viewportBounds();
+  const below = Math.max(0, viewport.bottom - rect.bottom - margin - gap);
+  const above = Math.max(0, rect.top - viewport.top - margin - gap);
   const opensAbove = below < Math.min(surface.scrollHeight, minimumHeight) && above > below;
   surface.style.maxHeight = `${Math.min(maxHeight, opensAbove ? above : below)}px`;
-  if (matchWidth) surface.style.minWidth = `${Math.min(rect.width, width - margin * 2)}px`;
-  surface.style.maxWidth = `${Math.max(0, width - margin * 2)}px`;
+  if (matchWidth) surface.style.minWidth = `${Math.max(0, Math.min(rect.width, viewport.width - margin * 2))}px`;
+  surface.style.maxWidth = `${Math.max(0, viewport.width - margin * 2)}px`;
   const box = surface.getBoundingClientRect();
-  const left = getComputedStyle(anchor).direction === 'rtl' ? rect.right - box.width : rect.left;
-  surface.style.left = `${Math.max(margin, Math.min(left, width - box.width - margin))}px`;
-  surface.style.top = `${Math.max(margin, opensAbove ? rect.top - gap - box.height : rect.bottom + gap)}px`;
+  const left = alignEnd || getComputedStyle(anchor).direction === 'rtl' ? rect.right - box.width : rect.left;
+  surface.style.left = `${Math.max(viewport.left + margin, Math.min(left, viewport.right - box.width - margin))}px`;
+  surface.style.top = `${Math.max(viewport.top + margin, opensAbove ? rect.top - gap - box.height : rect.bottom + gap)}px`;
   surface.style.transformOrigin = opensAbove ? 'center bottom' : 'center top';
 }

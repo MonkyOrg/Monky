@@ -12,7 +12,7 @@ export class ServerNotificationsTab {
           { id: 'checkbox-allow-everyone-mention', label: 'serverSettings.allowEveryoneMention', description: 'serverSettings.allowEveryoneMentionDesc', enabled: serverStore.serverDetails?.allowEveryoneMention !== false },
           { id: 'checkbox-allow-message-edit', label: 'serverSettings.allowMessageEdit', description: 'serverSettings.allowMessageEditDesc', enabled: serverStore.serverDetails?.allowMessageEdit !== false },
         ] as const).map((setting) => `
-          <div data-settings-section="${setting.id}" data-settings-label="${escapeHtml(t(setting.label))}" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--bg-card); padding: 14px; margin-bottom: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+          <div class="settings-switch-row" data-settings-section="${setting.id}" data-settings-label="${escapeHtml(t(setting.label))}" style="background: var(--bg-card); padding: 14px; margin-bottom: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
             <div>
               <label for="${setting.id}">${t(setting.label)}</label>
               <div style="font-size: 11px; color: var(--text-muted);">${t(setting.description)}</div>

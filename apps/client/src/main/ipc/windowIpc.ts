@@ -62,9 +62,7 @@ export function registerWindowIpc(registry: IpcRegistry, { window, pipWindows }:
     window.close();
   });
 
-  // The connection screen is a narrow card, but the in-server layout (rail +
-  // channels + stage + members) needs room to stay usable, so the floor is
-  // raised to a 16:9 box while a server is open (#342).
+  // Connecting must not expand a compact window: the renderer adapts its panels.
   registry.handle('window:set-in-server', 'main', (_event, inServer) => {
     const [minWidth, minHeight] = inServer
       ? [IN_SERVER_MIN_WIDTH, IN_SERVER_MIN_HEIGHT]

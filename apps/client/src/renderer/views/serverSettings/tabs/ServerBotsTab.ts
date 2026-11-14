@@ -58,7 +58,7 @@ export class ServerBotsTab {
             <span style="display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; background: rgba(88,101,242,0.16); color: var(--accent-primary); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;">${t('bots.recommended')}</span>
           </div>
           <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">${t('bots.installDescription')}</div>
-          <div style="display: flex; gap: 8px; align-items: flex-end;">
+          <div class="bot-install-controls">
             <div style="flex: 1;">
               <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">${t('bots.manifestUrlLabel')}</label>
               <input id="bot-manifest-url" type="url" class="input-field" placeholder="${t('bots.manifestUrlPlaceholder')}" style="width: 100%;">
@@ -72,7 +72,7 @@ export class ServerBotsTab {
         </div>
 
         <div data-settings-section="manual-link-bot" data-settings-label="${escapeHtml(t('bots.createTitle'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
-          <div style="display: flex; justify-content: space-between; gap: 12px; align-items: flex-start;">
+          <div class="bot-link-heading">
             <div style="min-width: 0;">
               <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                 <div style="font-size: 13px; font-weight: 700;">${t('bots.createTitle')}</div>

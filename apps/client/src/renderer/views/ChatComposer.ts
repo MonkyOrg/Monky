@@ -76,13 +76,15 @@ export function renderChatComposer({ kind, placeholder, maxLength }: ChatCompose
               </button>
             </div>` : ''}</div>
             <input id="chat-file-input" type="file" multiple style="display: none;">
-            <button id="btn-emoji" type="button" class="chat-attach-btn" title="${t(channel ? 'chat.emojiPickerTitle' : 'chat.emojiAction')}">
+            <button id="btn-emoji" type="button" class="chat-attach-btn" title="${t(channel ? 'chat.emojiPickerTitle' : 'chat.emojiAction')}"
+              aria-label="${t(channel ? 'chat.emojiPickerTitle' : 'chat.emojiAction')}" aria-haspopup="dialog">
               <span class="material-symbols-outlined md-22">mood</span>
             </button>
             <button id="btn-format" type="button" class="chat-attach-btn" title="${t('chat.formatting')}" aria-label="${t('chat.formatting')}" aria-expanded="false" aria-controls="chat-format-toolbar">
               <span class="material-symbols-outlined md-22">format_size</span>
             </button>
-            <monky-markdown-input id="chat-message-input" class="chat-input-field" placeholder="${escapeHtml(placeholder)}" ${maxLength > 0 ? `maxlength="${maxLength}"` : ''}></monky-markdown-input>
+            <monky-markdown-input id="chat-message-input" class="chat-input-field" placeholder="${escapeHtml(placeholder)}"
+              compact-placeholder="${escapeHtml(t('chat.compactInputPlaceholder'))}" ${maxLength > 0 ? `maxlength="${maxLength}"` : ''}></monky-markdown-input>
             <span id="chat-char-counter" class="chat-char-count">0/${maxLength > 0 ? maxLength : '∞'}</span>
             <button type="button" id="btn-send-message" class="btn btn-primary chat-send-btn">
               <span class="material-symbols-outlined md-16" aria-hidden="true">send</span>
@@ -105,6 +107,8 @@ export function setComposerEditMode(root: ParentNode, { editing, saving }: Compo
   const cancel = root.querySelector<HTMLButtonElement>('#btn-cancel-message-edit');
   if (cancel) cancel.disabled = saving;
   const input = root.querySelector<HTMLElement>('#chat-message-input');
+  const compactHint = t(editing ? 'chat.editingMessage' : 'chat.compactInputPlaceholder');
+  if (input && input.getAttribute('compact-placeholder') !== compactHint) input.setAttribute('compact-placeholder', compactHint);
   // Each attribute change reconfigures the editor, so only real changes are written.
   const describedBy = editing ? 'chat-edit-hint chat-edit-error' : null;
   if (input && input.getAttribute('aria-describedby') !== describedBy) {

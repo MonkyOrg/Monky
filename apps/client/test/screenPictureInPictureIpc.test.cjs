@@ -37,6 +37,29 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 // Objects created inside the vm realm have foreign prototypes.
 const plain = value => JSON.parse(JSON.stringify(value));
 
+test('connecting keeps a compact desktop window instead of forcing the desktop sidebar layout', () => {
+  let minimum = [], size = [700, 550];
+  const resizes = [];
+  const window = {
+    isDestroyed: () => false, isMinimized: () => false, isVisible: () => true,
+    isMaximized: () => false, isFullScreen: () => false, on() {},
+    setMinimumSize: (...value) => { minimum = value; }, getSize: () => size,
+    setSize: (...value) => { resizes.push(value); size = value; },
+    webContents: { isDestroyed: () => false, send() {}, mainFrame: {} },
+  };
+  const handler = registerWindow(window, { authorize() {} }).get('window:set-in-server');
+  const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+  handler(event, true);
+  assert.deepEqual(resizes, [], 'Joining a server preserves an already usable compact window');
+  assert.ok(minimum[0] <= size[0] && minimum[1] <= size[1]);
+  size = [400, 300];
+  handler(event, true);
+  assert.equal(resizes.length, 1, 'Undersized windows still grow to a usable minimum');
+  assert.ok(size[0] >= minimum[0] && size[1] >= minimum[1]);
+  handler(event, false);
+  assert.equal(resizes.length, 1, 'Returning Home does not change the chosen size');
+});
+
 test('screen PiP popups are authorized only for the main frame, and automatic ones only while Monky is away', async () => {
   const requestId = '0bb2238a-3560-4dc1-bb1c-72b6978aa96a';
   let focused = true, minimized = false, visible = true, destroyed = false;

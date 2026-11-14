@@ -66,7 +66,7 @@ export class ServerVoiceVideoTab {
     const afkTimeout = s.afkTimeoutSeconds ?? LIMITS.AFK_TIMEOUT_DEFAULT_SECONDS;
 
     return `
-      <div data-settings-section="soundboard" data-settings-label="${escapeHtml(t('serverSettings.allowSoundboard'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+      <div class="settings-switch-row" data-settings-section="soundboard" data-settings-label="${escapeHtml(t('serverSettings.allowSoundboard'))}" style="background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
         <div>
           <label for="checkbox-allow-soundboard" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
             <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">music_note</span>
@@ -81,7 +81,7 @@ export class ServerVoiceVideoTab {
 
       ${supportsRecentSounds ? `
       <div data-settings-section="recent-sounds" data-settings-label="${escapeHtml(t('serverSettings.recentSounds'))}" style="background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px;">
+        <div class="settings-switch-row">
           <div>
             <label for="checkbox-recent-sounds" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
               <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">history</span>
@@ -98,11 +98,11 @@ export class ServerVoiceVideoTab {
             value="${s.recentSoundCacheLimit ?? LIMITS.RECENT_SOUND_CACHE_DEFAULT_LIMIT}"
             style="width: 84px;" ${s.allowSoundboard === false || !s.recentSoundCacheEnabled ? 'disabled' : ''}>`}
         </label>
-        <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">${t('serverSettings.recentSoundsClearHint')}</div>
+        <div class="settings-control-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">${t('serverSettings.recentSoundsClearHint')}</div>
       </div>` : ''}
 
       ${supportsDmRelay ? `
-      <div data-settings-section="dm-relay" data-settings-label="${escapeHtml(t('serverSettings.dmRelayEnabled'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">
+      <div class="settings-switch-row" data-settings-section="dm-relay" data-settings-label="${escapeHtml(t('serverSettings.dmRelayEnabled'))}" style="background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">
         <div>
           <label for="checkbox-dm-relay-enabled" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
             <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">encrypted</span>
@@ -115,7 +115,7 @@ export class ServerVoiceVideoTab {
 
       ${supportsAfk ? `
       <div data-settings-section="afk-channel" data-settings-label="${escapeHtml(t('serverSettings.afkChannel'))}" style="background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px;">
+        <div class="settings-switch-row">
           <div>
             <label for="checkbox-afk-channel" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
               <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">bedtime</span>
@@ -141,7 +141,7 @@ export class ServerVoiceVideoTab {
         </div>
       </div>` : ''}
 
-      <div id="server-turn-section" data-settings-section="turn-relay" data-settings-label="${escapeHtml(t('serverSettings.turnEnabled'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">
+      <div id="server-turn-section" class="settings-switch-row" data-settings-section="turn-relay" data-settings-label="${escapeHtml(t('serverSettings.turnEnabled'))}" style="background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">
         <div>
           <label for="checkbox-turn-enabled" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: ${turnBlocked ? 'not-allowed' : 'pointer'}; margin-bottom: 2px;">
             <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">swap_horiz</span>

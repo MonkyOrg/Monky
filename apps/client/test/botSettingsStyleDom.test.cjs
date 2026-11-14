@@ -68,7 +68,7 @@ if (!process.versions.electron) {
             if (request.url !== '/__bot_settings_style__') return next();
             response.setHeader('Content-Type', 'text/html');
             // The same stylesheets, in the same order, as the application's index.html.
-            response.end('<!doctype html><html lang="pt-BR"><head><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css"><link rel="stylesheet" href="/styles/footerControls.css"></head><body><div id="app"></div></body></html>');
+            response.end('<!doctype html><html lang="pt-BR"><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css"><link rel="stylesheet" href="/styles/footerControls.css"></head><body><div id="app"></div></body></html>');
           });
         },
       }],
@@ -86,10 +86,16 @@ if (!process.versions.electron) {
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
     browser.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    browser.webContents.on('console-message', event => {
+      if (event.level === 'error') console.error(`[renderer] ${event.message}`);
+    });
     timeout = setTimeout(() => { console.error('Bot settings style DOM check timed out'); void finish(1); }, 100000);
     const files = [];
-    for (const language of ['pt-BR', 'en']) {
+    const { emulateViewport } = require('./mobileViewport.cjs');
+    for (const [language, width] of [['pt-BR', 1100], ['en', 1100], ['pt-BR', 390], ['en', 390]]) {
+      browser.setContentSize(width, 850);
       await browser.loadURL(`http://127.0.0.1:${address.port}/__bot_settings_style__`);
+      await emulateViewport(browser.webContents, width, 850);
       await browser.webContents.executeJavaScript('localStorage.clear(); sessionStorage.clear();', true);
       await browser.webContents.executeJavaScript(
         `window.botSettingsStyle = (${runBotSettingsStyle.toString()})(${JSON.stringify(language)}, ${dump}); void 0`, true);
@@ -102,7 +108,22 @@ if (!process.versions.electron) {
           else console.log(`Bot settings style DOM (${language}): ${step.value} checks passed`);
           break;
         }
-        files.push(await capture(`bot-settings-style-${language}-${step.value}`));
+        if (width <= 960) {
+          await browser.webContents.executeJavaScript(`(() => {
+            const card = document.querySelector('.settings-modal-card');
+            const body = card.querySelector('.settings-content-body');
+            const box = card.getBoundingClientRect();
+            if (box.left < 0 || box.right > innerWidth || body.scrollWidth > body.clientWidth + 1)
+              throw new Error('Compact bot settings overflow the viewport: ' + JSON.stringify({
+                box, scrollWidth: body.scrollWidth, clientWidth: body.clientWidth,
+              }));
+            if (card.querySelector('.settings-sidebar').checkVisibility({ checkVisibilityCSS: true }))
+              throw new Error('Compact settings details must replace the category index');
+            if (!card.querySelector('.compact-settings-back').checkVisibility({ checkVisibilityCSS: true }))
+              throw new Error('Compact settings need a back action to the category index');
+          })()`, true);
+        }
+        files.push(await capture(`bot-settings-style-${language}-${width}-${step.value}`));
       }
     }
     console.log(`Screenshots: ${files.join(', ')}`);
@@ -305,6 +326,16 @@ async function* runBotSettingsStyle(language, dump) {
         for (let attempt = 0; attempt < 50 && find('[data-storage-decision="always"]').getAttribute('aria-pressed') !== 'true'; attempt++) await flush();
         bot.storage.details.chosen = { pressed: find('[data-storage-decision="always"]').getAttribute('aria-pressed'), saved: [...deviceDecisions] };
       }
+      if (innerWidth <= 960) {
+        find('.compact-settings-back').click();
+        check(find('.settings-sidebar').checkVisibility({ checkVisibilityCSS: true })
+          && find('.settings-main-container').inert, 'Back opens the bot settings category index');
+        find(`[data-settings-scope="${scope}"]`).click();
+        await flush();
+        check(find('.settings-main-container').checkVisibility({ checkVisibilityCSS: true })
+          && find('.settings-sidebar').inert, 'The same category reopens its full-width detail');
+        check(!document.activeElement?.closest('[inert]'), 'Re-rendering the bot form never focuses the hidden index');
+      }
       yield `bot-${scope}`;
     }
     // Someone who cannot manage bots: no server part, only this computer.
@@ -362,7 +393,7 @@ async function* runBotSettingsStyle(language, dump) {
   const serverModal = new ServerSettingsModal();
   const standard = {};
   try {
-    serverModal.open();
+    serverModal.open('general');
     await flush();
     standard.sidebarTitle = styleOf(find('.server-settings-modal-card .settings-sidebar > :first-child'));
     standard.headerTitle = styleOf(find('#server-settings-tab-title'));
@@ -380,6 +411,7 @@ async function* runBotSettingsStyle(language, dump) {
     servers.setActiveServerStore(previous.server);
   }
   if (dump) return { bot, standard };
+  if (innerWidth <= 960) return checks;
 
   const tabKeys = ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'textTransform',
     'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'gap'];

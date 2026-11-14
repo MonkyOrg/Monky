@@ -70,7 +70,7 @@ export class ServerGeneralTab {
 
       <fieldset class="server-settings-fieldset" data-server-permission="${Permission.MANAGE_SERVER}">
       <div data-settings-section="message-limit" data-settings-label="${escapeHtml(t('serverSettings.messageLimit'))}" class="form-group">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+        <div class="settings-switch-row">
           <label for="input-message-limit">${t('serverSettings.messageLimit')}</label>
           ${renderSwitch({ id: 'toggle-message-limit', label: t('serverSettings.messageLimit'),
     checked: (s.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH) > 0, disabled: !s.protocol?.features.includes('message-length-setting') })}
@@ -80,7 +80,7 @@ export class ServerGeneralTab {
         <small>${t(s.protocol?.features.includes('message-length-setting') ? 'serverSettings.messageLimitHint' : 'chat.featureUpdateRequired')}</small>
       </div>
       <div data-settings-section="member-limit" data-settings-label="${escapeHtml(t('serverSettings.memberLimitLabel'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; margin-bottom: 16px;">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+        <div class="settings-switch-row">
           <div>
             <div id="server-member-limit-label" style="font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px;">${t('serverSettings.memberLimitLabel')}</div>
             <div id="server-member-limit-desc" style="font-size: 11px; color: var(--text-muted);">${t('serverSettings.memberLimitDesc')}</div>
