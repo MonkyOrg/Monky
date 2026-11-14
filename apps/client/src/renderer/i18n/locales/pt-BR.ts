@@ -10,6 +10,7 @@ import { serverAuditPtBR } from './serverAudit';
 import { botStoragePtBR } from './botStorage';
 import { messageSearchPtBR } from '../messageSearch';
 import { browserHomePtBR } from './browserHome';
+import { discordWebPtBR } from './discordWeb';
 
 export const ptBR = {
   'identity.guestAction': 'Entrar como convidado',
@@ -75,6 +76,7 @@ export const ptBR = {
   'identity.unbanConfirm': 'Permitir que esta identidade se conecte novamente a este servidor?',
   'desktopOnly.feature.miniappBrowser': 'Navegador pessoal de miniapps',
   ...browserHomePtBR,
+  ...discordWebPtBR,
   'browser.opened': 'O navegador está embutido aqui. O site continua sendo transmitido enquanto esta view está oculta.',
   'browser.broadcasting': 'Transmitindo este site para a sala. Todos veem o que você digitar ou abrir. Só você controla.',
   'browser.broadcastStarting': 'Iniciando a transmissão do site. A navegação será habilitada após a confirmação da publicação.',

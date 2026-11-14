@@ -5,7 +5,7 @@ import {
 } from '../core/serverConnection';
 import { ensureHostedServerStarted, findOwnedServer } from '../core/hostedServerStart';
 import { voiceStore } from '../stores/voiceStore';
-import { settingsStore } from '../stores/settingsStore';
+import { settingsChanged, settingsStore } from '../stores/settingsStore';
 import { favoritesStore } from '../stores/favoritesStore';
 import {
   connectionStore,
@@ -41,6 +41,7 @@ import { dmStore } from '../stores/dmStore';
 import type { ChatSoundMode } from '../stores/settingsStore';
 import type { HostServerStatus } from '@monky/shared';
 import { showErrorToast } from './CopyToast';
+import { discordWeb } from './discord/DiscordWebView';
 
 type RailUnread = 'mention' | 'unread' | null;
 
@@ -102,6 +103,7 @@ export class ServerRailView {
 
   constructor() {
     appEvents.on('community.updated', () => this.render());
+    appEvents.on('settings.updated', update => { if (settingsChanged(update, 'discordWebEnabled')) this.render(); });
   }
 
   private bindHostedStatus(): void {
@@ -199,6 +201,7 @@ export class ServerRailView {
         <span class="material-symbols-outlined md-22">home</span>
         ${this.homeBadgeCount > 0 ? `<span class="server-rail-home-badge">${this.homeBadgeCount}</span>` : ''}
       </button>
+      ${discordWeb.railButtonMarkup()}
       <div class="server-rail-divider"></div>
       <div class="server-rail-list">
         ${nodesHtml}
@@ -221,7 +224,12 @@ export class ServerRailView {
     this.renderedRail = railEl;
     this.renderedMarkup = markup;
 
-    railEl.querySelector('#server-rail-home')?.addEventListener('click', showHome);
+    railEl.querySelector('#server-rail-home')?.addEventListener('click', () => {
+      // Already on Home, Monky announces no navigation, so Discord is put away here.
+      discordWeb.hide();
+      showHome();
+    });
+    railEl.querySelector('#server-rail-discord')?.addEventListener('click', () => discordWeb.toggle());
     railEl.querySelector('#server-rail-add')?.addEventListener('click', () => addServerModal.open());
 
     this.bindServerClicks();
@@ -640,6 +648,14 @@ export class ServerRailView {
         disabled: dmStore.unreadTotal() === 0,
         onClick: () => { void dmStore.markAllRead(); },
       }], event.currentTarget as HTMLElement);
+    });
+
+    railEl.querySelector('#server-rail-discord')?.addEventListener('contextmenu', (event) => {
+      const entries = discordWeb.railContextEntries();
+      if (!entries.length) return;
+      const mouseEvent = event as MouseEvent;
+      event.preventDefault();
+      contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, entries, event.currentTarget as HTMLElement);
     });
 
     railEl.querySelector('.server-rail-list')?.addEventListener('contextmenu', (event) => {

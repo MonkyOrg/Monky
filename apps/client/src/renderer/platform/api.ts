@@ -84,6 +84,8 @@ export interface PlatformCapabilities {
   botScreens: boolean;
   /** Personal top-level browsing, in a disposable desktop session. */
   miniappBrowser: boolean;
+  /** The official Discord web app, drawn inside Monky's rail and main area. */
+  discordWeb: boolean;
   /** Friends and direct messages. */
   directMessages: boolean;
   /** Soundboard sounds and stickers. */
@@ -124,6 +126,12 @@ export interface PlatformApi {
   miniappBrowserCommand: Invoke<'miniapp-browser:owner'>;
   captureMiniappBrowser: Invoke<'miniapp-browser:capture'>;
   onMiniappBrowserClosed: Subscribe<'miniapp-browser:closed'>;
+  openDiscordWeb: Invoke<'discord-web:open'>;
+  discordWebCommand: Invoke<'discord-web:command'>;
+  onDiscordWebClosed: Subscribe<'discord-web:closed'>;
+  onDiscordWebFrame: Subscribe<'discord-web:frame'>;
+  onDiscordWebCursor: Subscribe<'discord-web:cursor'>;
+  onDiscordWebSplit: Subscribe<'discord-web:split'>;
   /** How the documents of `createBotScreenDocument` are isolated and loaded. */
   botScreenDocuments: BotScreenDocumentHost;
   botStorage: BotStorageApi;

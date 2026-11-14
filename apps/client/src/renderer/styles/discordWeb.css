@@ -1,0 +1,188 @@
+/* Discord web pilot: the official Discord page, rendered hidden by the main
+   process and drawn by Monky in two containers, inside its rail and main area. */
+
+.server-rail-discord {
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 50%;
+  background-color: var(--bg-card);
+  color: #5865f2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-radius 0.22s cubic-bezier(0.2, 0, 0, 1), background-color 0.15s ease, color 0.15s ease;
+}
+
+.server-rail-discord:hover,
+.server-rail-discord[aria-pressed="true"] {
+  border-radius: 16px;
+  background-color: #5865f2;
+  color: #fff;
+}
+
+.discord-web-icon {
+  width: 24px;
+  height: 24px;
+}
+
+/* Discord's server list lines up with Monky's rail: Discord draws its icons
+   in a 72px column, so the rail takes that width while Discord is shown. */
+body.discord-web-shown {
+  --server-rail-width: 72px;
+}
+
+/* Below the rail's divider, Discord's server list continues Monky's rail; the
+   rest of Discord fills Monky's main area, over a discreet Monky footer.
+   Geometry comes from DiscordWebView.syncPlacement. */
+.discord-web {
+  position: fixed;
+  inset: 0;
+  /* Above Monky's panels and the floating user card (80), below every popup,
+     toast and modal, so Monky's notices stay in front of Discord. */
+  z-index: 85;
+  /* Monky's title bar and the top of the rail stay usable. */
+  pointer-events: none;
+}
+
+.discord-web[hidden] {
+  display: none;
+}
+
+.discord-web__rail,
+.discord-web__main,
+.discord-web__footer {
+  position: absolute;
+  pointer-events: auto;
+  background-color: var(--bg-app);
+}
+
+.discord-web__rail {
+  top: var(--discord-web-rail-top, 0px);
+  bottom: var(--discord-web-page-bottom, 0px);
+  left: var(--discord-web-left, 0px);
+  width: var(--discord-web-servers, 72px);
+}
+
+.discord-web__main {
+  top: var(--discord-web-top, 0px);
+  right: 0;
+  bottom: var(--discord-web-page-bottom, 0px);
+  left: calc(var(--discord-web-left, 0px) + var(--discord-web-servers, 72px));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.discord-web__canvas {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  display: block;
+  outline: none;
+  touch-action: none;
+}
+
+.discord-web__main .discord-web__canvas {
+  inset: 0;
+  height: 100%;
+}
+
+/* Pages without Discord's server list (login, for one) stay whole in the main area. */
+.discord-web:not(.discord-web--split) .discord-web__rail .discord-web__canvas {
+  visibility: hidden;
+}
+
+.discord-web__canvas[data-part="servers"] {
+  top: 0;
+  height: calc(var(--discord-web-panel-top, 0px) - var(--discord-web-rail-top, 0px));
+}
+
+.discord-web__canvas[data-part="panel"] {
+  top: calc(var(--discord-web-panel-top, 0px) - var(--discord-web-rail-top, 0px));
+  bottom: 0;
+}
+
+.discord-web__loading {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.discord-web--painted .discord-web__loading {
+  display: none;
+}
+
+.discord-web__footer {
+  right: 0;
+  left: var(--discord-web-left, 0px);
+  height: var(--discord-web-footer, 26px);
+  bottom: calc(var(--discord-web-page-bottom, 26px) - var(--discord-web-footer, 26px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 6px 0 12px;
+  border-top: 1px solid var(--border-color);
+  box-sizing: border-box;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.discord-web__identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.discord-web__identity .discord-web-icon {
+  width: 14px;
+  height: 14px;
+  color: #5865f2;
+  flex-shrink: 0;
+}
+
+.discord-web__identity strong {
+  color: var(--text-secondary, var(--text-primary));
+  font-weight: 600;
+}
+
+.discord-web__origin {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.discord-web__settings {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.discord-web__settings:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.discord-web__settings:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+}
+
+/* Discord's own user panel takes the place of Monky's floating user card. */
+body.discord-web-shown .user-control-bar {
+  visibility: hidden;
+}

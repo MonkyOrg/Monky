@@ -112,6 +112,18 @@ export class AboutTab {
           </div>
           ${renderSwitch({ id: 'checkbox-warn-hosted-reach', label: t('settings.warnHostedServerReach'), checked: settingsStore.warnHostedServerReach })}
         </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);"${lockedAttributes('discordWeb', 'discordWeb')}>
+          <div>
+            <label data-settings-section="discord-web" data-settings-label="${escapeHtml(t('discordWeb.settingLabel'))}" style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-discord-web">
+              <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">open_in_browser</span>
+              ${t('discordWeb.settingLabel')}${lockedBadge('discordWeb')}
+            </label>
+            <div style="font-size: 11px; color: var(--text-muted);">
+              ${t('discordWeb.settingDesc')}
+            </div>
+          </div>
+          ${renderSwitch({ id: 'checkbox-discord-web', label: t('discordWeb.settingLabel'), checked: settingsStore.discordWebEnabled })}
+        </div>
       </div>
 
       <div data-settings-section="license" data-settings-label="${escapeHtml(t('settings.licenseSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
@@ -291,6 +303,12 @@ export class AboutTab {
 
     checkboxWarnHostedReach?.addEventListener('change', () => {
       settingsStore.warnHostedServerReach = checkboxWarnHostedReach.checked;
+      settingsStore.save();
+    });
+
+    const checkboxDiscordWeb = container.querySelector<HTMLInputElement>('#checkbox-discord-web');
+    checkboxDiscordWeb?.addEventListener('change', () => {
+      settingsStore.discordWebEnabled = checkboxDiscordWeb.checked;
       settingsStore.save();
     });
 

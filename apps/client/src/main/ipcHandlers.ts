@@ -34,6 +34,7 @@ import { registerSoundboardIpc } from './ipc/soundboardIpc';
 import { registerStickersIpc } from './ipc/stickersIpc';
 import { registerWindowIpc } from './ipc/windowIpc';
 import { registerMiniappBrowserIpc } from './ipc/miniappBrowserIpc';
+import { registerDiscordWebIpc } from './ipc/discordWebIpc';
 
 // Every channel registered here is checked against the contract in @monky/shared.
 const ipcMain: ContractIpcMain = electronIpcMain;
@@ -83,6 +84,7 @@ export function setupIpcHandlers(
   });
   mainWindow.once('closed', () => registry.dispose());
   const miniappBrowsers = registerMiniappBrowserIpc(mainWindow);
+  const discordWeb = registerDiscordWebIpc(registry, mainWindow);
 
   registerWindowIpc(registry, { window: mainWindow, pipWindows: new ScreenPictureInPictureWindows(mainWindow) });
   registerOverlayIpc(registry, overlayManager);
@@ -140,6 +142,7 @@ export function setupIpcHandlers(
     },
     prepareShutdown: async () => {
       localExecution.freezeAdmissions();
+      discordWeb.dispose();
       await Promise.all([desktopSources.close(), nativeScreenSharing.prepareShutdown(), miniappBrowsers.dispose()]);
     },
     async dispose() {

@@ -4,7 +4,7 @@ import type { NativeScreenPresentationController } from '@monky/screen-share/ren
 import * as nativeAudioProtocol from '@monky/shared';
 import {
   APP_RENDERER_READY, APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, AUDIO_PREVIEW_IPC, BOT_SCREEN_DOCUMENT_IPC, BOT_STORAGE_CHANGED,
-  MINIAPP_BROWSER_IPC, MINIAPP_BROWSER_CLOSED,
+  MINIAPP_BROWSER_IPC, MINIAPP_BROWSER_CLOSED, DISCORD_WEB_IPC, DISCORD_WEB_CLOSED, DISCORD_WEB_FRAME, DISCORD_WEB_CURSOR, DISCORD_WEB_SPLIT,
   BOT_STORAGE_IPC, CRASH_RECOVERY_IPC, DESKTOP_SOURCES_IPC, DEVELOPMENT_QA_IPC, DM_EVENT, DM_IPC, EDITOR_COMMAND_IPC,
   EVENT_CALENDAR_IPC, FILE_BATCH_DOWNLOAD_IPC, HOSTING_SKILL_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC,
   LOCAL_EXECUTION_TASK_FAILED, MEDIA_FOLDERS_IPC, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, SERVER_INVITE_AVAILABLE,
@@ -93,7 +93,7 @@ const api: PlatformApi = {
     browserScreenPicker: false, screenEncoderChoice: true,
     localExecution: true, botScreens: true, directMessages: true, mediaFolders: true, mediaFolderPicker: true, botSoundDownloads: true, folderDownloads: true,
     durableIdentity: true, plainRemoteServers: true,
-    miniappBrowser: true,
+    miniappBrowser: true, discordWeb: true,
   },
   nativeScreenCommand: command => {
     if (command?.action === 'watch') prepareNativeAudio();
@@ -166,6 +166,12 @@ const api: PlatformApi = {
   miniappBrowserCommand: command => invoke(MINIAPP_BROWSER_IPC.owner, command),
   captureMiniappBrowser: requestId => invoke(MINIAPP_BROWSER_IPC.capture, requestId),
   onMiniappBrowserClosed: callback => subscribe(MINIAPP_BROWSER_CLOSED, callback),
+  openDiscordWeb: () => invoke(DISCORD_WEB_IPC.open),
+  discordWebCommand: command => invoke(DISCORD_WEB_IPC.command, command),
+  onDiscordWebClosed: callback => subscribe(DISCORD_WEB_CLOSED, callback),
+  onDiscordWebFrame: callback => subscribe(DISCORD_WEB_FRAME, callback),
+  onDiscordWebCursor: callback => subscribe(DISCORD_WEB_CURSOR, callback),
+  onDiscordWebSplit: callback => subscribe(DISCORD_WEB_SPLIT, callback),
   botScreenDocuments: { isolation: 'origin', loaderLoads: 0 },
   removeBotScreenDocument: url => invoke(BOT_SCREEN_DOCUMENT_IPC.remove, url),
   botStorage: {
