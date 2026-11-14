@@ -1,5 +1,5 @@
-/* Discord web pilot: the official Discord page, rendered hidden by the main
-   process and drawn by Monky in two containers, inside its rail and main area. */
+/* The official Discord page, rendered hidden by the main process and drawn by
+   Monky in two containers, inside its rail and main area. */
 
 .server-rail-discord {
   width: 44px;
@@ -30,14 +30,74 @@
 }
 
 /* Discord's server list lines up with Monky's rail: Discord draws its icons
-   in a 72px column, so the rail takes that width while Discord is shown. */
-body.discord-web-shown {
-  --server-rail-width: 72px;
+   in a 72px column, so the rail takes that width while Discord is shown, in
+   the compact layout too. Registered as lengths, the widths ease between
+   Monky's and Discord's as the list opens and closes. */
+@property --server-rail-width {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 60px;
 }
 
-/* Below the rail's divider, Discord's server list continues Monky's rail; the
-   rest of Discord fills Monky's main area, over a discreet Monky footer.
-   Geometry comes from DiscordWebView.syncPlacement. */
+@property --compact-rail-width {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 64px;
+}
+
+body {
+  transition: --server-rail-width var(--motion-panel-duration) var(--motion-easing),
+    --compact-rail-width var(--motion-panel-duration) var(--motion-easing);
+}
+
+body.discord-web-shown {
+  --server-rail-width: 72px;
+  --compact-rail-width: 72px;
+}
+
+/* Discord's section of Monky's rail, after Monky's own servers. Closed, it
+   takes no room, not even the rail's gap; shown, it takes what Monky's servers
+   leave, and they keep at least half of the rail, on the whole screen too.
+   DiscordWebView.syncPlacement draws Discord's list over it, frame by frame. */
+.server-rail-discord-slot {
+  width: 100%;
+  flex: 0 0 0px;
+  min-height: 0;
+  margin-top: -8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: hidden;
+  transition: flex-grow var(--motion-panel-duration) var(--motion-easing),
+    margin-top var(--motion-panel-duration) var(--motion-easing);
+}
+
+.server-rail-discord-slot__divider {
+  width: 32px;
+  height: 2px;
+  margin-top: 2px;
+  border-radius: 1px;
+  flex-shrink: 0;
+  background: linear-gradient(90deg, var(--border-color), #5865f2, var(--border-color));
+  transition: height var(--motion-panel-duration) var(--motion-easing),
+    margin-top var(--motion-panel-duration) var(--motion-easing),
+    opacity var(--motion-panel-duration) var(--motion-easing);
+}
+
+body.discord-web-shown .server-rail-discord-slot {
+  flex-grow: 1;
+  margin-top: 0;
+}
+
+body.discord-web-shown .server-rail-list {
+  flex: 0 1 auto;
+  max-height: 50%;
+  transition: max-height var(--motion-panel-duration) var(--motion-easing);
+}
+
+/* Below the Discord section's divider, Discord's server list sits in Monky's
+   rail; the rest of Discord fills Monky's main area, over a discreet Monky
+   footer. Geometry comes from DiscordWebView.syncPlacement. */
 .discord-web {
   position: fixed;
   inset: 0;
@@ -48,8 +108,17 @@ body.discord-web-shown {
   pointer-events: none;
 }
 
-.discord-web[hidden] {
+.discord-web[hidden],
+.discord-web__content[hidden] {
   display: none;
+}
+
+/* Only the full mode shows the main area and the footer; with just the server
+   list, Monky's own screen stays in use beside it. */
+.discord-web__content {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
 .discord-web__rail,
@@ -61,10 +130,53 @@ body.discord-web-shown {
 }
 
 .discord-web__rail {
+  --discord-web-rail-overhang: calc(var(--discord-web-servers, 72px) - var(--discord-web-rail-width, var(--discord-web-servers, 72px)));
   top: var(--discord-web-rail-top, 0px);
-  bottom: var(--discord-web-page-bottom, 0px);
+  bottom: var(--discord-web-rail-bottom, var(--discord-web-page-bottom, 0px));
   left: var(--discord-web-left, 0px);
-  width: var(--discord-web-servers, 72px);
+  /* Narrower than Discord's column by the rail's border, which stays in sight
+     beside the list; Discord's user panel crosses it, as it does in Discord. */
+  width: var(--discord-web-rail-width, var(--discord-web-servers, 72px));
+  clip-path: inset(0 calc(-1 * var(--discord-web-rail-overhang)) 0 0);
+  transition: clip-path var(--motion-panel-duration) var(--motion-easing);
+}
+
+/* Put away, the list folds up into its divider as its section closes. */
+.discord-web--closing .discord-web__rail {
+  clip-path: inset(0 calc(-1 * var(--discord-web-rail-overhang)) 100% 0);
+}
+
+/* Discord's user panel belongs to the full page; Monky's user card stays under the list. */
+.discord-web--rail-only .discord-web__canvas[data-part="panel"],
+.discord-web--revealing .discord-web__canvas[data-part="panel"] {
+  visibility: hidden;
+}
+
+/* The compact layout shows Monky's rail only with its navigation panel; the list follows it. */
+.discord-web--rail-away .discord-web__rail {
+  visibility: hidden;
+}
+
+/* Until Discord has routed its entry address, the list's place shows that it is coming. */
+.discord-web__rail-loading {
+  display: none;
+  position: absolute;
+  top: 16px;
+  left: calc(50% - 12px);
+  width: 24px;
+  height: 24px;
+  border-width: 2px;
+  box-sizing: border-box;
+}
+
+.discord-web--rail-only:not(.discord-web--split) .discord-web__rail-loading {
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .discord-web__rail-loading {
+    animation: none;
+  }
 }
 
 .discord-web__main {
@@ -99,16 +211,55 @@ body.discord-web-shown {
 .discord-web__canvas[data-part="servers"] {
   top: 0;
   height: calc(var(--discord-web-panel-top, 0px) - var(--discord-web-rail-top, 0px));
+  /* Discord's icons fade into Monky's rail at the list's edges instead of being cut. */
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 8px);
+  mask-image: linear-gradient(to bottom, transparent, #000 8px);
+}
+
+.discord-web--rail-only .discord-web__canvas[data-part="servers"],
+.discord-web--revealing .discord-web__canvas[data-part="servers"] {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 16px), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 8px, #000 calc(100% - 16px), transparent);
 }
 
 .discord-web__canvas[data-part="panel"] {
   top: calc(var(--discord-web-panel-top, 0px) - var(--discord-web-rail-top, 0px));
-  bottom: 0;
+  width: var(--discord-web-servers, 72px);
+  /* A canvas keeps its own height under top and bottom, so it is given in full. */
+  height: calc(100% - (var(--discord-web-panel-top, 0px) - var(--discord-web-rail-top, 0px)));
 }
 
 .discord-web__loading {
   color: var(--text-muted);
   font-size: 14px;
+}
+
+/* Discord's menus and tooltips, drawn whole over the rail, the page and the
+   rest of Monky's screen, beside what opened them. Only the menus take the
+   pointer, on the area DiscordWebSurface cuts out for them. */
+.discord-web__popups,
+.discord-web__popup-hits {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+  touch-action: none;
+}
+
+.discord-web__popups {
+  pointer-events: none;
+  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.24));
+}
+
+.discord-web__popup-hits {
+  pointer-events: auto;
+}
+
+.discord-web__popups[hidden],
+.discord-web__popup-hits[hidden] {
+  display: none;
 }
 
 .discord-web--painted .discord-web__loading {
@@ -182,7 +333,8 @@ body.discord-web-shown {
   outline-offset: 1px;
 }
 
-/* Discord's own user panel takes the place of Monky's floating user card. */
-body.discord-web-shown .user-control-bar {
+/* Discord's own user panel takes the place of Monky's floating user card once
+   Discord fills the screen. */
+body.discord-web-expanded .user-control-bar {
   visibility: hidden;
 }

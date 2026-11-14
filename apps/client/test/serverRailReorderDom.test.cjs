@@ -332,7 +332,7 @@ if (!process.versions.electron) {
       await evaluate(`window.setLiveIcon('file:///C:/Windows/win.ini')`);
       await check(await evaluate(`!document.querySelector('#server-rail img[src^="file:"]')
         && !!document.querySelector('.server-rail-item[data-port="5101"] .server-rail-avatar')`), 'a live icon in no server format is not drawn');
-      // The Discord pilot comes on and can be turned off: its rail button follows the setting at once.
+      // The Discord button can be turned off: its rail button follows the setting at once.
       const discordButtonWith = (enabled) => evaluate(`import('/stores/settingsStore.ts').then(({ settingsStore }) => {
         settingsStore.discordWebEnabled = ${enabled};
         settingsStore.save();
@@ -341,6 +341,174 @@ if (!process.versions.electron) {
       await check(await evaluate(`!!document.querySelector('#server-rail-discord')`), 'the Discord button is in the rail by default');
       await check(!(await discordButtonWith(false)), 'turned off, the Discord button leaves the rail');
       await check(await discordButtonWith(true), 'turned back on, the Discord button returns to the rail');
+      // The Discord button shows only Discord's server list in the rail; Monky's
+      // screen stays in use until the list is clicked, and that click reaches Discord.
+      await evaluate(`Promise.all([import('/stores/settingsStore.ts'), import('/views/discord/DiscordWebView.ts')])
+        .then(([{ settingsStore }, { discordWeb }]) => {
+          settingsStore.acceptDiscordWebNotice();
+          window.discordCommands = [];
+          window.discordKeys = [];
+          window.api = { ...window.api, openDiscordWeb: () => new Promise(() => {}),
+            discordWebCommand: async command => {
+              window.discordCommands.push(command.action === 'mouse' && command.type === 'down' ? 'press' : command.action);
+              if (command.action === 'key') window.discordKeys.push(command.type + ':' + command.keyCode);
+              if (command.action === 'layout') window.discordLayout = command;
+            },
+            onDiscordWebClosed: () => () => {}, onDiscordWebCursor: () => () => {},
+            onDiscordWebFrame: callback => { window.discordFrame = callback; return () => {}; },
+            onDiscordWebSplit: callback => { window.discordSplit = callback; return () => {}; } };
+          window.discordToggle = () => discordWeb.toggle();
+          window.discordState = () => {
+            const overlay = document.querySelector('.discord-web');
+            const content = overlay?.querySelector('.discord-web__content');
+            return {
+              shown: !!overlay && !overlay.hidden,
+              railOnly: !!overlay?.classList.contains('discord-web--rail-only'),
+              content: !!content && !content.hidden && !content.hasAttribute('data-ui-closing'),
+              contentGone: !content || content.hidden,
+              expanded: document.body.classList.contains('discord-web-expanded'),
+              pressed: document.querySelector('#server-rail-discord')?.getAttribute('aria-pressed'),
+              loading: !!overlay && getComputedStyle(overlay.querySelector('.discord-web__rail-loading')).display !== 'none',
+            };
+          };
+          window.discordToggle();
+        })`);
+      const discord = () => evaluate('window.discordState()');
+      let state = await discord();
+      await check(state.shown && state.railOnly && state.contentGone && !state.expanded && state.pressed === 'true' && state.loading,
+        `the Discord button shows only the list's place, loading, beside Monky's screen ${JSON.stringify(state)}`);
+      await evaluate('window.discordSplit(true)');
+      state = await discord();
+      await check(state.railOnly && state.contentGone && !state.loading, `a signed-in list stays alone in the rail ${JSON.stringify(state)}`);
+      // Monky's servers stay in the rail, in use, above Discord's own section.
+      const shared = () => `(() => {
+        const monky = document.querySelector('#server-rail .server-rail-item').getBoundingClientRect();
+        const list = document.querySelector('#server-rail .server-rail-list');
+        const discordRail = document.querySelector('.discord-web__rail').getBoundingClientRect();
+        const servers = document.querySelector('.discord-web__canvas[data-part="servers"]').getBoundingClientRect();
+        const reached = document.elementFromPoint(monky.left + monky.width / 2, monky.top + monky.height / 2);
+        return { monkyInUse: !!reached?.closest('#server-rail') && getComputedStyle(list).visibility === 'visible',
+          below: discordRail.top >= list.getBoundingClientRect().bottom, height: Math.round(servers.height),
+          page: window.discordLayout?.height, top: Math.round(discordRail.top),
+          end: Math.round(document.getElementById('server-rail-discord-slot').getBoundingClientRect().bottom - discordRail.bottom),
+          divider: Math.round(document.querySelector('#server-rail .server-rail-divider').getBoundingClientRect().bottom) };
+      })()`;
+      await check(await waitFor(`(() => { const s = ${shared()}; return s.monkyInUse && s.below && s.height > 0 && s.page === s.height + 90 && s.end === 8; })()`),
+        `Monky's servers stay in use above Discord's list, whose page is as tall as its section, short of its end ${JSON.stringify(await evaluate(shared()))}`);
+      // The compact layout hides Monky's rail behind its content panel; the list must not cover that content.
+      const railAway = () => `getComputedStyle(document.querySelector('.discord-web__rail')).visibility === 'hidden'`;
+      await evaluate(`document.querySelector('#server-rail').style.visibility = 'hidden'`);
+      await check(await waitFor(railAway()), 'the list hides with Monky\'s rail');
+      await evaluate(`document.querySelector('#server-rail').style.visibility = ''`);
+      await check(await waitFor(`!(${railAway()})`), 'the list returns with Monky\'s rail');
+      const list = await center('.discord-web__canvas[data-part="servers"]');
+      // A right click opens Discord's menu beside the list, without taking Monky's screen.
+      browser.webContents.sendInputEvent({ type: 'mouseDown', button: 'right', clickCount: 1, x: list.x, y: list.y });
+      browser.webContents.sendInputEvent({ type: 'mouseUp', button: 'right', clickCount: 1, x: list.x, y: list.y });
+      await check(await waitFor('window.discordCommands.includes("press")'), 'the right click reaches Discord');
+      state = await discord();
+      await check(state.railOnly && !state.expanded, `a right click on the list keeps Monky's screen ${JSON.stringify(state)}`);
+      // The menu it opens is drawn whole over Monky, and only its own box takes the pointer.
+      const sendFrame = (layers) => evaluate(`window.discordFrame({ width: 200, height: 600, x: 0, y: 0,
+        patchWidth: 1, patchHeight: 1, pixels: new Uint8Array(4), servers: null, ...${JSON.stringify(layers)} })`);
+      const popupState = `(() => {
+        const layer = document.querySelector('.discord-web__popups');
+        const hits = document.querySelector('.discord-web__popup-hits');
+        return { layer: !layer.hidden, hits: !hits.hidden, clip: hits.style.clipPath };
+      })()`;
+      await sendFrame({ popups: [{ kind: 'menu', x: 36, y: 108, width: 150, height: 200, radius: 8, shown: true }], modal: false });
+      await check(await waitFor(`(() => { const s = ${popupState}; return s.layer && s.hits && s.clip.includes('h 150 v 200'); })()`),
+        `a menu from the list shows over Monky, its box taking the pointer ${JSON.stringify(await evaluate(popupState))}`);
+      // Pressing the list itself is Discord's to handle; pressing anywhere else in Monky closes the menu, as in Discord.
+      const press = (point, button) => {
+        browser.webContents.sendInputEvent({ type: 'mouseDown', button, clickCount: 1, x: point.x, y: point.y });
+        browser.webContents.sendInputEvent({ type: 'mouseUp', button, clickCount: 1, x: point.x, y: point.y });
+      };
+      await evaluate('window.discordCommands = []');
+      press(list, 'right');
+      await check(await waitFor('window.discordCommands.includes("press")'), 'the second right click reaches Discord');
+      await check(!(await evaluate('window.discordKeys.length')), 'a press on the list does not close Discord\'s menu');
+      const content = await evaluate('({ x: innerWidth - 40, y: Math.round(innerHeight / 2) })');
+      press(content, 'left');
+      await check(await waitFor('window.discordKeys.join() === "down:Escape,up:Escape"'),
+        `a press elsewhere in Monky closes Discord's menu ${JSON.stringify(await evaluate('window.discordKeys'))}`);
+      state = await discord();
+      await check(state.railOnly && !state.expanded, `closing the menu keeps Monky's screen ${JSON.stringify(state)}`);
+      await sendFrame({ popups: [], modal: false });
+      await check(await waitFor(`(() => { const s = ${popupState}; return !s.layer && !s.hits; })()`),
+        `a closed menu leaves Monky's screen free ${JSON.stringify(await evaluate(popupState))}`);
+      // A tooltip still settling or fading is known, so Monky keeps it out of its clean picture, but is not drawn.
+      await sendFrame({ popups: [{ kind: 'tooltip', x: 36, y: 108, width: 60, height: 32, radius: 4, shown: false }], modal: false });
+      await check(await waitFor(`(() => { const s = ${popupState}; return !s.layer && !s.hits; })()`),
+        `a tooltip not shown yet draws nothing over Monky ${JSON.stringify(await evaluate(popupState))}`);
+      await sendFrame({ popups: [], modal: false });
+      state = await discord();
+      await check(state.railOnly && !state.expanded, `menus never take Monky's screen ${JSON.stringify(state)}`);
+      // A Discord window (an invite from that menu) needs Discord's whole screen.
+      await sendFrame({ popups: [], modal: true });
+      await check(await waitFor('window.discordState().content && window.discordState().expanded'),
+        `a Discord window opens Discord over Monky's screen ${JSON.stringify(await discord())}`);
+      await evaluate('window.discordToggle()');
+      await check(await waitFor('window.discordState().railOnly && !window.discordState().expanded'),
+        `the Discord button goes back to Monky after the window ${JSON.stringify(await discord())}`);
+      await evaluate('window.discordCommands = []');
+      press(await center('.discord-web__canvas[data-part="servers"]'), 'left');
+      await check(await waitFor(`window.discordState().content && window.discordState().expanded
+        && !window.discordState().railOnly && window.discordCommands.includes('press')`),
+        `clicking the list opens Discord over Monky's screen and the click reaches Discord ${JSON.stringify(await discord())}`);
+      await check(await waitFor(`(() => { const s = ${shared()}; return s.monkyInUse && s.below; })()`),
+        `on the whole screen Monky's servers stay in use above Discord's list ${JSON.stringify(await evaluate(shared()))}`);
+      // There Discord's list is as tall as the page, longer than its section: past Discord's own end, the wheel moves the section down it.
+      const wheel = deltaY => evaluate(`(() => {
+        window.discordCommands = [];
+        const servers = document.querySelector('.discord-web__canvas[data-part="servers"]');
+        const box = servers.getBoundingClientRect();
+        servers.dispatchEvent(new WheelEvent('wheel', { deltaY: ${deltaY}, bubbles: true, cancelable: true,
+          clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 }));
+        return window.discordCommands.includes('wheel');
+      })()`);
+      const longList = (scrollTop, panel = null) => sendFrame({ popups: [], modal: false,
+        servers: { top: 32, height: 4000, scrollTop, scrollHeight: 4100, panel } });
+      // Turns of the wheel the window takes, in steps of deltaY, before handing the wheel back to Discord.
+      const turns = async deltaY => {
+        let count = 0;
+        while (count < 100 && !(await wheel(deltaY))) count += 1;
+        return count;
+      };
+      await longList(0);
+      await check(await wheel(120), 'the wheel scrolls Discord\'s own list first');
+      await longList(100);
+      // Discord's list viewport runs on under its user panel: the window ends where that panel starts, not at the viewport's end.
+      const spare = await evaluate(`(() => { const style = document.querySelector('.discord-web').style;
+        return parseInt(style.getPropertyValue('--discord-web-rail-top')) - parseInt(style.getPropertyValue('--discord-web-top')) - 32 + 12; })()`);
+      const down = await turns(120);
+      await check(spare > 0 && down === Math.ceil(spare / 120),
+        `at the end of Discord's list, the wheel moves the section down it, as far as Discord's user panel ${JSON.stringify({ spare, down })}`);
+      const up = await turns(-60);
+      await check(up === Math.ceil(spare / 60), `going back up, the section moves up first, then the wheel scrolls Discord's own list back ${JSON.stringify({ spare, up })}`);
+      // In a Discord call its user panel grows upward with the voice controls: the panel's strip grows with it.
+      const strip = `(() => { const style = document.querySelector('.discord-web').style;
+        return innerHeight - parseFloat(style.getPropertyValue('--discord-web-page-bottom'))
+          - parseFloat(style.getPropertyValue('--discord-web-panel-top')); })()`;
+      await longList(100, 100);
+      await check(await waitFor(`${strip} === 104`),
+        `Discord's taller user panel, in a call, is drawn whole across the rail ${JSON.stringify({ strip: await evaluate(strip) })}`);
+      await longList(100, 66);
+      await check(await waitFor(`${strip} === 70`),
+        `leaving the call, the panel's strip shrinks back ${JSON.stringify({ strip: await evaluate(strip) })}`);
+      await evaluate('window.discordToggle()');
+      await check(await waitFor(`window.discordState().railOnly && window.discordState().contentGone
+        && !window.discordState().expanded && window.discordState().shown && (${shared()}).monkyInUse`),
+        `the Discord button goes back to Monky, keeping the list under Monky's servers ${JSON.stringify(await discord())}`);
+      await evaluate('window.discordSplit(false)');
+      state = await discord();
+      await check(state.expanded && state.content, `a page without a server list (login) takes the main area at once ${JSON.stringify(state)}`);
+      await evaluate('window.discordToggle(); window.discordSplit(true); window.discordToggle()');
+      state = await discord();
+      await check(state.railOnly && !state.expanded, `the list is hidden by the button and shown alone again ${JSON.stringify(state)}`);
+      await evaluate('window.discordToggle()');
+      await check(await waitFor('!window.discordState().shown && window.discordState().pressed === "false"'),
+        `with only the list shown, the Discord button puts Discord away ${JSON.stringify(await discord())}`);
 
       const compactOrder = JSON.stringify(await order());
       for (const [width, height, mobile] of [[390, 844, false], [412, 915, true], [1032, 1376, true]]) {
