@@ -994,11 +994,21 @@ async function responsiveShellSmoke(width, height, mobile) {
     const checkPageSlide = async direction => {
       const slides = () => document.getAnimations().filter(animation => animation.effect?.pseudoElement?.includes('compact-page'));
       await until(() => slides().length === 2, 'The real settings screen did not start its lateral slide');
+      const active = slides();
+      active.forEach(animation => {
+        animation.pause();
+        animation.currentTime = animation.effect.getComputedTiming().duration / 4;
+      });
       await frame();
-      check(slides().length === 2 && slides().every(animation => animation.effect.getComputedTiming().progress > 0
+      const before = active.map(animation => animation.effect.getComputedTiming().progress);
+      active.forEach(animation => { animation.currentTime = animation.effect.getComputedTiming().duration * 3 / 4; });
+      await frame();
+      check(slides().length === 2 && active.every((animation, index) =>
+        before[index] > 0 && animation.effect.getComputedTiming().progress > before[index]
         && animation.effect.getComputedTiming().progress < 1), 'Real settings snapshots remain visible and advance after repaint');
       check(slides().some(animation => animation.effect.getKeyframes()[0].transform === `translateX(${direction * 100}%)`),
         `Settings ${direction === 1 ? 'entry' : 'back'} slides from the correct side`);
+      active.forEach(animation => animation.play());
     };
     let verifySlide = !matchMedia('(prefers-reduced-motion: reduce)').matches;
     for (const tab of card.querySelectorAll('.settings-tab-btn')) {

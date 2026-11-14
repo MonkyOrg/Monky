@@ -137,7 +137,10 @@ if (process.versions.electron) {
 
   test('browser pixel oracle accepts letterboxing but rejects blank, stale and mixed-color frames', async () => {
     const vm = require('node:vm');
-    for (const [kind, accepted] of [['letterbox', true], ['blank', false], ['stale', false], ['mixed', false]]) {
+    for (const [kind, accepted, aspect] of [
+      ['letterbox', true], ['blank', false], ['stale', false], ['mixed', false],
+      ['letterbox-edge', true, 2], ['blank', false, 2], ['stale-edge', false, 2], ['mixed-edge', false, 2],
+    ]) {
       let stopped = false, cancelled = false, released = false, closed = false, read = false, x = 0, y = 0;
       const frame = { displayWidth: 1000, displayHeight: 1000, close() { closed = true; } };
       const reader = {
@@ -153,8 +156,10 @@ if (process.versions.electron) {
             return {
               drawImage(_frame, sourceX, sourceY) { x = sourceX; y = sourceY; },
               getImageData() {
-                const color = kind === 'blank' || y < 400 || y > 600 ? [0, 0, 0, 255]
-                  : kind === 'stale' || (kind === 'mixed' && x === 750) ? [0, 0, 255, 255] : [0, 255, 0, 255];
+                const edge = kind.endsWith('-edge');
+                const color = kind === 'blank' || y < (edge ? 250 : 400) || y > (edge ? 750 : 600) ? [0, 0, 0, 255]
+                  : kind.startsWith('stale') || (kind.startsWith('mixed') && x === 750) ? [0, 0, 255, 255]
+                    : edge && (y === 250 || y === 750) ? [46, 237, 47, 255] : [0, 255, 0, 255];
                 return { data: new Uint8ClampedArray(color) };
               },
             };
@@ -162,8 +167,8 @@ if (process.versions.electron) {
         },
       });
       const track = { id: kind, clone: () => ({ stop() { stopped = true; } }), getSettings: () => ({ deviceId: kind }) };
-      if (accepted) assert.equal((await sample(track, 'green')).pixels.length, 49);
-      else await assert.rejects(sample(track, 'green'), /Browser video source ended/);
+      if (accepted) assert.equal((await sample(track, 'green', undefined, aspect)).pixels.length, 49);
+      else await assert.rejects(sample(track, 'green', undefined, aspect), /Browser video source ended/);
       assert.ok(stopped && cancelled && released && closed, `${kind} releases every owned probe resource`);
     }
   });
@@ -310,14 +315,15 @@ function runClient() {
         return browserAppPeers.flatMap(peer=>peer.getSenders()).filter(sender=>sender.track?.kind==='video'&&
           browserAppTrackClones.some(copy=>copy.parent===original.id&&copy.track===sender.track)).length===1;
       })()`), 'The browser rendition was not attached to its actual sender');
+      const viewport = await current.site.executeJavaScript('({width:innerWidth,height:innerHeight,dpr:devicePixelRatio})');
       const samples = await run(`(async()=>{
         const original=browserAppCaptures.at(-1).getVideoTracks()[0];
         const senders=browserAppPeers.flatMap(peer=>peer.getSenders()).filter(sender=>sender.track?.kind==='video'&&
           browserAppTrackClones.some(copy=>copy.parent===original.id&&copy.track===sender.track));
         if(senders.length!==1) throw new Error('Exactly one actual browser rendition sender is required');
         const sent=senders[0].track;
-        const samples=await Promise.all([(${sampleTrack.toString()})(original,${JSON.stringify(value)}),
-          (${sampleTrack.toString()})(sent,${JSON.stringify(value)})]);
+        const samples=await Promise.all([(${sampleTrack.toString()})(original,${JSON.stringify(value)},undefined,${viewport.width / viewport.height}),
+          (${sampleTrack.toString()})(sent,${JSON.stringify(value)},undefined,${viewport.width / viewport.height})]);
         return {original:samples[0],sent:samples[1],senderExact:senders[0].track===sent,
           captures:browserAppCaptures.length};
       })()`);
@@ -326,13 +332,13 @@ function runClient() {
       const identity = { original: samples.original.track, sent: samples.sent.track, source: samples.original.device };
       current.captureIdentity ??= identity;
       assert.deepEqual(identity, current.captureIdentity, 'Presentation preserves the original and actual sender track identities');
-      const compared = samples.sent.pixels.filter((pixel, index) =>
-        value !== 'home' || (pixel.flat && samples.original.pixels[index].flat));
+      const compared = samples.sent.pixels
+        .map((pixel, index) => ({ pixel, original: samples.original.pixels[index] }))
+        .filter(({ pixel, original }) => value !== 'home' || (pixel.flat && original.flat));
       assert.ok(value !== 'home' || compared.length >= 220, 'Home comparison covers flat surfaces across the full distributed grid');
-      const differences = compared.filter(pixel => {
-        const original = samples.original.pixels.find(point => point.x === pixel.x && point.y === pixel.y);
-        return pixel.rgba.some((channel, component) => Math.abs(channel-original.rgba[component]) > 12);
-      });
+      const differences = compared.filter(({ pixel, original }) =>
+        pixel.rgba.some((channel, component) => Math.abs(channel-original.rgba[component]) > 12))
+        .map(({ pixel }) => pixel);
       assert.deepEqual(differences, [], JSON.stringify({ color:value, compared:compared.length,
         original:[samples.original.width,samples.original.height],sent:[samples.sent.width,samples.sent.height] }));
       return { ...samples, comparedPoints:compared.length, ownerVisible: owner.isVisible(), presented: browser.container.getVisible(),
@@ -340,7 +346,7 @@ function runClient() {
         geometry: current.root ? { root: current.root.getBounds(), content: current.root.getContentSize(), view: current.view.getBounds() } : null,
         frame: { process: current.site.mainFrame.processId, routing: current.site.mainFrame.routingId,
           tree: current.site.mainFrame.frameTreeNodeId },
-        viewport: await current.site.executeJavaScript('({width:innerWidth,height:innerHeight,dpr:devicePixelRatio})') };
+        viewport };
     } else if (name === 'pixels') {
       assert.equal(manager?.entries.size ?? 0, 0, 'A spectator never gets a native site or its session');
       return run(`(async()=>{
@@ -479,7 +485,7 @@ function runClient() {
   require('../dist-electron/main/main.js');
 }
 
-async function sampleTrack(track, color, expected) {
+async function sampleTrack(track, color, expected, sourceAspect) {
   const clone = track.clone();
   const reader = new MediaStreamTrackProcessor({ track: clone, maxBufferSize: 1 }).readable.getReader();
   const canvas = new OffscreenCanvas(1, 1), context = canvas.getContext('2d');
@@ -501,7 +507,13 @@ async function sampleTrack(track, color, expected) {
       if (!frame) throw new Error('Browser video source ended');
       try {
         const pixels = [], axis = color === 'home' ? Array.from({length:21},(_,index)=>(index+.5)/21) : [.02,.1,.25,.5,.75,.9,.98];
-        const points = expected || axis.flatMap(y => axis.map(x => ({x,y})));
+        const frameAspect = frame.displayWidth / frame.displayHeight;
+        const contentWidth = sourceAspect ? Math.min(1, sourceAspect / frameAspect) : 1;
+        const contentHeight = sourceAspect ? Math.min(1, frameAspect / sourceAspect) : 1;
+        const points = expected || axis.flatMap(y => axis.map(x => ({
+          x: (1 - contentWidth) / 2 + x * contentWidth,
+          y: (1 - contentHeight) / 2 + y * contentHeight,
+        })));
         canvas.width = canvas.height = color === 'home' ? 7 : 1;
         for (const {x,y} of points) {
           const radius = color === 'home' ? 3 : 0, size = radius*2+1;
@@ -524,8 +536,8 @@ async function sampleTrack(track, color, expected) {
           : color === 'home' ? pixels.some(({flat,rgba:[red,green,blue]}) => flat &&
               red > 45 && green > 45 && blue > 130 && blue > red*1.5)
             && pixels.some(({flat,rgba:[red,green,blue]}) => flat && red > 5 && red < 80 && green < 80 && blue < 80)
-            // Native aspect ratios can letterbox the site. Sender/receiver comparison still covers the full grid.
-            : last.some(siteColor) && last.every(pixel =>
+            // Check the whole document, not resampling artifacts at a native letterbox boundary.
+            : sourceAspect ? pixels.every(siteColor) : last.some(siteColor) && last.every(pixel =>
               siteColor(pixel) || pixel.rgba.slice(0, 3).every(channel => channel < 35));
         if (matches) return { color, track: track.id, device: track.getSettings().deviceId, pixels,
           width: frame.displayWidth, height: frame.displayHeight, timestamp: frame.timestamp,
