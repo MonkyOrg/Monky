@@ -1,4 +1,4 @@
-import type { DiscordWebCommand, DiscordWebFrame } from '@monky/shared';
+import type { DiscordWebCommand, DiscordWebFrame, DiscordWebLayers, DiscordWebPopup, DiscordWebServerList } from '@monky/shared';
 
 type Modifier = Extract<DiscordWebCommand, { action: 'mouse' }>['modifiers'][number];
 type MouseButton = 'left' | 'middle' | 'right';
@@ -9,6 +9,12 @@ const DOUBLE_CLICK_MS = 500;
 const DOUBLE_CLICK_DISTANCE = 4;
 const WHEEL_LINE = 40;
 const MAX_WHEEL = 10000;
+/** Room around a popup for its shadow and its caret, hidden with it where it does not belong. */
+const POPUP_MARGIN = 40;
+
+type PopupKind = DiscordWebPopup['kind'];
+/** A popup and the canvas whose part of the page opened it, which it is drawn beside. */
+interface PlacedPopup { popup: DiscordWebPopup; owner: HTMLCanvasElement }
 
 /** Keys whose DOM name differs from Electron's, and the text some of them type. */
 const SPECIAL_KEYS: Record<string, { keyCode: string; text?: string }> = {
@@ -39,6 +45,16 @@ const CSS_CURSORS = new Set(['default', 'pointer', 'text', 'wait', 'help', 'cros
 export function discordCursor(electronName: string): string {
   const name = CURSOR_NAMES[electronName] ?? electronName;
   return CSS_CURSORS.has(name) ? name : 'default';
+}
+
+/** A popup's box on the page's picture, grown by `margin` CSS px and rounded outward to whole device pixels. */
+function devicePixels(popup: DiscordWebPopup, scale: number, margin: number): { x: number; y: number; width: number; height: number } {
+  const x = Math.floor((popup.x - margin) * scale), y = Math.floor((popup.y - margin) * scale);
+  return {
+    x, y,
+    width: Math.ceil((popup.x + popup.width + margin) * scale) - x,
+    height: Math.ceil((popup.y + popup.height + margin) * scale) - y,
+  };
 }
 
 function clampWheel(value: number): number {
@@ -86,11 +102,29 @@ function shortcutKey(event: KeyboardEvent): string {
  * pointer and keyboard back to it. Every canvas shows the part of the page that
  * lies under it when the page's top-left corner sits at that canvas's origin
  * (client CSS px), and a point on the canvas maps back the same way.
+ * Canvases may place the page differently (Discord's server list sits lower in
+ * Monky's rail than on the page), so Discord's menus and tooltips, which cross
+ * from one part into another, are drawn whole on a layer over all of them,
+ * beside the canvas that opened them; every canvas placing the page otherwise
+ * shows, where they are, the page as it was before they opened.
  */
 export class DiscordWebSurface {
   private readonly backing = document.createElement('canvas');
   private readonly backingContext: CanvasRenderingContext2D | null;
+  /** The page without its menus and tooltips, as last painted while none was open. */
+  private readonly clean = document.createElement('canvas');
+  private readonly cleanContext: CanvasRenderingContext2D | null;
+  /** Every canvas the person points at: the page's parts and the menus' hit area. */
+  private readonly canvases: readonly HTMLCanvasElement[];
   private readonly origins = new Map<HTMLCanvasElement, { x: number; y: number }>();
+  private popups: PlacedPopup[] = [];
+  private servers: DiscordWebServerList | null = null;
+  private wheelFirst: ((canvas: HTMLCanvasElement, deltaY: number) => boolean) | null = null;
+  /** Who opened the menus and the tooltips open now; kept while any of them stays open. */
+  private readonly owners: Record<PopupKind, HTMLCanvasElement | null> = { menu: null, tooltip: null };
+  /** The part the pointer was last on, or the menus when it was on them. */
+  private pointerOn: HTMLCanvasElement | null = null;
+  private hitsClip = '';
   private painted = false;
   private drawFrame: number | null = null;
   private moveFrame: number | null = null;
@@ -99,9 +133,20 @@ export class DiscordWebSurface {
   /** Keys whose press reached Discord, so their release does too. */
   private readonly pressed = new Map<string, string>();
 
-  constructor(private readonly canvases: readonly HTMLCanvasElement[], private readonly send: (command: DiscordWebCommand) => void,
-    private readonly onFirstPaint: () => void) {
+  /**
+   * `parts` show the page; `primary`, one of them, owns the popups the pointer
+   * did not open (the keyboard's, for one). Over every part and the rest of
+   * Monky, `layer` draws the popups and `hits`, transparent and cut to the
+   * menus, takes the pointer on them.
+   */
+  constructor(private readonly parts: readonly HTMLCanvasElement[], private readonly primary: HTMLCanvasElement,
+    private readonly layer: HTMLCanvasElement, private readonly hits: HTMLCanvasElement,
+    private readonly send: (command: DiscordWebCommand) => void, private readonly onFirstPaint: () => void) {
+    this.canvases = [...parts, hits];
     this.backingContext = this.backing.getContext('2d');
+    this.cleanContext = this.clean.getContext('2d');
+    layer.hidden = true;
+    hits.hidden = true;
   }
 
   /** Where the page's top-left corner sits in the window, for the part `canvas` shows. */
@@ -112,16 +157,18 @@ export class DiscordWebSurface {
     this.scheduleDraw();
   }
 
+  /** The menus follow whoever opened them, so a point on a menu reaches it where Discord drew it. */
   private origin(canvas: HTMLCanvasElement): { x: number; y: number } {
-    return this.origins.get(canvas) ?? { x: 0, y: 0 };
+    const placed = canvas === this.hits ? this.owners.menu ?? this.primary : canvas;
+    return this.origins.get(placed) ?? { x: 0, y: 0 };
   }
 
   frame(frame: DiscordWebFrame): void {
     const context = this.backingContext;
     if (!context || frame.pixels.length !== frame.patchWidth * frame.patchHeight * 4) return;
     if (this.backing.width !== frame.width || this.backing.height !== frame.height) {
-      this.backing.width = frame.width;
-      this.backing.height = frame.height;
+      this.backing.width = this.clean.width = frame.width;
+      this.backing.height = this.clean.height = frame.height;
     }
     const image = new ImageData(frame.patchWidth, frame.patchHeight);
     image.data.set(frame.pixels);
@@ -132,6 +179,16 @@ export class DiscordWebSurface {
       pixels[index] = (value & 0xff00ff00) | ((value & 0xff) << 16) | ((value >>> 16) & 0xff);
     }
     context.putImageData(image, frame.x, frame.y);
+    const covered = this.popups.length > 0;
+    this.place(frame);
+    this.servers = frame.servers;
+    // Any popup on the page, even one not drawn yet, keeps the clean copy as it was.
+    // Once the last closes, the whole picture is clean again, parts repainted meanwhile too.
+    if (this.popups.length === 0) {
+      if (covered) this.cleanContext?.drawImage(this.backing, 0, 0);
+      else this.cleanContext?.drawImage(this.backing, frame.x, frame.y, frame.patchWidth, frame.patchHeight,
+        frame.x, frame.y, frame.patchWidth, frame.patchHeight);
+    }
     if (!this.painted) {
       this.painted = true;
       this.onFirstPaint();
@@ -139,23 +196,61 @@ export class DiscordWebSurface {
     this.scheduleDraw();
   }
 
+  /** A popup belongs to the canvas the pointer was on when the first of its kind opened; one opened from a menu, to the menu's. */
+  private place({ popups }: DiscordWebLayers): void {
+    const pointed = (this.pointerOn === this.hits ? this.owners.menu : this.pointerOn) ?? this.primary;
+    const menuOwner = this.owners.menu;
+    for (const kind of ['menu', 'tooltip'] as const) {
+      if (!popups.some(popup => popup.kind === kind)) this.owners[kind] = null;
+      else this.owners[kind] ??= pointed;
+    }
+    this.popups = popups.map(popup => ({ popup, owner: this.owners[popup.kind] ?? this.primary }));
+    // A closed menu hands the keyboard back to the part of Discord that opened it.
+    if (!this.owners.menu && menuOwner && document.activeElement === this.hits) menuOwner.focus({ preventScroll: true });
+    this.layer.hidden = !this.popups.some(({ popup }) => popup.shown);
+  }
+
+  /** Where Discord's server list is and how far it has scrolled, as of the latest picture. */
+  serverList(): DiscordWebServerList | null {
+    return this.servers;
+  }
+
+  /**
+   * Lets `handler` take a wheel turn over a part of the page before it reaches
+   * Discord: it tells whether it used it.
+   */
+  interceptWheel(handler: (canvas: HTMLCanvasElement, deltaY: number) => boolean): void {
+    this.wheelFirst = handler;
+  }
+
   cursor(electronName: string): void {
     const cursor = discordCursor(electronName);
     for (const canvas of this.canvases) if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor;
   }
 
+  /** How tall the page's latest picture is, in CSS px. */
+  pictureHeight(): number {
+    return this.backing.height / (window.devicePixelRatio || 1);
+  }
+
   /** Forgets the page's picture, for a page that closed. */
   reset(): void {
-    this.backing.width = 0;
-    this.backing.height = 0;
+    this.backing.width = this.clean.width = 0;
+    this.backing.height = this.clean.height = 0;
     this.painted = false;
     this.pressed.clear();
     this.pendingMove = null;
+    this.popups = [];
+    this.servers = null;
+    this.owners.menu = this.owners.tooltip = null;
+    this.pointerOn = null;
     this.cancelFrames();
-    for (const canvas of this.canvases) {
+    for (const canvas of [...this.canvases, this.layer]) {
       canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
       canvas.style.cursor = '';
     }
+    this.layer.hidden = true;
+    this.syncHits();
   }
 
   cancelFrames(): void {
@@ -175,7 +270,7 @@ export class DiscordWebSurface {
 
   private draw(): void {
     const scale = window.devicePixelRatio || 1;
-    for (const canvas of this.canvases) {
+    for (const canvas of [...this.parts, this.layer]) {
       const rect = canvas.getBoundingClientRect();
       const width = Math.max(0, Math.round(rect.width * scale)), height = Math.max(0, Math.round(rect.height * scale));
       if (canvas.width !== width) canvas.width = width;
@@ -185,10 +280,53 @@ export class DiscordWebSurface {
       context.imageSmoothingEnabled = false;
       context.clearRect(0, 0, width, height);
       if (this.backing.width === 0 || this.backing.height === 0) continue;
-      const origin = this.origin(canvas);
-      const sourceX = Math.round((rect.left - origin.x) * scale), sourceY = Math.round((rect.top - origin.y) * scale);
-      context.drawImage(this.backing, sourceX, sourceY, width, height, 0, 0, width, height);
+      if (canvas === this.layer) this.drawPopups(context, rect, scale);
+      else this.drawPart(canvas, context, rect, scale);
     }
+    this.syncHits();
+  }
+
+  private drawPart(canvas: HTMLCanvasElement, context: CanvasRenderingContext2D, rect: DOMRect, scale: number): void {
+    const origin = this.origin(canvas);
+    const sourceX = Math.round((rect.left - origin.x) * scale), sourceY = Math.round((rect.top - origin.y) * scale);
+    context.drawImage(this.backing, sourceX, sourceY, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+    // A popup opened elsewhere would show here torn or twice: this part shows the page as it was without it.
+    for (const { popup, owner } of this.popups) {
+      const at = this.origin(owner);
+      if (at.x === origin.x && at.y === origin.y) continue;
+      const box = devicePixels(popup, scale, POPUP_MARGIN);
+      context.clearRect(box.x - sourceX, box.y - sourceY, box.width, box.height);
+      context.drawImage(this.clean, box.x, box.y, box.width, box.height, box.x - sourceX, box.y - sourceY, box.width, box.height);
+    }
+  }
+
+  /** Each shown popup, whole and with its round corners, beside the part of the page that opened it. */
+  private drawPopups(context: CanvasRenderingContext2D, rect: DOMRect, scale: number): void {
+    for (const { popup, owner } of this.popups) {
+      if (!popup.shown) continue;
+      const at = this.origin(owner);
+      const box = devicePixels(popup, scale, 0);
+      const x = Math.round((at.x - rect.left) * scale) + box.x, y = Math.round((at.y - rect.top) * scale) + box.y;
+      context.save();
+      context.beginPath();
+      context.roundRect(x, y, box.width, box.height, popup.radius * scale);
+      context.clip();
+      context.drawImage(this.backing, box.x, box.y, box.width, box.height, x, y, box.width, box.height);
+      context.restore();
+    }
+  }
+
+  /** Over Monky's own screen, the pointer reaches Discord only on its open menus. */
+  private syncHits(): void {
+    const menus = this.popups.filter(({ popup }) => popup.kind === 'menu' && popup.shown);
+    const clip = menus.map(({ popup, owner }) => {
+      const at = this.origin(owner);
+      return `M${at.x + popup.x} ${at.y + popup.y}h${popup.width}v${popup.height}h${-popup.width}Z`;
+    }).join('');
+    if (clip === this.hitsClip) return;
+    this.hitsClip = clip;
+    this.hits.style.clipPath = clip ? `path('${clip}')` : '';
+    this.hits.hidden = clip === '';
   }
 
   /** Listens to the person on every canvas until `signal` aborts. */
@@ -213,6 +351,20 @@ export class DiscordWebSurface {
       canvas.addEventListener('keyup', event => this.keyUp(event), options);
       canvas.addEventListener('blur', () => this.releaseKeys(), options);
     }
+    // A part that grows or shrinks with Monky's frame is redrawn before that frame paints, never shown stretched.
+    const resized = new ResizeObserver(() => {
+      if (this.drawFrame !== null) cancelAnimationFrame(this.drawFrame);
+      this.drawFrame = null;
+      this.draw();
+    });
+    for (const canvas of [...this.parts, this.layer]) resized.observe(canvas);
+    signal.addEventListener('abort', () => resized.disconnect(), { once: true });
+    // Pressing anywhere else in Monky closes Discord's open menus, as a press beside them would in Discord.
+    document.addEventListener('pointerdown', event => {
+      if (!this.owners.menu || (event.target instanceof HTMLCanvasElement && this.canvases.includes(event.target))) return;
+      this.key('down', 'Escape', []);
+      this.key('up', 'Escape', []);
+    }, { signal, capture: true });
   }
 
   private point(canvas: HTMLCanvasElement, event: MouseEvent): { x: number; y: number } {
@@ -221,6 +373,7 @@ export class DiscordWebSurface {
   }
 
   private pointerDown(canvas: HTMLCanvasElement, event: PointerEvent): void {
+    this.pointerOn = canvas;
     const button = BUTTONS[event.button];
     if (!button) return;
     // No middle-button autoscroll or text selection in Monky itself.
@@ -237,6 +390,7 @@ export class DiscordWebSurface {
   }
 
   private pointerMove(canvas: HTMLCanvasElement, event: PointerEvent): void {
+    this.pointerOn = canvas;
     const { x, y } = this.point(canvas, event);
     this.pendingMove = { action: 'mouse', type: 'move', x, y, modifiers: pointerModifiers(event) };
     this.moveFrame ??= requestAnimationFrame(() => {
@@ -269,9 +423,10 @@ export class DiscordWebSurface {
     event.preventDefault();
     const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? WHEEL_LINE
       : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? window.innerHeight : 1;
+    const deltaX = clampWheel(event.deltaX * unit), deltaY = clampWheel(event.deltaY * unit);
+    if (deltaX === 0 && this.wheelFirst?.(canvas, deltaY)) return;
     const { x, y } = this.point(canvas, event);
-    this.send({ action: 'wheel', x, y, deltaX: clampWheel(event.deltaX * unit), deltaY: clampWheel(event.deltaY * unit),
-      modifiers: pointerModifiers(event) });
+    this.send({ action: 'wheel', x, y, deltaX, deltaY, modifiers: pointerModifiers(event) });
   }
 
   private keyDown(event: KeyboardEvent): void {

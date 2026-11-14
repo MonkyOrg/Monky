@@ -208,6 +208,7 @@ export class ServerRailView {
         ${this.renderRootDropZone(layout.length)}
         ${this.renderAddServerButton(busy)}
       </div>
+      ${discordWeb.railSlotMarkup()}
     `;
     // Messages of background servers, community updates and saved-server writes
     // ask for a render far more often than the rail changes. Rebuilding the same
@@ -225,8 +226,8 @@ export class ServerRailView {
     this.renderedMarkup = markup;
 
     railEl.querySelector('#server-rail-home')?.addEventListener('click', () => {
-      // Already on Home, Monky announces no navigation, so Discord is put away here.
-      discordWeb.hide();
+      // Already on Home, Monky announces no navigation, so Monky takes the screen back here.
+      discordWeb.backToMonky();
       showHome();
     });
     railEl.querySelector('#server-rail-discord')?.addEventListener('click', () => discordWeb.toggle());

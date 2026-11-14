@@ -528,8 +528,15 @@ async function shellNavigationSmoke() {
   await closeMenu();
 
   phase = 'R-SHELL-1: hanging up at Home';
+  const footerEdges = () => {
+    const { left, right, bottom } = document.querySelector('.user-control-bar').getBoundingClientRect();
+    return JSON.stringify([left, right, bottom]);
+  };
+  const serverFooter = footerEdges();
   document.querySelector('#server-rail-home').click();
   await until(() => !!document.querySelector('#home-view'), 'Home did not come back');
+  check(footerEdges() === serverFooter,
+    `the Home user card crosses the rail exactly like in a server (${serverFooter} → ${footerEdges()})`);
   voiceStore.setChannel('voice-5401', session.key);
   await settle();
   // The stage listens to participants while it is mounted; at Home there is none.

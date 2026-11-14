@@ -78,7 +78,7 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   :root .main-layout[data-compact] {
     --compact-search-height: 56px;
     display: grid;
-    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-columns: var(--compact-rail-width, 64px) minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto;
     padding-top: env(safe-area-inset-top);
     padding-left: env(safe-area-inset-left);
@@ -150,7 +150,7 @@ html[data-compact-transition]::view-transition-new(compact-page) {
 
   :root .main-layout[data-compact] > .server-rail {
     grid-column: 1;
-    width: 64px !important;
+    width: var(--compact-rail-width, 64px) !important;
     padding: 12px 0;
     border: 0;
   }

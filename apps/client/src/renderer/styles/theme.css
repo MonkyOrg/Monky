@@ -510,9 +510,8 @@
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
-  padding: 12px;
-  padding-bottom: 0;
-  overflow: hidden;
+  --home-sidebar-gutter: 12px;
+  padding: var(--home-sidebar-gutter) var(--home-sidebar-gutter) 0;
 }
 
 .main-layout--home > .home-center-column {
@@ -721,8 +720,11 @@
   display: none;
 }
 
+/* Same floating card as in a server: the Home sidebar's gutter is undone so it
+   also crosses the server rail and keeps the server's 8px edges. */
 .main-layout--home .user-control-bar {
-  margin: auto 0 12px;
+  margin: 0 calc(8px - var(--home-sidebar-gutter)) 8px
+    calc(8px - var(--home-sidebar-gutter) - var(--server-rail-width));
 }
 
 .server-rail-home[aria-current="page"] {
