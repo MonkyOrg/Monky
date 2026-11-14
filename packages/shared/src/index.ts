@@ -69,6 +69,7 @@ export * from './botCarousels.js';
 export * from './botSelectors.js';
 export * from './botScreens.js';
 export * from './miniappBrowser.js';
+export * from './discordWeb.js';
 export * from './localExecution.js';
 export * from './localExecutionProtocol.js';
 export * from './botPermissions.js';

@@ -325,6 +325,15 @@ if (!process.versions.electron) {
       await evaluate(`window.setLiveIcon('file:///C:/Windows/win.ini')`);
       await check(await evaluate(`!document.querySelector('#server-rail img[src^="file:"]')
         && !!document.querySelector('.server-rail-item[data-port="5101"] .server-rail-avatar')`), 'a live icon in no server format is not drawn');
+      // The Discord pilot comes on and can be turned off: its rail button follows the setting at once.
+      const discordButtonWith = (enabled) => evaluate(`import('/stores/settingsStore.ts').then(({ settingsStore }) => {
+        settingsStore.discordWebEnabled = ${enabled};
+        settingsStore.save();
+        return !!document.querySelector('#server-rail-discord');
+      })`);
+      await check(await evaluate(`!!document.querySelector('#server-rail-discord')`), 'the Discord button is in the rail by default');
+      await check(!(await discordButtonWith(false)), 'turned off, the Discord button leaves the rail');
+      await check(await discordButtonWith(true), 'turned back on, the Discord button returns to the rail');
       console.log('Server rail reorder DOM passed');
       await finish(0);
     } catch (error) {

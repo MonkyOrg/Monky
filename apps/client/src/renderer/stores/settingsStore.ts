@@ -61,6 +61,8 @@ function savedSettings(store: SettingsStore) {
     outputVolume: store.outputVolume,
     navigationSidebarHidden: store.navigationSidebarHidden,
     membersSidebarHidden: store.membersSidebarHidden,
+    discordWebEnabled: store.discordWebEnabled,
+    discordWebNoticeAccepted: store.discordWebNoticeAccepted,
     selectedMicrophoneId: store.selectedMicrophoneId,
     selectedSpeakerId: store.selectedSpeakerId,
     advancedAudioOutputs: store.advancedAudioOutputs,
@@ -226,6 +228,10 @@ export class SettingsStore {
   public navigationSidebarHidden: boolean = false;
   /** The member list, folded away. */
   public membersSidebarHidden: boolean = false;
+  /** The notice that the Discord inside Monky is the official, unaffiliated discord.com was acknowledged. */
+  public discordWebNoticeAccepted: boolean = false;
+  /** The Discord button in the server rail; turned off, it is gone and the page is ended. */
+  public discordWebEnabled: boolean = true;
   public selectedMicrophoneId: string = '';
   public selectedSpeakerId: string = '';
   public advancedAudioOutputs: boolean = false;
@@ -382,6 +388,8 @@ export class SettingsStore {
         this.outputVolume = restoreMasterVolume(parsed.outputVolume);
         this.navigationSidebarHidden = parsed.navigationSidebarHidden === true;
         this.membersSidebarHidden = parsed.membersSidebarHidden === true;
+        this.discordWebNoticeAccepted = parsed.discordWebNoticeAccepted === true;
+        this.discordWebEnabled = parsed.discordWebEnabled !== false;
         this.noiseSuppressionMode = restoreNoiseSuppressionMode(parsed.noiseSuppressionMode, parsed.noiseSuppressionEnabled);
         this.lastNoiseSuppressionMode = isNoiseSuppressionMode(parsed.lastNoiseSuppressionMode) && parsed.lastNoiseSuppressionMode !== 'off'
           ? parsed.lastNoiseSuppressionMode : this.noiseSuppressionMode === 'off' ? 'rnnoise' : this.noiseSuppressionMode;
@@ -733,6 +741,11 @@ export class SettingsStore {
   public setSidebarHidden(sidebar: 'navigation' | 'members', hidden: boolean): void {
     if (sidebar === 'navigation') this.navigationSidebarHidden = hidden;
     else this.membersSidebarHidden = hidden;
+    this.persist('now');
+  }
+
+  public acceptDiscordWebNotice(): void {
+    this.discordWebNoticeAccepted = true;
     this.persist('now');
   }
 

@@ -1,7 +1,13 @@
 import type { App, WebContents, WebPreferences } from 'electron';
-import { miniappBrowserUrl } from '@monky/shared';
+import { discordWebUrl, miniappBrowserUrl } from '@monky/shared';
 
 const personalBrowsers = new WeakSet<WebContents>();
+const discordPages = new WeakSet<WebContents>();
+
+/** The embedded official Discord page may move between Discord addresses, and only those. */
+export function allowDiscordNavigation(contents: WebContents): void {
+  discordPages.add(contents);
+}
 
 /** Only unprivileged, sandboxed, non-persistent contents may opt into HTTP(S) navigation. */
 export function allowPersonalBrowserNavigation(contents: WebContents, prefs: WebPreferences): void {
@@ -24,7 +30,8 @@ export function allowPersonalBrowserNavigation(contents: WebContents, prefs: Web
  * - `window.open` is refused (the main window replaces this handler with its
  *   own, which allows Picture-in-Picture and sends links to the browser);
  * - the top frame may only reload its own document; leaving it is cancelled.
- * An explicitly isolated personal browser may instead navigate to HTTP(S).
+ * An explicitly isolated personal browser may instead navigate to HTTP(S), and
+ * the embedded Discord page to Discord addresses.
  */
 export function installWebContentsPolicy(app: Pick<App, 'on' | 'removeListener'>): () => void {
   const secure = (_event: Electron.Event, contents: WebContents): void => {
@@ -32,6 +39,7 @@ export function installWebContentsPolicy(app: Pick<App, 'on' | 'removeListener'>
     contents.setWindowOpenHandler(() => ({ action: 'deny' }));
     contents.on('will-navigate', event => {
       if (personalBrowsers.has(contents) && miniappBrowserUrl(event.url)) return;
+      if (discordPages.has(contents) && discordWebUrl(event.url)) return;
       if (event.url !== contents.getURL()) event.preventDefault();
     });
   };

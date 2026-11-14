@@ -38,6 +38,7 @@ const FEATURE_NAMES = {
   mediaLibrary: 'desktopOnly.feature.mediaLibrary',
   directMessages: 'desktopOnly.feature.directMessages',
   miniappBrowser: 'desktopOnly.feature.miniappBrowser',
+  discordWeb: 'desktopOnly.feature.discordWeb',
 } as const satisfies Readonly<Record<string, TranslationKey>>;
 
 export type DesktopFeature = keyof typeof FEATURE_NAMES;

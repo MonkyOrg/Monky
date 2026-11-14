@@ -8,7 +8,7 @@ const WEB: PlatformCapabilities = {
   windowControls: false, screenPictureInPicture: true, documentPictureInPicture: true, automaticPictureInPicture: false,
   hostServer: false, lanDiscovery: false, overlay: false, globalShortcuts: false, tray: false, autoStart: false,
   autoUpdate: false, gamePresence: false, nativeScreenAudio: false, screenShare: true, browserScreenPicker: true,
-  screenEncoderChoice: false, localExecution: false, botScreens: true, miniappBrowser: false, directMessages: true, mediaFolders: true,
+  screenEncoderChoice: false, localExecution: false, botScreens: true, miniappBrowser: false, discordWeb: false, directMessages: true, mediaFolders: true,
   mediaFolderPicker: false, botSoundDownloads: false, folderDownloads: false, durableIdentity: false, plainRemoteServers: false,
 };
 

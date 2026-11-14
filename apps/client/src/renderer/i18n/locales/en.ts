@@ -4,6 +4,7 @@ import { serverAuditEn } from './serverAudit';
 import { botStorageEn } from './botStorage';
 import { messageSearchEn } from '../messageSearch';
 import { browserHomeEn } from './browserHome';
+import { discordWebEn } from './discordWeb';
 
 /**
  * English catalog (#16). Keys mirror `pt-BR.ts`; anything missing here falls
@@ -73,6 +74,7 @@ export const en: TranslationMap = {
   'identity.unbanConfirm': 'Allow this identity to connect to this server again?',
   'desktopOnly.feature.miniappBrowser': 'Personal miniapp browser',
   ...browserHomeEn,
+  ...discordWebEn,
   'browser.opened': 'The browser is embedded here. Its site stays on air while this view is hidden.',
   'browser.broadcasting': 'Broadcasting this site to the room. Everyone can see anything you type or open. Only you control it.',
   'browser.broadcastStarting': 'Starting the site broadcast. Navigation is disabled until publication is confirmed.',
