@@ -1,10 +1,11 @@
-import { contextBridge, ipcRenderer, sharedTexture } from 'electron';
+import { contextBridge, ipcRenderer, sharedTexture, webUtils } from 'electron';
 import nativePcmPlayoutWorklet from '@monky/screen-share/runtime/nativePcmPlayout.worklet.js?raw';
 import type { NativeScreenPresentationController } from '@monky/screen-share/renderer';
 import * as nativeAudioProtocol from '@monky/shared';
 import {
   APP_RENDERER_READY, APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, AUDIO_PREVIEW_IPC, BOT_SCREEN_DOCUMENT_IPC, BOT_STORAGE_CHANGED,
   MINIAPP_BROWSER_IPC, MINIAPP_BROWSER_CLOSED, DISCORD_WEB_IPC, DISCORD_WEB_CLOSED, DISCORD_WEB_FRAME, DISCORD_WEB_CURSOR, DISCORD_WEB_SPLIT,
+  DISCORD_WEB_FULLSCREEN,
   BOT_STORAGE_IPC, CRASH_RECOVERY_IPC, DESKTOP_SOURCES_IPC, DEVELOPMENT_QA_IPC, DM_EVENT, DM_IPC, EDITOR_COMMAND_IPC,
   EVENT_CALENDAR_IPC, FILE_BATCH_DOWNLOAD_IPC, HOSTING_SKILL_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC,
   LOCAL_EXECUTION_TASK_FAILED, MEDIA_FOLDERS_IPC, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, SERVER_INVITE_AVAILABLE,
@@ -168,10 +169,16 @@ const api: PlatformApi = {
   onMiniappBrowserClosed: callback => subscribe(MINIAPP_BROWSER_CLOSED, callback),
   openDiscordWeb: () => invoke(DISCORD_WEB_IPC.open),
   discordWebCommand: command => invoke(DISCORD_WEB_IPC.command, command),
+  discordWebDrop: async ({ x, y, files }) => {
+    // Files from the disk have a path; anything else dropped (a picture from a page) has none and is left out.
+    const paths = files.map(file => webUtils.getPathForFile(file)).filter(path => path !== '');
+    if (paths.length) await invoke(DISCORD_WEB_IPC.drop, { x, y, paths });
+  },
   onDiscordWebClosed: callback => subscribe(DISCORD_WEB_CLOSED, callback),
   onDiscordWebFrame: callback => subscribe(DISCORD_WEB_FRAME, callback),
   onDiscordWebCursor: callback => subscribe(DISCORD_WEB_CURSOR, callback),
   onDiscordWebSplit: callback => subscribe(DISCORD_WEB_SPLIT, callback),
+  onDiscordWebFullscreen: callback => subscribe(DISCORD_WEB_FULLSCREEN, callback),
   botScreenDocuments: { isolation: 'origin', loaderLoads: 0 },
   removeBotScreenDocument: url => invoke(BOT_SCREEN_DOCUMENT_IPC.remove, url),
   botStorage: {

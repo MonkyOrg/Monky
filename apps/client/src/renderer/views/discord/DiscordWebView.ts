@@ -20,6 +20,7 @@ const TERMS_URL = 'https://discord.com/terms';
 const SHOWN_CLASS = 'discord-web-shown';
 const EXPANDED_CLASS = 'discord-web-expanded';
 const CLOSING_CLASS = 'discord-web--closing';
+const FULLSCREEN_CLASS = 'discord-web--fullscreen';
 /** Room left under a rail divider before Discord's server list begins, so its top fade covers no icon. */
 const DIVIDER_GAP = 8;
 /** Room left between Discord's server list and the end of its section, for its bottom fade. */
@@ -44,6 +45,8 @@ const DISCORD_TOP_BAR = 32;
 const DISCORD_USER_PANEL = 70;
 /** The room Discord leaves between its list and its user panel. */
 const DISCORD_PANEL_GAP = 4;
+/** How far a picture's width may be from the size asked for, in CSS px, with the screen's scale rounding it. */
+const PICTURE_SIZE_SLACK = 1.5;
 /**
  * After a page resized to the whole screen shows its first frame, Discord
  * still takes a few frames to fill it: the main area holds at least this long,
@@ -118,6 +121,16 @@ class DiscordWebView {
   private listRoom = 0;
   /** Where, down the page, Discord's user panel starts covering the bottom of its list. */
   private listEnd = 0;
+  /** Discord shows a video on its whole screen: Monky's window shows the page alone, on the whole screen too. */
+  private fullscreen = false;
+  /** Where Discord's open modal window starts on its page (its settings, an invite); null when none is open. */
+  private modalLeft: number | null = null;
+  /**
+   * The page is drawn whole in the main area, right of Monky's rail, rather
+   * than split across both. It follows the size of the latest picture, so that
+   * a page being resized is never drawn at the place meant for its other size.
+   */
+  private drawnWhole = true;
   private stopEvents: (() => void) | null = null;
 
   /** Like the rail it lives in, it follows navigation for the app's lifetime. */
@@ -128,6 +141,8 @@ class DiscordWebView {
     // Turned off in the settings: the button leaves the rail and the page is ended.
     appEvents.on('settings.updated', update => {
       if (settingsChanged(update, 'discordWebEnabled') && !settingsStore.discordWebEnabled) this.close();
+      // No longer allowed in the background: a page already put away ends now.
+      else if (settingsChanged(update, 'discordWebBackground') && !settingsStore.discordWebBackground && this.mode === 'hidden') this.close();
     });
   }
 
@@ -204,6 +219,8 @@ class DiscordWebView {
     }
     if (this.mode !== 'hidden' || !this.available()) return;
     const overlay = this.mount();
+    // Reopened while the last page was still folding away: its picture must not show.
+    if (!this.opened && !this.opening) this.clearPicture();
     // A page known to have no server list (login) needs the main area right away.
     this.setMode(this.split === false ? 'full' : 'rail', false);
     overlay.classList.remove(CLOSING_CLASS);
@@ -217,6 +234,7 @@ class DiscordWebView {
       await opening;
       if (this.opening !== opening) return;
       this.opened = true;
+      this.surface?.syncFocus();
     } catch (error) {
       if (this.opening !== opening) return;
       this.forget();
@@ -226,7 +244,10 @@ class DiscordWebView {
     }
   }
 
-  /** Puts the page away; it keeps running, signed in, until closed. */
+  /**
+   * Puts the page away. It keeps running, signed in, until closed, only when
+   * allowed in the background; otherwise it ends now and uses nothing.
+   */
   hide(): void {
     if (this.mode === 'hidden') return;
     const returnFocus = this.overlay?.contains(document.activeElement) === true;
@@ -236,9 +257,13 @@ class DiscordWebView {
     const overlay = this.overlay;
     if (overlay) {
       overlay.classList.add(CLOSING_CLASS);
-      hideWithMotion(overlay, 'view', () => overlay.classList.remove(CLOSING_CLASS));
+      hideWithMotion(overlay, 'view', () => {
+        overlay.classList.remove(CLOSING_CLASS);
+        if (!this.opened && !this.opening) this.clearPicture();
+      });
     }
     if (returnFocus) document.getElementById('server-rail-discord')?.focus({ preventScroll: true });
+    if (!settingsStore.discordWebBackground && (this.opened || this.opening)) this.close();
   }
 
   /** Ends the Discord page; the login stays saved in its own storage. */
@@ -253,14 +278,24 @@ class DiscordWebView {
     this.opened = false;
     this.opening = null;
     this.hide();
+    this.split = null;
+    this.modalLeft = null;
+    this.drawnWhole = true;
+    this.syncRailButton();
+    // A page put away folds up with its last picture, cleared once out of sight.
+    if (!this.overlay?.classList.contains(CLOSING_CLASS)) this.clearPicture();
+  }
+
+  /** Forgets the last picture of an ended page, so the next one starts from its loading state. */
+  private clearPicture(): void {
     this.surface?.reset();
-    this.setSplit(null);
-    this.overlay?.classList.remove('discord-web--painted');
+    this.overlay?.classList.remove('discord-web--split', 'discord-web--painted');
   }
 
   /** Shows nothing, only Discord's server list or all of Discord. */
   private setMode(mode: DiscordWebMode, animate = true): void {
     if (mode === this.mode) return;
+    if (mode !== 'full') this.leaveFullscreen();
     const returnFocus = mode === 'rail' && this.content?.contains(document.activeElement) === true;
     const fromList = this.mode === 'rail';
     this.mode = mode;
@@ -294,13 +329,51 @@ class DiscordWebView {
       window.api.onDiscordWebFrame(frame => {
         if (!this.opened && !this.opening) return;
         this.surface?.frame(frame);
+        this.modalLeft = frame.modal?.left ?? null;
         // Discord's windows (an invite, a profile) need its whole screen, not just the list.
         if (frame.modal && this.mode === 'rail') this.setMode('full');
       }),
       window.api.onDiscordWebCursor(cursor => this.surface?.cursor(cursor)),
       window.api.onDiscordWebSplit(split => { if (this.opened || this.opening) this.setSplit(split); }),
+      window.api.onDiscordWebFullscreen(fullscreen => {
+        if (fullscreen) this.enterFullscreen();
+        else this.leaveFullscreen(false);
+      }),
     ];
     this.stopEvents = () => { for (const stop of stops) stop(); };
+  }
+
+  /**
+   * A video Discord shows on its whole screen fills the page, which then fills
+   * Monky's whole screen alone. The person's click on the video still counts
+   * as their gesture here, so Monky's window may take the screen; refused, the
+   * page leaves it too.
+   */
+  private enterFullscreen(): void {
+    const overlay = this.overlay;
+    if (this.fullscreen) return;
+    if (!overlay || this.mode === 'hidden' || (!this.opened && !this.opening)) {
+      this.command({ action: 'exitFullscreen' });
+      return;
+    }
+    this.fullscreen = true;
+    if (this.mode !== 'full') this.setMode('full', false);
+    if (this.reveal !== null && this.content) {
+      this.reveal = null;
+      showWithMotion(this.content, 'view');
+    }
+    overlay.classList.add(FULLSCREEN_CLASS);
+    overlay.requestFullscreen({ navigationUI: 'hide' }).catch(() => this.leaveFullscreen());
+  }
+
+  /** Monky leaves the whole screen; the page too, unless it is the one that left. */
+  private leaveFullscreen(tellPage = true): void {
+    if (!this.fullscreen) return;
+    this.fullscreen = false;
+    const overlay = this.overlay;
+    overlay?.classList.remove(FULLSCREEN_CLASS);
+    if (overlay && document.fullscreenElement === overlay) void document.exitFullscreen().catch(() => undefined);
+    if (tellPage) this.command({ action: 'exitFullscreen' });
   }
 
   private setSplit(split: boolean | null): void {
@@ -341,10 +414,16 @@ class DiscordWebView {
             <strong>${escapeHtml(t('discordWeb.badge'))}</strong>
             <span class="discord-web__origin">${escapeHtml(t('discordWeb.origin'))}</span>
           </span>
+          <span class="discord-web__actions">
+          <button type="button" class="discord-web__settings" data-action="reload" aria-label="${escapeHtml(t('discordWeb.reload'))}"
+            title="${escapeHtml(t('discordWeb.reload'))}">
+            <span class="material-symbols-outlined md-16" aria-hidden="true">refresh</span>
+          </button>
           <button type="button" class="discord-web__settings" data-action="settings" aria-label="${escapeHtml(t('discordWeb.settings'))}"
             title="${escapeHtml(t('discordWeb.settings'))}">
             <span class="material-symbols-outlined md-16" aria-hidden="true">settings</span>
           </button>
+          </span>
         </footer>
       </div>
       <canvas class="discord-web__popups" aria-hidden="true" hidden></canvas>
@@ -361,6 +440,11 @@ class DiscordWebView {
     settings?.addEventListener('click', () => {
       void withButtonLoading(settings, async () => (await import('../SettingsModal')).settingsModal.open());
     });
+    const reload = overlay.querySelector<HTMLElement>('[data-action="reload"]');
+    reload?.addEventListener('click', () => {
+      void withButtonLoading(reload, () => window.api.discordWebCommand({ action: 'reload' }))
+        .catch(error => reportError(errorMessage(error, t('discordWeb.reloadFailed'))));
+    });
     const canvases = [...overlay.querySelectorAll<HTMLCanvasElement>('canvas.discord-web__canvas')];
     const layer = overlay.querySelector<HTMLCanvasElement>('.discord-web__popups');
     const hits = overlay.querySelector<HTMLCanvasElement>('.discord-web__popup-hits');
@@ -372,9 +456,14 @@ class DiscordWebView {
     if (!this.parts.main || !layer || !hits) throw new Error('Discord web markup is incomplete.');
     // The overlay lives as long as the app, like the rail button that opens it.
     this.surface = new DiscordWebSurface(canvases, this.parts.main, layer, hits, command => this.command(command),
+      drop => void window.api.discordWebDrop(drop).catch(error => reportError(errorMessage(error, t('discordWeb.dropFailed')))),
       () => overlay.classList.add('discord-web--painted'));
     this.surface.bind(new AbortController().signal);
     this.surface.interceptWheel((canvas, deltaY) => this.scrollList(canvas, deltaY));
+    // Esc, or anything else that takes Monky's window out of the whole screen, takes the page out too.
+    document.addEventListener('fullscreenchange', () => {
+      if (this.fullscreen && document.fullscreenElement !== overlay) this.leaveFullscreen();
+    });
     document.body.append(overlay);
     this.overlay = overlay;
     return overlay;
@@ -402,7 +491,9 @@ class DiscordWebView {
   /**
    * Follows Monky's frame on every animation frame. A split page's top-left
    * corner sits at the top-left of Monky's rail, so the main area shows Discord
-   * as is, right of its server list; a whole page fits the main area alone. In
+   * as is, right of its server list; a whole page fits the main area alone. So
+   * does a page under one of Discord's windows reaching its list's column (its
+   * settings, in a narrow window), which Monky's rail would otherwise cover. In
    * the rail, the server list fills Discord's section, shifted down to start
    * under its divider. On the whole screen, the strip behind Discord's user
    * panel stays in place so the panel reads as one piece across both
@@ -414,6 +505,13 @@ class DiscordWebView {
   private syncPlacement(): void {
     const overlay = this.overlay, surface = this.surface, { servers, panel, main } = this.parts;
     if (this.mode === 'hidden' || !overlay || !surface || !servers || !panel || !main) return;
+    if (this.fullscreen) {
+      surface.setOrigin(main, 0, 0);
+      this.lastSize = { width: Math.max(1, window.innerWidth), height: Math.max(1, window.innerHeight) };
+      this.sendLayout(document.visibilityState === 'visible');
+      this.nextPlacement();
+      return;
+    }
     const full = this.mode === 'full';
     const layout = document.querySelector('.main-layout')?.getBoundingClientRect();
     const railElement = document.getElementById('server-rail');
@@ -445,8 +543,15 @@ class DiscordWebView {
     setStyle(overlay, '--discord-web-panel-top', `${holding ? Math.min(listBottom, railTop + this.heldList) : listBottom}px`);
     setStyle(overlay, '--discord-web-page-bottom', `${Math.max(0, window.innerHeight - pageBottom)}px`);
     setStyle(overlay, '--discord-web-footer', `${FOOTER_HEIGHT}px`);
-    const pageLeft = this.split === true ? left : left + DISCORD_SERVER_LIST_WIDTH;
-    surface.setOrigin(main, pageLeft, top);
+    const wantWhole = this.split !== true
+      || (this.modalLeft !== null && this.modalLeft < DISCORD_SERVER_LIST_WIDTH);
+    const wholeWidth = window.innerWidth - left - DISCORD_SERVER_LIST_WIDTH;
+    const pictureWidth = surface.pictureWidth();
+    if (pictureWidth <= 0) this.drawnWhole = wantWhole;
+    else if (Math.abs(pictureWidth - wholeWidth) <= PICTURE_SIZE_SLACK) this.drawnWhole = true;
+    else if (Math.abs(pictureWidth - (window.innerWidth - left)) <= PICTURE_SIZE_SLACK) this.drawnWhole = false;
+    overlay.classList.toggle('discord-web--whole', this.drawnWhole);
+    surface.setOrigin(main, this.drawnWhole ? left + DISCORD_SERVER_LIST_WIDTH : left, top);
     surface.setOrigin(panel, left, top);
     this.listRoom = full ? listBottom - railTop : 0;
     this.listEnd = listBottom - top;
@@ -458,7 +563,7 @@ class DiscordWebView {
     const height = fitted
       ? listBottom - railTop - LIST_TOP_INSET + DISCORD_TOP_BAR + userPanel
       : pageBottom - top;
-    this.lastSize = { width: Math.max(1, Math.round(window.innerWidth - pageLeft)), height: Math.max(1, height) };
+    this.lastSize = { width: Math.max(1, Math.round(wantWhole ? wholeWidth : window.innerWidth - left)), height: Math.max(1, height) };
     this.sendLayout(document.visibilityState === 'visible');
     const now = performance.now();
     if (this.reveal !== null && this.content && (now >= this.reveal.until
@@ -466,6 +571,10 @@ class DiscordWebView {
       this.reveal = null;
       showWithMotion(this.content, 'view');
     }
+    this.nextPlacement();
+  }
+
+  private nextPlacement(): void {
     if (document.visibilityState === 'visible' && this.animationFrame === null) {
       this.animationFrame = requestAnimationFrame(() => { this.animationFrame = null; this.syncPlacement(); });
     }

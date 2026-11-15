@@ -62,6 +62,7 @@ function savedSettings(store: SettingsStore) {
     navigationSidebarHidden: store.navigationSidebarHidden,
     membersSidebarHidden: store.membersSidebarHidden,
     discordWebEnabled: store.discordWebEnabled,
+    discordWebBackground: store.discordWebBackground,
     discordWebNoticeAccepted: store.discordWebNoticeAccepted,
     selectedMicrophoneId: store.selectedMicrophoneId,
     selectedSpeakerId: store.selectedSpeakerId,
@@ -232,6 +233,8 @@ export class SettingsStore {
   public discordWebNoticeAccepted: boolean = false;
   /** The Discord button in the server rail; turned off, it is gone and the page is ended. */
   public discordWebEnabled: boolean = true;
+  /** Discord keeps running while put away; off, putting it away ends the page, so it uses nothing. */
+  public discordWebBackground: boolean = false;
   public selectedMicrophoneId: string = '';
   public selectedSpeakerId: string = '';
   public advancedAudioOutputs: boolean = false;
@@ -390,6 +393,7 @@ export class SettingsStore {
         this.membersSidebarHidden = parsed.membersSidebarHidden === true;
         this.discordWebNoticeAccepted = parsed.discordWebNoticeAccepted === true;
         this.discordWebEnabled = parsed.discordWebEnabled !== false;
+        this.discordWebBackground = parsed.discordWebBackground === true;
         this.noiseSuppressionMode = restoreNoiseSuppressionMode(parsed.noiseSuppressionMode, parsed.noiseSuppressionEnabled);
         this.lastNoiseSuppressionMode = isNoiseSuppressionMode(parsed.lastNoiseSuppressionMode) && parsed.lastNoiseSuppressionMode !== 'off'
           ? parsed.lastNoiseSuppressionMode : this.noiseSuppressionMode === 'off' ? 'rnnoise' : this.noiseSuppressionMode;

@@ -1029,7 +1029,11 @@
   color: #fff;
 }
 
+/* The button ends the scrolling list, which clips at its edge, and the list
+   hugs its content while Discord's section is shown: the margin keeps the
+   glow and the pulse inside the list, as the drop zone above already does. */
 .server-rail-add--highlight {
+  margin-bottom: 12px;
   box-shadow: 0 0 0 4px rgba(88, 101, 242, 0.18), 0 0 24px rgba(88, 101, 242, 0.45);
   animation: server-rail-add-pulse 1.8s ease-in-out infinite;
 }

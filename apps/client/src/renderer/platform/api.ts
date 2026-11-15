@@ -128,10 +128,13 @@ export interface PlatformApi {
   onMiniappBrowserClosed: Subscribe<'miniapp-browser:closed'>;
   openDiscordWeb: Invoke<'discord-web:open'>;
   discordWebCommand: Invoke<'discord-web:command'>;
+  /** Hands files the person dropped on Discord's page to it, as if dropped there; only files from the disk go. */
+  discordWebDrop: (drop: { x: number; y: number; files: readonly File[] }) => Promise<void>;
   onDiscordWebClosed: Subscribe<'discord-web:closed'>;
   onDiscordWebFrame: Subscribe<'discord-web:frame'>;
   onDiscordWebCursor: Subscribe<'discord-web:cursor'>;
   onDiscordWebSplit: Subscribe<'discord-web:split'>;
+  onDiscordWebFullscreen: Subscribe<'discord-web:fullscreen'>;
   /** How the documents of `createBotScreenDocument` are isolated and loaded. */
   botScreenDocuments: BotScreenDocumentHost;
   botStorage: BotStorageApi;

@@ -92,7 +92,28 @@ body.discord-web-shown .server-rail-discord-slot {
 body.discord-web-shown .server-rail-list {
   flex: 0 1 auto;
   max-height: 50%;
-  transition: max-height var(--motion-panel-duration) var(--motion-easing);
+  transition: max-height var(--motion-panel-duration) var(--motion-easing),
+    margin-top var(--motion-panel-duration) var(--motion-easing);
+}
+
+/* In a very short window, half of the rail holds two or three icons a side.
+   Discord shown then takes the whole section and Monky's servers fold away,
+   unreachable by Tab too once folded; hiding Discord brings them back. */
+@media (max-height: 600px) {
+  body.discord-web-shown .server-rail-list {
+    max-height: 0;
+    margin-top: -8px;
+    visibility: hidden;
+    transition: max-height var(--motion-panel-duration) var(--motion-easing),
+      margin-top var(--motion-panel-duration) var(--motion-easing),
+      visibility 0s linear var(--motion-panel-duration);
+  }
+
+  body.discord-web-shown .server-rail-discord-slot__divider {
+    height: 0;
+    margin-top: 0;
+    opacity: 0;
+  }
 }
 
 /* Below the Discord section's divider, Discord's server list sits in Monky's
@@ -203,8 +224,10 @@ body.discord-web-shown .server-rail-list {
   height: 100%;
 }
 
-/* Pages without Discord's server list (login, for one) stay whole in the main area. */
-.discord-web:not(.discord-web--split) .discord-web__rail .discord-web__canvas {
+/* Pages without Discord's server list (login, for one), and pages under one of
+   Discord's windows that reaches the list's column, stay whole in the main area. */
+.discord-web:not(.discord-web--split) .discord-web__rail .discord-web__canvas,
+.discord-web--whole .discord-web__rail .discord-web__canvas {
   visibility: hidden;
 }
 
@@ -307,6 +330,13 @@ body.discord-web-shown .server-rail-list {
   text-overflow: ellipsis;
 }
 
+.discord-web__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 .discord-web__settings {
   display: inline-flex;
   align-items: center;
@@ -333,8 +363,40 @@ body.discord-web-shown .server-rail-list {
   outline-offset: 1px;
 }
 
+/* A footer this small takes a quieter spinner, in its own colors. */
+.discord-web__settings[data-loading="1"]::after {
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-color: var(--border-color);
+  border-top-color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .discord-web__settings[data-loading="1"]::after {
+    animation: none;
+  }
+}
+
 /* Discord's own user panel takes the place of Monky's floating user card once
-   Discord fills the screen. */
-body.discord-web-expanded .user-control-bar {
+   Discord fills the screen; in the compact layout, the card's slot goes with
+   it, or its empty box would take the clicks meant for Discord's panel. */
+body.discord-web-expanded :is(.user-control-bar, .compact-footer) {
   visibility: hidden;
+}
+
+/* A video Discord shows on its whole screen: Monky's window shows the page
+   alone, on the whole screen too (see DiscordWebView.enterFullscreen). */
+.discord-web--fullscreen {
+  background-color: #000;
+}
+
+.discord-web--fullscreen .discord-web__rail,
+.discord-web--fullscreen .discord-web__footer {
+  display: none;
+}
+
+.discord-web--fullscreen .discord-web__main {
+  inset: 0;
+  background-color: #000;
 }

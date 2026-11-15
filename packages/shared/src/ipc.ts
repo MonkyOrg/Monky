@@ -5,7 +5,7 @@
 
 import { z } from 'zod';
 import type { MiniappBrowserOpen, MiniappBrowserOwnerCommand, MiniappBrowserControl, MiniappBrowserState } from './miniappBrowser.js';
-import type { DiscordWebCommand, DiscordWebFrame } from './discordWeb.js';
+import type { DiscordWebCommand, DiscordWebDrop, DiscordWebFrame } from './discordWeb.js';
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
 import type { DevelopmentQaConfig, DevelopmentQaReport } from './developmentQa.js';
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
@@ -91,11 +91,13 @@ export const MINIAPP_BROWSER_CLOSED = 'miniapp-browser:closed' satisfies keyof I
 export const DISCORD_WEB_IPC = {
   open: 'discord-web:open',
   command: 'discord-web:command',
+  drop: 'discord-web:drop',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
 export const DISCORD_WEB_CLOSED = 'discord-web:closed' satisfies keyof IpcEvents;
 export const DISCORD_WEB_FRAME = 'discord-web:frame' satisfies keyof IpcEvents;
 export const DISCORD_WEB_CURSOR = 'discord-web:cursor' satisfies keyof IpcEvents;
 export const DISCORD_WEB_SPLIT = 'discord-web:split' satisfies keyof IpcEvents;
+export const DISCORD_WEB_FULLSCREEN = 'discord-web:fullscreen' satisfies keyof IpcEvents;
 
 export const BOT_SCREEN_PERMISSION_POLICY_VERSION = 2;
 export const botScreenDocumentConsentSchema = z.object({
@@ -968,6 +970,7 @@ export interface IpcInvokeChannels extends DmInvokeChannels {
   'miniapp-browser:capture': { args: [requestId: string]; returnType: string };
   'discord-web:open': { args: []; returnType: void };
   'discord-web:command': { args: [command: DiscordWebCommand]; returnType: void };
+  'discord-web:drop': { args: [drop: DiscordWebDrop]; returnType: void };
   'bot-storage:document-state': { args: [url: string]; returnType: BotDeviceStorageDocumentState };
   'bot-storage:document-request': { args: [url: string, request: unknown]; returnType: BotDeviceStorageResponse };
   'bot-storage:list': { args: []; returnType: BotDeviceStorageEntry[] };
@@ -1185,6 +1188,8 @@ export interface IpcEvents {
   'discord-web:cursor': [cursor: string];
   /** Whether the Discord page currently shows its server list, so Monky may split it. */
   'discord-web:split': [split: boolean];
+  /** Whether the Discord page shows something (a video) on its whole screen. */
+  'discord-web:fullscreen': [fullscreen: boolean];
   'window:inactive': [];
   'window:active': [];
   'native-screen:event': [event: NativeScreenEvent];

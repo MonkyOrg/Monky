@@ -132,16 +132,22 @@ export class DiscordWebSurface {
   private lastClick = { button: '' as string, time: 0, x: 0, y: 0, count: 0 };
   /** Keys whose press reached Discord, so their release does too. */
   private readonly pressed = new Map<string, string>();
+  /** Whether Discord was last told Monky's keyboard is on it. */
+  private keyboardOn = false;
+  /** Ends with the listeners bind() added. */
+  private bound: AbortSignal | null = null;
 
   /**
    * `parts` show the page; `primary`, one of them, owns the popups the pointer
    * did not open (the keyboard's, for one). Over every part and the rest of
    * Monky, `layer` draws the popups and `hits`, transparent and cut to the
-   * menus, takes the pointer on them.
+   * menus, takes the pointer on them. Files dropped on any of them go to `drop`.
    */
   constructor(private readonly parts: readonly HTMLCanvasElement[], private readonly primary: HTMLCanvasElement,
     private readonly layer: HTMLCanvasElement, private readonly hits: HTMLCanvasElement,
-    private readonly send: (command: DiscordWebCommand) => void, private readonly onFirstPaint: () => void) {
+    private readonly send: (command: DiscordWebCommand) => void,
+    private readonly drop: (drop: { x: number; y: number; files: File[] }) => void,
+    private readonly onFirstPaint: () => void) {
     this.canvases = [...parts, hits];
     this.backingContext = this.backing.getContext('2d');
     this.cleanContext = this.clean.getContext('2d');
@@ -228,6 +234,11 @@ export class DiscordWebSurface {
     for (const canvas of this.canvases) if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor;
   }
 
+  /** How wide the page's latest picture is, in CSS px; 0 before the first. */
+  pictureWidth(): number {
+    return this.backing.width / (window.devicePixelRatio || 1);
+  }
+
   /** How tall the page's latest picture is, in CSS px. */
   pictureHeight(): number {
     return this.backing.height / (window.devicePixelRatio || 1);
@@ -239,6 +250,7 @@ export class DiscordWebSurface {
     this.backing.height = this.clean.height = 0;
     this.painted = false;
     this.pressed.clear();
+    this.keyboardOn = false;
     this.pendingMove = null;
     this.popups = [];
     this.servers = null;
@@ -350,7 +362,29 @@ export class DiscordWebSurface {
       canvas.addEventListener('keydown', event => this.keyDown(event), options);
       canvas.addEventListener('keyup', event => this.keyUp(event), options);
       canvas.addEventListener('blur', () => this.releaseKeys(), options);
+      canvas.addEventListener('focus', () => this.syncFocus(), options);
+      canvas.addEventListener('blur', () => this.syncFocus(), options);
+      // Files dragged from the system are taken here and dropped on Discord's page at the same point.
+      const acceptFiles = (event: DragEvent): void => {
+        if (!event.dataTransfer?.types.includes('Files')) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+      };
+      canvas.addEventListener('dragenter', acceptFiles, options);
+      canvas.addEventListener('dragover', acceptFiles, options);
+      canvas.addEventListener('drop', event => {
+        const files = [...event.dataTransfer?.files ?? []];
+        if (!files.length) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const { x, y } = this.point(canvas, event);
+        this.drop({ x, y, files });
+      }, options);
     }
+    this.bound = signal;
+    window.addEventListener('focus', () => this.syncFocus(), { signal });
+    window.addEventListener('blur', () => this.syncFocus(), { signal });
+    signal.addEventListener('abort', () => { this.keyboardOn = false; }, { once: true });
     // A part that grows or shrinks with Monky's frame is redrawn before that frame paints, never shown stretched.
     const resized = new ResizeObserver(() => {
       if (this.drawFrame !== null) cancelAnimationFrame(this.drawFrame);
@@ -459,6 +493,24 @@ export class DiscordWebSurface {
   private releaseKeys(): void {
     for (const keyCode of this.pressed.values()) this.key('up', keyCode, []);
     this.pressed.clear();
+  }
+
+  /**
+   * Tells Discord whether Monky's keyboard is on it, so it draws its text
+   * cursor. Read once focus settles: moving between two of Discord's canvases
+   * blurs one before focusing the other, and Discord must not blink out between.
+   * A page just opened knows nothing yet, so it is told again then.
+   */
+  syncFocus(): void {
+    const signal = this.bound;
+    queueMicrotask(() => {
+      if (!signal || signal.aborted) return;
+      const active = document.activeElement;
+      const on = document.hasFocus() && active instanceof HTMLCanvasElement && this.canvases.includes(active);
+      if (on === this.keyboardOn) return;
+      this.keyboardOn = on;
+      this.send({ action: 'focus', focused: on });
+    });
   }
 
   private key(type: KeyCommand['type'], keyCode: string, modifiers: Modifier[]): void {

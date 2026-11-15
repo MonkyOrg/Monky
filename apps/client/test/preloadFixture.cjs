@@ -46,6 +46,7 @@ function loadPreload() {
         removeListener() {},
       },
       sharedTexture: {},
+      webUtils: { getPathForFile: () => 'C:\\fixture.txt' },
     }],
     // The bundle embeds the worklet source as a string (scripts/buildPreloads.mjs).
     [WORKLET, 'registerProcessor("fixture", class {});'],
@@ -78,6 +79,9 @@ function loadPreload() {
   return { api, requested, rendererCalls, marks, invoked, sent };
 }
 
+/** Members that take a structured argument get one, so they reach Main as the renderer calls them. */
+const ARGUMENTS = { discordWebDrop: { x: 0, y: 0, files: [{}] } };
+
 /** Calls every member of the preload API once and returns the preload with what it invoked. */
 async function exercisePreload() {
   const preload = loadPreload();
@@ -86,7 +90,7 @@ async function exercisePreload() {
     if (name === 'dm' || name === 'botStorage') {
       for (const [member, method] of Object.entries(value)) await method(member.startsWith('on') ? noop : 'fixture');
     } else if (typeof value === 'function') {
-      await value(name.startsWith('on') ? noop : undefined);
+      await value(name.startsWith('on') ? noop : ARGUMENTS[name]);
     }
   }
   return { ...preload, channels: new Set(preload.invoked.map(([channel]) => channel)) };

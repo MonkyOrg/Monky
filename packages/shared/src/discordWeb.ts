@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 /**
  * The official Discord web app, shown as is: Monky never changes, styles or
- * automates the page, and reads from it only where its menus and tooltips are
+ * automates the page, and reads from it only where its menus, popouts and tooltips are
  * and how far its server list has scrolled.
  */
 export const DISCORD_WEB_HOME = 'https://discord.com/app';
@@ -60,15 +60,36 @@ export const discordWebCommandSchema = z.discriminatedUnion('action', [
   /** `keyCode` is an Electron accelerator key name, or the typed text for `char`. */
   z.object({ action: z.literal('key'), type: z.enum(['down', 'up', 'char']), keyCode: z.string().min(1).max(32),
     modifiers }).strict(),
+  /** Whether Monky's keyboard is on the page, so it draws its text cursor. */
+  z.object({ action: z.literal('focus'), focused: z.boolean() }).strict(),
+  /** Monky left the whole screen: the page leaves it too. */
+  z.object({ action: z.literal('exitFullscreen') }).strict(),
+  /** The person asked for the page again, fresh from Discord. */
+  z.object({ action: z.literal('reload') }).strict(),
   z.object({ action: z.literal('close') }).strict(),
 ]);
 export type DiscordWebCommand = z.infer<typeof discordWebCommandSchema>;
+
+/** At most this many files are handed to Discord in one drop; Discord itself says how many a message takes. */
+export const DISCORD_WEB_MAX_DROPPED_FILES = 100;
+
+/**
+ * Files the person dropped on the page, where they let go in Monky's CSS
+ * pixels. Only Monky's preload turns dropped files into `paths`, so the page
+ * cannot name any other file of the computer.
+ */
+export const discordWebDropSchema = z.object({
+  x: pageCoordinate, y: pageCoordinate,
+  paths: z.array(z.string().min(1).max(4096)).min(1).max(DISCORD_WEB_MAX_DROPPED_FILES),
+}).strict();
+export type DiscordWebDrop = z.infer<typeof discordWebDropSchema>;
 
 const pageLength = z.number().finite().min(0).max(16384);
 
 /**
  * One of Discord's own menus or tooltips: where it is on the page, in Monky's
- * CSS pixels, and how round its corners are. Monky draws it whole beside what
+ * CSS pixels, and how round its corners are. A popout (a profile card, the
+ * emoji picker) takes the pointer as a menu does and comes as a `menu`. Monky draws it whole beside what
  * opened it, even when that sits elsewhere in Monky than on Discord's page.
  * One still fading in or out, or that just appeared or moved, is not `shown`
  * yet: Monky does not draw it, but still keeps it out of the parts of Monky
@@ -101,12 +122,19 @@ export const discordWebServerListSchema = z.object({
 export type DiscordWebServerList = z.infer<typeof discordWebServerListSchema>;
 
 /**
- * What lies over Discord's page: its menus and tooltips, and whether a modal
- * window is open; and where its server list is, when the page shows one.
+ * A modal window open over Discord's page: `left` is where its leftmost one
+ * starts, 0 for one filling the page (its settings).
+ */
+export const discordWebModalSchema = z.object({ left: pageCoordinate }).strict();
+export type DiscordWebModal = z.infer<typeof discordWebModalSchema>;
+
+/**
+ * What lies over Discord's page: its menus and tooltips, and its modal window,
+ * if one is open; and where its server list is, when the page shows one.
  */
 export const discordWebLayersSchema = z.object({
   popups: z.array(discordWebPopupSchema).max(DISCORD_WEB_MAX_POPUPS),
-  modal: z.boolean(),
+  modal: discordWebModalSchema.nullable(),
   servers: discordWebServerListSchema.nullable(),
 }).strict();
 export type DiscordWebLayers = z.infer<typeof discordWebLayersSchema>;

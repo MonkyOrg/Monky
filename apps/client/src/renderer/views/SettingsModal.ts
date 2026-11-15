@@ -17,6 +17,7 @@ import { QualityTab } from './settings/tabs/QualityTab';
 import { LocalToolsTab } from './settings/tabs/LocalToolsTab';
 import { LogsTab } from './settings/tabs/LogsTab';
 import { AboutTab } from './settings/tabs/AboutTab';
+import { DiscordTab } from './settings/tabs/DiscordTab';
 import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
 import { renderSettingsTabButtons, renderSettingsTabLabel, selectSettingsTab, type SettingsTabEntry } from './settings/settingsLayout';
 import { showLogoutDialog } from './LogoutDialog';
@@ -24,7 +25,7 @@ import { isDesktopOnly, isShown, lockedPanel, type DesktopFeature } from '../uti
 import type { PlatformCapabilities } from '../platform/api';
 
 type SettingsTabId = 'account' | 'voice_video' | 'soundboard' | 'stickers' | 'keybinds' | 'notifications'
-  | 'quality' | 'local_tools' | 'logs' | 'about';
+  | 'quality' | 'local_tools' | 'discord' | 'logs' | 'about';
 
 /** A tab of the app's settings, declared once: its entry in the sidebar, its panel and its life. */
 interface SettingsTab extends SettingsTabEntry {
@@ -57,6 +58,7 @@ export class SettingsModal {
   private qualityTab = new QualityTab();
   private localToolsTab = new LocalToolsTab();
   private logsTab = new LogsTab();
+  private discordTab = new DiscordTab();
   private aboutTab = new AboutTab();
 
   private readonly allTabs: readonly SettingsTab[] = [
@@ -137,6 +139,12 @@ export class SettingsModal {
         attach: (root) => this.localToolsTab.attachBotStorage(root),
         cleanup: () => this.localToolsTab.cleanup(),
       },
+    },
+    {
+      id: 'discord', icon: 'sports_esports', label: 'discordWeb.settingsTab', requires: { capability: 'discordWeb', feature: 'discordWeb' },
+      render: () => this.discordTab.renderHtml(),
+      attach: (root) => this.discordTab.attachEvents(root),
+      cleanup: () => this.discordTab.cleanup(),
     },
     {
       id: 'logs', icon: 'description', label: 'settings.tabLogs',
