@@ -929,20 +929,56 @@ async function responsiveShellSmoke(width, height, mobile) {
     withinViewport(document.querySelector('#stage-btn-leave'), 'hang up action');
     const cards = [...document.querySelectorAll('.stage-grid > .stage-card')];
     check(cards.length === 2, 'the compact call contains both participants');
+    // A phone on its side has width to spare, not height: the dock becomes a rail beside the tiles.
+    const sideDock = compact && height <= 540 && width / height >= 1.5;
+    const dock = () => document.querySelector('.stage-call-controls').getBoundingClientRect();
+    const stageArea = () => document.querySelector('#stage-content-area').getBoundingClientRect();
+    check(sideDock ? dock().height > dock().width && dock().left >= stageArea().right
+      : dock().width > dock().height && dock().top >= stageArea().bottom - 1,
+    `the call dock is a ${sideDock ? 'rail beside' : 'bar below'} the participants (${JSON.stringify(dock())})`);
     for (const card of cards) {
       withinViewport(card, 'call participant tile');
-      check(card.getBoundingClientRect().bottom <= document.querySelector('.stage-call-controls').getBoundingClientRect().top,
-        'both participants fit above the call dock, including short and landscape viewports');
+      const box = card.getBoundingClientRect();
+      check(sideDock ? box.right <= dock().left : box.bottom <= dock().top,
+        'both participants fit beside or above the call dock, including short and landscape viewports');
+    }
+    if (sideDock) {
+      check(stageArea().height >= (height - 64) * 0.75, 'on its side the stage keeps the height below its header');
+      cards[1].click();
+      await until(() => !!document.querySelector('.stage-focused-main'), 'Tapping a participant did not focus it');
+      await settleMotion(document.querySelector('.voice-stage-container'));
+      const main = document.querySelector('.stage-focused-main').getBoundingClientRect();
+      const strip = document.querySelector('.stage-focused-strip').getBoundingClientRect();
+      check(main.height >= stageArea().height * 0.9 && main.width >= width * 0.6,
+        `a focused tile (a shared screen) takes the stage's whole height instead of a strip of it (${JSON.stringify(main)})`);
+      check(strip.left >= main.right && strip.height > strip.width && strip.right <= dock().left,
+        'the other participants line up in a column between the focused tile and the call rail');
+      withinViewport(document.querySelector('.stage-focused-strip > .stage-mini-card'), 'unfocused participant beside the focus');
+      document.querySelector('.stage-focused-main').click();
+      await until(() => !document.querySelector('.stage-focused-main'), 'Tapping the focused participant did not release it');
     }
     check(!visible(document.querySelector('.compact-footer')), 'the stage never duplicates its call dock with a desktop footer');
+    // A phone cannot capture its screen and touch shows no tooltip: the sheet itself says why sharing is locked.
+    const { setDesktopOnly } = await import('/utils/desktopOnly.ts');
+    const screenButton = document.querySelector('#stage-btn-screen');
+    Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', { value: undefined, configurable: true });
+    setDesktopOnly(screenButton, 'screenShare');
     document.querySelector('[data-compact-call-options]').click();
     await until(() => !!document.querySelector('.compact-call-sheet'), 'Call options did not open');
     const callSheet = document.querySelector('.compact-call-sheet .modal-card');
     await settleMotion(callSheet);
     withinViewport(callSheet, 'additional call controls bottom sheet');
     check(Math.abs(callSheet.getBoundingClientRect().bottom - height) < 2, 'call options are attached to the bottom edge');
+    const lockedShare = callSheet.querySelector('.compact-call-action[data-desktop-only="screenShare"]');
+    const shareReason = lockedShare && document.getElementById(lockedShare.getAttribute('aria-describedby'));
+    check(visible(shareReason) && lockedShare.contains(shareReason)
+      && shareReason.textContent === t('desktopOnly.reason.screenShareDevice')
+      && getComputedStyle(lockedShare).opacity === '1',
+    'a locked call action shows, undimmed and tied to it, why this device cannot share its screen');
     document.querySelector('.compact-call-sheet [data-modal-close]').click();
     await until(() => !document.querySelector('.compact-call-sheet'), 'Call options did not close');
+    setDesktopOnly(screenButton, null);
+    delete navigator.mediaDevices.getDisplayMedia;
     await toggle('navigation');
     document.querySelector('.channel-item[data-channel-type="TEXT"]').click();
     await until(() => layout().dataset.compactPanel === 'content', 'The background call chat did not become visible');

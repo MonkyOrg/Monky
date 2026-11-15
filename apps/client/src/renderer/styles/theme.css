@@ -9944,11 +9944,15 @@
   width: 100vw;
   height: 100vh;
   margin: 0;
-  border: 0;
+  /* The overlays are positioned inside the border, so a transparent one sized
+     by the safe area keeps them clear of a phone's notch and status bar. */
+  border-style: solid;
+  border-width: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   border-radius: 0;
   background: #000;
   transform: none;
   /* Fullscreen shows only the media: no hover frame or speaking glow (cards force that glow). */
+  border-color: transparent !important;
   box-shadow: none !important;
 }
 
