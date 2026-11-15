@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "O Discord oficial tem uma aba nas configurações, com a opção Rodar em segundo plano. Desligada (padrão), esconder o Discord o encerra: não consome nada, mas recarrega ao abrir e não avisa notificações. Em janelas baixas, ele recolhe os servidores do Monky.",
+  "en": "Official Discord has a settings tab with a Run in the background option. Off by default, hiding Discord closes it: it uses nothing, but reloads when opened and gives no notifications. In short windows, it folds Monky's servers away."
+}

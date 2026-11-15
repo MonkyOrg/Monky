@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No Discord oficial, o cursor piscando volta a aparecer nos campos de texto, e o cartão de perfil e outros painéis flutuantes aparecem inteiros e clicáveis, mesmo com a janela baixa. Com o Discord aberto, o botão de adicionar servidor não sai mais cortado.",
+  "en": "In official Discord, the blinking cursor shows again in text fields, and the profile card and other floating panels show whole and clickable, even in a short window. With Discord open, the add server button is no longer cut off."
+}

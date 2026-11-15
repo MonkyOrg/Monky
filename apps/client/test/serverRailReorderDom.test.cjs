@@ -58,7 +58,8 @@ if (!process.versions.electron) {
       vite.httpServer.once('error', reject);
       vite.httpServer.listen(0, '127.0.0.1', resolve);
     });
-    browser = new BrowserWindow({ show: false, width: 1100, height: 700, webPreferences: {
+    // Not fullscreenable, the test window never takes the screen: its page still goes to the whole screen in its viewport.
+    browser = new BrowserWindow({ show: false, width: 1100, height: 700, fullscreenable: false, webPreferences: {
       contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true,
     } });
     const evaluate = (code) => browser.webContents.executeJavaScript(code, true);
@@ -352,11 +353,14 @@ if (!process.versions.electron) {
             discordWebCommand: async command => {
               window.discordCommands.push(command.action === 'mouse' && command.type === 'down' ? 'press' : command.action);
               if (command.action === 'key') window.discordKeys.push(command.type + ':' + command.keyCode);
+              if (command.action === 'mouse' && command.type === 'down') window.discordPress = { x: command.x, y: command.y };
               if (command.action === 'layout') window.discordLayout = command;
+              if (command.action === 'reload') return new Promise(resolve => { window.discordReloaded = resolve; });
             },
             onDiscordWebClosed: () => () => {}, onDiscordWebCursor: () => () => {},
             onDiscordWebFrame: callback => { window.discordFrame = callback; return () => {}; },
-            onDiscordWebSplit: callback => { window.discordSplit = callback; return () => {}; } };
+            onDiscordWebSplit: callback => { window.discordSplit = callback; return () => {}; },
+            onDiscordWebFullscreen: callback => { window.discordFullscreen = callback; return () => {}; } };
           window.discordToggle = () => discordWeb.toggle();
           window.discordState = () => {
             const overlay = document.querySelector('.discord-web');
@@ -416,7 +420,7 @@ if (!process.versions.electron) {
         const hits = document.querySelector('.discord-web__popup-hits');
         return { layer: !layer.hidden, hits: !hits.hidden, clip: hits.style.clipPath };
       })()`;
-      await sendFrame({ popups: [{ kind: 'menu', x: 36, y: 108, width: 150, height: 200, radius: 8, shown: true }], modal: false });
+      await sendFrame({ popups: [{ kind: 'menu', x: 36, y: 108, width: 150, height: 200, radius: 8, shown: true }], modal: null });
       await check(await waitFor(`(() => { const s = ${popupState}; return s.layer && s.hits && s.clip.includes('h 150 v 200'); })()`),
         `a menu from the list shows over Monky, its box taking the pointer ${JSON.stringify(await evaluate(popupState))}`);
       // Pressing the list itself is Discord's to handle; pressing anywhere else in Monky closes the menu, as in Discord.
@@ -434,18 +438,18 @@ if (!process.versions.electron) {
         `a press elsewhere in Monky closes Discord's menu ${JSON.stringify(await evaluate('window.discordKeys'))}`);
       state = await discord();
       await check(state.railOnly && !state.expanded, `closing the menu keeps Monky's screen ${JSON.stringify(state)}`);
-      await sendFrame({ popups: [], modal: false });
+      await sendFrame({ popups: [], modal: null });
       await check(await waitFor(`(() => { const s = ${popupState}; return !s.layer && !s.hits; })()`),
         `a closed menu leaves Monky's screen free ${JSON.stringify(await evaluate(popupState))}`);
       // A tooltip still settling or fading is known, so Monky keeps it out of its clean picture, but is not drawn.
-      await sendFrame({ popups: [{ kind: 'tooltip', x: 36, y: 108, width: 60, height: 32, radius: 4, shown: false }], modal: false });
+      await sendFrame({ popups: [{ kind: 'tooltip', x: 36, y: 108, width: 60, height: 32, radius: 4, shown: false }], modal: null });
       await check(await waitFor(`(() => { const s = ${popupState}; return !s.layer && !s.hits; })()`),
         `a tooltip not shown yet draws nothing over Monky ${JSON.stringify(await evaluate(popupState))}`);
-      await sendFrame({ popups: [], modal: false });
+      await sendFrame({ popups: [], modal: null });
       state = await discord();
       await check(state.railOnly && !state.expanded, `menus never take Monky's screen ${JSON.stringify(state)}`);
       // A Discord window (an invite from that menu) needs Discord's whole screen.
-      await sendFrame({ popups: [], modal: true });
+      await sendFrame({ popups: [], modal: { left: 400 } });
       await check(await waitFor('window.discordState().content && window.discordState().expanded'),
         `a Discord window opens Discord over Monky's screen ${JSON.stringify(await discord())}`);
       await evaluate('window.discordToggle()');
@@ -467,7 +471,7 @@ if (!process.versions.electron) {
           clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 }));
         return window.discordCommands.includes('wheel');
       })()`);
-      const longList = (scrollTop, panel = null) => sendFrame({ popups: [], modal: false,
+      const longList = (scrollTop, panel = null) => sendFrame({ popups: [], modal: null,
         servers: { top: 32, height: 4000, scrollTop, scrollHeight: 4100, panel } });
       // Turns of the wheel the window takes, in steps of deltaY, before handing the wheel back to Discord.
       const turns = async deltaY => {
@@ -500,15 +504,156 @@ if (!process.versions.electron) {
       await check(await waitFor(`window.discordState().railOnly && window.discordState().contentGone
         && !window.discordState().expanded && window.discordState().shown && (${shared()}).monkyInUse`),
         `the Discord button goes back to Monky, keeping the list under Monky's servers ${JSON.stringify(await discord())}`);
+      // A video Discord shows on its whole screen: Monky's window shows the page alone on the whole screen,
+      // and leaving it, by Esc in Monky or in the page, takes both out.
+      const fullscreen = `(() => {
+        const overlay = document.querySelector('.discord-web');
+        const page = document.querySelector('.discord-web__canvas[data-part="main"]').getBoundingClientRect();
+        const rail = document.querySelector('.discord-web__rail');
+        return { marked: overlay.classList.contains('discord-web--fullscreen'), monky: document.fullscreenElement === overlay,
+          page: page.left === 0 && page.top === 0 && page.width === innerWidth && page.height === innerHeight,
+          railGone: getComputedStyle(rail).display === 'none', layout: window.discordLayout,
+          size: { width: innerWidth, height: innerHeight }, told: window.discordCommands.includes('exitFullscreen') };
+      })()`;
+      await evaluate('window.discordCommands = []; window.discordFullscreen(true)');
+      await check(await waitFor(`(() => { const s = ${fullscreen}; return s.marked && s.monky && s.page && s.railGone && !s.told
+        && s.layout.width === s.size.width && s.layout.height === s.size.height; })()`),
+        `a video on Discord's whole screen puts Monky's window on it with only the page ${JSON.stringify(await evaluate(fullscreen))}`);
+      await evaluate('document.exitFullscreen()');
+      await check(await waitFor(`(() => { const s = ${fullscreen}; return !s.marked && !s.monky && s.told; })()`),
+        `Esc in Monky takes the page out of the whole screen too ${JSON.stringify(await evaluate(fullscreen))}`);
+      await evaluate('window.discordCommands = []; window.discordFullscreen(true)');
+      await check(await waitFor(`${fullscreen}.monky`), 'Discord takes the whole screen again');
+      await evaluate('window.discordFullscreen(false)');
+      await check(await waitFor(`(() => { const s = ${fullscreen}; return !s.marked && !s.monky && !s.told; })()`),
+        `the page leaving the whole screen takes Monky out, without telling the page back ${JSON.stringify(await evaluate(fullscreen))}`);
+      await evaluate('window.discordToggle()');
+      await check(await waitFor('window.discordState().railOnly && !window.discordState().expanded'),
+        `after the whole screen, the Discord button goes back to Monky ${JSON.stringify(await discord())}`);
       await evaluate('window.discordSplit(false)');
       state = await discord();
       await check(state.expanded && state.content, `a page without a server list (login) takes the main area at once ${JSON.stringify(state)}`);
+      // The footer's reload button asks for the page again, and stays busy until it has loaded.
+      const reload = `(() => { const b = document.querySelector('.discord-web__footer [data-action="reload"]');
+        return b && { busy: b.getAttribute('aria-busy') === 'true', disabled: b.disabled,
+          named: !!b.getAttribute('aria-label'), asked: window.discordCommands.filter(c => c === 'reload').length }; })()`;
+      await evaluate(`window.discordCommands = []; document.querySelector('.discord-web__footer [data-action="reload"]').click();
+        document.querySelector('.discord-web__footer [data-action="reload"]').click()`);
+      await check(await waitFor(`(() => { const s = ${reload}; return s && s.busy && s.disabled && s.named && s.asked === 1; })()`),
+        `the reload button asks Discord once and spins while the page loads ${JSON.stringify(await evaluate(reload))}`);
+      await evaluate('window.discordReloaded()');
+      await check(await waitFor(`(() => { const s = ${reload}; return !s.busy && !s.disabled; })()`),
+        `the reload button is ready again once the page has loaded ${JSON.stringify(await evaluate(reload))}`);
       await evaluate('window.discordToggle(); window.discordSplit(true); window.discordToggle()');
       state = await discord();
       await check(state.railOnly && !state.expanded, `the list is hidden by the button and shown alone again ${JSON.stringify(state)}`);
       await evaluate('window.discordToggle()');
       await check(await waitFor('!window.discordState().shown && window.discordState().pressed === "false"'),
         `with only the list shown, the Discord button puts Discord away ${JSON.stringify(await discord())}`);
+      // Not allowed in the background (the default), putting Discord away ends its page, so it uses nothing.
+      const background = (allowed) => evaluate(`import('/stores/settingsStore.ts').then(({ settingsStore }) => {
+        settingsStore.discordWebBackground = ${allowed};
+        settingsStore.save();
+      })`);
+      const openThenHide = async () => {
+        await evaluate('window.discordCommands = []; window.discordToggle()');
+        await check(await waitFor('window.discordState().shown'), 'the Discord button shows Discord again');
+        await evaluate('window.discordToggle()');
+        await check(await waitFor('!window.discordState().shown'), 'the Discord button puts Discord away again');
+      };
+      await openThenHide();
+      await check(await evaluate('window.discordCommands.includes("close")'),
+        `by default, putting Discord away ends its page ${JSON.stringify(await evaluate('window.discordCommands'))}`);
+      await background(true);
+      await openThenHide();
+      await check(!(await evaluate('window.discordCommands.includes("close")')),
+        `allowed in the background, Discord put away keeps running ${JSON.stringify(await evaluate('window.discordCommands'))}`);
+      await background(false);
+      await check(await evaluate('window.discordCommands.includes("close")'), 'no longer allowed in the background, the page put away ends at once');
+      // In a very short window, Discord takes the rail: Monky's servers fold away until Discord is put away.
+      await emulateViewport(browser.webContents, 1280, 560);
+      const monkyServersAway = `getComputedStyle(document.querySelector('.server-rail-list')).visibility === 'hidden'`;
+      await evaluate('window.discordToggle()');
+      await check(await waitFor(`window.discordState().shown && ${monkyServersAway}`), 'in a very short window, Discord folds Monky\'s servers away');
+      await evaluate('window.discordToggle()');
+      await check(await waitFor(`!window.discordState().shown && !(${monkyServersAway})`), 'putting Discord away brings Monky\'s servers back');
+      await emulateViewport(browser.webContents, 1600, 900);
+      await evaluate('window.discordToggle()');
+      await check(await waitFor('window.discordState().shown'), 'the Discord button shows Discord in a taller window');
+      await check(!(await evaluate(monkyServersAway)), 'in a taller window, Monky\'s servers stay above Discord\'s list');
+      // With no server yet, the add button glows; the list, hugging its content beside Discord, must not cut that glow.
+      const glowRoom = `(() => {
+        const add = document.getElementById('server-rail-add');
+        add.classList.add('server-rail-add--highlight');
+        const list = document.querySelector('#server-rail .server-rail-list');
+        return Math.round(list.getBoundingClientRect().bottom - add.getBoundingClientRect().bottom);
+      })()`;
+      await check(await waitFor(`${glowRoom} >= 12`),
+        `beside Discord, the glowing add button keeps room for its glow inside the list ${await evaluate(glowRoom)}`);
+      await evaluate(`document.getElementById('server-rail-add').classList.remove('server-rail-add--highlight')`);
+      await evaluate('window.discordToggle()');
+      await check(await waitFor('!window.discordState().shown'), 'the Discord button puts Discord away in a taller window');
+      // In the compact layout, Discord's settings fill the page and lay their menu out from its left edge,
+      // where Monky's rail would cover it: the page is laid out whole, right of the rail, as soon as a
+      // picture of that size arrives. Monky's user card gives way with its slot, so Discord's user panel
+      // takes the clicks.
+      await emulateViewport(browser.webContents, 700, 900);
+      // The compact shell's slot for Monky's user card, at the bottom as its grid row puts it.
+      await evaluate(`document.body.insertAdjacentHTML('beforeend', '<div id="compact-shell" data-compact-panel="navigation">'
+        + '<div class="compact-footer" style="position: fixed; left: 0; right: 0; bottom: 0; height: 78px">'
+        + '<div class="user-control-bar"></div></div></div>')`);
+      await evaluate('window.discordToggle(); window.discordSplit(true)');
+      await check(await waitFor('window.discordState().railOnly'), 'the Discord button shows Discord\'s list in the compact layout');
+      const widths = `(() => { const left = parseInt(document.querySelector('.discord-web').style.getPropertyValue('--discord-web-left'));
+        return { split: innerWidth - left, whole: innerWidth - left - 72 }; })()`;
+      const { split: splitWidth, whole: wholeWidth } = await evaluate(widths);
+      // A picture of the page as wide as `cssWidth`, as the main process sends once the page has that size.
+      const sendPicture = (cssWidth, layers) => evaluate(`window.discordFrame({ width: Math.round(${cssWidth} * devicePixelRatio),
+        height: 600, x: 0, y: 0, patchWidth: 1, patchHeight: 1, pixels: new Uint8Array(4), popups: [],
+        servers: { top: 32, height: 800, scrollTop: 0, scrollHeight: 800, panel: 66 }, ...${JSON.stringify(layers)} })`);
+      const whole = `(() => {
+        const rail = document.querySelector('.discord-web__canvas[data-part="servers"]');
+        return { whole: document.querySelector('.discord-web').classList.contains('discord-web--whole'),
+          railShown: getComputedStyle(rail).visibility === 'visible', width: window.discordLayout?.width }; })()`;
+      await sendPicture(splitWidth, { modal: null });
+      await check(await waitFor(`(() => { const s = ${whole}; return !s.whole && s.railShown && s.width === ${splitWidth}; })()`),
+        `Discord's list is drawn in the rail, the page beside it ${JSON.stringify(await evaluate(whole))}`);
+      await sendPicture(splitWidth, { modal: { left: 0 } });
+      await check(await waitFor('window.discordState().expanded'), 'in the compact layout, a Discord window takes the whole screen');
+      await check(await waitFor(`(() => { const s = ${whole}; return s.width === ${wholeWidth} && !s.whole; })()`),
+        `the page is asked to fit right of Monky's rail, still drawn at its old size meanwhile ${JSON.stringify(await evaluate(whole))}`);
+      await sendPicture(wholeWidth, { modal: { left: 0 } });
+      await check(await waitFor(`(() => { const s = ${whole}; return s.whole && !s.railShown; })()`),
+        `once it fits, Discord's window is drawn whole beside Monky's rail, none of it under the rail ${JSON.stringify(await evaluate(whole))}`);
+      const panelReached = `(() => {
+        const panel = document.querySelector('.discord-web__rail').getBoundingClientRect();
+        const y = innerHeight - ${26 + 20};
+        return [panel.left + panel.width / 2, innerWidth - 40].map(x => document.elementFromPoint(x, y)?.className); })()`;
+      await check(await waitFor(`${panelReached}.every(name => String(name).startsWith('discord-web'))`),
+        `in the compact layout, Discord's user panel takes the clicks, not the slot of Monky's user card ${JSON.stringify(await evaluate(panelReached))}`);
+      await check(await waitFor(`document.querySelector('.discord-web__canvas[data-part="main"]').getBoundingClientRect().width > 100`),
+        'the main area shows Discord\'s window');
+      const mainPoint = await center('.discord-web__canvas[data-part="main"]');
+      await evaluate('window.discordPress = null');
+      press(mainPoint, 'left');
+      const inPlace = `(() => { const style = document.querySelector('.discord-web').style;
+        return { press: window.discordPress, expected: { x: ${mainPoint.x} - parseInt(style.getPropertyValue('--discord-web-left')) - 72,
+          y: ${mainPoint.y} - parseInt(style.getPropertyValue('--discord-web-top')) } }; })()`;
+      await check(await waitFor(`(() => { const s = ${inPlace}; return !!s.press && s.press.x === s.expected.x && s.press.y === s.expected.y; })()`),
+        `a click on Discord's window reaches the page where it is drawn ${JSON.stringify(await evaluate(inPlace))}`);
+      // A small window, clear of the list's column, leaves the page split, Discord's list in the rail.
+      await sendPicture(wholeWidth, { modal: { left: 200 } });
+      await check(await waitFor(`(() => { const s = ${whole}; return s.width === ${splitWidth} && s.whole; })()`),
+        `a window clear of the rail asks for the split page back, drawn whole meanwhile ${JSON.stringify(await evaluate(whole))}`);
+      await sendPicture(splitWidth, { modal: { left: 236 } });
+      await check(await waitFor(`(() => { const s = ${whole}; return !s.whole && s.railShown; })()`),
+        `a window clear of the rail shows Discord's list in the rail ${JSON.stringify(await evaluate(whole))}`);
+      await sendPicture(splitWidth, { modal: null });
+      await evaluate('window.discordToggle()');
+      await check(await waitFor('window.discordState().railOnly'), 'the Discord button goes back to Monky in the compact layout');
+      await evaluate('window.discordToggle()');
+      await check(await waitFor('!window.discordState().shown'), 'the Discord button puts Discord away in the compact layout');
+      await evaluate(`document.getElementById('compact-shell').remove()`);
 
       const compactOrder = JSON.stringify(await order());
       for (const [width, height, mobile] of [[390, 844, false], [412, 915, true], [1032, 1376, true]]) {

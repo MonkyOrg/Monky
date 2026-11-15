@@ -57,19 +57,20 @@ test('discordWebCommandSchema accepts only the known commands, without extra fie
 test('discordWebLayersSchema takes only boxes of menus and tooltips, a few at most, and the server list\'s scroll', () => {
   const menu = { kind: 'menu', x: 80, y: 120, width: 220, height: 300, radius: 8, shown: true };
   const servers = { top: 32, height: 1252, scrollTop: 0, scrollHeight: 1273, panel: 66 };
-  assert.equal(discordWebLayersSchema.safeParse({ popups: [menu, { ...menu, kind: 'tooltip', shown: false }], modal: false, servers }).success, true);
-  assert.equal(discordWebLayersSchema.safeParse({ popups: [], modal: true, servers: null }).success, true);
+  assert.equal(discordWebLayersSchema.safeParse({ popups: [menu, { ...menu, kind: 'tooltip', shown: false }], modal: null, servers }).success, true);
+  assert.equal(discordWebLayersSchema.safeParse({ popups: [], modal: { left: 0 }, servers: null }).success, true);
   for (const rejected of [
-    { popups: [{ ...menu, kind: 'dialog' }], modal: false, servers },
-    { popups: [{ ...menu, width: Number.POSITIVE_INFINITY }], modal: false, servers },
-    { popups: [{ ...menu, text: 'Convidar' }], modal: false, servers },
-    { popups: [{ ...menu, shown: undefined }], modal: false, servers },
-    { popups: Array.from({ length: 9 }, () => menu), modal: false, servers },
-    { popups: [], modal: 'yes', servers },
-    { popups: [], modal: false, servers, html: '<b>' },
-    { popups: [], modal: false, servers: { ...servers, scrollTop: -1 } },
-    { popups: [], modal: false, servers: { ...servers, names: ['Lichii'] } },
-    { popups: [], modal: false, servers: { ...servers, panel: -1 } },
-    { popups: [], modal: false, servers: { top: 32, height: 1252, scrollTop: 0, scrollHeight: 1273 } },
+    { popups: [{ ...menu, kind: 'dialog' }], modal: null, servers },
+    { popups: [{ ...menu, width: Number.POSITIVE_INFINITY }], modal: null, servers },
+    { popups: [{ ...menu, text: 'Convidar' }], modal: null, servers },
+    { popups: [{ ...menu, shown: undefined }], modal: null, servers },
+    { popups: Array.from({ length: 9 }, () => menu), modal: null, servers },
+    { popups: [], modal: true, servers },
+    { popups: [], modal: { left: 0, width: 440 }, servers },
+    { popups: [], modal: null, servers, html: '<b>' },
+    { popups: [], modal: null, servers: { ...servers, scrollTop: -1 } },
+    { popups: [], modal: null, servers: { ...servers, names: ['Lichii'] } },
+    { popups: [], modal: null, servers: { ...servers, panel: -1 } },
+    { popups: [], modal: null, servers: { top: 32, height: 1252, scrollTop: 0, scrollHeight: 1273 } },
   ]) assert.equal(discordWebLayersSchema.safeParse(rejected).success, false, JSON.stringify(rejected));
 });

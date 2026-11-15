@@ -1,9 +1,13 @@
-import { app, BrowserWindow, screen, shell, session, type NativeImage, type Rectangle, type Session } from 'electron';
+import { app, BrowserWindow, screen, shell, session, type NativeImage, type Rectangle, type Session, type WebContents } from 'electron';
+import { statSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import {
   DISCORD_WEB_HOME, DISCORD_WEB_MAX_POPUPS, discordWebLayersSchema, discordWebRouting, discordWebShowsServers, discordWebUrl,
   type DiscordWebCommand, type DiscordWebFrame, type DiscordWebLayers, type DiscordWebPopup,
 } from '@monky/shared';
 import { webUrl } from './ipc/guards';
+import { attachDevTools, DiscordWebFrames } from './discordWebFrames';
+import { DiscordWebFileChooser } from './discordWebFileChooser';
 import { allowDiscordNavigation } from './webContentsPolicy';
 
 /** Persistent, so the Discord login survives restarts; it never shares storage with Monky's own pages. */
@@ -17,7 +21,11 @@ const FLUSH_INTERVAL_MS = 16;
 const LAYERS_WORLD = 1001;
 /** A page too busy to answer keeps its last known layers rather than holding its pictures back. */
 const LAYERS_TIMEOUT_MS = 100;
-const NO_LAYERS: DiscordWebLayers = { popups: [], modal: false, servers: null };
+const NO_LAYERS: DiscordWebLayers = { popups: [], modal: null, servers: null };
+/** Resolves after the page drew two frames: the one reacting to a drag and the one showing it. */
+const NEXT_FRAMES = 'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))';
+/** The longest a drop waits for the page to draw its drop zone. */
+const DROP_ZONE_WAIT_MS = 150;
 /**
  * How opaque a menu or tooltip must be to be drawn. Discord fades them in and
  * out: drawn whole elsewhere, a fading one would show the page behind it. It
@@ -28,27 +36,65 @@ const MIN_POPUP_OPACITY = 0.95;
 const MIN_PAINTED_OPACITY = 0.01;
 /** A point this far above the page's bottom, in the middle of the server list's column, lies on Discord's user panel. */
 const PANEL_PROBE_RISE = 24;
+/**
+ * Discord's menus, tooltips and popouts (a profile card, the emoji picker) and
+ * its modal windows: a dialog is told apart by what it does to the page.
+ */
+const POPUP_SELECTOR = '[role="menu"], [role="tooltip"], [role="dialog"]';
+/** DevTools' drag operation that copies what is dropped. */
+const DRAG_COPY = 1;
+
+/** Only a file that exists, named by its full path, is handed to Discord; never a folder. */
+function isDroppableFile(path: string): boolean {
+  if (!isAbsolute(path)) return false;
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
 
 /**
- * Finds where Discord's own menus and tooltips are, whether it shows a modal
- * window, how far its server list has scrolled and how tall its user panel is,
+ * Finds where Discord's own menus, popouts and tooltips are, where its modal
+ * window starts, how far its server list has scrolled and how tall its user panel is,
  * by their standard accessibility roles, Discord's list id and what lies at the
- * list's bottom. It reads boxes, visibility and
+ * list's bottom. A popout takes the pointer as a menu does, so it is reported as
+ * one. It reads boxes, colors, visibility and
  * scroll only: no text, and nothing on the page is changed.
  */
 export const LAYERS_PROBE = `(() => {
+  // Discord marks its account card aria-modal like a modal window, and both lay
+  // a box over the whole page to catch clicks outside them; only a modal window
+  // paints that box, dimming the page.
+  const dimmed = [[1, 1], [innerWidth - 2, 1], [1, innerHeight - 2], [innerWidth - 2, innerHeight - 2]].some(([x, y]) => {
+    const top = document.elementFromPoint(x, y);
+    const box = top && top.getBoundingClientRect();
+    if (!box || box.width < innerWidth || box.height < innerHeight) return false;
+    const style = getComputedStyle(top);
+    return !/^(?:transparent|rgba\\(0, 0, 0, 0\\))$/.test(style.backgroundColor) || (style.backdropFilter || 'none') !== 'none';
+  });
   const popups = [];
-  for (const element of document.querySelectorAll('[role="menu"], [role="tooltip"]')) {
+  let modal = null;
+  for (const element of document.querySelectorAll('${POPUP_SELECTOR}')) {
     const box = element.getBoundingClientRect();
     if (box.width < 1 || box.height < 1 || getComputedStyle(element).visibility !== 'visible') continue;
+    const whole = box.width >= innerWidth && box.height >= innerHeight;
+    if (element.getAttribute('aria-modal') === 'true' && (dimmed || whole)) {
+      // Discord's settings fill the page and lay their content out from its left edge in a narrow one.
+      const left = whole ? 0 : Math.max(0, box.left);
+      modal = { left: modal ? Math.min(modal.left, left) : left };
+      continue;
+    }
+    // A dialog filling the whole page is one of Discord's screens, not a popout.
+    if (whole) continue;
     let opacity = 1;
     for (let node = element; node && opacity >= ${MIN_PAINTED_OPACITY}; node = node.parentElement) {
       opacity *= parseFloat(getComputedStyle(node).opacity) || 0;
     }
     if (opacity < ${MIN_PAINTED_OPACITY}) continue;
-    popups.push({ kind: element.getAttribute('role'), x: box.left, y: box.top, width: box.width, height: box.height,
+    if (popups.length === ${DISCORD_WEB_MAX_POPUPS}) continue;
+    popups.push({ kind: element.getAttribute('role') === 'tooltip' ? 'tooltip' : 'menu', x: box.left, y: box.top, width: box.width, height: box.height,
       radius: Math.min(64, parseFloat(getComputedStyle(element).borderTopLeftRadius) || 0), shown: opacity >= ${MIN_POPUP_OPACITY} });
-    if (popups.length === ${DISCORD_WEB_MAX_POPUPS}) break;
   }
   const tree = document.querySelector('[data-list-id="guildsnav"]');
   const list = tree && [tree, ...tree.children].find(node => /^(?:auto|scroll)$/.test(getComputedStyle(node).overflowY));
@@ -56,7 +102,7 @@ export const LAYERS_PROBE = `(() => {
   // Discord's user panel, which covers the bottom of its list, is the outermost
   // box at that corner that does not hold the list too; a call makes it taller.
   let panel = tree && document.elementsFromPoint(box ? box.left + box.width / 2 : 36, innerHeight - ${PANEL_PROBE_RISE})
-    .find(node => !node.contains(tree) && !tree.contains(node) && !node.closest('[role="menu"], [role="tooltip"]'));
+    .find(node => !node.contains(tree) && !tree.contains(node) && !node.closest('${POPUP_SELECTOR}'));
   while (panel && panel.parentElement && !panel.parentElement.contains(tree)) panel = panel.parentElement;
   const panelBox = panel && panel.getBoundingClientRect();
   const panelRise = panelBox && panelBox.height >= 1 && panelBox.height < innerHeight / 2 && box && panelBox.left < box.right
@@ -65,7 +111,7 @@ export const LAYERS_PROBE = `(() => {
     ? { top: box.top, height: list.clientHeight, scrollTop: Math.max(0, list.scrollTop), scrollHeight: list.scrollHeight,
       panel: panelRise }
     : null;
-  return { popups, modal: document.querySelector('[role="dialog"][aria-modal="true"]') !== null, servers };
+  return { popups, modal, servers };
 })()`;
 
 /**
@@ -109,11 +155,22 @@ export interface DiscordWebPageEvents {
   frame(frame: DiscordWebFrame): void;
   cursor(type: string): void;
   split(split: boolean): void;
+  fullscreen(fullscreen: boolean): void;
   closed(): void;
 }
 
 function fromDiscord(url: string | undefined): boolean {
   return typeof url === 'string' && discordWebUrl(url) !== null;
+}
+
+/**
+ * What the page may use. A video may take the whole screen from a frame of
+ * another site too (a YouTube embed): Discord's own page decides which frames
+ * it lets do so.
+ */
+function permitted(contents: WebContents | null, permission: string, url: string | undefined): boolean {
+  if (permission === 'fullscreen') return fromDiscord(contents?.getURL());
+  return DISCORD_PERMISSIONS.has(permission) && fromDiscord(url);
 }
 
 /** The plain Chrome identity: Discord gets no hint of Electron or Monky that could make it expect its own desktop app. */
@@ -124,10 +181,10 @@ function chromeUserAgent(): string {
 
 function prepareSession(discord: Session): void {
   discord.setUserAgent(chromeUserAgent());
-  discord.setPermissionRequestHandler((_contents, permission, callback, details) => {
-    callback(DISCORD_PERMISSIONS.has(permission) && fromDiscord(details.requestingUrl));
+  discord.setPermissionRequestHandler((contents, permission, callback, details) => {
+    callback(permitted(contents, permission, details.requestingUrl));
   });
-  discord.setPermissionCheckHandler((_contents, permission, origin) => DISCORD_PERMISSIONS.has(permission) && fromDiscord(origin));
+  discord.setPermissionCheckHandler((contents, permission, origin) => permitted(contents, permission, origin));
   discord.setDevicePermissionHandler(() => false);
   // Sharing a screen from inside Discord is not offered.
   discord.setDisplayMediaRequestHandler((_request, callback) => callback({}));
@@ -173,6 +230,16 @@ export class DiscordWebPage {
   private disposed = false;
   /** Whether the page shows Discord's server list; unknown until Discord routes its entry address. */
   private split: boolean | null = null;
+  /** Whether Monky's keyboard is on the page, as Monky's window last told. */
+  private focusWanted = false;
+  /** Whether the page currently believes it has the focus (see applyFocus). */
+  private focusEmulated = false;
+  /** Takes the pointer to the frames the page embeds from other sites. */
+  private frames: DiscordWebFrames | null = null;
+  /** Opens the files the page asks for over Monky's window. */
+  private chooser: DiscordWebFileChooser | null = null;
+  /** Whether the page shows something on its whole screen, which Monky's window then shows alone. */
+  private fullscreen = false;
 
   constructor(private readonly owner: BrowserWindow, private readonly events: DiscordWebPageEvents) {}
 
@@ -185,6 +252,8 @@ export class DiscordWebPage {
     const window = new BrowserWindow({
       show: false, frame: false, skipTaskbar: true, enableLargerThanScreen: true, useContentSize: true, width: 1280, height: 720,
       title: 'Discord', paintWhenInitiallyHidden: true,
+      // A video on the whole screen fills the page itself; the hidden window would otherwise cover the screen and show.
+      fullscreenable: false,
       webPreferences: {
         session: discord, offscreen: { deviceScaleFactor: scale }, sandbox: true, contextIsolation: true, nodeIntegration: false,
         nodeIntegrationInSubFrames: false, webviewTag: false, navigateOnDragDrop: false, spellcheck: true,
@@ -198,6 +267,8 @@ export class DiscordWebPage {
     contents.setFrameRate(FRAME_RATE);
     contents.on('paint', (_event, dirty, image) => this.painted(window, dirty, image));
     contents.on('cursor-changed', (_event, type) => { if (this.window === window) this.events.cursor(type); });
+    contents.on('enter-html-full-screen', () => this.setFullscreen(window, true));
+    contents.on('leave-html-full-screen', () => this.setFullscreen(window, false));
     const followAddress = (): void => {
       const url = contents.getURL();
       if (this.window === window && !discordWebRouting(url)) this.setSplit(discordWebShowsServers(url));
@@ -217,6 +288,16 @@ export class DiscordWebPage {
       else openExternal(url);
       return { action: 'deny' };
     });
+    const frames = new DiscordWebFrames(contents);
+    this.frames = frames;
+    const chooser = new DiscordWebFileChooser(contents, this.owner);
+    this.chooser = chooser;
+    contents.debugger.on('detach', () => {
+      if (this.window !== window) return;
+      this.focusEmulated = false;
+      frames.detached();
+      chooser.detached();
+    });
     contents.once('render-process-gone', () => { if (this.window === window) this.close(); });
     window.once('closed', () => { if (this.window === window) this.close(); });
     this.applyLayout();
@@ -232,27 +313,110 @@ export class DiscordWebPage {
     this.visible = visible;
     if (!visible) this.seen = [];
     this.applyLayout();
+    this.applyFocus();
     // Monky's copy of the page may be stale after it was hidden: send it whole again.
     if (appeared) this.liveContents()?.invalidate();
+  }
+
+  focus(focused: boolean): void {
+    this.focusWanted = focused;
+    this.applyFocus();
   }
 
   input(command: InputCommand): void {
     const contents = this.liveContents();
     if (!contents || !this.visible) return;
+    this.chooser?.watch();
     if (command.action === 'key') {
       contents.sendInputEvent({ type: KEY_TYPES[command.type], keyCode: command.keyCode, modifiers: command.modifiers });
       return;
     }
     const zoom = this.sharedZoom;
     const x = Math.round(command.x * zoom), y = Math.round(command.y * zoom);
+    const frames = this.frames;
+    if (!frames) return;
     if (command.action === 'wheel') {
       // Electron counts wheel deltas the other way round from the DOM.
-      contents.sendInputEvent({ type: 'mouseWheel', x, y, deltaX: -command.deltaX * zoom, deltaY: -command.deltaY * zoom,
-        canScroll: true, modifiers: command.modifiers });
+      frames.route(command, () => contents.sendInputEvent({ type: 'mouseWheel', x, y, deltaX: -command.deltaX * zoom,
+        deltaY: -command.deltaY * zoom, canScroll: true, modifiers: command.modifiers }));
       return;
     }
-    contents.sendInputEvent({ type: MOUSE_TYPES[command.type], x, y, button: command.button, clickCount: command.clickCount,
-      modifiers: command.modifiers });
+    frames.route(command, () => contents.sendInputEvent({ type: MOUSE_TYPES[command.type], x, y, button: command.button,
+      clickCount: command.clickCount, modifiers: command.modifiers }));
+  }
+
+  /**
+   * Drops files from the disk on the page where the person let go of them, as
+   * Chromium would for a drag from the system: Discord attaches them to the
+   * message being written. An offscreen page takes no drag from the system, so
+   * DevTools carries it, in the page's CSS pixels, which match Monky's.
+   * Discord only accepts a drop once its drop zone, drawn after the drag
+   * entered, is under the pointer; Chromium turns a drop the page has not
+   * accepted yet into another drag entering. So the drag waits for the page to
+   * draw that zone and passes over it again before letting go.
+   */
+  async drop(x: number, y: number, paths: readonly string[]): Promise<void> {
+    const contents = this.liveContents();
+    if (!contents || !this.visible) return;
+    const files = paths.filter(isDroppableFile);
+    if (!files.length) return;
+    attachDevTools(contents);
+    const data = { items: [], files, dragOperationsMask: DRAG_COPY };
+    const drag = (type: 'dragEnter' | 'dragOver' | 'drop') =>
+      contents.debugger.sendCommand('Input.dispatchDragEvent', { type, x, y, data });
+    await drag('dragEnter');
+    await drag('dragOver');
+    await this.nextFrames(contents);
+    if (this.liveContents() !== contents) return;
+    await drag('dragOver');
+    await drag('drop');
+  }
+
+  /** Waits for the page to draw a couple of frames, or a little while if it draws none. */
+  private async nextFrames(contents: WebContents): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<void>(resolve => { timer = setTimeout(resolve, DROP_ZONE_WAIT_MS); });
+    try {
+      await Promise.race([contents.executeJavaScriptInIsolatedWorld(LAYERS_WORLD, [{ code: NEXT_FRAMES }]), late]);
+    } catch {
+      // A page between two addresses draws nothing; the wait above is enough.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Monky's window left the whole screen (Esc, or Monky showing something
+   * else): the page leaves it too, by the Escape a person would press.
+   * Chromium takes that key itself; Discord never sees it.
+   */
+  exitFullscreen(): void {
+    const contents = this.liveContents();
+    if (!contents || !this.fullscreen) return;
+    contents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+    contents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+  }
+
+  /** Loads the page again, past the cache; settles once it has loaded, failed or closed. */
+  reload(): Promise<void> {
+    const contents = this.liveContents();
+    if (!contents) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = (): void => {
+        contents.removeListener('did-stop-loading', done);
+        contents.removeListener('destroyed', done);
+        resolve();
+      };
+      contents.once('did-stop-loading', done);
+      contents.once('destroyed', done);
+      contents.reloadIgnoringCache();
+    });
+  }
+
+  private setFullscreen(window: BrowserWindow, fullscreen: boolean): void {
+    if (this.window !== window || fullscreen === this.fullscreen) return;
+    this.fullscreen = fullscreen;
+    this.events.fullscreen(fullscreen);
   }
 
   private setSplit(split: boolean): void {
@@ -264,6 +428,29 @@ export class DiscordWebPage {
   private liveContents(): Electron.WebContents | null {
     const window = this.window;
     return window && !window.isDestroyed() && !window.webContents.isDestroyed() ? window.webContents : null;
+  }
+
+  /**
+   * An offscreen page never gets the focus: Electron's offscreen views ignore
+   * it, so Chromium draws no text cursor, although typed keys still arrive.
+   * DevTools' focus emulation makes the page focused and active, as Puppeteer
+   * does. Only while Monky's keyboard is on it: a focused page tells Discord the
+   * person is looking at it, and Discord then keeps its notifications quiet.
+   */
+  private applyFocus(): void {
+    const contents = this.liveContents();
+    const focused = this.focusWanted && this.visible;
+    if (!contents || focused === this.focusEmulated) return;
+    try {
+      attachDevTools(contents);
+    } catch (error) {
+      console.warn('[Discord web] Could not show the text cursor.', error instanceof Error ? error.message : error);
+      return;
+    }
+    this.focusEmulated = focused;
+    void contents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: focused }).catch(error => {
+      if (this.liveContents() === contents) console.warn('[Discord web] Could not show the text cursor.', error instanceof Error ? error.message : error);
+    });
   }
 
   private applyLayout(): void {
@@ -364,6 +551,11 @@ export class DiscordWebPage {
     this.size = null;
     this.sharedZoom = 1;
     this.split = null;
+    this.focusWanted = false;
+    this.focusEmulated = false;
+    this.fullscreen = false;
+    this.frames = null;
+    this.chooser = null;
     this.image = null;
     this.dirty = null;
     this.layers = NO_LAYERS;
