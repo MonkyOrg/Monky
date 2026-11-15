@@ -45,6 +45,7 @@ input:is([data-date-picker], [type=time])[data-picker-only] {
   cursor: pointer;
   caret-color: transparent;
   user-select: none;
+  -webkit-user-select: none;
   appearance: none;
   background-repeat: no-repeat;
   background-position: right 12px center;

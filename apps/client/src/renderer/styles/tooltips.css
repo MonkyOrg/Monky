@@ -20,6 +20,7 @@
   overflow-wrap: anywhere;
   pointer-events: none;
   user-select: none;
+  -webkit-user-select: none;
   -webkit-app-region: no-drag;
   animation: monky-tooltip-in 90ms ease-out;
 }

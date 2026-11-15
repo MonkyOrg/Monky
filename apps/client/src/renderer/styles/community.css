@@ -624,7 +624,7 @@
   border-radius: var(--radius-sm);
   background: var(--bg-input);
 }
-.native-form-text-results li span { overflow-wrap: anywhere; user-select: text; }
+.native-form-text-results li span { overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
 .native-form-text-results li small { flex: none; color: var(--text-muted); }
 .native-form-text-results .native-form-more-answers {
   justify-content: center;

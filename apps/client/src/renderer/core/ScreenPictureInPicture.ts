@@ -47,7 +47,7 @@ const PIP_FRAME_PREFIX = 'monky-screen-pip-';
 const PIP_STYLE = `
 :root { color-scheme: dark; }
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
-body { -webkit-app-region: drag; user-select: none; font-family: system-ui, sans-serif; }
+body { -webkit-app-region: drag; user-select: none; -webkit-user-select: none; font-family: system-ui, sans-serif; }
 video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; pointer-events: none; }
 .shade {
   position: fixed; inset: 0 0 auto 0; height: 64px; pointer-events: none;

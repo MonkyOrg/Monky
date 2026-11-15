@@ -145,7 +145,7 @@ export class InviteModal {
           <!-- Password Option -->
           <div style="border-top: 1px solid var(--border-color); padding-top: 10px; margin-top: 2px; display: flex; flex-direction: column; gap: 8px;">
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-              <label for="chk-invite-password" style="font-size: 12px; font-weight: 500; color: var(--text-primary); cursor: pointer; user-select: none;">${t('invite.includePassword')}</label>
+              <label for="chk-invite-password" style="font-size: 12px; font-weight: 500; color: var(--text-primary); cursor: pointer; user-select: none; -webkit-user-select: none;">${t('invite.includePassword')}</label>
               <label class="toggle-switch">
                 <input id="chk-invite-password" type="checkbox" role="switch" ${this.knownPassword ? '' : 'disabled'}>
                 <span class="toggle-slider"></span>

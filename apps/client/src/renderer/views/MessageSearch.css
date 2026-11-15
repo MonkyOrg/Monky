@@ -27,7 +27,7 @@
 .message-search-chip[aria-pressed=true] { background: var(--accent-primary); color: var(--text-on-accent, white); }
 .message-search-dates { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .message-search-results { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; gap: 10px; overflow-y: auto; padding-right: 4px; }
-.message-search-result { position: relative; flex-shrink: 0; text-align: left; width: 100%; overflow: hidden; border: 1px solid var(--border-color); border-radius: 7px; padding: 12px; background: var(--bg-card); color: var(--text-primary); cursor: pointer; user-select: none; }
+.message-search-result { position: relative; flex-shrink: 0; text-align: left; width: 100%; overflow: hidden; border: 1px solid var(--border-color); border-radius: 7px; padding: 12px; background: var(--bg-card); color: var(--text-primary); cursor: pointer; user-select: none; -webkit-user-select: none; }
 .message-search-result:hover, .message-search-result:focus-visible { background: var(--bg-card-hover); }
 .message-search-result:has(.message-search-result-attachments :is(a, button, .chat-video-player, .chat-audio-player):hover) { background: var(--bg-card); }
 .message-search-result-jump { position: absolute; top: 8px; right: 8px; z-index: 1; padding: 4px 7px; border-radius: 4px; background: var(--bg-panel); color: var(--text-secondary); font-size: 10px; line-height: 1; opacity: 0; transform: translateY(-2px); pointer-events: none; transition: opacity var(--motion-popover-duration) var(--motion-easing), transform var(--motion-popover-duration) var(--motion-easing); }

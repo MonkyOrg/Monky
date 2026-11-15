@@ -99,7 +99,7 @@ export class ServerBotsTab {
             <span class="material-symbols-outlined md-14" style="vertical-align: middle;">warning</span>
             ${t('bots.tokenWarning')}
           </div>
-          <code id="bot-token-value" style="display: block; background: var(--bg-elevated); padding: 8px 10px; border-radius: var(--radius-sm); font-size: 12px; word-break: break-all; color: var(--text-primary); user-select: all;"></code>
+          <code id="bot-token-value" style="display: block; background: var(--bg-elevated); padding: 8px 10px; border-radius: var(--radius-sm); font-size: 12px; word-break: break-all; color: var(--text-primary); user-select: all; -webkit-user-select: all;"></code>
           <button id="btn-copy-token" type="button" class="btn btn-secondary" style="margin-top: 8px; font-size: 11px;">
             <span class="material-symbols-outlined md-14">content_copy</span>
             ${t('bots.copyToken')}

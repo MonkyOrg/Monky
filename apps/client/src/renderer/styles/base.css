@@ -65,6 +65,14 @@
   padding: 0;
   box-sizing: border-box;
   user-select: none;
+  -webkit-user-select: none;
+}
+
+/* WebKit edits nothing under -webkit-user-select: none, the only form iOS Safari reads: editors stay selectable. */
+[contenteditable]:not([contenteditable="false"]),
+[contenteditable]:not([contenteditable="false"]) * {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 [data-ui-closing] { pointer-events: none !important; }
@@ -157,6 +165,7 @@ input, textarea, button, select {
 
 input:not([type="range"]):not([type="checkbox"]), textarea, select {
   user-select: text;
+  -webkit-user-select: text;
   background-color: var(--bg-input);
   color: var(--text-primary);
   border: 1px solid var(--border-color);
