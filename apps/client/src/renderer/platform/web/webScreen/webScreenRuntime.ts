@@ -5,6 +5,7 @@ import {
   type NativeScreenParticipant, type NativeScreenPresentation, type NativeScreenSignalPayload, type NativeScreenSource,
 } from '@monky/shared';
 import type { PlatformApi } from '../../api';
+import { browserCapturesDisplay } from '../../capabilities';
 import { browserScreenFormats, browserScreenProfile } from './browserScreenProfile';
 import { DisplayCaptures, type DisplayCapture } from './displayCaptures';
 import { WebScreenBridge } from './webScreenBridge';
@@ -44,7 +45,7 @@ const errorText = (error: unknown): string => (error instanceof Error ? error.me
 
 /** What a browser tab can do with screens: capture through its own dialog and send; receiving is the browser receiver's. */
 export function webScreenCapabilities(): NativeScreenCapabilities {
-  const display = typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+  const display = browserCapturesDisplay();
   const formats = typeof RTCRtpSender === 'undefined' ? [] : browserScreenFormats(RTCRtpSender.getCapabilities('video')?.codecs ?? []);
   const capture = display && formats.length > 0;
   // Only Chromium shares a tab's or the system's sound, and only Chromium lists this constraint.

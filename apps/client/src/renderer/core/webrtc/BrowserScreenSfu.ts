@@ -5,7 +5,10 @@ import {
   type NativeScreenVideoProfile, type SfuConsumedPayload, type SfuProducerClosedPayload,
   type SfuProducersListPayload, type SfuRouterRtpCapabilitiesPayload, type SfuWebRtcTransportCreatedPayload,
 } from '@monky/shared';
-import { BrowserScreenCodecError, av1ReceiveLevel, browserReceivesH264Main, h264MaxReceiveLevel, supportsBrowserAv1Level } from './browserScreenCodecs';
+import {
+  BrowserScreenCodecError, aliasH264MainProfile, av1ReceiveLevel, browserAliasesH264Main, browserReceivesH264Main,
+  h264MaxReceiveLevel, restoreH264MainProfile, supportsBrowserAv1Level,
+} from './browserScreenCodecs';
 
 export type BrowserScreenRpc = <T>(method: NativeScreenRpcMethod, payload: Record<string, unknown>) => Promise<T>;
 type RouterResponse = Omit<SfuRouterRtpCapabilitiesPayload, 'rtpCapabilities'> & { rtpCapabilities: SfuTypes.RtpCapabilities };
@@ -31,6 +34,8 @@ export class BrowserScreenSfu {
   private readonly screenSessionId = crypto.randomUUID();
   private readonly producers = new Map<string, Producer>();
   private readonly serverConsumers = new Set<string>();
+  /** Router H.264 Main payload types this browser loaded as Constrained High, with their Main profile. */
+  private readonly mainAliases = new Map<number, string>();
   private transport: SfuTypes.Transport | null = null;
   private serverTransportId: string | null = null;
   private opening: Promise<void> | null = null;
@@ -60,7 +65,16 @@ export class BrowserScreenSfu {
     const router = await rpc<RouterResponse>(MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES, { channelId: call.channelId });
     this.current();
     if (router.channelId !== call.channelId) throw new Error('Screen router capabilities belong to another channel.');
-    await this.device.load({ routerRtpCapabilities: router.rtpCapabilities, preferLocalCodecsOrder: true });
+    const routerCapabilities = structuredClone(router.rtpCapabilities);
+    // A receiver that aliases Main matches the router's Main codecs under the Constrained High name it lists.
+    if (browserAliasesH264Main()) for (const codec of routerCapabilities.codecs ?? []) {
+      const profileLevelId = codec.parameters?.['profile-level-id'];
+      const alias = codec.mimeType.toLowerCase() === 'video/h264' ? aliasH264MainProfile(profileLevelId) : null;
+      if (!alias || typeof profileLevelId !== 'string') continue;
+      this.mainAliases.set(codec.preferredPayloadType, profileLevelId.slice(0, 4));
+      codec.parameters = { ...codec.parameters, 'profile-level-id': alias };
+    }
+    await this.device.load({ routerRtpCapabilities: routerCapabilities, preferLocalCodecsOrder: true });
     this.current();
     const created = await rpc<TransportResponse>(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, {
       channelId: call.channelId, direction: 'recv', purpose: 'screen', screenSessionId: this.screenSessionId,
@@ -165,6 +179,9 @@ export class BrowserScreenSfu {
       || (codec.mimeType.toLowerCase() === 'video/rtx' && typeof codec.parameters?.apt === 'number'
         && selectedPayloads.has(codec.parameters.apt)));
     for (const codec of capabilities.codecs ?? []) {
+      const main = this.mainAliases.get(codec.preferredPayloadType);
+      const restored = main ? restoreH264MainProfile(codec.parameters?.['profile-level-id'], main) : null;
+      if (restored) codec.parameters = { ...codec.parameters, 'profile-level-id': restored };
       const maxReceiveLevel = selectedMime === 'video/h264' && codec.mimeType.toLowerCase() === 'video/h264'
         ? h264MaxReceiveLevel(codec.parameters?.['profile-level-id'], this.options.profile) : null;
       if (maxReceiveLevel) codec.parameters = { ...codec.parameters, 'max-recv-level': maxReceiveLevel };
@@ -207,6 +224,11 @@ export class BrowserScreenSfu {
       && consumed.rtpParameters.codecs.some(codec => codec.mimeType.toLowerCase() === selectedMime
         && !supportsBrowserAv1Level(this.options.profile, codec.parameters ?? {})))
       throw new BrowserScreenCodecError('The SFU AV1 consumer level is insufficient for the selected screen profile.');
+    // The server consumes Main; this browser receives it under the alias it loaded.
+    for (const codec of consumed.rtpParameters.codecs ?? []) {
+      const alias = this.mainAliases.has(codec.payloadType) ? aliasH264MainProfile(codec.parameters?.['profile-level-id']) : null;
+      if (alias) codec.parameters = { ...codec.parameters, 'profile-level-id': alias };
+    }
     const consumer = await transport.consume({
       id: consumed.id, producerId: consumed.producerId, kind: consumed.kind,
       rtpParameters: consumed.rtpParameters, appData: metadata.appData,

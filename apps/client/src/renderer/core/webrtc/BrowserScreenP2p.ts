@@ -2,7 +2,10 @@ import {
   nativeScreenP2pControlSchema, type NativeScreenCall, type NativeScreenP2pControl, type NativeScreenSource,
   type NativeScreenVideoProfile,
 } from '@monky/shared';
-import { assertBrowserScreenCodec, withBrowserScreenReceiveParameters } from './browserScreenCodecs';
+import {
+  aliasH264MainOffer, assertBrowserScreenCodec, browserAliasesH264Main, restoreH264MainAnswer, withBrowserScreenReceiveParameters,
+  type H264MainAliases,
+} from './browserScreenCodecs';
 
 type ControlBody<T = NativeScreenP2pControl> = T extends NativeScreenP2pControl
   ? Omit<T, 'protocol' | 'version' | 'callId' | 'channelId' | 'connectionId' | 'generation'> : never;
@@ -172,7 +175,10 @@ export class BrowserScreenP2p {
         if (!this.turn || this.turn.number !== control.turn || this.turn.phase !== 'offer')
           throw new Error('The screen offer does not match its granted turn.');
         this.turn.phase = 'answering';
-        await this.peer.setRemoteDescription({ type: 'offer', sdp: control.sdp });
+        const codec = this.options.source.codec ?? 'h264';
+        const offer: { sdp: string; aliases: H264MainAliases } = browserAliasesH264Main()
+          ? aliasH264MainOffer(control.sdp) : { sdp: control.sdp, aliases: new Map<number, string>() };
+        await this.peer.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
         this.current();
         this.remoteDescriptionTurn = control.turn;
         for (let index = 0; index < this.pendingIce.length;) {
@@ -186,14 +192,16 @@ export class BrowserScreenP2p {
         const answer = await this.peer.createAnswer();
         this.current();
         // The receive levels the decoder probe admitted are written first; the codec is checked on what is sent.
-        const sdp = withBrowserScreenReceiveParameters(answer.sdp ?? '', this.options.source.audio, this.options.profile,
-          this.options.source.codec ?? 'h264');
-        assertBrowserScreenCodec(sdp, this.options.source.codec ?? 'h264', this.options.profile);
+        // An aliased Main answers the publisher under its own profile, with the levels written for Main.
+        const sent = (sdp: string): string => offer.aliases.size ? withBrowserScreenReceiveParameters(
+          restoreH264MainAnswer(sdp, offer.aliases), this.options.source.audio, this.options.profile, codec) : sdp;
+        const sdp = withBrowserScreenReceiveParameters(answer.sdp ?? '', this.options.source.audio, this.options.profile, codec);
+        assertBrowserScreenCodec(sent(sdp), codec, this.options.profile);
         this.localDescriptionTurn = control.turn;
         await this.peer.setLocalDescription({ type: 'answer', sdp });
         this.current();
         if (!this.peer.localDescription?.sdp) throw new Error('The browser did not produce a screen answer.');
-        await this.send({ type: 'answer', turn: control.turn, sdp: this.peer.localDescription.sdp });
+        await this.send({ type: 'answer', turn: control.turn, sdp: sent(this.peer.localDescription.sdp) });
         this.current();
         this.turn.phase = this.leader ? 'applied' : 'done';
         break;

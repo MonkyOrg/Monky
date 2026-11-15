@@ -13,6 +13,11 @@ export function platformSupports(capability: keyof PlatformCapabilities): boolea
   return capabilities ? capabilities[capability] : !BROWSER_ONLY.has(capability);
 }
 
+/** Whether this browser can capture a screen at all. No browser on a phone or tablet (iOS, Android) can. */
+export function browserCapturesDisplay(): boolean {
+  return typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+}
+
 /**
  * The web looks exactly like the desktop (#858): every desktop feature stays in
  * place, locked and marked "Desktop", and activating it offers the download.

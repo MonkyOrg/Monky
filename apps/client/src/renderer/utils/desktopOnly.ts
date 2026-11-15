@@ -1,6 +1,6 @@
 import '../styles/desktopOnly.css';
 import { getLanguage, t, type SupportedLanguage, type TranslationKey } from '../i18n';
-import { featureAvailability } from '../platform/capabilities';
+import { browserCapturesDisplay, featureAvailability } from '../platform/capabilities';
 import type { PlatformCapabilities } from '../platform/api';
 import { openExternalUrl } from './feedback';
 import { escapeHtml } from './html';
@@ -51,14 +51,15 @@ export function desktopFeatureName(feature: DesktopFeature): string {
   return t(FEATURE_NAMES[feature]);
 }
 
-/** Features a browser lacks for a reason worth naming: this browser, not the web version, cannot do them. */
-const FEATURE_REASONS: Partial<Readonly<Record<DesktopFeature, TranslationKey>>> = {
-  screenShare: 'desktopOnly.reason.screenShare',
+/** Features a browser lacks for a reason worth naming: this browser or device, not the web version, cannot do them. */
+const FEATURE_REASONS: Partial<Readonly<Record<DesktopFeature, () => TranslationKey>>> = {
+  // A desktop browser without the encoder has a sibling that shares; a phone has none.
+  screenShare: () => browserCapturesDisplay() ? 'desktopOnly.reason.screenShare' : 'desktopOnly.reason.screenShareDevice',
 };
 
 /** The tooltip of a locked `feature`: why it is locked, or just where it works. */
 function lockedTooltip(feature: DesktopFeature): string {
-  return t(FEATURE_REASONS[feature] ?? 'desktopOnly.tooltip');
+  return t(FEATURE_REASONS[feature]?.() ?? 'desktopOnly.tooltip');
 }
 
 /** Whether `capability` is shown locked here, rather than working or hidden. */

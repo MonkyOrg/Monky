@@ -58,14 +58,78 @@ const h264Receiver = (codec: { mimeType: string; sdpFmtpLine?: string }, profile
   && profile.test(/(?:^|;)\s*profile-level-id=([0-9a-f]{6})(?:;|$)/i.exec(codec.sdpFmtpLine ?? '')?.[1] ?? '')
   && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(codec.sdpFmtpLine ?? '');
 
+/**
+ * Whether this browser plays H.264 Main through its Constrained High receiver. Safari, on the iPhone and iPad
+ * included, lists Constrained High (`640c`) but not Main, although its hardware decoder plays Main. The Main
+ * that screens send is real time, progressive and without B-frames (WebRTC, and the desktop's encoders with
+ * frame reordering off), a stream Constrained High covers. Such a receiver negotiates the screen's Main
+ * payloads under the Constrained High name and answers with the original profile (`aliasH264MainOffer`).
+ */
+export function browserAliasesH264Main(): boolean {
+  const codecs = RTCRtpReceiver.getCapabilities('video')?.codecs ?? [];
+  return !codecs.some(codec => h264Receiver(codec, /^4d/i)) && codecs.some(codec => h264Receiver(codec, /^640c/i));
+}
+
 /** Whether this browser receives H.264 Main, what the desktop app and the web's better format send. */
 export function browserReceivesH264Main(): boolean {
-  return RTCRtpReceiver.getCapabilities('video')?.codecs.some(codec => h264Receiver(codec, /^4d/i)) ?? false;
+  return RTCRtpReceiver.getCapabilities('video')?.codecs.some(codec => h264Receiver(codec, /^4d/i))
+    || browserAliasesH264Main();
+}
+
+/** The payload types renamed from H.264 Main to Constrained High, each with the Main `profile_idc` and `profile-iop` it had. */
+export type H264MainAliases = ReadonlyMap<number, string>;
+
+/** A Main `profile-level-id` under the Constrained High name, at the same level; null when it is not Main. */
+export function aliasH264MainProfile(profileLevelId: unknown): string | null {
+  return typeof profileLevelId === 'string' && /^4d[0-9a-f]{4}$/i.test(profileLevelId) ? `640c${profileLevelId.slice(4)}` : null;
+}
+
+/** The Main `profile-level-id` back from its Constrained High alias, keeping the level the receiver chose. */
+export function restoreH264MainProfile(profileLevelId: unknown, main: string): string | null {
+  return typeof profileLevelId === 'string' && /^640c[0-9a-f]{2}$/i.test(profileLevelId)
+    ? `${main.slice(0, 4)}${profileLevelId.slice(4)}` : null;
+}
+
+function rewriteH264Profiles(sdp: string, rewrite: (payload: number, profileLevelId: string) => string | null): string {
+  let video = false;
+  const h264 = new Set<string>();
+  return sdp.split('\r\n').map(line => {
+    if (line.startsWith('m=')) { video = line.startsWith('m=video '); h264.clear(); }
+    const codec = /^a=rtpmap:(\d+) H264\//i.exec(line);
+    if (codec) h264.add(codec[1]);
+    const fmtp = video ? /^a=fmtp:(\d+) (.+)$/.exec(line) : null;
+    if (!fmtp || !h264.has(fmtp[1])) return line;
+    return `a=fmtp:${fmtp[1]} ${fmtp[2].replace(/(^|;)(\s*profile-level-id=)([0-9a-f]{6})(?=;|$)/i,
+      (match: string, start: string, key: string, value: string) => {
+        const next = rewrite(Number(fmtp[1]), value);
+        return next ? `${start}${key}${next}` : match;
+      })}`;
+  }).join('\r\n');
+}
+
+/** A screen offer whose H.264 Main payloads read as Constrained High, for a receiver that aliases Main. */
+export function aliasH264MainOffer(sdp: string): { sdp: string; aliases: H264MainAliases } {
+  const aliases = new Map<number, string>();
+  const aliased = rewriteH264Profiles(sdp, (payload, profileLevelId) => {
+    const alias = aliasH264MainProfile(profileLevelId);
+    if (alias) aliases.set(payload, profileLevelId.slice(0, 4));
+    return alias;
+  });
+  return { sdp: aliased, aliases };
+}
+
+/** The answer to an aliased offer as the publisher must read it: its payloads back under their Main profile. */
+export function restoreH264MainAnswer(sdp: string, aliases: H264MainAliases): string {
+  if (!aliases.size) return sdp;
+  return rewriteH264Profiles(sdp, (payload, profileLevelId) => {
+    const main = aliases.get(payload);
+    return main ? restoreH264MainProfile(profileLevelId, main) : null;
+  });
 }
 
 /**
  * Whether this browser's WebRTC receiver lists the codec of Monky screens at all: AV1 profile 0, or H.264 as
- * Main or as the Constrained Baseline the web shares by default (Firefox and Safari list only the latter).
+ * Main or as the Constrained Baseline the web shares by default (Firefox lists only the latter; Safari aliases Main).
  */
 export function browserReceivesScreenCodec(selected: ScreenCodec = 'h264'): boolean {
   return RTCRtpReceiver.getCapabilities('video')?.codecs.some(codec =>
@@ -76,7 +140,7 @@ export function browserReceivesScreenCodec(selected: ScreenCodec = 'h264'): bool
 
 /**
  * What to tell a browser about a screen in `codec` it could not decode: `unwatchable`, a format it does not
- * decode (Firefox and Safari facing H.264 Main or AV1), so it watches elsewhere or asks for the compatible
+ * decode (Firefox facing H.264 Main or AV1), so it watches elsewhere or asks for the compatible
  * format; `switch`, another codec the publisher can change to the H.264 it receives; `null`, nothing codec-specific.
  */
 export function browserScreenRefusal(codec: ScreenCodec): 'unwatchable' | 'switch' | null {
@@ -91,9 +155,10 @@ export async function supportsBrowserScreenCodec(
 ): Promise<boolean> {
   // For AV1 the advertised level is only a default: the decoder probe below decides.
   if (!browserReceivesScreenCodec(selected) || !navigator.mediaCapabilities?.decodingInfo) return false;
-  // A browser without Main is probed with the Constrained Baseline it receives, at the same level.
+  // A browser without Main is probed with the profile it negotiates instead, at the same level.
   const h264 = getScreenH264ProfileLevelId(profile);
-  const profileLevelId = browserReceivesH264Main() ? h264 : `42e0${h264.slice(4)}`;
+  const profileLevelId = browserAliasesH264Main() ? `640c${h264.slice(4)}`
+    : browserReceivesH264Main() ? h264 : `42e0${h264.slice(4)}`;
   const capability = await navigator.mediaCapabilities.decodingInfo({
     type: 'webrtc',
     video: {

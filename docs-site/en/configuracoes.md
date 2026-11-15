@@ -196,9 +196,9 @@ path from native screen capture.
 
 The **Video format** appears below **Screen encoding** only while the screen is
 sent in H.264, and decides who can watch it. **Better quality**, the default on
-the desktop app and the web version, uses H.264 Main, which Chrome, Edge and the
-desktop app watch. **Compatible** uses H.264 Constrained Baseline, which
-everyone watches, Firefox and Safari included; 4K above 64 FPS is lowered,
+the desktop app and the web version, uses H.264 Main, which Chrome, Edge, Safari
+(on the iPhone and iPad included) and the desktop app watch. **Compatible** uses
+H.264 Constrained Baseline, which everyone watches, Firefox included; 4K above 64 FPS is lowered,
 because Firefox decodes this profile only up to Level 5.2. The format does not
 change the codec: Automatic still picks AV1 when available, and with AV1 the
 option is hidden and has no effect. The choice applies from the next share.

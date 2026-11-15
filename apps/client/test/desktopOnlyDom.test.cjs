@@ -166,6 +166,14 @@ if (!process.versions.electron) {
         await check(`document.querySelector(".modal-backdrop:not([data-ui-closing]) .desktop-only-dialog__message").textContent
           === window.qa.t("desktopOnly.reason.screenShare")`, 'The screen-sharing offer names why this browser cannot share');
         await closeOffer();
+        // A phone browser (iOS Safari) has no screen capture at all: no other browser on it would share either.
+        await evaluate(`Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', { value: undefined, configurable: true });
+          import("/utils/desktopOnly.ts").then(({ showDesktopOnly }) => showDesktopOnly("screenShare"))`);
+        await waitFor(`${dialogs} === 1`, 'The screen-sharing offer opens on a device without screen capture');
+        await check(`document.querySelector(".modal-backdrop:not([data-ui-closing]) .desktop-only-dialog__message").textContent
+          === window.qa.t("desktopOnly.reason.screenShareDevice")`, 'A device that cannot capture its screen says so, instead of sending to another browser');
+        await evaluate('delete navigator.mediaDevices.getDisplayMedia');
+        await closeOffer();
 
         // Keyboard: Enter and Space offer the app; Tab moves past. Focus events only reach a focused page, and an
         // unshown window on a CI runner is not one: the shared helper shows and focuses it, and waits until it is.

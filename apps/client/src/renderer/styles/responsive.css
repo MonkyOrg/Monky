@@ -719,6 +719,29 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     cursor: pointer;
   }
 
+  :root .compact-call-action__text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  :root .compact-call-action__reason {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  /* A locked action dims its icon and name, never the reason that explains it. */
+  :root .compact-call-sheet .compact-call-action[data-desktop-only] {
+    opacity: 1;
+    cursor: default;
+  }
+
+  :root .compact-call-action[data-desktop-only] > .material-symbols-outlined,
+  :root .compact-call-action[data-desktop-only] .compact-call-action__text > :first-child {
+    opacity: 0.55;
+  }
+
   :root .modal-backdrop {
     top: var(--viewport-top, 0px);
     height: var(--viewport-height, 100dvh);

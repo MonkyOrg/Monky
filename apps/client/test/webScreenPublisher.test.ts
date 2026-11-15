@@ -17,7 +17,10 @@ import { planBrowserAudio, type LiveScreens } from '../src/renderer/views/screen
 import { createScreenShareStream } from '../src/renderer/core/screenShareStream';
 import { webScreenCapabilities } from '../src/renderer/platform/web/webScreen/webScreenRuntime';
 import { webCapabilities } from '../src/renderer/platform/web/webPlatform';
-import { browserReceivesH264Main, browserReceivesScreenCodec, browserScreenRefusal } from '../src/renderer/core/webrtc/browserScreenCodecs';
+import {
+  aliasH264MainOffer, browserAliasesH264Main, browserReceivesH264Main, browserReceivesScreenCodec, browserScreenRefusal,
+  restoreH264MainAnswer,
+} from '../src/renderer/core/webrtc/browserScreenCodecs';
 
 const INSTANCE = '3dfbff6f-6556-49cb-be32-1a6699d242a1';
 const CONNECTION = '74439c45-0865-42d3-9577-d4e451504e8c';
@@ -314,6 +317,49 @@ test('a browser that cannot decode a screen is told which format and where to wa
   inBrowser(t, NO_H264_VIDEO_CODECS, () => {
     assert.equal(browserScreenRefusal('h264'), 'unwatchable');
   });
+});
+
+/** What Safari lists, on the iPhone and iPad too: H.264 as Constrained High and Constrained Baseline, never Main. */
+const SAFARI_VIDEO_CODECS = [
+  { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f' },
+  { mimeType: 'video/rtx', sdpFmtpLine: 'apt=96' },
+  { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
+  { mimeType: 'video/H265' },
+  { mimeType: 'video/VP8' },
+  { mimeType: 'video/VP9', sdpFmtpLine: 'profile-id=0' },
+];
+
+test('Safari watches H.264 Main screens through its Constrained High receiver, never told to watch elsewhere', (t: TestContext) => {
+  inBrowser(t, SAFARI_VIDEO_CODECS, () => {
+    assert.equal(browserAliasesH264Main(), true);
+    assert.equal(browserReceivesH264Main(), true);
+    assert.equal(browserScreenRefusal('h264'), null);
+    // AV1, which it does not receive, can still become the H.264 it plays.
+    assert.equal(browserScreenRefusal('av1'), 'switch');
+  });
+  for (const codecs of [CHROMIUM_VIDEO_CODECS, FIREFOX_VIDEO_CODECS, NO_H264_VIDEO_CODECS])
+    inBrowser(t, codecs, () => assert.equal(browserAliasesH264Main(), false));
+});
+
+test('an aliased H.264 Main offer is answered back under the profile each payload had', () => {
+  const offer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99', 'a=rtpmap:96 H264/90000',
+    'a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d0033', 'a=rtpmap:97 rtx/90000', 'a=fmtp:97 apt=96',
+    'a=rtpmap:98 H264/90000', 'a=fmtp:98 profile-level-id=4D401F;packetization-mode=1',
+    'a=rtpmap:99 H264/90000', 'a=fmtp:99 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f',
+    'm=audio 9 UDP/TLS/RTP/SAVPF 96', 'a=rtpmap:96 opus/48000/2', 'a=fmtp:96 profile-level-id=4d0033', ''].join('\r\n');
+  const aliased = aliasH264MainOffer(offer);
+  assert.deepEqual([...aliased.aliases], [[96, '4d00'], [98, '4D40']]);
+  assert.match(aliased.sdp, /a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c33\r\n/);
+  assert.match(aliased.sdp, /a=fmtp:98 profile-level-id=640c1F;packetization-mode=1\r\n/);
+  assert.match(aliased.sdp, /a=fmtp:99 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f\r\n/);
+  // Only H.264 in video carries a profile to alias.
+  assert.match(aliased.sdp, /a=fmtp:96 profile-level-id=4d0033\r\n$/);
+  const answer = aliased.sdp.replace('profile-level-id=640c33', 'profile-level-id=640c1f');
+  const restored = restoreH264MainAnswer(answer, aliased.aliases);
+  assert.match(restored, /a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f\r\n/, 'the level the receiver chose stays');
+  assert.match(restored, /a=fmtp:98 profile-level-id=4D401F;packetization-mode=1\r\n/);
+  assert.match(restored, /a=fmtp:99 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f\r\n/, 'a real Constrained High stays');
+  assert.equal(restoreH264MainAnswer(answer, new Map()), answer);
 });
 
 test('the sent screen stream is renamed after its instance and read back as its binding (#858)', () => {
