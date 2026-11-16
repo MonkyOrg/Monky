@@ -4,22 +4,18 @@ import { voiceStore } from '../stores/voiceStore';
 import { soundEffects } from './SoundEffects';
 import { clientLog } from './ClientLogService';
 import { createNoiseSuppressor, destroyNoiseSuppressor, type NoiseSuppressorNode } from './NoiseSuppression';
+import { createMicrophoneChain, type MicrophoneChain, type PreparedSuppression } from './voiceCapture/microphoneChain';
 import { microphoneConstraints, type NoiseSuppressionMode } from '../utils/audioPreferences';
 import { isVoiceActive, speechLevel } from '../audio/voiceActivity';
 
 export class AudioProcessor {
   private rawMicStream: MediaStream | null = null;
   private localStream: MediaStream | null = null;
-  private audioContext: AudioContext | null = null;
-  private analyser: AnalyserNode | null = null;
-  private microphoneSource: MediaStreamAudioSourceNode | null = null;
-  private noiseSuppressorNode: NoiseSuppressorNode | null = null;
+  // The input volume applies only to the transmitted voice: the analyser reads the level before it.
+  private chain: MicrophoneChain | null = null;
   private noiseSuppressionGeneration = 0;
   private noiseSuppressionChanging = false;
   private noiseProcessorFailed = false;
-  private destinationNode: MediaStreamAudioDestinationNode | null = null;
-  // Sits before the destination only: the analyser reads the level before it, so voice detection does not depend on the volume setting.
-  private inputGainNode: GainNode | null = null;
 
   private vadInterval: ReturnType<typeof setInterval> | null = null;
   private isSpeaking: boolean = false;
@@ -38,6 +34,14 @@ export class AudioProcessor {
   private graphReady = false;
   private microphonePublicationPending = false;
   private initialized = false;
+
+  private get audioContext(): AudioContext | null {
+    return this.chain?.context ?? null;
+  }
+
+  private get analyser(): AnalyserNode | null {
+    return this.chain?.analyser ?? null;
+  }
 
   /**
    * Starts push-to-talk and the microphone gate's listeners. Importing the
@@ -171,7 +175,6 @@ export class AudioProcessor {
     const previous = this.rawMicStream;
     const generation = this.captureGeneration;
     let next: MediaStream | null = null;
-    let source: MediaStreamAudioSourceNode | null = null;
     try {
       ensureCurrent();
       next = await this.captureSelectedMicrophone(deviceId, signal);
@@ -195,16 +198,9 @@ export class AudioProcessor {
         }
         this.microphonePublicationPending = false;
         this.graphReady = true;
-      } else if (this.audioContext && this.destinationNode && this.analyser && this.localStream !== previous) {
+      } else if (this.chain && this.localStream !== previous) {
         // Keep the outgoing processed track stable for both P2P and SFU calls.
-        source = this.audioContext.createMediaStreamSource(next);
-        if (this.noiseSuppressorNode) source.connect(this.noiseSuppressorNode);
-        else {
-          source.connect(this.inputGainNode ?? this.destinationNode);
-          source.connect(this.analyser);
-        }
-        this.microphoneSource?.disconnect();
-        this.microphoneSource = source;
+        this.chain.setInput(next);
       } else {
         await replaceTrack(track, signal);
         try {
@@ -227,7 +223,6 @@ export class AudioProcessor {
       next = null;
     } finally {
       if (next) {
-        source?.disconnect();
         next.getTracks().forEach((track) => track.stop());
         if (!previous && generation === this.captureGeneration) this.releaseMicrophoneResources();
       }
@@ -260,55 +255,34 @@ export class AudioProcessor {
         throw new DOMException('Microphone startup was cancelled', 'AbortError');
       }
     };
-    const context = new AudioContext({ sampleRate: 48000 });
-    this.audioContext = context;
-    this.analyser = context.createAnalyser();
-    this.analyser.fftSize = 256;
-    this.analyser.smoothingTimeConstant = 0.25;
-    this.destinationNode = context.createMediaStreamDestination();
-    const inputGain = context.createGain();
-    inputGain.gain.value = settingsStore.inputVolume / 100;
-    inputGain.connect(this.destinationNode);
-    this.inputGainNode = inputGain;
-    this.microphoneSource = context.createMediaStreamSource(rawStream);
-    let node: NoiseSuppressorNode | null = null;
+    this.chain?.destroy();
+    const chain: MicrophoneChain = createMicrophoneChain(rawStream, {
+      volume: settingsStore.inputVolume,
+      onFailure: () => this.handleProcessingFailure(chain),
+    });
+    this.chain = chain;
+    const mode = settingsStore.noiseSuppressionMode;
     try {
-      await context.resume();
-      ensureCurrent();
-      node = await createNoiseSuppressor(context, settingsStore.noiseSuppressionMode);
-      ensureCurrent();
+      await chain.start(mode);
     } catch (error) {
-      destroyNoiseSuppressor(node);
       ensureCurrent();
       throw error;
     }
-    this.noiseSuppressorNode = node;
+    ensureCurrent();
     this.noiseProcessorFailed = false;
-    this.bindNoiseSuppressorError(node);
-    if (node) {
-      this.microphoneSource.connect(node);
-      node.connect(inputGain);
-      node.connect(this.analyser);
-    } else {
-      this.microphoneSource.connect(inputGain);
-      this.microphoneSource.connect(this.analyser);
-    }
-    this.localStream = this.destinationNode.stream;
+    this.localStream = chain.output;
     this.applyTrackEnabled();
     this.startVadLoop();
-    clientLog.info('AUDIO', 'Microphone processing initialized', { mode: settingsStore.noiseSuppressionMode });
+    clientLog.info('AUDIO', 'Microphone processing initialized', { mode, pipeline: chain.pipeline });
   }
 
-  private bindNoiseSuppressorError(node: NoiseSuppressorNode | null): void {
-    if (!node) return;
-    node.onprocessorerror = () => {
-      if (this.noiseSuppressorNode !== node) return;
-      this.noiseProcessorFailed = true;
-      this.graphReady = false;
-      this.applyTrackEnabled();
-      clientLog.error('AUDIO', 'Noise suppression processor failed; microphone transmission stopped');
-      appEvents.emit('audio.processing_error');
-    };
+  private handleProcessingFailure(chain: MicrophoneChain): void {
+    if (this.chain !== chain) return;
+    this.noiseProcessorFailed = true;
+    this.graphReady = false;
+    this.applyTrackEnabled();
+    clientLog.error('AUDIO', 'Noise suppression processor failed; microphone transmission stopped');
+    appEvents.emit('audio.processing_error');
   }
 
   private initPtt(): void {
@@ -325,7 +299,7 @@ export class AudioProcessor {
     });
     this.unbindPttEvents.push(unbindSettings);
     this.unbindPttEvents.push(appEvents.on('master_volume.changed', ({ direction, volume }) => {
-      if (direction === 'input' && this.inputGainNode) this.inputGainNode.gain.value = volume / 100;
+      if (direction === 'input') this.chain?.setVolume(volume);
     }));
 
     let channelId = voiceStore.currentVoiceChannelId;
@@ -514,10 +488,7 @@ export class AudioProcessor {
     if (signal?.aborted) throw new DOMException('Noise suppression selection was cancelled', 'AbortError');
     if (this.noiseSuppressionChanging) throw new Error('Noise suppression is already being changed');
     const generation = ++this.noiseSuppressionGeneration;
-    const context = this.audioContext;
-    const source = this.microphoneSource;
-    const destination = this.inputGainNode;
-    const analyser = this.analyser;
+    const chain = this.chain;
     const raw = this.rawMicStream;
     if (!raw) {
       const probe = new AudioContext({ sampleRate: 48000 });
@@ -533,57 +504,38 @@ export class AudioProcessor {
       }
       return;
     }
-    if ((!this.graphReady && !this.noiseProcessorFailed) || !context || !source || !destination || !analyser || this.pendingDeviceSwitch) {
+    if ((!this.graphReady && !this.noiseProcessorFailed) || !chain || this.pendingDeviceSwitch) {
       throw new Error('Microphone capture is changing; try again when it is ready');
     }
     const ensureCurrent = () => {
       if (signal?.aborted || generation !== this.noiseSuppressionGeneration ||
-          this.audioContext !== context || this.microphoneSource !== source || this.rawMicStream !== raw) {
+          this.chain !== chain || this.rawMicStream !== raw) {
         throw new DOMException('Noise suppression selection was cancelled', 'AbortError');
       }
     };
-    const previous = this.noiseSuppressorNode;
     const previousBrowserSuppression = settingsStore.noiseSuppressionMode === 'browser';
     this.noiseSuppressionChanging = true;
-    let next: NoiseSuppressorNode | null = null;
+    let next: PreparedSuppression | null = null;
     let constraintsChanged = false;
     try {
-      next = await createNoiseSuppressor(context, mode);
+      next = await chain.prepareSuppression(mode);
       ensureCurrent();
       const track = raw.getAudioTracks()[0];
       if (!track || track.readyState !== 'live') throw new Error('Microphone is no longer available');
       await track.applyConstraints({ ...track.getConstraints(), noiseSuppression: mode === 'browser' });
       constraintsChanged = true;
       ensureCurrent();
-      if (next) {
-        next.connect(destination);
-        next.connect(analyser);
-      }
-      source.disconnect();
-      if (next) source.connect(next);
-      else {
-        source.connect(destination);
-        source.connect(analyser);
-      }
-      this.noiseSuppressorNode = next;
+      next.commit();
       this.noiseProcessorFailed = false;
       this.graphReady = true;
-      this.bindNoiseSuppressorError(next);
-      destroyNoiseSuppressor(previous);
       this.applyTrackEnabled();
       clientLog.info('AUDIO', 'Noise suppression changed', { mode });
     } catch (error) {
-      destroyNoiseSuppressor(next);
-      if (this.rawMicStream === raw && this.microphoneSource === source && constraintsChanged) {
+      next?.cancel();
+      if (this.rawMicStream === raw && this.chain === chain && constraintsChanged) {
         const track = raw.getAudioTracks()[0];
         if (track?.readyState === 'live') {
           await track.applyConstraints({ ...track.getConstraints(), noiseSuppression: previousBrowserSuppression });
-        }
-        source.disconnect();
-        if (previous) source.connect(previous);
-        else {
-          source.connect(destination);
-          source.connect(analyser);
         }
       }
       ensureCurrent();
@@ -729,37 +681,8 @@ export class AudioProcessor {
       clearInterval(this.vadInterval);
       this.vadInterval = null;
     }
-    destroyNoiseSuppressor(this.noiseSuppressorNode);
-    this.noiseSuppressorNode = null;
-    if (this.microphoneSource) {
-      try {
-        this.microphoneSource.disconnect();
-      } catch {}
-      this.microphoneSource = null;
-    }
-    if (this.analyser) {
-      try {
-        this.analyser.disconnect();
-      } catch {}
-      this.analyser = null;
-    }
-    if (this.inputGainNode) {
-      try {
-        this.inputGainNode.disconnect();
-      } catch {}
-      this.inputGainNode = null;
-    }
-    if (this.destinationNode) {
-      this.destinationNode.stream.getTracks().forEach((track) => track.stop());
-      try {
-        this.destinationNode.disconnect();
-      } catch {}
-      this.destinationNode = null;
-    }
-    if (this.audioContext) {
-      if (this.audioContext.state !== 'closed') this.audioContext.close().catch(() => {});
-      this.audioContext = null;
-    }
+    this.chain?.destroy();
+    this.chain = null;
   }
 
   public destroy(): void {

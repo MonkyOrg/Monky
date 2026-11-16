@@ -276,7 +276,7 @@ async function runLiveAudioDeviceSmoke() {
     const recoveredOutput = audio.getLocalAudioStream().getAudioTracks()[0];
     check(recoverySender.track === recoveredOutput && rtc.localAudioTrack === recoveredOutput,
       'Recovery publishes to the real existing sendrecv transceiver');
-    check(audio.noiseSuppressorNode && audio.analyser && audio.vadInterval && recoveredOutput !== audio.getRawMicrophoneStream().getAudioTracks()[0],
+    check(audio.chain?.suppression && audio.analyser && audio.vadInterval && recoveredOutput !== audio.getRawMicrophoneStream().getAudioTracks()[0],
       'Recovery builds the real RNNoise/VAD processed graph, not a permanent raw bypass');
     check(!recoveredOutput.enabled && !voice.microphoneOpen && settings.selectedMicrophoneId === 'recovered-p2p',
       'PTT stays closed and preference commits only after initial publication');
@@ -345,40 +345,39 @@ async function runLiveAudioDeviceSmoke() {
     rtc.replaceMicrophoneTrack = publishMicrophone;
 
     // The older asynchronous graph must never wire into a newer selection.
-    const loadWorklet = AudioWorklet.prototype.addModule;
-    const pendingModules = [];
+    const postToWorker = Worker.prototype.postMessage;
+    const pendingEngines = [];
     settings.noiseSuppressionEnabled = true;
-    AudioWorklet.prototype.addModule = function(url, options) {
-      return new Promise((resolve, reject) => {
-        pendingModules.push(() => loadWorklet.call(this, url, options).then(resolve, reject));
-      });
+    Worker.prototype.postMessage = function(message, transfer) {
+      if (message?.type !== 'prepare') return postToWorker.call(this, message, transfer);
+      pendingEngines.push(() => postToWorker.call(this, message, transfer));
     };
-    const nextPendingModule = async () => {
-      for (let attempt = 0; attempt < 100 && pendingModules.length === 0; attempt++) await tick();
-      const finish = pendingModules.shift();
-      if (!finish) throw new Error('Expected an asynchronous worklet load');
+    const nextPendingEngine = async () => {
+      for (let attempt = 0; attempt < 200 && pendingEngines.length === 0; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+      const finish = pendingEngines.shift();
+      if (!finish) throw new Error('Expected an asynchronous noise suppression engine load');
       return finish;
     };
     const graphAbort = new AbortController();
     const graphPending = devices.selectAudioDevice('input', 'cancel-graph', graphAbort.signal);
-    const resolveWorklet = await nextPendingModule();
+    const resolveEngine = await nextPendingEngine();
     const abandonedContext = audio.audioContext;
-    const abandonedDestination = audio.destinationNode.stream;
+    const abandonedOutput = audio.chain.output;
     graphAbort.abort();
-    resolveWorklet();
+    resolveEngine();
     await reject(graphPending, 'AbortError', 'Picker cancellation interrupts asynchronous graph construction');
-    check(allStopped(captures.at(-1)) && allStopped(abandonedDestination) && abandonedContext.state === 'closed'
-      && !audio.audioContext && !recoverySender.track, 'Cancelled graph releases its raw and destination tracks and context');
+    check(allStopped(captures.at(-1)) && allStopped(abandonedOutput) && abandonedContext.state === 'closed'
+      && !audio.audioContext && !recoverySender.track, 'Cancelled graph releases its raw and output tracks and context');
 
     const initialGraph = audio.startMicrophone('superseded-start');
     const initialGraphCheck = reject(initialGraph, 'AbortError', 'Selection supersedes an unfinished startup graph');
-    const resolveInitialWorklet = await nextPendingModule();
+    const resolveInitialEngine = await nextPendingEngine();
     const initialRaw = audio.getRawMicrophoneStream();
-    AudioWorklet.prototype.addModule = loadWorklet;
+    Worker.prototype.postMessage = postToWorker;
     await devices.selectAudioDevice('input', 'after-initial-graph');
-    resolveInitialWorklet();
+    resolveInitialEngine();
     await initialGraphCheck;
-    check(allStopped(initialRaw) && audio.noiseSuppressorNode && recoverySender.track === audio.getLocalAudioStream().getAudioTracks()[0],
+    check(allStopped(initialRaw) && audio.chain?.suppression && recoverySender.track === audio.getLocalAudioStream().getAudioTracks()[0],
       'Initial graph completion cannot damage the selected recovery graph');
     audio.stopMicrophone();
     await recoverySender.replaceTrack(null);
@@ -512,7 +511,7 @@ async function runLiveAudioDeviceSmoke() {
       check(audio.getRawMicrophoneStream() === noiseInput
         && audio.getLocalAudioStream().getAudioTracks()[0] === noiseOutput,
         `${mode}: input capture and outgoing RTC track remain stable`);
-      check(!!audio.noiseSuppressorNode === !['browser', 'off'].includes(mode),
+      check((audio.chain.suppression ?? null) === (['browser', 'off'].includes(mode) ? null : mode),
         `${mode}: actual worklet or browser/direct graph is selected`);
       check(noiseConstraints.at(-1).noiseSuppression === (mode === 'browser'),
         `${mode}: browser suppression is not stacked with a worklet`);
@@ -521,22 +520,25 @@ async function runLiveAudioDeviceSmoke() {
     }
     audio.stopMicrophone();
     await audio.startMicrophone();
-    const failureContext = audio.audioContext;
-    const actualAddModule = failureContext.audioWorklet.addModule.bind(failureContext.audioWorklet);
-    failureContext.audioWorklet.addModule = async () => { throw new Error('Missing worklet asset'); };
+    const postToChain = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function(message, transfer) {
+      const missing = message?.type === 'prepare' && message.assets
+        ? { ...message, assets: { ...message.assets, scriptUrl: new URL('/missing-noise-engine.js', location.href).href } }
+        : message;
+      return postToChain.call(this, missing, transfer);
+    };
     await reject(devices.selectNoiseSuppression('speex'), undefined, 'A missing engine asset rejects selection');
-    check(settings.noiseSuppressionMode === 'browser' && audio.graphReady && !audio.noiseSuppressorNode,
+    check(settings.noiseSuppressionMode === 'browser' && audio.graphReady && !audio.chain.suppression,
       'Failed noise selection preserves the previous working graph and preference');
-    failureContext.audioWorklet.addModule = actualAddModule;
+    Worker.prototype.postMessage = postToChain;
     await devices.selectNoiseSuppression('speex');
-    check(settings.noiseSuppressionMode === 'speex' && audio.noiseSuppressorNode,
-      'A failed worklet load can be retried successfully');
-    const failedProcessor = audio.noiseSuppressorNode;
-    failedProcessor.onprocessorerror();
+    check(settings.noiseSuppressionMode === 'speex' && audio.chain.suppression === 'speex',
+      'A failed engine load can be retried successfully');
+    audio.chain.worker.dispatchEvent(new MessageEvent('message', { data: { type: 'failed', message: 'Engine crashed' } }));
     check(!voice.microphoneOpen && !audio.getLocalAudioStream().getAudioTracks()[0].enabled,
       'Processor errors stop microphone transmission rather than sending raw audio');
     await devices.selectNoiseSuppression('off');
-    check(audio.graphReady && !audio.noiseSuppressorNode, 'Explicitly disabling suppression recovers from a processor error');
+    check(audio.graphReady && !audio.chain.suppression, 'Explicitly disabling suppression recovers from a processor error');
     check(settings.lastNoiseSuppressionMode === 'speex', 'Disabling retains the last selected engine for the quick toggle');
     audio.stopMicrophone();
     voice.currentVoiceChannelId = null;

@@ -9,6 +9,7 @@ import speexWasmUrl from '@sapphi-red/web-noise-suppressor/speex.wasm?url';
 import gtcrnWorkletUrl from '@sapphi-red/web-noise-suppressor/gtcrnWorklet.js?url';
 import gtcrnWasmUrl from '@sapphi-red/web-noise-suppressor/gtcrn.wasm?url';
 import type { NoiseSuppressionMode, WorkletNoiseSuppressionMode } from '../utils/audioPreferences';
+import type { SuppressionAssets } from './voiceCapture/voiceCaptureProtocol';
 
 export type NoiseSuppressorNode = RnnoiseWorkletNode | SpeexWorkletNode | GtcrnWorkletNode;
 
@@ -31,9 +32,7 @@ async function loadBinary(mode: WorkletNoiseSuppressionMode): Promise<ArrayBuffe
   return binary;
 }
 
-export async function createNoiseSuppressor(context: AudioContext, mode: NoiseSuppressionMode): Promise<NoiseSuppressorNode | null> {
-  if (mode === 'browser' || mode === 'off') return null;
-  if (!context.audioWorklet) throw new Error('AudioWorklet is required for noise suppression');
+function binaryFor(mode: WorkletNoiseSuppressionMode): Promise<ArrayBuffer> {
   let binary = binaries.get(mode);
   if (!binary) {
     binary = loadBinary(mode).catch((error: unknown) => {
@@ -42,6 +41,20 @@ export async function createNoiseSuppressor(context: AudioContext, mode: NoiseSu
     });
     binaries.set(mode, binary);
   }
+  return binary;
+}
+
+/** Loads an engine for the voice capture worker; null for browser suppression or none. */
+export async function loadNoiseSuppressorAssets(mode: NoiseSuppressionMode): Promise<SuppressionAssets | null> {
+  if (mode === 'browser' || mode === 'off') return null;
+  const wasmBinary = await binaryFor(mode);
+  return { mode, wasmBinary, scriptUrl: new URL(workletUrls[mode], location.href).href };
+}
+
+export async function createNoiseSuppressor(context: AudioContext, mode: NoiseSuppressionMode): Promise<NoiseSuppressorNode | null> {
+  if (mode === 'browser' || mode === 'off') return null;
+  if (!context.audioWorklet) throw new Error('AudioWorklet is required for noise suppression');
+  const binary = binaryFor(mode);
   let contextModules = modules.get(context);
   if (!contextModules) {
     contextModules = new Map();
