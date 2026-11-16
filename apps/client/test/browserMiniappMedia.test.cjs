@@ -129,7 +129,7 @@ function fixture(t, { sessionId = 'host', current = true, ice = [] } = {}) {
   const { BrowserMiniappMedia } = compile(path.join('core', 'webrtc', 'BrowserMiniappMedia.ts'), request => {
     if (request === './BrowserScreenSubscription') return { BrowserScreenSubscription: Receiver };
     if (request === './nativeScreen/NativeScreenCall') return config;
-    if (request.endsWith('browserScreenProfile')) return { browserScreenProfile: value => value };
+    if (request.endsWith('browserScreenProfile')) return { browserSourceProfile: value => value };
     if (request.endsWith('webScreenPublisher')) return { WebScreenPublisher: Publisher };
     if (request === '../ClientLogService') return { clientLog: { logError: (...args) => logs.push(args) } };
     throw new Error(`Unexpected import: ${request}`);

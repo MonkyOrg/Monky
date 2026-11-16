@@ -1069,6 +1069,7 @@
 .server-rail-folder-header[data-rail-draggable='true'] {
   cursor: grab;
   -webkit-touch-callout: none;
+  -webkit-user-select: none;
   user-select: none;
 }
 
@@ -1076,6 +1077,7 @@
 .server-rail--dragging * {
   cursor: grabbing !important;
   user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Rail icons are pointer-dragged; a native image drag would carry the picture. */
@@ -2369,6 +2371,7 @@
   cursor: grab;
   touch-action: pan-y pinch-zoom;
   -webkit-touch-callout: none;
+  -webkit-user-select: none;
   user-select: none;
 }
 
@@ -8682,6 +8685,7 @@
   box-shadow: 0 24px 56px rgba(0, 0, 0, 0.42);
   object-fit: contain;
   user-select: none;
+  -webkit-user-select: none;
   -webkit-user-drag: none;
   transform-origin: center center;
   transition: transform 0.12s ease;
@@ -8914,6 +8918,7 @@
   overflow: hidden;
   cursor: pointer;
   user-select: none;
+  -webkit-user-select: none;
   transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
@@ -9944,11 +9949,15 @@
   width: 100vw;
   height: 100vh;
   margin: 0;
-  border: 0;
+  /* The overlays are positioned inside the border, so a transparent one sized
+     by the safe area keeps them clear of a phone's notch and status bar. */
+  border-style: solid;
+  border-width: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   border-radius: 0;
   background: #000;
   transform: none;
   /* Fullscreen shows only the media: no hover frame or speaking glow (cards force that glow). */
+  border-color: transparent !important;
   box-shadow: none !important;
 }
 
@@ -11525,6 +11534,7 @@ button.member-live-badge:focus-visible {
   padding: 16px 10px;
   gap: 4px;
   user-select: none;
+  -webkit-user-select: none;
   min-height: 0;
   overflow-y: auto;
 }
@@ -11919,6 +11929,7 @@ button.member-live-badge:focus-visible {
   font-size: 13px;
   color: var(--text-secondary);
   user-select: none;
+  -webkit-user-select: none;
 }
 
 /* The switch inside brings its own sizing; the old checkbox rules would
@@ -11962,6 +11973,7 @@ button.member-live-badge:focus-visible {
   transform-origin: top left;
   max-width: none;
   user-select: none;
+  -webkit-user-select: none;
   -webkit-user-drag: none;
 }
 
@@ -12573,6 +12585,7 @@ button.member-live-badge:focus-visible {
   gap: 10px;
   animation: ctxMenuFadeIn 0.12s cubic-bezier(0.16, 1, 0.3, 1);
   user-select: none;
+  -webkit-user-select: none;
   backdrop-filter: blur(12px);
 }
 
@@ -13271,7 +13284,7 @@ button:hover .role-option-check:not(.checked) {
 .sb-waveform-playhead { position: absolute; top: 55px; height: 95px; width: 2px; background: var(--text-primary); pointer-events: none; }
 .sb-waveform-handle {
   position: absolute; transform: translateX(-50%); width: 36px; height: 28px; padding: 0;
-  touch-action: none; user-select: none; cursor: ew-resize; color: var(--text-primary);
+  touch-action: none; user-select: none; -webkit-user-select: none; cursor: ew-resize; color: var(--text-primary);
   background: var(--bg-tertiary); border: 1px solid var(--text-muted); border-radius: 5px;
 }
 .sb-waveform-handle[data-handle="start"],
@@ -13473,6 +13486,7 @@ button:hover .role-option-check:not(.checked) {
   position: relative;
   overflow: hidden;
   user-select: none;
+  -webkit-user-select: none;
 }
 
 .sb-sound-btn:hover {
@@ -13537,6 +13551,7 @@ button:hover .role-option-check:not(.checked) {
 /* Soundboard Cards and Shortcut Badges */
 .sb-sound-card {
   user-select: none;
+  -webkit-user-select: none;
 }
 
 .sb-sound-card:hover {
@@ -13569,6 +13584,7 @@ button:hover .role-option-check:not(.checked) {
 /* Soundboard List View (#326) */
 .sb-sound-row {
   user-select: none;
+  -webkit-user-select: none;
   transition: all 0.15s ease;
 }
 
@@ -13838,6 +13854,7 @@ button:hover .role-option-check:not(.checked) {
   max-width: 100%;
   height: auto;
   user-select: none;
+  -webkit-user-select: none;
 }
 .tutorial-shot {
   margin-bottom: 14px;
@@ -14242,6 +14259,7 @@ button:hover .role-option-check:not(.checked) {
   font-weight: 700;
   flex-shrink: 0;
   user-select: none;
+  -webkit-user-select: none;
 }
 .tutorial-cmd-copy {
   position: absolute;

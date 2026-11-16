@@ -8,6 +8,8 @@ import { COMPACT_VIEWPORT_QUERY } from '../../utils/viewport';
 
 type Panel = 'content' | 'navigation' | 'members';
 
+let nextReasonId = 0;
+
 /** Compact navigation is transient: it never changes the saved desktop sidebar preferences. */
 export class ResponsiveShell {
   private panel: Panel = 'navigation';
@@ -181,12 +183,19 @@ export class ResponsiveShell {
             <button type="button" class="btn btn-icon" data-modal-close aria-label="${t('common.close')}">
               <span class="material-symbols-outlined" aria-hidden="true">close</span>
             </button></div>
-          <div class="compact-call-action-list">${actions.map((button, index) => html`
+          <div class="compact-call-action-list">${actions.map((button, index) => {
+            // Touch never shows a tooltip, so a locked action explains itself on its own line.
+            const reason = button.dataset.desktopOnly ? button.dataset.tooltip : undefined;
+            const reasonId = `compact-call-reason-${++nextReasonId}`;
+            return html`
             <button type="button" class="compact-call-action" data-call-action="${index}" ${button.disabled ? html`disabled` : null}
-              ${button.dataset.desktopOnly ? html`aria-disabled="true" data-desktop-only="${button.dataset.desktopOnly}" data-tooltip="${button.dataset.tooltip}"` : null}>
+              ${button.dataset.desktopOnly ? html`aria-disabled="true" data-desktop-only="${button.dataset.desktopOnly}"` : null}
+              ${reason ? html`aria-describedby="${reasonId}"` : null}>
               <span class="material-symbols-outlined" aria-hidden="true">${button.querySelector('.material-symbols-outlined')?.textContent ?? 'settings'}</span>
-              <span>${button.title || button.getAttribute('aria-label')}</span>
-            </button>`)}</div></div>`,
+              <span class="compact-call-action__text"><span>${button.title || button.getAttribute('aria-label')}</span>
+                ${reason ? html`<span class="compact-call-action__reason" id="${reasonId}">${reason}</span>` : null}</span>
+            </button>`;
+          })}</div></div>`,
       });
       callOptions = sheet;
       sheet.card.addEventListener('click', event => {

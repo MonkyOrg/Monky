@@ -5,7 +5,8 @@ import { screenShareIdSchema,
   type NativeScreenP2pControl,
 } from '@monky/shared';
 import {
-  browserScreenFormats, browserScreenProfile, isScreenCodec, screenSenderCodecs,
+  browserScreenFormats, browserScreenProfile, browserSourceProfile, encoderScaleDown, h264Level31Profile, isScreenCodec,
+  screenSenderCodecs,
 } from '../src/renderer/platform/web/webScreen/browserScreenProfile';
 import { sameMediaBinding, sentMediaBinding, withScreenStreamId } from '../src/renderer/platform/web/webScreen/screenSdp';
 import {
@@ -17,7 +18,10 @@ import { planBrowserAudio, type LiveScreens } from '../src/renderer/views/screen
 import { createScreenShareStream } from '../src/renderer/core/screenShareStream';
 import { webScreenCapabilities } from '../src/renderer/platform/web/webScreen/webScreenRuntime';
 import { webCapabilities } from '../src/renderer/platform/web/webPlatform';
-import { browserReceivesH264Main, browserReceivesScreenCodec, browserScreenRefusal } from '../src/renderer/core/webrtc/browserScreenCodecs';
+import {
+  aliasH264MainOffer, browserAliasesH264Main, browserReceivesH264Main, browserReceivesScreenCodec, browserScreenRefusal,
+  restoreH264MainAnswer,
+} from '../src/renderer/core/webrtc/browserScreenCodecs';
 
 const INSTANCE = '3dfbff6f-6556-49cb-be32-1a6699d242a1';
 const CONNECTION = '74439c45-0865-42d3-9577-d4e451504e8c';
@@ -205,6 +209,49 @@ test('a browser capture announces the chosen quality fitted to what it captured 
   assert.deepEqual({ ...browserScreenProfile(requested, {}) }, requested);
 });
 
+const macroblocks = (width: number, height: number): number => Math.ceil(width / 16) * Math.ceil(height / 16);
+
+test('a screen fitted to H.264 Level 3.1 keeps its shape inside 3600 macroblocks and 30 FPS at that size', () => {
+  const fitted = h264Level31Profile({ width: 1920, height: 1080, fps: 60, maxBitrateKbps: 8000 });
+  assert.deepEqual({ ...fitted }, { width: 1272, height: 716, fps: 30, maxBitrateKbps: 8000 });
+  assert.ok(macroblocks(fitted.width, fitted.height) <= 3600);
+  // An iPhone held upright fills the level as 720p does; a smaller screen keeps its frame rate.
+  assert.deepEqual({ ...h264Level31Profile({ width: 720, height: 1280, fps: 30, maxBitrateKbps: 2500 }) },
+    { width: 720, height: 1280, fps: 30, maxBitrateKbps: 2500 });
+  assert.deepEqual({ ...h264Level31Profile({ width: 328, height: 720, fps: 60, maxBitrateKbps: 20000 }) },
+    { width: 328, height: 720, fps: 60, maxBitrateKbps: 14000 });
+});
+
+test('Safari, and every browser on the iPhone, publishes screens its level 3.1 encoder emits; Chromium keeps the size', (t: TestContext) => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  const as = (userAgent: string): void => { Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent } }); };
+  const requested = { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 8000 };
+  const display = { width: 2560, height: 1440, frameRate: 60 };
+  as('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Safari/605.1.15');
+  assert.deepEqual({ ...browserSourceProfile(requested, display, 'compatible') }, { width: 1272, height: 716, fps: 30, maxBitrateKbps: 8000 });
+  as('Mozilla/5.0 (iPhone; CPU iPhone OS 26_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/146.0.0.0 Mobile/15E148 Safari/604.1');
+  assert.deepEqual({ ...browserSourceProfile(requested, display, 'compatible') }, { width: 1272, height: 716, fps: 30, maxBitrateKbps: 8000 });
+  as('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36');
+  assert.deepEqual({ ...browserSourceProfile(requested, display, 'compatible') }, requested);
+  assert.deepEqual({ ...browserSourceProfile(requested, display, 'main') }, requested);
+});
+
+test('the encoder shrinks a copy the browser did not resize to its rendition, never enlarging it', () => {
+  const rendition = { width: 328, height: 720, fps: 30, maxBitrateKbps: 2500 };
+  const scale = encoderScaleDown({ width: 1206, height: 2622 }, rendition);
+  assert.equal(scale, 1206 / 328);
+  assert.ok(1206 / scale <= rendition.width && 2622 / scale <= rendition.height);
+  // Turned sideways, the same scale keeps the frame inside the level.
+  assert.ok(macroblocks(Math.round(2622 / scale), Math.round(1206 / scale)) <= 3600);
+  assert.equal(encoderScaleDown({ width: 328, height: 720 }, rendition), 1);
+  assert.equal(encoderScaleDown({ width: 200, height: 400 }, rendition), 1);
+  assert.equal(encoderScaleDown({}, rendition), 1);
+});
+
 test('a browser screen sender offers only the H.264 profile of its format and its retransmission (#858)', () => {
   const codecs = [
     { mimeType: 'video/VP8' },
@@ -314,6 +361,49 @@ test('a browser that cannot decode a screen is told which format and where to wa
   inBrowser(t, NO_H264_VIDEO_CODECS, () => {
     assert.equal(browserScreenRefusal('h264'), 'unwatchable');
   });
+});
+
+/** What Safari lists, on the iPhone and iPad too: H.264 as Constrained High and Constrained Baseline, never Main. */
+const SAFARI_VIDEO_CODECS = [
+  { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f' },
+  { mimeType: 'video/rtx', sdpFmtpLine: 'apt=96' },
+  { mimeType: 'video/H264', sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
+  { mimeType: 'video/H265' },
+  { mimeType: 'video/VP8' },
+  { mimeType: 'video/VP9', sdpFmtpLine: 'profile-id=0' },
+];
+
+test('Safari watches H.264 Main screens through its Constrained High receiver, never told to watch elsewhere', (t: TestContext) => {
+  inBrowser(t, SAFARI_VIDEO_CODECS, () => {
+    assert.equal(browserAliasesH264Main(), true);
+    assert.equal(browserReceivesH264Main(), true);
+    assert.equal(browserScreenRefusal('h264'), null);
+    // AV1, which it does not receive, can still become the H.264 it plays.
+    assert.equal(browserScreenRefusal('av1'), 'switch');
+  });
+  for (const codecs of [CHROMIUM_VIDEO_CODECS, FIREFOX_VIDEO_CODECS, NO_H264_VIDEO_CODECS])
+    inBrowser(t, codecs, () => assert.equal(browserAliasesH264Main(), false));
+});
+
+test('an aliased H.264 Main offer is answered back under the profile each payload had', () => {
+  const offer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99', 'a=rtpmap:96 H264/90000',
+    'a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d0033', 'a=rtpmap:97 rtx/90000', 'a=fmtp:97 apt=96',
+    'a=rtpmap:98 H264/90000', 'a=fmtp:98 profile-level-id=4D401F;packetization-mode=1',
+    'a=rtpmap:99 H264/90000', 'a=fmtp:99 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f',
+    'm=audio 9 UDP/TLS/RTP/SAVPF 96', 'a=rtpmap:96 opus/48000/2', 'a=fmtp:96 profile-level-id=4d0033', ''].join('\r\n');
+  const aliased = aliasH264MainOffer(offer);
+  assert.deepEqual([...aliased.aliases], [[96, '4d00'], [98, '4D40']]);
+  assert.match(aliased.sdp, /a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c33\r\n/);
+  assert.match(aliased.sdp, /a=fmtp:98 profile-level-id=640c1F;packetization-mode=1\r\n/);
+  assert.match(aliased.sdp, /a=fmtp:99 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f\r\n/);
+  // Only H.264 in video carries a profile to alias.
+  assert.match(aliased.sdp, /a=fmtp:96 profile-level-id=4d0033\r\n$/);
+  const answer = aliased.sdp.replace('profile-level-id=640c33', 'profile-level-id=640c1f');
+  const restored = restoreH264MainAnswer(answer, aliased.aliases);
+  assert.match(restored, /a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f\r\n/, 'the level the receiver chose stays');
+  assert.match(restored, /a=fmtp:98 profile-level-id=4D401F;packetization-mode=1\r\n/);
+  assert.match(restored, /a=fmtp:99 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f\r\n/, 'a real Constrained High stays');
+  assert.equal(restoreH264MainAnswer(answer, new Map()), answer);
 });
 
 test('the sent screen stream is renamed after its instance and read back as its binding (#858)', () => {

@@ -1,11 +1,11 @@
 import {
   MessageType, botScreenSchema, botScreenRemovedSchema, nativeScreenProducerSchema, nativeScreenSignalAckSchema,
-  nativeScreenSourceSchema, nativeScreenSignalSchema, nativeScreenRpcMethodSchema, compatibleScreenProfile,
+  nativeScreenSourceSchema, nativeScreenSignalSchema, nativeScreenRpcMethodSchema,
   type BotScreen, type NativeScreenCall, type NativeScreenSignalPayload, type NativeScreenSource, type NativeScreenRpcMethod,
 } from '@monky/shared';
 import { BrowserScreenSubscription } from './BrowserScreenSubscription';
 import { createNativeScreenCallConfig, type NativeScreenCallContext } from './nativeScreen/NativeScreenCall';
-import { browserScreenProfile } from '../../platform/web/webScreen/browserScreenProfile';
+import { browserSourceProfile } from '../../platform/web/webScreen/browserScreenProfile';
 import { WebScreenPublisher } from '../../platform/web/webScreen/webScreenPublisher';
 import { clientLog } from '../ClientLogService';
 
@@ -146,9 +146,9 @@ export class BrowserMiniappMedia {
       this.current(entry);
       const source = nativeScreenSourceSchema.parse({
         shareId: `browser-${screen.instanceId}`, instanceId: screen.instanceId, audio: false, codec: 'h264',
-        video: compatibleScreenProfile(browserScreenProfile({
+        video: browserSourceProfile({
           width: 1920, height: 1080, fps: 30, maxBitrateKbps: 6000,
-        }, video.getSettings())),
+        }, video.getSettings(), 'compatible'),
       });
       entry.source = source;
       entry.publisher = new WebScreenPublisher({

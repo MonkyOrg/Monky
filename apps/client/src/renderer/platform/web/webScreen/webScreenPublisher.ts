@@ -4,6 +4,7 @@ import {
   type NativeScreenVideoProfile, type ScreenShareQuality, type ScreenFormat,
 } from '@monky/shared';
 import { BrowserScreenPeer } from './browserScreenPeer';
+import { encoderScaleDown } from './browserScreenProfile';
 import type { DisplayCapture } from './displayCaptures';
 import { ScreenP2pPublisherPeer } from './screenP2pPublisherPeer';
 import { WebScreenSfuRendition, type WebScreenRpc } from './webScreenSfuRendition';
@@ -21,6 +22,8 @@ interface Pipeline {
   readonly viewers: Map<string, Viewer>;
   readonly video: MediaStreamTrack;
   readonly audio: MediaStreamTrack | null;
+  /** How much the encoder shrinks `video` to the profile, known once `ready` settles. */
+  scaleResolutionDownBy: number;
   ready: Promise<void>;
   sfu: WebScreenSfuRendition | null;
   closing: Promise<void> | null;
@@ -164,7 +167,7 @@ export class WebScreenPublisher {
     const port = new BrowserScreenPeer({
       iceServers: call.iceServers, format: this.options.format, streamId: source.instanceId, video: pipeline.video, audio: pipeline.audio,
       maxBitrateBps: pipeline.profile.maxBitrateKbps * 1000, maxFramerate: pipeline.profile.fps,
-      audioBitrateBps: audioBitrateKbps * 1000,
+      scaleResolutionDownBy: pipeline.scaleResolutionDownBy, audioBitrateBps: audioBitrateKbps * 1000,
       onCandidate: candidate => peer?.localCandidate(candidate),
       onState: state => peer?.connectionState(state),
     });
@@ -201,14 +204,19 @@ export class WebScreenPublisher {
     viewer.pipeline = pipeline;
     pipeline.viewers.set(viewer.sessionId, viewer);
     if (!existing && call.mode === 'sfu') {
-      const sfu = new WebScreenSfuRendition({
-        channelId: call.channelId, shareId: source.shareId, format: this.options.format,
-        rendition: { sourceInstanceId: source.instanceId, pipelineId: pipeline.id, video: profile },
-        video: pipeline.video, audio: pipeline.audio, audioBitrateBps: this.options.audioBitrateKbps * 1000,
-        rpc: this.options.rpc, onError: error => { void this.track(this.failPipeline(pipeline, error)); },
+      // The producer's encoding needs the copy's final size, so the rendition opens once it is known.
+      pipeline.ready = pipeline.ready.then(() => {
+        if (this.closed || pipeline.closing) throw cancelled();
+        const sfu = new WebScreenSfuRendition({
+          channelId: call.channelId, shareId: source.shareId, format: this.options.format,
+          rendition: { sourceInstanceId: source.instanceId, pipelineId: pipeline.id, video: profile },
+          video: pipeline.video, audio: pipeline.audio, scaleResolutionDownBy: pipeline.scaleResolutionDownBy,
+          audioBitrateBps: this.options.audioBitrateKbps * 1000, rpc: this.options.rpc,
+          onError: error => { void this.track(this.failPipeline(pipeline, error)); },
+        });
+        pipeline.sfu = sfu;
+        return sfu.ready;
       });
-      pipeline.sfu = sfu;
-      pipeline.ready = pipeline.ready.then(() => sfu.ready);
     }
     if (capture.ended) throw new Error('The browser capture ended.');
     return pipeline;
@@ -222,12 +230,13 @@ export class WebScreenPublisher {
     const pipeline: Pipeline = {
       key, id: crypto.randomUUID(), profile, viewers: new Map(), video,
       audio: this.options.source.audio && capture.audioTrack ? capture.audioTrack.clone() : null,
-      // The browser scales the copy to the rendition; refusing only costs bandwidth, never the share.
-      ready: video.applyConstraints({
-        width: { max: profile.width }, height: { max: profile.height }, frameRate: { max: profile.fps },
-      }).catch((error: unknown) => console.warn('[WebScreen] The capture kept its own size for this rendition:', error)),
-      sfu: null, closing: null,
+      scaleResolutionDownBy: 1, ready: Promise.resolve(), sfu: null, closing: null,
     };
+    // The browser scales the copy to the rendition; where it refuses (Safari), the encoder scales it instead.
+    pipeline.ready = video.applyConstraints({
+      width: { max: profile.width }, height: { max: profile.height }, frameRate: { max: profile.fps },
+    }).catch((error: unknown) => console.warn('[WebScreen] The capture kept its own size for this rendition:', error))
+      .then(() => { pipeline.scaleResolutionDownBy = encoderScaleDown(video.getSettings(), profile); });
     this.pipelines.set(key, pipeline);
     return pipeline;
   }

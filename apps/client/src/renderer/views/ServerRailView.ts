@@ -1170,7 +1170,11 @@ export class ServerRailView {
     // Already connected in the background: switching back is just repointing
     // the views at the state that was kept alive (#400). No probe, no
     // confirmation, no reconnection.
-    if (showServerSession(targetUrl)) return;
+    if (showServerSession(targetUrl)) {
+      // Already on screen, Monky announces no navigation, so Monky takes the screen back here, as Home does.
+      discordWeb.backToMonky();
+      return;
+    }
 
     // Everything below is async and used to happen with no feedback at all: the
     // online probe alone can hang for 2.5s before the confirmation even shows up

@@ -668,9 +668,14 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     font-size: 24px;
   }
 
-  :root .stage-call-controls :is(#stage-btn-screen, #stage-btn-overlay, #stage-btn-soundboard, #stage-btn-stop-share),
+  :root .stage-call-controls :is(#stage-btn-screen, #stage-btn-overlay, #stage-btn-soundboard),
   :root .voice-stage-container :is(#stage-header-mode-badge-wrapper, #stage-ping-badge) {
     display: none;
+  }
+
+  /* The banner above the stage stops a share; the view shows this labelled button with an inline display. */
+  :root .stage-call-controls #stage-btn-stop-share {
+    display: none !important;
   }
 
   :root .voice-stage-container .content-header {
@@ -717,6 +722,29 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     color: var(--text-primary);
     text-align: left;
     cursor: pointer;
+  }
+
+  :root .compact-call-action__text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  :root .compact-call-action__reason {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  /* A locked action dims its icon and name, never the reason that explains it. */
+  :root .compact-call-sheet .compact-call-action[data-desktop-only] {
+    opacity: 1;
+    cursor: default;
+  }
+
+  :root .compact-call-action[data-desktop-only] > .material-symbols-outlined,
+  :root .compact-call-action[data-desktop-only] .compact-call-action__text > :first-child {
+    opacity: 0.55;
   }
 
   :root .modal-backdrop {
@@ -1017,6 +1045,84 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   :root .floating-context-menu .server-dropdown-item,
   :root .audio-device-popover button { min-height: 44px; }
   :root .floating-context-menu .server-dropdown-item { gap: 12px; font-size: 14px; padding: 10px 12px; }
+}
+
+/* A phone on its side has width to spare and little height. The call controls
+   become a rail on the right and the focus strip a column beside the main tile,
+   so a focused screen share keeps the stage's whole height. A nearly square
+   short screen (a keyboard open) has no width to spare and keeps the bottom dock. */
+@media (max-height: 540px) and (min-aspect-ratio: 3/2) {
+  :root .main-layout[data-compact] .voice-stage-container {
+    --stage-rail-width: 56px;
+    --stage-rail-top: 72px;
+    --stage-bottom: max(8px, env(safe-area-inset-bottom));
+    padding-right: calc(20px + var(--stage-rail-width));
+    padding-bottom: var(--stage-bottom);
+  }
+
+  :root .main-layout[data-compact] .voice-stage-container .content-header {
+    margin-right: calc(-20px - var(--stage-rail-width));
+  }
+
+  :root .main-layout[data-compact] .stage-call-controls {
+    position: absolute;
+    top: var(--stage-rail-top);
+    right: 12px;
+    bottom: var(--stage-bottom);
+    flex-direction: column;
+    justify-content: flex-start;
+    width: var(--stage-rail-width);
+    height: fit-content;
+    max-height: calc(100% - var(--stage-rail-top) - var(--stage-bottom));
+    margin: auto 0;
+    padding: 6px;
+    gap: 4px;
+    overflow: hidden auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+  }
+
+  :root .main-layout[data-compact] .stage-call-controls #stage-btn-leave {
+    width: 44px;
+    min-width: 44px;
+    height: 48px !important;
+    flex-shrink: 0;
+  }
+
+  :root .main-layout[data-compact] .stage-call-controls .btn-icon {
+    flex-shrink: 0;
+  }
+
+  :root .main-layout[data-compact] :is(.stage-focused-layout, .stage-focused-stack--split) {
+    flex-direction: row;
+    gap: 8px;
+  }
+
+  :root .main-layout[data-compact] .stage-focused-strip {
+    flex-direction: column;
+    width: 88px;
+    min-width: 88px;
+    height: auto;
+    min-height: 0;
+    padding: 2px;
+    gap: 8px;
+    overflow: hidden auto;
+    overscroll-behavior: contain;
+  }
+
+  :root .main-layout[data-compact] .stage-focused-strip > .stage-mini-card {
+    width: 100%;
+    height: auto;
+  }
+
+  :root .main-layout[data-compact] .stage-focus-hint-badge {
+    display: none;
+  }
+
+  :root .main-layout[data-compact] .stage-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
+    grid-auto-rows: minmax(96px, 1fr);
+  }
 }
 
 @media (max-width: 600px) {

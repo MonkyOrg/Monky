@@ -74,3 +74,75 @@ test('publisher teardown also retires a rendition whose asynchronous setup finis
   assert.equal(late.readyState, 'ended');
   assert.equal(f.publisher.pipelines.size, 0);
 });
+
+const compile = (file, imports) => {
+  const source = path.resolve(__dirname, '..', 'src', 'renderer', 'platform', 'web', 'webScreen', file);
+  const output = ts.transpileModule(fs.readFileSync(source, 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const module = { exports: {} };
+  vm.runInNewContext(`(function(exports,require,module){${output}\n})`, { console, DOMException, crypto })(module.exports,
+    request => request === '@monky/shared' ? shared : imports(request), module);
+  return module.exports;
+};
+
+/** A publisher whose connections are spies, sharing a capture that keeps `size` after `applyConstraints`. */
+function scaledFixture(mode, size, constraints = Promise.resolve()) {
+  const peers = [], renditions = [];
+  const profile = compile('browserScreenProfile.ts', () => ({ runsOnWebKit: () => false }));
+  const { WebScreenPublisher: Publisher } = compile('webScreenPublisher.ts', request => {
+    if (request === './browserScreenProfile') return profile;
+    if (request === './browserScreenPeer') return { BrowserScreenPeer: class { constructor(options) { peers.push(options); } } };
+    if (request === './screenP2pPublisherPeer') return { ScreenP2pPublisherPeer: class { start() {} close() { return Promise.resolve(); } } };
+    if (request === './webScreenSfuRendition') return { WebScreenSfuRendition: class {
+      constructor(options) { renditions.push(options); this.ready = Promise.resolve(); }
+      close() { return Promise.resolve(); }
+    } };
+    return {};
+  });
+  const copy = {
+    readyState: 'live', applyConstraints: () => constraints, getSettings: () => size,
+    stop() { this.readyState = 'ended'; },
+  };
+  const source = {
+    shareId: 'browser', instanceId: randomUUID(), audio: false, codec: 'h264',
+    video: { width: 328, height: 720, fps: 30, maxBitrateKbps: 2500 },
+  };
+  const publisher = new Publisher({
+    call: { sessionId: 'host', channelId: 'room', mode, iceServers: [] }, source, format: 'compatible',
+    capture: { video: { clone: () => copy }, audioTrack: null, ended: false }, audioBitrateKbps: 128,
+    signal: () => Promise.resolve(), rpc: () => Promise.resolve(), onError: error => { throw error; },
+  });
+  const watch = () => publisher.receive({
+    action: 'watch', fromSessionId: 'viewer', targetSessionId: 'host', publisherSessionId: 'host', channelId: 'room',
+    shareId: source.shareId, sourceInstanceId: source.instanceId, subscriptionId: randomUUID(), quality: 'source', backend: 'browser',
+  });
+  return { publisher, peers, renditions, watch };
+}
+
+test('an iPhone capture Safari keeps whole is scaled by the encoder to the rendition, in P2P and on the SFU', async () => {
+  // Safari ignores applyConstraints on the copy of a 1206x2622 portrait screen; at that size its encoder emitted no frame.
+  const p2p = scaledFixture('p2p', { width: 1206, height: 2622 });
+  await p2p.watch();
+  assert.equal(p2p.peers.length, 1);
+  assert.equal(p2p.peers[0].scaleResolutionDownBy, 1206 / 328);
+  await p2p.publisher.close('source-unavailable', false);
+
+  const constraints = Promise.withResolvers();
+  const sfu = scaledFixture('sfu', { width: 1206, height: 2622 }, constraints.promise);
+  const watching = sfu.watch();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sfu.renditions.length, 0, 'the producer waits for the copy to settle its size');
+  constraints.resolve();
+  await watching;
+  assert.equal(sfu.renditions.length, 1);
+  assert.equal(sfu.renditions[0].scaleResolutionDownBy, 1206 / 328);
+  await sfu.publisher.close('source-unavailable', false);
+});
+
+test('a copy the browser already resized to its rendition is sent as it is', async () => {
+  const f = scaledFixture('p2p', { width: 328, height: 720 });
+  await f.watch();
+  assert.equal(f.peers[0].scaleResolutionDownBy, 1);
+  await f.publisher.close('source-unavailable', false);
+});

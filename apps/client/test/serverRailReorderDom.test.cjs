@@ -504,6 +504,26 @@ if (!process.versions.electron) {
       await check(await waitFor(`window.discordState().railOnly && window.discordState().contentGone
         && !window.discordState().expanded && window.discordState().shown && (${shared()}).monkyInUse`),
         `the Discord button goes back to Monky, keeping the list under Monky's servers ${JSON.stringify(await discord())}`);
+      // The Monky server already on screen announces no navigation when clicked, yet it takes Monky's screen back from Discord.
+      press(await center('.discord-web__canvas[data-part="servers"]'), 'left');
+      await check(await waitFor('window.discordState().expanded'), 'clicking the list opens Discord over Monky\'s screen again');
+      await evaluate(`Promise.all([import('/views/ServerRailView.ts'), import('/core/SessionManager.ts')])
+        .then(([{ serverRailView }, { sessionManager }]) => {
+          window.stubbedConnect = serverRailView.connectToSavedServer;
+          delete serverRailView.connectToSavedServer;
+          sessionManager.getActive().client.getStatus = () => 'CONNECTED';
+          window.restoreConnect = () => {
+            serverRailView.connectToSavedServer = window.stubbedConnect;
+            delete sessionManager.getActive().client.getStatus;
+          };
+        })`);
+      const current = await center('.server-rail-item.active[data-port="5101"] .server-rail-avatar');
+      browser.webContents.sendInputEvent({ type: 'mouseMove', ...current });
+      press(current, 'left');
+      await check(await waitFor(`window.discordState().railOnly && !window.discordState().expanded && window.discordState().contentGone
+        && !!document.querySelector('.server-rail-item.active[data-port="5101"]')`),
+        `clicking the Monky server already on screen gives Monky's screen back, keeping Discord's list ${JSON.stringify(await discord())}`);
+      await evaluate('window.restoreConnect()');
       // A video Discord shows on its whole screen: Monky's window shows the page alone on the whole screen,
       // and leaving it, by Esc in Monky or in the page, takes both out.
       const fullscreen = `(() => {

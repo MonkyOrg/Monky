@@ -292,11 +292,22 @@ respondido por `src/renderer/platform/web/webScreen`: a captura vem da janela
 do próprio navegador (`getDisplayMedia`), cada perfil pedido é uma cópia da
 captura reduzida pelo navegador, e o envio é H.264 por conexões próprias
 para cada espectador em P2P ou por um par de producers de tela no SFU, com o
-mesmo protocolo `monky-native-screen-p2p` e os mesmos dados de rendição. O
-formato padrão é o H.264 Main, de imagem melhor, que só o Chrome, o Edge e o
-desktop assistem; quem publica pode escolher o Constrained Baseline (`42e0..`,
-packetization-mode 1), que todo receptor decodifica, inclusive o Firefox e o
-Safari. O codec fica fixo pelo `setCodecPreferences` em P2P e pelo codec do
+mesmo protocolo `monky-native-screen-p2p` e os mesmos dados de rendição.
+Quando o navegador ignora a redução da cópia (o Safari, inclusive no iPhone),
+o encoder a reduz pelo `scaleResolutionDownBy` do envio; no SFU ele é aplicado
+por `setParameters`, porque o handler de Safari do mediasoup não repassa os
+encodings ao navegador. O WebKit fixa o encoder H.264 no nível que anuncia, o
+3.1, e não emite quadro acima dele: lá a rendição fica em até 3.600
+macroblocos (a área de um 720p, em qualquer formato) e no FPS que cabe nesse
+nível (`browserScreenProfile.ts`). O
+formato padrão é o H.264 Main, de imagem melhor, que o Chrome, o Edge, o Safari
+e o desktop assistem. O Safari, inclusive no iPhone e no iPad, não anuncia o
+Main, mas o decodifica: o receptor dele negocia os payloads Main com o nome
+Constrained High (`640c..`), que cobre o Main sem quadros B que as telas
+enviam, e a resposta volta a quem publica com o perfil original
+(`browserScreenCodecs.ts`). Quem publica pode escolher o Constrained Baseline
+(`42e0..`, packetization-mode 1), que todo receptor decodifica, inclusive o
+Firefox. O codec fica fixo pelo `setCodecPreferences` em P2P e pelo codec do
 producer no SFU, mesmo quando o navegador usaria o encoder de hardware. O
 renderer acima dele não muda; o seletor é a janela do navegador
 (`views/screenShare/BrowserScreenSharePicker.ts`), e a versão web assiste

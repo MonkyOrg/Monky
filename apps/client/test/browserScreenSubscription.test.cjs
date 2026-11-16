@@ -25,8 +25,9 @@ const answer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 98', 'a=rtpmap:98 H264/90000
 
 function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = true, capabilityGate, transportGate,
   sourceVideo = video, sourceCodec, availableCodecs = codecs, negotiatedAv1Level = 5, quality = 'source',
-  answerSdp, consumeError } = {}) {
+  answerSdp, consumeError, routerCodecs, deviceCodecs, consumedVideoCodec } = {}) {
   const sent = [], rpc = [], peers = [], transports = [], tracks = [], admitted = [], states = [], errors = [], probes = [], modes = [];
+  const loads = [];
   const availableProducers = new Map();
   let closeFailures = 0;
   class Track {
@@ -87,10 +88,10 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
     close() { this.closed = true; this.consumers.forEach(consumer => consumer.close()); }
   }
   class Device {
-    rtpCapabilities = { codecs: [{ mimeType: 'video/H264', kind: 'video', clockRate: 90000,
+    rtpCapabilities = { codecs: deviceCodecs ?? [{ mimeType: 'video/H264', kind: 'video', clockRate: 90000,
       parameters: { 'profile-level-id': '4d001f', 'packetization-mode': 1 } },
     { mimeType: 'video/AV1', kind: 'video', clockRate: 90000, parameters: { profile: 0, 'level-idx': negotiatedAv1Level } }] };
-    async load() {}
+    async load({ routerRtpCapabilities }) { loads.push(routerRtpCapabilities); }
     createRecvTransport(options) { return new Transport(options); }
   }
   const context = vm.createContext({
@@ -130,7 +131,8 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
       rpc.push({ method, payload });
       const channelId = call.channelId;
       switch (method) {
-        case shared.MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES: return { channelId, rtpCapabilities: {} };
+        case shared.MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES:
+          return { channelId, rtpCapabilities: routerCodecs ? { codecs: routerCodecs } : {} };
         case shared.MessageType.SFU_CREATE_WEBRTC_TRANSPORT:
           if (transportGate) await transportGate.promise;
           return { ...payload, transportOptions: { id: 'owned-recv' } };
@@ -141,7 +143,7 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
           assert.ok(producer);
           if (consumeError && producer.kind === 'video') throw new Error(consumeError);
           return { ...producer, id: `consumer-${producer.producerId}`,
-            rtpParameters: { codecs: [{ mimeType: producer.kind === 'audio' ? 'audio/opus'
+            rtpParameters: { codecs: [producer.kind === 'video' && consumedVideoCodec ? structuredClone(consumedVideoCodec) : { mimeType: producer.kind === 'audio' ? 'audio/opus'
               : sourceCodec === 'av1' ? 'video/AV1' : 'video/H264',
             ...(sourceCodec === 'av1' ? { parameters: { profile: 0, 'level-idx': negotiatedAv1Level } } : {}) }] } };
         }
@@ -180,13 +182,13 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
     availableProducers.set(value.producerId, value);
     return value;
   };
-  async function turn(number = 1) {
+  async function turn(number = 1, sdp = 'modeled offer') {
     if (leader) await sub.receive(control({ type: 'negotiate', requestVersion: number }));
     else await sub.receive(control({ type: 'turn', turn: number, offererSessionId: publisherSessionId }));
-    await sub.receive(control({ type: 'offer', turn: number, sdp: 'modeled offer' }));
+    await sub.receive(control({ type: 'offer', turn: number, sdp }));
     await sub.receive(control({ type: leader ? 'turn-applied' : 'turn-done', turn: number }));
   }
-  return { sub, source, call, sent, rpc, peers, transports, tracks, admitted, states, errors, probes, modes,
+  return { sub, source, call, sent, rpc, peers, transports, tracks, admitted, states, errors, probes, modes, loads,
     signal, control, accepted, publication, producer, turn, load,
     closeFailures: count => { closeFailures = count; },
     open: async () => { await sub.start(); await sub.receive(accepted); } };
@@ -607,6 +609,61 @@ test('an SFU screen Firefox cannot consume is refused as its codec, while a Chro
   await chromium.open().catch(() => {});
   for (let i = 0; i < 5 && !chromium.states.length; i++) await tick();
   assert.deepEqual(chromium.states, ['connection-failed']);
+});
+
+/** What Safari receives, on the iPhone and iPad too: H.264 as Constrained High and Constrained Baseline, never Main. */
+const SAFARI_CODECS = [
+  { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f' },
+  { mimeType: 'video/rtx', clockRate: 90000, sdpFmtpLine: 'apt=96' },
+  { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
+  { mimeType: 'video/H265', clockRate: 90000 },
+  { mimeType: 'video/VP8', clockRate: 90000 },
+];
+
+test('p2p: Safari answers an H.264 Main screen through its Constrained High receiver, telling the publisher Main', async t => {
+  const f = fixture(t, { availableCodecs: SAFARI_CODECS, answerSdp: answer.replace('profile-level-id=4d001f', 'profile-level-id=640c1f') });
+  await f.open();
+  assert.match(f.probes[0].video.contentType, /profile-level-id=640c33;packetization-mode=1/, 'probed as what it negotiates');
+  const offer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 98 99 100', 'a=rtpmap:98 H264/90000',
+    'a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d0033', 'a=rtpmap:99 rtx/90000', 'a=fmtp:99 apt=98',
+    'a=rtpmap:100 H264/90000', 'a=fmtp:100 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033',
+    'm=audio 9 UDP/TLS/RTP/SAVPF 111', 'a=rtpmap:111 opus/48000/2', 'a=fmtp:111 minptime=10;useinbandfec=1', ''].join('\r\n');
+  await f.turn(1, offer);
+  const peer = f.peers[0];
+  assert.match(peer.remoteDescription.sdp, /a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c33\r\n/);
+  assert.match(peer.remoteDescription.sdp, /a=fmtp:100 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033\r\n/);
+  assert.match(peer.localDescription.sdp, /a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f\r\n/,
+    'Safari keeps its own description');
+  const sentAnswer = f.sent.find(signal => signal.action === 'control' && signal.control.type === 'answer');
+  assert.ok(sentAnswer);
+  assert.match(sentAnswer.control.sdp,
+    /a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f;max-recv-level=0033\r\n/,
+    'the publisher reads Main, extended to the level the screen needs');
+  assert.deepEqual(f.states, []);
+  assert.deepEqual(f.errors, []);
+});
+
+test('sfu: Safari consumes an H.264 Main screen through its Constrained High receiver', async t => {
+  const h264 = (preferredPayloadType, profileLevelId) => ({ mimeType: 'video/H264', kind: 'video', clockRate: 90000,
+    preferredPayloadType, parameters: { 'level-asymmetry-allowed': 1, 'packetization-mode': 1, 'profile-level-id': profileLevelId } });
+  const routerCodecs = [h264(102, '42e01f'), h264(103, '4d003c')];
+  const f = fixture(t, { mode: 'sfu', availableCodecs: SAFARI_CODECS, routerCodecs,
+    // mediasoup-client matched the aliased router codec with Safari's Constrained High and its level.
+    deviceCodecs: [h264(102, '42e01f'), h264(103, '640c1f')],
+    consumedVideoCodec: { mimeType: 'video/H264', payloadType: 103, clockRate: 90000,
+      parameters: { 'level-asymmetry-allowed': 1, 'packetization-mode': 1, 'profile-level-id': '4d003c' } } });
+  f.producer('video');
+  await f.open();
+  assert.deepEqual(f.loads[0].codecs.map(codec => codec.parameters['profile-level-id']), ['42e01f', '640c3c']);
+  assert.equal(routerCodecs[1].parameters['profile-level-id'], '4d003c', 'the server\'s reply is left untouched');
+  const consume = f.rpc.find(call => call.method === shared.MessageType.SFU_CONSUME);
+  assert.deepEqual(JSON.parse(JSON.stringify(consume.payload.rtpCapabilities.codecs.map(codec => codec.parameters))),
+    [{ 'level-asymmetry-allowed': 1, 'packetization-mode': 1, 'profile-level-id': '42e01f' },
+      { 'level-asymmetry-allowed': 1, 'packetization-mode': 1, 'profile-level-id': '4d001f', 'max-recv-level': '0033' }],
+    'the server consumes Main for this browser, at the level the screen needs');
+  assert.equal(f.transports[0].consumers[0].rtpParameters.codecs[0].parameters['profile-level-id'], '640c3c');
+  assert.deepEqual(f.states, []);
+  assert.deepEqual(f.errors, []);
 });
 
 for (const [label, receive, reason] of [

@@ -290,10 +290,20 @@ the browser's own dialog (`getDisplayMedia`), each requested profile is a copy
 of the capture scaled down by the browser, and it is sent as H.264 over a
 connection of its own per viewer in P2P or through a pair of screen producers
 on the SFU, with the same `monky-native-screen-p2p` protocol and rendition
-data. The default format is H.264 Main, a better picture that only Chrome, Edge
-and the desktop watch; the publisher can choose Constrained Baseline (`42e0..`,
-packetization-mode 1), which every receiver decodes, Firefox and Safari
-included. The codec is pinned by `setCodecPreferences` in P2P and by the
+data. When the browser ignores the copy's scaling (Safari, on the iPhone
+included), the encoder scales it through the sender's `scaleResolutionDownBy`;
+on the SFU it is applied with `setParameters`, because mediasoup's Safari
+handler does not hand the encodings to the browser. WebKit pins its H.264
+encoder to the level it lists, 3.1, and emits no frame above it: there the
+rendition stays within 3,600 macroblocks (the area of a 720p, in any shape)
+and at the FPS that level allows (`browserScreenProfile.ts`). The default format is H.264 Main, a better picture that Chrome, Edge,
+Safari and the desktop watch. Safari, on the iPhone and iPad included, does not
+list Main but decodes it: its receiver negotiates the Main payloads under the
+Constrained High name (`640c..`), which covers the B-frame-free Main that
+screens send, and the answer goes back to the publisher with the original
+profile (`browserScreenCodecs.ts`). The publisher can choose Constrained
+Baseline (`42e0..`, packetization-mode 1), which every receiver decodes,
+Firefox included. The codec is pinned by `setCodecPreferences` in P2P and by the
 producer's codec on the SFU, even when the browser would use its hardware
 encoder. The renderer above it does not change; the picker is the browser's
 dialog (`views/screenShare/BrowserScreenSharePicker.ts`), and the web version
