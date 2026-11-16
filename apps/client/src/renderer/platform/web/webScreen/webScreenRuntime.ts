@@ -1,12 +1,12 @@
 import {
-  SCREEN_SHARE_LIMITS, browserScreenCommandSchema, compatibleScreenProfile, nativeScreenCallSchema, nativeScreenPresentationSchema,
+  SCREEN_SHARE_LIMITS, browserScreenCommandSchema, nativeScreenCallSchema, nativeScreenPresentationSchema,
   nativeScreenSignalSchema, nativeScreenSourceSchema,
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommandResult, type NativeScreenEvent,
   type NativeScreenParticipant, type NativeScreenPresentation, type NativeScreenSignalPayload, type NativeScreenSource,
 } from '@monky/shared';
 import type { PlatformApi } from '../../api';
 import { browserCapturesDisplay } from '../../capabilities';
-import { browserScreenFormats, browserScreenProfile } from './browserScreenProfile';
+import { browserScreenFormats, browserSourceProfile } from './browserScreenProfile';
 import { DisplayCaptures, type DisplayCapture } from './displayCaptures';
 import { WebScreenBridge } from './webScreenBridge';
 import { WebScreenPublisher } from './webScreenPublisher';
@@ -252,8 +252,7 @@ export class WebScreenRuntime {
       if (capture.ended) throw sourceLost();
       const source = nativeScreenSourceSchema.parse({
         shareId: command.shareId, instanceId: crypto.randomUUID(),
-        video: format === 'compatible' ? compatibleScreenProfile(browserScreenProfile(command.video, capture.video.getSettings()))
-          : browserScreenProfile(command.video, capture.video.getSettings()), audio: command.audio, codec: 'h264',
+        video: browserSourceProfile(command.video, capture.video.getSettings(), format), audio: command.audio, codec: 'h264',
       });
       const publisher = new WebScreenPublisher({
         call: call.config, source, format, capture, audioBitrateKbps: command.audioBitrateKbps,

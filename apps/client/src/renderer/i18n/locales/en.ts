@@ -1064,7 +1064,7 @@ export const en: TranslationMap = {
   'desktopOnly.badge': 'Desktop',
   'desktopOnly.tooltip': 'Available in the desktop app',
   'desktopOnly.reason.screenShare': 'This browser cannot share screens to Monky. Use Chrome, Edge or Firefox, or the desktop app.',
-  'desktopOnly.reason.screenShareDevice': 'Phones and tablets cannot share their screen from a browser. To share, use a computer: in a browser or the desktop app.',
+  'desktopOnly.reason.screenShareDevice': 'This browser cannot capture the screen of this device. To share, use a computer: in a browser or the desktop app.',
   'desktopOnly.title': 'Available in the desktop app',
   'desktopOnly.message': '{feature}: this feature only works in the Monky desktop app. Download the app to use it.',
   'desktopOnly.panelNotice': '{feature}: available only in the Monky desktop app. Here you can only look at the options.',

@@ -5,7 +5,8 @@ import { screenShareIdSchema,
   type NativeScreenP2pControl,
 } from '@monky/shared';
 import {
-  browserScreenFormats, browserScreenProfile, isScreenCodec, screenSenderCodecs,
+  browserScreenFormats, browserScreenProfile, browserSourceProfile, encoderScaleDown, h264Level31Profile, isScreenCodec,
+  screenSenderCodecs,
 } from '../src/renderer/platform/web/webScreen/browserScreenProfile';
 import { sameMediaBinding, sentMediaBinding, withScreenStreamId } from '../src/renderer/platform/web/webScreen/screenSdp';
 import {
@@ -206,6 +207,49 @@ test('a browser capture announces the chosen quality fitted to what it captured 
     { width: 1276, height: 720, fps: 30, maxBitrateKbps: 8000 });
   // Without settings the chosen quality stands.
   assert.deepEqual({ ...browserScreenProfile(requested, {}) }, requested);
+});
+
+const macroblocks = (width: number, height: number): number => Math.ceil(width / 16) * Math.ceil(height / 16);
+
+test('a screen fitted to H.264 Level 3.1 keeps its shape inside 3600 macroblocks and 30 FPS at that size', () => {
+  const fitted = h264Level31Profile({ width: 1920, height: 1080, fps: 60, maxBitrateKbps: 8000 });
+  assert.deepEqual({ ...fitted }, { width: 1272, height: 716, fps: 30, maxBitrateKbps: 8000 });
+  assert.ok(macroblocks(fitted.width, fitted.height) <= 3600);
+  // An iPhone held upright fills the level as 720p does; a smaller screen keeps its frame rate.
+  assert.deepEqual({ ...h264Level31Profile({ width: 720, height: 1280, fps: 30, maxBitrateKbps: 2500 }) },
+    { width: 720, height: 1280, fps: 30, maxBitrateKbps: 2500 });
+  assert.deepEqual({ ...h264Level31Profile({ width: 328, height: 720, fps: 60, maxBitrateKbps: 20000 }) },
+    { width: 328, height: 720, fps: 60, maxBitrateKbps: 14000 });
+});
+
+test('Safari, and every browser on the iPhone, publishes screens its level 3.1 encoder emits; Chromium keeps the size', (t: TestContext) => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  const as = (userAgent: string): void => { Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent } }); };
+  const requested = { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 8000 };
+  const display = { width: 2560, height: 1440, frameRate: 60 };
+  as('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Safari/605.1.15');
+  assert.deepEqual({ ...browserSourceProfile(requested, display, 'compatible') }, { width: 1272, height: 716, fps: 30, maxBitrateKbps: 8000 });
+  as('Mozilla/5.0 (iPhone; CPU iPhone OS 26_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/146.0.0.0 Mobile/15E148 Safari/604.1');
+  assert.deepEqual({ ...browserSourceProfile(requested, display, 'compatible') }, { width: 1272, height: 716, fps: 30, maxBitrateKbps: 8000 });
+  as('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36');
+  assert.deepEqual({ ...browserSourceProfile(requested, display, 'compatible') }, requested);
+  assert.deepEqual({ ...browserSourceProfile(requested, display, 'main') }, requested);
+});
+
+test('the encoder shrinks a copy the browser did not resize to its rendition, never enlarging it', () => {
+  const rendition = { width: 328, height: 720, fps: 30, maxBitrateKbps: 2500 };
+  const scale = encoderScaleDown({ width: 1206, height: 2622 }, rendition);
+  assert.equal(scale, 1206 / 328);
+  assert.ok(1206 / scale <= rendition.width && 2622 / scale <= rendition.height);
+  // Turned sideways, the same scale keeps the frame inside the level.
+  assert.ok(macroblocks(Math.round(2622 / scale), Math.round(1206 / scale)) <= 3600);
+  assert.equal(encoderScaleDown({ width: 328, height: 720 }, rendition), 1);
+  assert.equal(encoderScaleDown({ width: 200, height: 400 }, rendition), 1);
+  assert.equal(encoderScaleDown({}, rendition), 1);
 });
 
 test('a browser screen sender offers only the H.264 profile of its format and its retransmission (#858)', () => {

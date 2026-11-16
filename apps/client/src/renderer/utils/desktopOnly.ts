@@ -53,7 +53,7 @@ export function desktopFeatureName(feature: DesktopFeature): string {
 
 /** Features a browser lacks for a reason worth naming: this browser or device, not the web version, cannot do them. */
 const FEATURE_REASONS: Partial<Readonly<Record<DesktopFeature, () => TranslationKey>>> = {
-  // A desktop browser without the encoder has a sibling that shares; a phone has none.
+  // A browser without the encoder has a sibling that shares; a device whose browser cannot capture may have none.
   screenShare: () => browserCapturesDisplay() ? 'desktopOnly.reason.screenShare' : 'desktopOnly.reason.screenShareDevice',
 };
 

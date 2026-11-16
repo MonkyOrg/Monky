@@ -166,7 +166,7 @@ if (!process.versions.electron) {
         await check(`document.querySelector(".modal-backdrop:not([data-ui-closing]) .desktop-only-dialog__message").textContent
           === window.qa.t("desktopOnly.reason.screenShare")`, 'The screen-sharing offer names why this browser cannot share');
         await closeOffer();
-        // A phone browser (iOS Safari) has no screen capture at all: no other browser on it would share either.
+        // A phone browser without screen capture points to a computer: another browser on it may not capture either.
         await evaluate(`Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', { value: undefined, configurable: true });
           import("/utils/desktopOnly.ts").then(({ showDesktopOnly }) => showDesktopOnly("screenShare"))`);
         await waitFor(`${dialogs} === 1`, 'The screen-sharing offer opens on a device without screen capture');

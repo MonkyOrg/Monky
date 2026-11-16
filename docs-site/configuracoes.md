@@ -206,6 +206,9 @@ H.264 Constrained Baseline, que todos assistem, inclusive o Firefox; um 4K acima
 porque o Firefox decodifica esse perfil só até o nível 5.2. O formato não muda o
 codec: o Automático continua escolhendo o AV1 quando disponível, e com AV1 a
 opção some e não tem efeito. A escolha vale a partir do próximo compartilhamento.
+Quem transmite pelo Safari, inclusive no iPhone, envia no Compatível e com até
+a área de um 720p, a 30 FPS nesse tamanho: o encoder do Safari não emite
+quadros acima do nível 3.1 do H.264.
 
 Qualquer alteração de qualidade — preset, resolução, FPS, bitrate, codec ou
 Hardware/Software — valida a combinação antes de aplicá-la. Se necessário, o

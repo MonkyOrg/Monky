@@ -11,6 +11,8 @@ export interface WebScreenSfuRenditionOptions {
   readonly rendition: NativeScreenRendition;
   readonly video: MediaStreamTrack;
   readonly audio: MediaStreamTrack | null;
+  /** How much the encoder shrinks `video` to the rendition. */
+  readonly scaleResolutionDownBy: number;
   readonly audioBitrateBps: number;
   readonly rpc: WebScreenRpc;
   readonly onError: (error: unknown) => void;
@@ -107,14 +109,23 @@ export class WebScreenSfuRendition {
         this.disconnectedTimer = null;
       }
     });
-    const { shareId, video, audio, audioBitrateBps } = this.options;
-    this.producers.push(await transport.produce({
-      track: video, codec, stopTracks: false,
-      encodings: [{ maxBitrate: rendition.video.maxBitrateKbps * 1000, maxFramerate: rendition.video.fps }],
+    const { shareId, video, audio, audioBitrateBps, scaleResolutionDownBy } = this.options;
+    const encoding = { maxBitrate: rendition.video.maxBitrateKbps * 1000, maxFramerate: rendition.video.fps, scaleResolutionDownBy };
+    const producer = await transport.produce({
+      track: video, codec, stopTracks: false, encodings: [encoding],
       codecOptions: { videoGoogleStartBitrate: Math.min(5000, rendition.video.maxBitrateKbps) },
       appData: { mediaType: 'screen_video', shareId, nativeScreen: rendition },
-    }));
+    });
+    this.producers.push(producer);
     this.current();
+    // mediasoup's Safari handler announces the encoding to the server but never hands it to the browser's sender.
+    const sender = producer.rtpSender;
+    if (sender) {
+      const parameters = sender.getParameters();
+      for (const sent of parameters.encodings) Object.assign(sent, encoding);
+      await sender.setParameters(parameters);
+      this.current();
+    }
     if (audio) {
       this.producers.push(await transport.produce({
         track: audio, stopTracks: false, encodings: [{ maxBitrate: audioBitrateBps }],

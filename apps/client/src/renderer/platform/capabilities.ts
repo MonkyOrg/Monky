@@ -13,7 +13,7 @@ export function platformSupports(capability: keyof PlatformCapabilities): boolea
   return capabilities ? capabilities[capability] : !BROWSER_ONLY.has(capability);
 }
 
-/** Whether this browser can capture a screen at all. No browser on a phone or tablet (iOS, Android) can. */
+/** Whether this browser can capture a screen at all; some phone browsers cannot. */
 export function browserCapturesDisplay(): boolean {
   return typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getDisplayMedia === 'function';
 }

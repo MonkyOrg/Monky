@@ -668,9 +668,14 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     font-size: 24px;
   }
 
-  :root .stage-call-controls :is(#stage-btn-screen, #stage-btn-overlay, #stage-btn-soundboard, #stage-btn-stop-share),
+  :root .stage-call-controls :is(#stage-btn-screen, #stage-btn-overlay, #stage-btn-soundboard),
   :root .voice-stage-container :is(#stage-header-mode-badge-wrapper, #stage-ping-badge) {
     display: none;
+  }
+
+  /* The banner above the stage stops a share; the view shows this labelled button with an inline display. */
+  :root .stage-call-controls #stage-btn-stop-share {
+    display: none !important;
   }
 
   :root .voice-stage-container .content-header {

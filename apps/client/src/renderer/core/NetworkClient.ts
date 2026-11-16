@@ -28,6 +28,7 @@ import { clientLog } from './ClientLogService';
 import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
 import { identityBanMessage } from '../utils/identityBan';
+import { runsOnWebKit } from '../utils/browserEngine';
 import { settingsStore } from '../stores/settingsStore';
 import { connectionStore } from '../stores/connectionStore';
 import { localHostedServerKey } from './hostedServerStart';
@@ -51,9 +52,7 @@ function clientProtocolOffer(): ReturnType<typeof createProtocolOffer> {
  * https://developer.apple.com/forums/thread/817697
  */
 function needsWebKitIpSocketNudge(host: string): boolean {
-  if (typeof navigator === 'undefined' || !isIpLiteralHost(host) || isLoopbackHost(host)) return false;
-  const userAgent = navigator.userAgent;
-  return /AppleWebKit\//.test(userAgent) && !/(Chrome|Chromium|Edg|OPR)\//.test(userAgent);
+  return isIpLiteralHost(host) && !isLoopbackHost(host) && runsOnWebKit();
 }
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';

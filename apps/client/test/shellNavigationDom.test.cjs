@@ -958,7 +958,16 @@ async function responsiveShellSmoke(width, height, mobile) {
       await until(() => !document.querySelector('.stage-focused-main'), 'Tapping the focused participant did not release it');
     }
     check(!visible(document.querySelector('.compact-footer')), 'the stage never duplicates its call dock with a desktop footer');
-    // A phone cannot capture its screen and touch shows no tooltip: the sheet itself says why sharing is locked.
+    voiceStore.setScreenSharing(true);
+    const stopShare = document.querySelector('#stage-btn-stop-share');
+    await until(() => stopShare.style.display === 'inline-flex' && !!document.querySelector('#btn-stage-quick-stop'),
+      'Sharing did not offer a way to stop');
+    check(getComputedStyle(stopShare).display === 'none' && visible(document.querySelector('#btn-stage-quick-stop')),
+      'a phone stops its share from the banner above the stage, not from a label squeezed out of the call dock');
+    withinViewport(document.querySelector('#stage-btn-leave'), 'hang up action while sharing');
+    voiceStore.setScreenSharing(false);
+    await until(() => stopShare.style.display === 'none', 'Stopping the share did not withdraw its control');
+    // A phone browser without screen capture shows no tooltip on touch: the sheet itself says why sharing is locked.
     const { setDesktopOnly } = await import('/utils/desktopOnly.ts');
     const screenButton = document.querySelector('#stage-btn-screen');
     Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', { value: undefined, configurable: true });

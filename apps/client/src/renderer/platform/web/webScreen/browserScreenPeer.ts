@@ -13,6 +13,8 @@ export interface BrowserScreenPeerOptions {
   readonly audio: MediaStreamTrack | null;
   readonly maxBitrateBps: number;
   readonly maxFramerate: number;
+  /** How much the encoder shrinks `video` to its rendition. */
+  readonly scaleResolutionDownBy: number;
   readonly audioBitrateBps: number;
   readonly onCandidate: (candidate: ScreenIceCandidate) => void;
   readonly onState: (state: RTCPeerConnectionState) => void;
@@ -33,7 +35,10 @@ export class BrowserScreenPeer implements ScreenPeerPort {
     this.stream = new MediaStream();
     const video = this.peer.addTransceiver(options.video, {
       direction: 'sendonly', streams: [this.stream],
-      sendEncodings: [{ active: false, maxBitrate: options.maxBitrateBps, maxFramerate: options.maxFramerate }],
+      sendEncodings: [{
+        active: false, maxBitrate: options.maxBitrateBps, maxFramerate: options.maxFramerate,
+        scaleResolutionDownBy: options.scaleResolutionDownBy,
+      }],
     });
     const codecs = screenSenderCodecs(RTCRtpSender.getCapabilities('video')?.codecs ?? [], options.format);
     if (!codecs.length) {

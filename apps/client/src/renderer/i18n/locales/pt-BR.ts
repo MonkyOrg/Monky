@@ -1026,7 +1026,7 @@ export const ptBR = {
   'desktopOnly.badge': 'Desktop',
   'desktopOnly.tooltip': 'Disponível no app desktop',
   'desktopOnly.reason.screenShare': 'Este navegador não consegue transmitir tela para o Monky. Use o Chrome, o Edge ou o Firefox, ou o app desktop.',
-  'desktopOnly.reason.screenShareDevice': 'Celulares e tablets não transmitem a tela pelo navegador. Para transmitir, use um computador: pelo navegador ou pelo app desktop.',
+  'desktopOnly.reason.screenShareDevice': 'Este navegador não consegue capturar a tela deste aparelho. Para transmitir, use um computador: pelo navegador ou pelo app desktop.',
   'desktopOnly.title': 'Disponível no app desktop',
   'desktopOnly.message': '{feature}: este recurso funciona só no app do Monky para computador. Baixe o app para usar.',
   'desktopOnly.panelNotice': '{feature}: disponível só no app do Monky para computador. Aqui você só pode ver as opções.',
