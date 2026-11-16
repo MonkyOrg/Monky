@@ -630,7 +630,7 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
       };
     },
     graphActive() {
-      return audioProcessor.noiseSuppressorNode !== null && audioProcessor.audioContext?.state === 'running'
+      return audioProcessor.chain?.suppression === 'rnnoise' && audioProcessor.audioContext?.state === 'running'
         && webRtcManager.mediaRouter.voicePipelines.has('bot:fixture')
         && document.querySelectorAll('audio[data-peer-session="bot:fixture"]').length === 1
         && !!document.querySelector('.voice-stage-container');

@@ -183,8 +183,9 @@ async function run() {
     };
     const assetNames = {
       cameraWorker: asset(/^cameraEffects\.worker-.*\.js$/, 'new Worker('),
+      voiceWorker: asset(/^voiceCapture\.worker-.*\.js$/),
       rnnoise: asset(/^rnnoise-.*\.wasm$/),
-      noiseWorklet: asset(/^workletProcessor-.*\.js$/),
+      noiseWorklet: asset(/^workletProcessor-.*\.js$/, 'web-noise-suppressor/rnnoise'),
     };
     const page = track(new BrowserWindow({ show: false, width: 1100, height: 850,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } }));
@@ -408,7 +409,7 @@ function wav() {
 }
 
 // Runs inside the built renderer: each feature the app uses must keep working under its CSP.
-async function exerciseFeatures({ origin, cameraWorker, rnnoise, noiseWorklet }) {
+async function exerciseFeatures({ origin, cameraWorker, voiceWorker, rnnoise, noiseWorklet }) {
   const settle = (promise, ms = 10_000) => Promise.race([
     promise.then(() => true, error => `${error?.name ?? 'Error'}: ${error?.message ?? error}`),
     new Promise(resolve => setTimeout(() => resolve('timed out'), ms)),
@@ -459,6 +460,21 @@ async function exerciseFeatures({ origin, cameraWorker, rnnoise, noiseWorklet })
         worker.postMessage({ type: 'dispose' });
       });
       if (reply !== 'disposed') throw new Error(`Unexpected reply ${reply}`);
+    })()),
+    'voice capture worker loading a noise suppression engine': await settle((async () => {
+      const worker = new Worker(new URL(`./assets/${voiceWorker}`, location.href).href, { type: 'module', name: 'csp-probe' });
+      try {
+        const reply = await new Promise((resolve, reject) => {
+          worker.onmessage = event => resolve(event.data);
+          worker.onerror = event => reject(new Error(event.message || 'Worker failed'));
+          worker.postMessage({ type: 'prepare', id: 1, assets: {
+            mode: 'rnnoise', scriptUrl: new URL(`./assets/${noiseWorklet}`, location.href).href, wasmBinary: wasm,
+          } });
+        });
+        if (reply?.type !== 'prepared') throw new Error(`Unexpected reply ${JSON.stringify(reply)}`);
+      } finally {
+        worker.terminate();
+      }
     })()),
     'miniapp frame (monky-miniapp:)': await settle(new Promise(resolve => {
       const frame = document.createElement('iframe');

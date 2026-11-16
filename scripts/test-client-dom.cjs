@@ -22,6 +22,7 @@ const commands = [
   ['node', 'apps/client/test/serverInviteCardDom.cjs'],
   ['node', 'apps/client/test/microphoneStateSmoke.cjs'],
   ['node', 'apps/client/test/microphoneTestSmoke.cjs'],
+  ['node', 'apps/client/test/voiceCaptureClockSmoke.cjs'],
   ['node', 'apps/client/test/settingsNavigationSmoke.cjs'],
   ['node', 'apps/client/test/settingsNavigationSmoke.cjs', '--release-notes'],
   ['node', 'apps/client/test/settingsNavigationSmoke.cjs', '--quality-settings'],
