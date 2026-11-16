@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No Discord oficial, o captcha do login agora recebe o clique de verdade: a camada de efeitos que o Discord desenha sobre a página escondia o captcha do Monky, e quem tentava entrar na conta não conseguia confirmar que não é um robô.",
+  "en": "In official Discord, the login captcha now really takes the click: the effects layer Discord draws over the page hid the captcha from Monky, so people signing in could not confirm they are not a robot."
+}

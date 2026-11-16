@@ -239,7 +239,10 @@ test('a click on a frame from another site, like Discord\'s captcha, reaches tha
         handlers.message({}, 'Target.attachedToTarget', { sessionId: 'captcha', targetInfo: { targetId: 'F1', type: 'iframe' } });
         handlers.message({}, 'Target.attachedToTarget', { sessionId: 'worker', targetInfo: { targetId: 'W1', type: 'worker' } });
       }
-      if (method === 'DOM.getNodeForLocation') return { backendNodeId: inFrame(params) ? 7 : 3 };
+      // Discord's effects canvas covers the page with pointer-events: none; only a hit test that counts it finds it.
+      if (method === 'DOM.getNodeForLocation') {
+        return { backendNodeId: params.ignorePointerEventsNone !== false ? 5 : inFrame(params) ? 7 : 3 };
+      }
       if (method === 'DOM.getFrameOwner') return { backendNodeId: params.frameId === 'F1' ? 7 : 9 };
       if (method === 'DOM.getBoxModel') return { model: { content: [100, 200, 400, 200, 400, 280, 100, 280] } };
       if (method === 'Input.dispatchMouseEvent') dispatched.push({ session, ...params });
