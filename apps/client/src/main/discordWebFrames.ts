@@ -147,8 +147,10 @@ export class DiscordWebFrames {
       this.captured = null;
     }
     if (command.action === 'mouse' && command.type === 'leave') return null;
+    // Hit-tested as the pointer is, past what lets it through: Discord lays a canvas for its
+    // effects over the whole page, and counting it hid every frame under it.
     const hit = await this.send('DOM.getNodeForLocation', {
-      x: Math.floor(command.x), y: Math.floor(command.y), ignorePointerEventsNone: true,
+      x: Math.floor(command.x), y: Math.floor(command.y), ignorePointerEventsNone: false,
     }).catch(() => null);
     const node = number(hit, 'backendNodeId');
     if (node === null) return null;
