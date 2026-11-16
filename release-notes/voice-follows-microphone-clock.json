@@ -1,5 +1,5 @@
 {
   "group": "correcoes",
-  "pt-BR": "Sua voz não fica mais atrasada, picotada ou robótica com o Monky minimizado ou atrás de outras janelas. O processamento do microfone seguia o ritmo da saída de som, que em alguns computadores desacelera quando a janela some; agora ele acompanha o próprio microfone.",
-  "en": "Your voice no longer lags, cuts out or sounds robotic while Monky is minimized or behind other windows. Microphone processing followed the pace of the sound output, which slows down on some computers when the window is hidden; it now follows the microphone itself."
+  "pt-BR": "Sua voz n?o chega mais atrasada, picotada ou rob?tica para os outros com o Monky minimizado ou atr?s de outras janelas. O microfone seguia o ritmo da sa?da de som, que em alguns computadores fica lento com a janela escondida; agora segue o pr?prio ritmo.",
+  "en": "Others no longer hear your voice lagging, cutting out or sounding robotic while Monky is minimized or behind other windows. The microphone followed the pace of the sound output, which slows down on some computers when the window is hidden; it now keeps its own pace."
 }
