@@ -1,4 +1,6 @@
-import { LinearResampler, SampleQueue, SampleTimeline, VOICE_BLOCK_SIZE, VOICE_SAMPLE_RATE, downmix } from './audioFrames';
+import {
+  LinearResampler, SampleQueue, SampleTimeline, VOICE_BLOCK_SIZE, VOICE_CHUNK_SIZE, VOICE_SAMPLE_RATE, downmix,
+} from './audioFrames';
 import type { SuppressionAssets, VoiceCaptureRequest, VoiceCaptureResponse } from './voiceCaptureProtocol';
 
 declare const self: {
@@ -169,16 +171,17 @@ class VoiceCaptureWorker {
       }
       this.processed.push(this.result);
     }
-    const available = this.processed.length;
-    if (available === 0 || !this.output) return;
-    const voice = new Float32Array(available);
-    this.processed.take(voice);
-    const stamp = this.timeline.stamp(timestamp, available);
-    this.writeLevel(voice, stamp);
-    if (this.gain !== 1) {
-      for (let index = 0; index < voice.length; index++) voice[index] *= this.gain;
+    if (!this.output) return;
+    for (;;) {
+      const voice = new Float32Array(VOICE_CHUNK_SIZE);
+      if (!this.processed.take(voice)) return;
+      const stamp = this.timeline.stamp(timestamp, voice.length);
+      this.writeLevel(voice, stamp);
+      if (this.gain !== 1) {
+        for (let index = 0; index < voice.length; index++) voice[index] *= this.gain;
+      }
+      await this.output.write(audioData(voice, stamp));
     }
-    await this.output.write(audioData(voice, stamp));
   }
 
   /** The meter never holds back transmission: a chunk is dropped while the previous one is still being written. */
