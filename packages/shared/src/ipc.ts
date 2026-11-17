@@ -156,6 +156,14 @@ export interface DesktopSource {
   thumbnailDataUrl: string;
   appIconDataUrl: string | null;
   thumbnailState?: 'pending' | 'ready' | 'unavailable';
+  /** The system gave no exact identity for it: listed so the user knows it exists, but it can never be shared. */
+  unidentified?: true;
+}
+
+/** What the picker offers. A type the system could not list at all is named, so its tab explains the failure. */
+export interface DesktopSourceList {
+  sources: DesktopSource[];
+  failedTypes: DesktopSource['type'][];
 }
 
 export const desktopSourcesOptionsSchema = z.object({
@@ -1080,7 +1088,7 @@ export interface IpcInvokeChannels extends DmInvokeChannels {
 
   // Captura de Tela
   'screen-share:ensure-permission': { args: []; returnType: boolean };
-  'screen-share:get-sources': { args: [options?: DesktopSourcesOptions]; returnType: DesktopSource[] };
+  'screen-share:get-sources': { args: [options?: DesktopSourcesOptions]; returnType: DesktopSourceList };
   'screen-share:get-previews': { args: [request: DesktopSourcePreviewsRequest]; returnType: DesktopSourcePreview[] };
   'screen-share:cancel-previews': { args: []; returnType: void };
   'screen-share:prepare-window': { args: [string]; returnType: boolean };

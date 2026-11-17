@@ -993,7 +993,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
           throw new Error('Capture methods must reflect actual native capabilities with an explicit unavailable reason.');
       }
       document.querySelector('#share-tab-window').click();
-      const { id: desktopSourceId } = ownedWindowSource(await window.api.getDesktopSources({ metadataOnly: true }), ownedHwnd);
+      const { id: desktopSourceId } = ownedWindowSource((await window.api.getDesktopSources({ metadataOnly: true })).sources, ownedHwnd);
       const card = () => [...document.querySelectorAll('.source-item')].find(item => item.dataset.sourceId === desktopSourceId);
       await wait(card, 'The real picker did not enumerate the owned synthetic window.');
       card().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));

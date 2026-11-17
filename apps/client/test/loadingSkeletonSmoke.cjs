@@ -129,6 +129,7 @@ async function runLoadingSmoke(language) {
   let availability = deferred();
   let enumeration = deferred();
   let enumerations = 0;
+  const listed = sources => ({ sources, failedTypes: [] });
   const originalCapabilities = webRtcManager.getNativeScreenCapabilities;
   webRtcManager.getNativeScreenCapabilities = async () => {
     const capture = await availability.promise;
@@ -138,7 +139,7 @@ async function runLoadingSmoke(language) {
   window.api = {
     platform: 'win32',
     nativeScreenCommand: async () => { throw new Error('The loading fixture must not start native capture.'); },
-    getDesktopSources: () => { enumerations++; return enumeration.promise; },
+    getDesktopSources: () => { enumerations++; return enumeration.promise.then(listed); },
   };
   const source = (id, type = 'screen') => ({
     id, type, name: id, thumbnailDataUrl: '', appIconDataUrl: null,
@@ -282,7 +283,7 @@ async function runLoadingSmoke(language) {
     window.api.getDesktopSources = options => {
       check(options.metadataOnly === true, 'Initial picker enumeration excludes expensive thumbnails.');
       enumerations++;
-      return Promise.resolve([{ ...source(previewSourceId, 'window'), thumbnailState: 'pending' }]);
+      return Promise.resolve(listed([{ ...source(previewSourceId, 'window'), thumbnailState: 'pending' }]));
     };
     await picker.open();
     const sourceCard = panel().querySelector('.source-item');
@@ -327,7 +328,7 @@ async function runLoadingSmoke(language) {
     check(opened === closed + 1, 'each completed/abandoned opening emitted one close event');
     picker.close();
 
-    window.api.getDesktopSources = () => { enumerations++; return enumeration.promise; };
+    window.api.getDesktopSources = () => { enumerations++; return enumeration.promise.then(listed); };
     const beforeImmediateClose = enumerations;
     const closeOnOpen = appEvents.on('modal.screenshare_picker_opened', () => picker.close());
     await picker.open();

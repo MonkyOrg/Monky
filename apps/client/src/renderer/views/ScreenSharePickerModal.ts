@@ -31,7 +31,7 @@ import {
 
 type SourceLoadState =
   | { status: 'loading' }
-  | { status: 'ready'; sources: DesktopSource[] }
+  | { status: 'ready'; sources: DesktopSource[]; failedTypes: DesktopSource['type'][] }
   | { status: 'error' };
 
 /** A private share speaks of who can watch; the picker is the same one community resources use. */
@@ -186,7 +186,7 @@ export class ScreenSharePickerModal {
     // Switching with several live shares first asks which one to replace.
     this.modalEl?.querySelector<HTMLButtonElement>('#btn-share')
       ?.setAttribute('aria-haspopup', voiceStore.screenShareIds.length > 1 ? 'menu' : 'false');
-    this.modalEl?.querySelectorAll<HTMLElement>('.source-item').forEach(item => {
+    this.modalEl?.querySelectorAll<HTMLElement>('.source-item[data-source-id]').forEach(item => {
       const selected = item.dataset.sourceId === this.selectedSourceId;
       item.classList.toggle('selected', selected);
       item.setAttribute('aria-pressed', String(selected));
@@ -425,7 +425,7 @@ export class ScreenSharePickerModal {
       this.nativeCapabilities = capabilities;
       this.updateCaptureInfo();
       if (!SOURCE_TABS.some(tab => supportsTab(this.nativeCapabilities, tab.id))) {
-        this.sourceState = { status: 'ready', sources: [] };
+        this.sourceState = { status: 'ready', sources: [], failedTypes: [] };
         this.renderSources();
         this.updateCaptureInfo();
         return;
@@ -447,9 +447,9 @@ export class ScreenSharePickerModal {
           return;
         }
       }
-      const sources = await window.api.getDesktopSources({ metadataOnly: true, refresh: forceRefresh });
+      const { sources, failedTypes } = await window.api.getDesktopSources({ metadataOnly: true, refresh: forceRefresh });
       if (!isCurrent()) return;
-      this.sourceState = { status: 'ready', sources };
+      this.sourceState = { status: 'ready', sources, failedTypes };
       this.renderSources();
       this.updateCaptureInfo();
       void this.loadSourcePreviews(modal, request);
@@ -472,7 +472,7 @@ export class ScreenSharePickerModal {
     // Sources stay selectable without previews; the failure is explained once per load.
     let failureReported = false;
     await Promise.all(SOURCE_TABS.map(async ({ id: type }) => {
-      const pending = sources.filter(source => source.type === type && source.thumbnailState !== undefined
+      const pending = sources.filter(source => source.type === type && !source.unidentified && source.thumbnailState !== undefined
         && (source.thumbnailState === 'pending' || (type === 'window' && !source.appIconDataUrl)));
       for (let offset = 0; offset < pending.length; offset += 4) {
         if (!isCurrent()) return;
@@ -511,8 +511,32 @@ export class ScreenSharePickerModal {
   }
 
   private sourceName(source: DesktopSource): string {
-    return source.type === 'screen' && source.displayNumber !== undefined
-      ? t('screenShare.screenNumber', { number: source.displayNumber }) : source.name;
+    if (source.type === 'screen' && source.displayNumber !== undefined)
+      return t('screenShare.screenNumber', { number: source.displayNumber });
+    return source.name || (source.unidentified ? t('screenShare.untitledWindow') : '');
+  }
+
+  /** Shown so the user knows the source exists and why it cannot be shared; it is never selectable. */
+  private renderUnidentifiedSource(source: DesktopSource, index: number): string {
+    const name = escapeHtml(this.sourceName(source));
+    const reason = escapeHtml(t(source.type === 'screen' ? 'screenShare.unidentifiedScreen' : 'screenShare.unidentifiedWindow'));
+    const icon = source.type === 'screen' ? 'desktop_windows' : 'web_asset';
+    return `
+      <div class="source-item source-item--unidentified" role="button" tabindex="0" aria-disabled="true" aria-label="${name}"
+        aria-describedby="share-unidentified-${index}" title="${reason}">
+        <div class="source-preview">
+          <div class="source-thumbnail source-thumbnail--minimized">
+            <span class="material-symbols-outlined" aria-hidden="true">warning</span>
+            <span class="source-thumbnail-label">${escapeHtml(t('screenShare.unavailable'))}</span>
+          </div>
+        </div>
+        <div class="source-name" title="${name}">
+          <span class="source-icon"><span class="material-symbols-outlined source-app-icon-fallback" aria-hidden="true">${icon}</span></span>
+          ${name}
+        </div>
+        <p id="share-unidentified-${index}" class="source-unidentified-reason">${reason}</p>
+      </div>
+    `;
   }
 
   private renderSourcePreview(source: DesktopSource): string {
@@ -550,9 +574,14 @@ export class ScreenSharePickerModal {
       panel.innerHTML = '';
       return;
     }
-    const filtered = this.sourceState.sources.filter(source => sourceMatchesTab(source, this.activeTab));
+    const type: DesktopSource['type'] = this.activeTab;
+    if (this.sourceState.failedTypes.includes(type)) {
+      panel.innerHTML = renderLoadingError(t(type === 'screen' ? 'screenShare.screensFailed' : 'screenShare.windowsFailed'));
+      return;
+    }
     const activeSourceIds = videoService.getActiveSourceIds();
-    const available = filtered.filter((s) => !activeSourceIds.has(s.id));
+    const available = this.sourceState.sources.filter(source => source.unidentified ? source.type === type
+      : sourceMatchesTab(source, this.activeTab) && !activeSourceIds.has(source.id));
 
     if (available.length === 0) {
       panel.innerHTML = `
@@ -565,7 +594,8 @@ export class ScreenSharePickerModal {
 
     panel.innerHTML = `
       <div class="screen-sources-grid">
-        ${available.map((s) => {
+        ${available.map((s, index) => {
+          if (s.unidentified) return this.renderUnidentifiedSource(s, index);
           const name = escapeHtml(this.sourceName(s));
           return `
           <div class="source-item ${this.selectedSourceId === s.id ? 'selected' : ''}" data-source-id="${escapeHtml(s.id)}"

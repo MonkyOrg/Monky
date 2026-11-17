@@ -27,6 +27,27 @@ type Inspection = {
 type ListedWindow = { id: string; window: NativeWindowInfo; processAncestry?: number[] };
 type MonitorTarget = Extract<NativeScreenCaptureTarget, { deviceId: string }>;
 type WindowTarget = Extract<NativeScreenCaptureTarget, { hwnd: number }>;
+type UnidentifiedReason = 'invalid-identity' | 'ambiguous-identity';
+/** A window or monitor without an exact capture identity: shown so the user knows it exists, never captured. */
+export type UnidentifiedNativeSource =
+  | { kind: 'window'; reason: UnidentifiedReason; window: NativeWindowInfo }
+  | { kind: 'monitor'; reason: UnidentifiedReason; monitor: NativeMonitorInfo };
+type OnUnidentified = (source: UnidentifiedNativeSource) => void;
+
+function isValidTarget(target: NativeScreenCaptureTarget): boolean {
+  try {
+    validateCaptureTarget(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function repeated<T, K>(items: readonly T[], key: (item: T) => K): Set<K> {
+  const seen = new Set<K>(), duplicates = new Set<K>();
+  for (const item of items) (seen.has(key(item)) ? duplicates : seen).add(key(item));
+  return duplicates;
+}
 
 function monitorTarget(monitor: NativeMonitorInfo): MonitorTarget {
   const target: MonitorTarget = {
@@ -42,14 +63,26 @@ function monitorIdentity(target: MonitorTarget): string {
   return JSON.stringify([target.deviceId, target.deviceName, x, y, width, height]);
 }
 
+/** Picker entries for unidentified sources: their ids name no capture target, so they can never be selected. */
+export function unidentifiedDesktopSource(type: DesktopSource['type'], index: number, name: unknown): DesktopSource {
+  return { id: `unidentified-${type}:${index}`, name: typeof name === 'string' ? name : '', type, unidentified: true,
+    thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: 'unavailable' };
+}
+
+/**
+ * The Screens tab in display order. A monitor without an exact identity (`id: null`) keeps its place
+ * in the numbering, so "Screen 2" is still the second screen.
+ */
 export function nativeMonitorDesktopSources(
-  monitors: readonly { id: string; monitor: NativeMonitorInfo }[],
+  monitors: readonly { id: string | null; monitor: NativeMonitorInfo }[],
 ): DesktopSource[] {
-  return [...monitors].sort((a, b) => a.monitor.deviceName.localeCompare(b.monitor.deviceName, 'en', { numeric: true }))
-    .map(({ id, monitor }, index) => ({
-      id, name: monitor.name, displayNumber: index + 1, type: 'screen',
-      thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: 'pending',
-    }));
+  const order = (monitor: NativeMonitorInfo) => typeof monitor.deviceName === 'string' ? monitor.deviceName : '';
+  return [...monitors]
+    .sort((a, b) => order(a.monitor).localeCompare(order(b.monitor), 'en', { numeric: true }))
+    .map(({ id, monitor }, index): DesktopSource => id === null
+      ? { ...unidentifiedDesktopSource('screen', index, monitor.name), displayNumber: index + 1 }
+      : { id, name: monitor.name, displayNumber: index + 1, type: 'screen',
+        thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: 'pending' });
 }
 
 export class NativeDesktopSources {
@@ -58,7 +91,11 @@ export class NativeDesktopSources {
 
   constructor(private readonly inspect: Inspection) {}
 
-  listWindows(): ListedWindow[] {
+  /**
+   * One window without an exact identity is reported on its own: it must not hide every other
+   * window from the picker, and it can never become a capture target either.
+   */
+  listWindows(onUnidentified: OnUnidentified = () => {}): ListedWindow[] {
     // Refreshing another picker must not revoke a still-owned hidden/minimized
     // selection needed for source restoration.
     const selected = new Map([...this.windows].filter(([, target]) => {
@@ -67,16 +104,22 @@ export class NativeDesktopSources {
       return state?.isTopLevel && state.processId === target.expectedProcessId
         && state.processCreationTime100ns === target.expectedProcessCreationTime100ns;
     }));
-    const handles = new Set<number>();
+    const candidates = this.inspect.windows().filter((window): window is NativeWindowInfo & { processCreationTime100ns: string } =>
+      !this.inspect.isWindowExcluded?.(window.hwnd) && !isGhostWindow(window) && (window.isVisible || window.isIconic)
+      && !!window.processCreationTime100ns);
+    const ambiguous = repeated(candidates, window => window.hwnd);
     const result: ListedWindow[] = [];
-    for (const window of this.inspect.windows()) {
-      if (this.inspect.isWindowExcluded?.(window.hwnd)) continue;
-      if (isGhostWindow(window) || (!window.isVisible && !window.isIconic) || !window.processCreationTime100ns) continue;
-      if (handles.has(window.hwnd)) throw new Error('Native window identity is ambiguous.');
-      handles.add(window.hwnd);
+    for (const window of candidates) {
+      if (ambiguous.has(window.hwnd)) {
+        onUnidentified({ kind: 'window', reason: 'ambiguous-identity', window });
+        continue;
+      }
       const target: WindowTarget = { kind: 'window', hwnd: window.hwnd, expectedProcessId: window.processId,
         expectedProcessCreationTime100ns: window.processCreationTime100ns };
-      validateCaptureTarget(target);
+      if (!isValidTarget(target)) {
+        onUnidentified({ kind: 'window', reason: 'invalid-identity', window });
+        continue;
+      }
       const identity = JSON.stringify([target.hwnd, target.expectedProcessId, target.expectedProcessCreationTime100ns]);
       const id = `window:${window.hwnd}:${createHash('sha256').update(identity).digest('hex')}`;
       const previous = this.windows.get(id);
@@ -115,13 +158,23 @@ export class NativeDesktopSources {
     });
   }
 
-  listMonitors(): { id: string; monitor: NativeMonitorInfo }[] {
+  /** Like windows, a monitor without an exact identity is reported on its own instead of hiding every screen. */
+  listMonitors(onUnidentified: OnUnidentified = () => {}): { id: string; monitor: NativeMonitorInfo }[] {
     const selected = new Map<string, MonitorTarget>();
-    const devices = new Set<string>();
-    const result = this.inspect.monitors().map(monitor => {
-      const target = monitorTarget(monitor);
-      if (devices.has(target.deviceId)) throw new Error('Native monitor device identity is ambiguous.');
-      devices.add(target.deviceId);
+    const valid = this.inspect.monitors().flatMap(monitor => {
+      try {
+        return [{ monitor, target: monitorTarget(monitor) }];
+      } catch {
+        onUnidentified({ kind: 'monitor', reason: 'invalid-identity', monitor });
+        return [];
+      }
+    });
+    const ambiguous = repeated(valid, ({ target }) => target.deviceId);
+    const result = valid.flatMap(({ monitor, target }) => {
+      if (ambiguous.has(target.deviceId)) {
+        onUnidentified({ kind: 'monitor', reason: 'ambiguous-identity', monitor });
+        return [];
+      }
       // Geometry is part of this selection: a mode/topology change invalidates
       // stored IDs rather than silently restoring capture on different pixels.
       const id = `native-monitor:${createHash('sha256').update(monitorIdentity(target)).digest('hex')}`;
@@ -129,7 +182,7 @@ export class NativeDesktopSources {
       if (selected.has(id) || (previous && monitorIdentity(previous) !== monitorIdentity(target)))
         throw new Error('Native monitor selection identity collision.');
       selected.set(id, target);
-      return { id, monitor };
+      return [{ id, monitor }];
     });
     this.monitors = selected;
     return result;

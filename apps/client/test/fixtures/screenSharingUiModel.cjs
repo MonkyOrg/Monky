@@ -472,7 +472,10 @@ function fixture(language = 'en') {
       if (command.action === 'cancel-encoding-probe') { traces.push(['cancel-encoding', command.probeId]); return { kind: 'ok' }; }
       throw new Error('Model must not perform other native IPC');
     },
-    getDesktopSources: options => { enumerations++; return controls.sources(options); },
+    getDesktopSources: options => {
+      enumerations++;
+      return Promise.resolve(controls.sources(options)).then(list => Array.isArray(list) ? { sources: list, failedTypes: [] } : list);
+    },
     ensureScreenPermission: () => { permissionChecks++; return controls.screenPermission(); },
     getDesktopSourcePreviews: request => controls.previews ? controls.previews(request) : Promise.resolve([]),
     cancelDesktopSourcePreviews: async () => { traces.push(['cancel-previews']); },

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No Windows, uma janela ou tela que o sistema não identifica com segurança não esvazia mais a lista de compartilhamento. Ela aparece acinzentada como indisponível, e as demais continuam disponíveis. Se só a lista de telas ou a de janelas falhar, a outra aba continua funcionando.",
+  "en": "On Windows, a window or screen that the system cannot identify reliably no longer empties the sharing list. It shows up greyed out as unavailable, and the others remain available. If only the screens list or the windows list fails, the other tab keeps working."
+}

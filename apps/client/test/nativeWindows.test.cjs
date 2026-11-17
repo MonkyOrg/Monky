@@ -86,7 +86,8 @@ function desktopEnumerator(sources, { previewError, platform = 'win32', chromium
   const catalog = new DesktopSourceCatalog({
     nativeSources: sources, isExcluded: isScreenShareSource, logger: { write: entry => logs.push(entry) },
   });
-  return { enumerate: (...args) => catalog.enumerate(...args), calls, warnings, logs, captures, iconPaths };
+  return { enumerate: (...args) => catalog.enumerate(...args), list: (...args) => catalog.list(...args),
+    calls, warnings, logs, captures, iconPaths };
 }
 
 test('Windows lists screens and windows and captures native previews without consulting Chromium', async () => {
@@ -220,7 +221,72 @@ test('native identity enumeration failure cannot masquerade as an empty successf
   assert.equal(e.warnings.length, 1);
   assert.equal(e.logs[0].message, 'Native desktop source enumeration failed');
   assert.equal(e.logs[0].data.phase, 'native-source-identities');
+  assert.equal(e.logs[0].data.stage, 'screen');
+  assert.equal(e.logs[0].data.reason, 'Error');
   assert.doesNotMatch(JSON.stringify(e.logs), /PRIVATE_/);
+});
+
+test('the enumeration failure log names the native cause, so a user report shows why the picker is empty', async () => {
+  const f = fixture(), e = desktopEnumerator(f.sources);
+  f.sources.listMonitors = () => { throw new Error('Cannot enumerate unambiguous monitor device identities'); };
+  await assert.rejects(e.enumerate(true), /unambiguous/);
+  assert.equal(e.logs[0].data.reason, 'Cannot enumerate unambiguous monitor device identities');
+  f.sources.listWindows = () => { throw Object.assign(new Error('PRIVATE_LOAD_PATH'), { code: 'ERR_SCREEN_AUDIO_UNAVAILABLE' }); };
+  await assert.rejects(e.enumerate(true), /PRIVATE_LOAD_PATH/);
+  assert.deepEqual([e.logs[1].data.stage, e.logs[1].data.reason], ['window', 'ERR_SCREEN_AUDIO_UNAVAILABLE']);
+  assert.doesNotMatch(JSON.stringify(e.logs), /PRIVATE_/);
+});
+
+test('the picker keeps the windows usable and names the failed Screens list when only monitors cannot be read', async () => {
+  const f = fixture(), e = desktopEnumerator(f.sources);
+  f.sources.listMonitors = () => { throw new Error('Cannot enumerate unambiguous monitor device identities'); };
+  const { sources, failedTypes } = await e.list(true);
+  assert.deepEqual(sources.map(source => [source.type, source.name]), [['window', 'Selected']]);
+  assert.deepEqual(failedTypes, ['screen']);
+  assert.equal(f.sources.resolve(sources[0].id, 'window').hwnd, window.hwnd);
+  f.sources.listWindows = () => { throw new Error('Windows failed too'); };
+  await assert.rejects(e.list(true), /Windows failed too/, 'With nothing listable the whole picker reports the failure');
+});
+
+test('a window or monitor without an exact identity is shown as unavailable instead of emptying the picker', async () => {
+  const f = fixture(), e = desktopEnumerator(f.sources);
+  const duplicated = { ...window, hwnd: 777, title: 'Duplicated' };
+  f.setWindows([{ ...window, hwnd: 2 ** 53, title: 'Unsafe handle' }, duplicated, { ...duplicated }, window]);
+  f.setMonitors([
+    { ...monitor, deviceId: 'MONITOR\\NO#INTERFACE', deviceName: String.raw`\\.\DISPLAY1`, name: 'No interface' },
+    { ...monitor, deviceId: String.raw`\\?\DISPLAY#EMPTY#ONE`, deviceName: String.raw`\\.\DISPLAY3`, name: 'Empty',
+      bounds: { ...monitor.bounds, width: 0 } },
+    { ...monitor, deviceId: String.raw`\\?\DISPLAY#SAME#TWO`, deviceName: String.raw`\\.\DISPLAY4`, name: 'Same A' },
+    { ...monitor, deviceId: String.raw`\\?\DISPLAY#SAME#TWO`, deviceName: String.raw`\\.\DISPLAY5`, name: 'Same B' },
+    monitor,
+  ]);
+  const { sources, failedTypes } = await e.list(true);
+  assert.deepEqual(failedTypes, []);
+  assert.deepEqual(sources.map(source => [source.type, source.name, source.unidentified === true, source.displayNumber]), [
+    ['window', 'Selected', false, undefined],
+    ['window', 'Unsafe handle', true, undefined], ['window', 'Duplicated', true, undefined],
+    ['window', 'Duplicated', true, undefined],
+    ['screen', 'No interface', true, 1], ['screen', 'Selected display', false, 2], ['screen', 'Empty', true, 3],
+    ['screen', 'Same A', true, 4], ['screen', 'Same B', true, 5],
+  ], 'Unidentified screens keep their place in the numbering');
+  assert.equal(new Set(sources.map(source => source.id)).size, sources.length, 'Every card has its own id');
+  for (const source of sources.filter(source => source.unidentified)) {
+    assert.match(source.id, /^unidentified-(window|screen):\d+$/);
+    assert.equal(source.thumbnailState, 'unavailable');
+    assert.throws(() => f.sources.resolve(source.id, source.type === 'screen' ? 'monitor' : 'window'),
+      'An unidentified source never becomes a capture target');
+  }
+  assert.equal(f.sources.resolve(sources[0].id, 'window').hwnd, window.hwnd);
+  assert.equal(f.sources.resolve(sources[5].id, 'monitor').deviceId, monitor.deviceId);
+  assert.deepEqual(e.logs.map(entry => [entry.level, entry.data.kind, entry.data.reason]), [
+    ['WARN', 'window', 'invalid-identity'], ['WARN', 'window', 'ambiguous-identity'],
+    ['WARN', 'monitor', 'invalid-identity'], ['WARN', 'monitor', 'ambiguous-identity'],
+  ]);
+  assert.doesNotMatch(JSON.stringify(e.logs), /Unsafe|Duplicated|No interface|Same|Empty|DISPLAY/,
+    'Window titles and device names never reach the log');
+  await e.list(true);
+  assert.equal(e.logs.length, 4, 'Refreshing the picker does not repeat the same warning');
+  assert.deepEqual((await e.enumerate(true, 'window')).filter(source => source.unidentified).length, 3);
 });
 
 test('identical monitor names get stable numbers without any Electron DPI or thumbnail dependency', () => {
@@ -422,10 +488,10 @@ test('monitor disconnect, replacement, mode and topology changes require explici
   }
 });
 
-test('ambiguous native monitor identities and digest collisions are rejected, not mapped by ordinal', () => {
+test('ambiguous native monitor identities are never offered, and digest collisions are rejected, not mapped by ordinal', () => {
   const f = fixture();
   f.setMonitors([monitor, structuredClone(monitor)]);
-  assert.throws(() => f.sources.listMonitors(), /ambiguous/);
+  assert.deepEqual(f.sources.listMonitors(), []);
   const hash = { createHash: () => ({ update() { return this; }, digest: () => '0'.repeat(64) }) };
   const collided = fixture(moduleFor(hash));
   collided.sources.listMonitors();
