@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   DESKTOP_SOURCES_IPC, desktopSourcePreviewsRequestSchema, desktopSourcesOptionsSchema,
-  type DesktopSource, type NativeScreenCaptureKind,
+  type DesktopSource, type DesktopSourceList, type NativeScreenCaptureKind,
 } from '@monky/shared';
 import type { MacScreenProvider, NativeScreenCaptureTarget, NativeThumbnailCapturer } from '@monky/screen-share';
 import * as screenAudio from '@monky/screen-audio';
@@ -14,7 +14,10 @@ import { browserOcclusionEngine } from '../browserOcclusion';
 import { DesktopSourcePreviews } from '../desktopSourcePreviews';
 import { gameWindowIds } from '../gameWindows';
 import { mt } from '../i18n';
-import { NativeDesktopSources, nativeMonitorDesktopSources, nativeWindowIdFromSourceId } from '../nativeWindows';
+import {
+  NativeDesktopSources, nativeMonitorDesktopSources, nativeWindowIdFromSourceId, unidentifiedDesktopSource,
+  type UnidentifiedNativeSource,
+} from '../nativeWindows';
 import { NativeScreenNotice, rendererFailure } from '../nativeScreen/errorDiagnostics';
 import { screenShareModule } from '../nativeScreen/screenShareModule';
 import type { IpcRegistry } from './registry';
@@ -194,12 +197,45 @@ export function windowsDesktopSources(isExcluded: (sourceId: string) => boolean)
   });
 }
 
+/** Fixed messages the native module and the identity checks throw, safe to log as they are. */
+const NATIVE_ENUMERATION_FAILURES = new Set([
+  'Cannot enumerate unambiguous monitor device identities',
+  'Cannot obtain physical monitor coordinates',
+  'Native window selection identity collision.',
+  'Native monitor selection identity collision.',
+]);
+/**
+ * Why native enumeration failed, without the raw message of an unknown error: the
+ * native module's own fixed messages and error codes, otherwise only the error's class.
+ */
+function enumerationFailureReason(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error;
+  const code = 'code' in error && typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+    ? error.code : undefined;
+  return code ?? (NATIVE_ENUMERATION_FAILURES.has(error.message) ? error.message : error.name);
+}
+
+function writeLog(logger: Pick<ClientLogger, 'write'> | undefined, level: 'WARN' | 'ERROR', message: string,
+  data: Record<string, unknown>): void {
+  try {
+    logger?.write({ timestamp: new Date().toISOString(), level, category: 'SCREEN_SHARE', message, data });
+  } catch (loggingError) {
+    console.error('[ScreenShare:Main] Could not persist screen-share log entry:', loggingError);
+  }
+}
+
 export interface DesktopSourceCatalogDeps {
   nativeSources: NativeDesktopSources;
   /** The overlay: never listed, previewed or captured. */
   isExcluded: (sourceId: string) => boolean;
   logger?: Pick<ClientLogger, 'write'>;
 }
+
+/** The sources listed, and each kind the system could not list at all, with why. */
+type SourceCollection = {
+  sources: DesktopSource[];
+  failures: { type: DesktopSource['type']; error: unknown }[];
+};
 
 /**
  * What the screen picker offers, with previews and app icons, and the capture
@@ -211,6 +247,7 @@ export class DesktopSourceCatalog {
   private thumbnails: NativeThumbnailCapturer | undefined;
   private macProvider: MacScreenProvider | undefined;
   private frozen = false;
+  private readonly reportedUnidentified = new Set<string>();
 
   constructor(private readonly deps: DesktopSourceCatalogDeps) {
     this.previews = new DesktopSourcePreviews((type, ids, signal) => this.enumerate(false, type, ids, signal));
@@ -247,6 +284,31 @@ export class DesktopSourceCatalog {
 
   async enumerate(metadataOnly: boolean, type?: DesktopSource['type'],
     sourceIds?: readonly string[], signal?: AbortSignal): Promise<DesktopSource[]> {
+    const { sources, failures } = await this.collect(metadataOnly, type, sourceIds, signal);
+    if (failures.length) throw failures[0].error;
+    return sources;
+  }
+
+  /** The picker's list: when the system cannot list one kind of source, the other stays usable. */
+  async list(metadataOnly: boolean): Promise<DesktopSourceList> {
+    const { sources, failures } = await this.collect(metadataOnly);
+    if (failures.some(failure => failure.type === 'window') && failures.some(failure => failure.type === 'screen'))
+      throw failures[0].error;
+    return { sources, failedTypes: failures.map(failure => failure.type) };
+  }
+
+  /** Each kind of unidentified source goes to the log once, not on every picker refresh. */
+  private reportUnidentified(source: UnidentifiedNativeSource): void {
+    const key = `${source.kind}:${source.reason}`;
+    if (this.reportedUnidentified.has(key)) return;
+    this.reportedUnidentified.add(key);
+    console.warn('[ScreenShare:Main] Native desktop source has no exact identity:', key);
+    writeLog(this.deps.logger, 'WARN', 'Native desktop source has no exact identity',
+      { kind: source.kind, reason: source.reason });
+  }
+
+  private async collect(metadataOnly: boolean, type?: DesktopSource['type'],
+    sourceIds?: readonly string[], signal?: AbortSignal): Promise<SourceCollection> {
     if (this.frozen || signal?.aborted)
       throw new DOMException('Desktop source enumeration was cancelled.', 'AbortError');
     const { nativeSources, isExcluded, logger } = this.deps;
@@ -254,7 +316,7 @@ export class DesktopSourceCatalog {
       const provider = this.macSources();
       let sources = (await provider.listSources({ signal })).filter(source =>
         (!type || source.type === type) && !isExcluded(source.id));
-      if (metadataOnly) return sources;
+      if (metadataOnly) return { sources, failures: [] };
       if (sourceIds) sources = sources.filter(source => sourceIds.includes(source.id));
       const icons = await resolveMacAppIcons(sources.filter(source => source.type === 'window').map(source => source.id));
       if (signal?.aborted) throw new DOMException('Desktop preview icons were cancelled.', 'AbortError');
@@ -272,43 +334,52 @@ export class DesktopSourceCatalog {
           }
         }));
       }
-      return sources;
+      return { sources, failures: [] };
     }
     if (process.platform === 'win32') {
-      let windows: ReturnType<NativeDesktopSources['listWindows']>;
-      let result: DesktopSource[];
-      try {
-        windows = type === 'screen' ? [] : nativeSources.listWindows();
-        result = windows.map(({ id, window, processAncestry }) => {
-          const occlusionEngine = browserOcclusionEngine(window.processPath);
-          return {
-            id, name: window.title, type: 'window', isOwnWindow: window.processId === process.pid,
-            processId: window.processId,
-            ...(processAncestry ? { processAncestry } : {}),
-            ...(occlusionEngine ? { occlusionEngine } : {}),
-            thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: window.isIconic ? 'unavailable' : 'pending',
-          } satisfies DesktopSource;
-        });
-        if (type !== 'window') result.push(...nativeMonitorDesktopSources(nativeSources.listMonitors()));
-      } catch (error) {
-        console.warn('[ScreenShare:Main] Native desktop source enumeration failed:', error);
+      const failures: SourceCollection['failures'] = [];
+      const listKind = <T>(kind: DesktopSource['type'],
+        read: (onUnidentified: (source: UnidentifiedNativeSource) => void) => T[]) => {
+        const unidentified: UnidentifiedNativeSource[] = [];
         try {
-          logger?.write({
-            timestamp: new Date().toISOString(), level: 'ERROR', category: 'SCREEN_SHARE',
-            message: 'Native desktop source enumeration failed',
-            data: { phase: 'native-source-identities', metadataOnly, type: type ?? 'all' },
+          const listed = read(source => unidentified.push(source));
+          unidentified.forEach(source => this.reportUnidentified(source));
+          return { listed, unidentified };
+        } catch (error) {
+          console.warn('[ScreenShare:Main] Native desktop source enumeration failed:', error);
+          writeLog(logger, 'ERROR', 'Native desktop source enumeration failed', {
+            phase: 'native-source-identities', stage: kind, reason: enumerationFailureReason(error), metadataOnly,
+            type: type ?? 'all',
           });
-        } catch (loggingError) {
-          console.error('[ScreenShare:Main] Could not persist source enumeration failure:', loggingError);
+          failures.push({ type: kind, error });
+          return { listed: [], unidentified: [] };
         }
-        throw error;
+      };
+      const windows = type === 'screen' ? { listed: [], unidentified: [] }
+        : listKind('window', onUnidentified => nativeSources.listWindows(onUnidentified));
+      let result: DesktopSource[] = windows.listed.map(({ id, window, processAncestry }) => {
+        const occlusionEngine = browserOcclusionEngine(window.processPath);
+        return {
+          id, name: window.title, type: 'window', isOwnWindow: window.processId === process.pid,
+          processId: window.processId,
+          ...(processAncestry ? { processAncestry } : {}),
+          ...(occlusionEngine ? { occlusionEngine } : {}),
+          thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: window.isIconic ? 'unavailable' : 'pending',
+        } satisfies DesktopSource;
+      });
+      result.push(...windows.unidentified.flatMap((source, index) =>
+        source.kind === 'window' ? [unidentifiedDesktopSource('window', index, source.window.title)] : []));
+      if (type !== 'window') {
+        const monitors = listKind('screen', onUnidentified => nativeSources.listMonitors(onUnidentified));
+        result.push(...nativeMonitorDesktopSources([...monitors.listed,
+          ...monitors.unidentified.flatMap(source => source.kind === 'monitor' ? [{ id: null, monitor: source.monitor }] : [])]));
       }
-      if (metadataOnly) return result;
+      if (metadataOnly) return { sources: result, failures };
       if (sourceIds) {
         const requested = new Set(sourceIds);
         result = result.filter(source => requested.has(source.id));
       }
-      const paths = new Map(windows.map(({ id, window }) => [id, window.processPath]));
+      const paths = new Map(windows.listed.map(({ id, window }) => [id, window.processPath]));
       const iconPaths = result.flatMap(source => {
         const filename = paths.get(source.id);
         return filename ? [filename] : [];
@@ -353,21 +424,21 @@ export class DesktopSourceCatalog {
       }));
       const errors = previews.filter(result => result.status === 'rejected').map(result => result.reason);
       if (errors.length) throw new AggregateError(errors, 'Native desktop preview requests failed.');
-      return result;
+      return { sources: result, failures };
     }
     const sources = (await desktopCapturer.getSources({
       types: type ? [type] : ['screen', 'window'],
       thumbnailSize: metadataOnly ? { width: 0, height: 0 } : { width: 320, height: 180 },
       fetchWindowIcons: !metadataOnly,
     })).filter(source => !isExcluded(source.id));
-    return sources.map((s) => ({
+    return { failures: [], sources: sources.map((s): DesktopSource => ({
       id: s.id,
       name: s.name,
       type: s.id.startsWith('screen:') ? 'screen' : 'window',
       thumbnailDataUrl: metadataOnly || s.thumbnail.isEmpty() ? '' : s.thumbnail.toDataURL(),
       appIconDataUrl: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null,
       thumbnailState: metadataOnly ? 'pending' : s.thumbnail.isEmpty() ? 'unavailable' : 'ready',
-    }));
+    })) };
   }
 
   /** Quitting: nothing new is listed and pending previews are dropped. */
@@ -396,13 +467,13 @@ export function registerDesktopSourcesIpc(registry: IpcRegistry, { window, catal
   registry.handle(DESKTOP_SOURCES_IPC.list, 'main', async (_event, input) => {
     const options = desktopSourcesOptionsSchema.parse(input === undefined ? {} : input);
     if (options.refresh) catalog.previews.clear();
-    const sources = await catalog.enumerate(options.metadataOnly === true);
-    return options.metadataOnly ? sources.map(source => {
+    const list = await catalog.list(options.metadataOnly === true);
+    return options.metadataOnly ? { ...list, sources: list.sources.map(source => {
       const cached = catalog.previews.cached(source.id);
       if (!cached) return source;
       return source.thumbnailState === 'unavailable' ? { ...source, appIconDataUrl: cached.appIconDataUrl }
         : { ...source, ...cached, thumbnailState: cached.thumbnailDataUrl ? 'ready' as const : 'unavailable' as const };
-    }) : sources;
+    }) } : list;
   });
   registry.handle(DESKTOP_SOURCES_IPC.previews, 'main', async (_event, input) => {
     const request = desktopSourcePreviewsRequestSchema.parse(input);

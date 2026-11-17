@@ -693,7 +693,7 @@ async function runQualitySettingsSmoke() {
           throw new Error('Picker UI must not prepare a source or capture native media.');
         },
         prepareScreenShareWindow: async () => { nativeCommands++; throw new Error('Choosing a method must not prepare its window.'); },
-        getDesktopSources: async () => { enumerations++; return enumerateSources(); },
+        getDesktopSources: async () => { enumerations++; return { sources: await enumerateSources(), failedTypes: [] }; },
         openExternal: async url => { sourceOpens.push(url); return { success: sourceOpenSuccess }; },
       };
       webRtcManager.getNativeScreenCapabilities = async () => capabilities;

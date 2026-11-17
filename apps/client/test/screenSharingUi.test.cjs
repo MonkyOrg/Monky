@@ -69,6 +69,45 @@ test('native thumbnails load progressively in bounded batches and closing cancel
   assert.equal(requests.length, 2, 'Closed pickers must not request another batch.');
 });
 
+test('a source the system could not identify is shown greyed out with its reason, and a failed list keeps the other tab', async t => {
+  const f = fixture('pt-BR');
+  t.after(() => f.close());
+  const unidentified = { id: 'unidentified-window:0', name: '', type: 'window', unidentified: true,
+    thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: 'unavailable' };
+  const requests = [];
+  f.controls.sources = async () => ({ sources: [...f.sources.filter(source => source.type === 'window'), unidentified],
+    failedTypes: ['screen'] });
+  f.controls.previews = async input => { requests.push(input); return []; };
+  await f.picker.open();
+  const panel = control(f, 'share-sources-panel');
+  control(f, 'share-tab-screen').click();
+  assert.equal(panel.querySelector('[role="alert"] p').textContent, f.i18n.t('screenShare.screensFailed'));
+  assert.ok(panel.querySelector('[data-loading-retry]'), 'The failed tab offers to try again');
+
+  control(f, 'share-tab-window').click();
+  const card = panel.querySelector('.source-item--unidentified');
+  assert.equal(panel.querySelectorAll('.source-item').length, 3, 'The working windows stay listed beside it');
+  assert.equal(card.getAttribute('aria-disabled'), 'true');
+  assert.equal(card.getAttribute('aria-label'), f.i18n.t('screenShare.untitledWindow'));
+  assert.equal(panel.querySelector(`#${card.getAttribute('aria-describedby')}`).textContent,
+    f.i18n.t('screenShare.unidentifiedWindow'));
+  card.click();
+  key(card, 'Enter');
+  card.dispatchEvent(new Event('dblclick', { bubbles: true }));
+  assert.equal(f.picker.selectedSourceId, null, 'It can never be chosen');
+  assert.equal(control(f, 'btn-share').disabled, true);
+  panel.querySelector('[data-source-id="window:101:0"]').click();
+  assert.equal(f.picker.selectedSourceId, 'window:101:0');
+  assert.equal(card.getAttribute('aria-disabled'), 'true', 'Selecting another source does not re-enable it');
+  assert.ok(requests.every(request => !request.sourceIds.includes(unidentified.id)), 'No preview is requested for it');
+
+  f.controls.sources = async () => f.sources;
+  control(f, 'share-tab-screen').click();
+  panel.querySelector('[data-loading-retry]').click();
+  await flush();
+  assert.ok(panel.querySelector(`[data-source-id="${MONITOR_SOURCE_ID}"]`), 'Trying again lists the screens once readable');
+});
+
 for (const language of ['pt-BR', 'en']) {
   test(`minimized sources gain icons without presenting a cached image as a current preview (${language})`, async t => {
     const f = fixture(language);

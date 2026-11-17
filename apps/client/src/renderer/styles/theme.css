@@ -12593,6 +12593,27 @@ button.member-live-badge:focus-visible {
   font-weight: 500;
 }
 
+/* A fonte que o sistema nao identificou com seguranca: aparece para o usuario
+   saber que ela existe e por que nao da para compartilhar, mas nunca e escolhida. */
+.source-item--unidentified,
+.source-item--unidentified:hover {
+  cursor: not-allowed;
+  border-style: dashed;
+  border-color: var(--border-color);
+  opacity: 0.7;
+}
+
+.source-item--unidentified .source-thumbnail--minimized .material-symbols-outlined {
+  color: var(--warning);
+}
+
+.source-unidentified-reason {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
 .source-name {
   font-size: 12px;
   font-weight: 500;

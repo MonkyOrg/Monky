@@ -39,7 +39,7 @@ async function runScreenAudienceSmoke() {
   window.api = {
     platform: 'win32',
     nativeScreenCommand: deny,
-    getDesktopSources: async () => [{ id: 'window:1', type: 'window', name: 'Owned fixture', thumbnailDataUrl: '', appIconDataUrl: null }],
+    getDesktopSources: async () => ({ sources: [{ id: 'window:1', type: 'window', name: 'Owned fixture', thumbnailDataUrl: '', appIconDataUrl: null }], failedTypes: [] }),
     getDesktopSourcePreviews: async () => [],
   };
   let picker, overlay, preview = '', previewScroll = 0;

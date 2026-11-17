@@ -425,7 +425,7 @@ export function createWebPlatformApi(): PlatformApi {
     // remote screens play in the browser receiver, never in a native presentation.
     ...new WebScreenRuntime().api(),
     attachNativeScreenPresentation: unsupported('Native screen presentation'),
-    getDesktopSources: () => Promise.resolve([]),
+    getDesktopSources: () => Promise.resolve({ sources: [], failedTypes: [] }),
     getDesktopSourcePreviews: () => Promise.resolve([]),
     cancelDesktopSourcePreviews: done,
     prepareScreenShareWindow: () => Promise.resolve(false),
