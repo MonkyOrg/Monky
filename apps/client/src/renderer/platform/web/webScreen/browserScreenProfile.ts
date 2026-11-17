@@ -15,6 +15,16 @@ const measured = (value: number | undefined): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
 
 /**
+ * How much a `width`×`height` picture shrinks to fit `box` turned to the picture's own orientation, never
+ * enlarging it: long side against long side, short against short. A quality is a size, not a landscape
+ * frame; fitting an upright phone into 852×480 as drawn left it 220 pixels wide.
+ */
+function orientedFitScale(width: number, height: number, box: Readonly<{ width: number; height: number }>): number {
+  return Math.min(1, Math.max(box.width, box.height) / Math.max(width, height),
+    Math.min(box.width, box.height) / Math.min(width, height));
+}
+
+/**
  * The largest rendition a browser capture announces (#858): the chosen quality, shrunk to the captured
  * surface without changing its shape and never enlarged, so viewers never ask for pixels nobody captured.
  */
@@ -24,7 +34,7 @@ export function browserScreenProfile(
   const limit = nativeScreenVideoProfileSchema.parse(requested);
   const width = measured(captured.width) ?? limit.width;
   const height = measured(captured.height) ?? limit.height;
-  const scale = Math.min(1, limit.width / width, limit.height / height);
+  const scale = orientedFitScale(width, height, limit);
   const frameRate = measured(captured.frameRate);
   return getScreenShareProfile(nativeScreenVideoProfileSchema.parse({
     width: Math.max(4, Math.floor(width * scale / 4) * 4),
@@ -75,12 +85,14 @@ export function browserSourceProfile(
 /**
  * How much the encoder shrinks a rendition's copy of the capture. Browsers resize the copy to the rendition
  * through `applyConstraints`, but Safari ignores it and would encode the whole capture, beyond its level; the
- * encoder then scales the copy down to the rendition itself.
+ * encoder then scales the copy down to the rendition itself. The rendition holds the capture in either
+ * orientation, so a phone turned sideways keeps the same scale instead of shrinking its picture twice over.
  */
 export function encoderScaleDown(captured: CapturedVideoSettings, profile: Readonly<NativeScreenVideoProfile>): number {
   const width = measured(captured.width);
   const height = measured(captured.height);
-  return width === null || height === null ? 1 : Math.max(1, width / profile.width, height / profile.height);
+  return width === null || height === null ? 1 : Math.max(1, Math.max(width, height) / Math.max(profile.width, profile.height),
+    Math.min(width, height) / Math.min(profile.width, profile.height));
 }
 
 /** The codec entries of `RTCRtpSender.getCapabilities()` this module reads. */

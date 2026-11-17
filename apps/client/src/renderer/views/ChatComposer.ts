@@ -74,6 +74,9 @@ export function renderChatComposer({ kind, placeholder, maxLength }: ChatCompose
               <button type="button" role="menuitem" data-chat-create="poll">
                 <span class="material-symbols-outlined md-20">poll</span><span>${t('poll.create')}</span>
               </button>
+              <button type="button" role="menuitem" data-chat-create="format" class="chat-create-format">
+                <span class="material-symbols-outlined md-20">format_size</span><span>${t('chat.formatting')}</span>
+              </button>
             </div>` : ''}</div>
             <input id="chat-file-input" type="file" multiple style="display: none;">
             <button id="btn-emoji" type="button" class="chat-attach-btn" title="${t(channel ? 'chat.emojiPickerTitle' : 'chat.emojiAction')}"
@@ -92,6 +95,20 @@ export function renderChatComposer({ kind, placeholder, maxLength }: ChatCompose
             </button>
           </div>
           </div>`;
+}
+
+/** Share of the limit from which the compact layout reveals the counter. */
+const COUNTER_NEAR_LIMIT = 0.9;
+
+/**
+ * Writes the character counter of channels and direct messages. A limit of 0
+ * means unlimited. The compact layout shows the counter only near the limit.
+ */
+export function setComposerCounter(counter: HTMLElement | null, length: number, limit: number): void {
+  if (!counter) return;
+  counter.textContent = `${length}/${limit > 0 ? limit : '∞'}`;
+  counter.classList.toggle('code-char-count--over', limit > 0 && length > limit);
+  counter.toggleAttribute('data-near-limit', limit > 0 && length >= limit * COUNTER_NEAR_LIMIT);
 }
 
 /**

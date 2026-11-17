@@ -86,7 +86,7 @@ function fixture(t: TestContext) {
   });
   t.mock.method(videoService, 'getCameraStream', () => current);
   t.mock.method(videoService, 'getCameraState', (): CameraState => ({
-    status: current ? 'ready' : 'idle', stream: current, publishing: announced, error: null,
+    status: current ? 'ready' : 'idle', stream: current, publishing: announced, error: null, canSwitchFacing: false,
   }));
 
   const published: Array<MediaStreamTrack | null> = [];

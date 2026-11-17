@@ -1,4 +1,4 @@
-import { t } from '../i18n';
+import { t, tTouch } from '../i18n';
 import { replaceModalStep } from '../utils/modalSteps';
 import { settingsStore } from '../stores/settingsStore';
 import type { TutorialDefinition } from '../tutorials/TutorialDefinition';
@@ -207,7 +207,7 @@ export class OnboardingWizard {
           <span class="onboarding-pointer-icon material-symbols-outlined" aria-hidden="true">group</span>
           <div>
             <strong>${t('onboarding.pointerFriendsTitle')}</strong>
-            <span>${t('onboarding.pointerFriendsDesc')}</span>
+            <span>${tTouch('onboarding.pointerFriendsDesc')}</span>
           </div>
         </li>
       </ul>
@@ -225,7 +225,7 @@ export class OnboardingWizard {
 
   private renderChoose(): string {
     return this.card(`
-      ${this.heading('add_circle', t('onboarding.chooseTitle'), t('onboarding.chooseSubtitle'))}
+      ${this.heading('add_circle', t('onboarding.chooseTitle'), tTouch('onboarding.chooseSubtitle'))}
       ${this.renderStepDots(1)}
       ${renderOnboardingShot('add-server-choice', t('onboarding.choiceShotAlt'))}
       <div class="onboarding-options">

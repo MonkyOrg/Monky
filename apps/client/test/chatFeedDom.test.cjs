@@ -822,10 +822,12 @@ async function setupFixture() {
     },
     // A spot of the feed that takes no focus: its padding beside the messages.
     // After a click there the focus is on the body, and keys scroll this feed.
+    // Rows reach into that padding, so the spot is halfway to their left edge.
     quietPoint: (view) => {
       const element = views[view].feed();
       const box = element.getBoundingClientRect();
-      const x = Math.round(box.left + 6);
+      const rowLeft = element.querySelector('.chat-message-row')?.getBoundingClientRect().left ?? box.left + 4;
+      const x = Math.floor((box.left + rowLeft) / 2);
       for (let y = Math.round(box.top + box.height / 2); y < box.bottom - 4; y += 4) {
         if (document.elementFromPoint(x, y) === element) return { x, y };
       }

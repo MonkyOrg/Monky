@@ -1,7 +1,7 @@
 import { LIMITS, MAX_SERVER_INVITE_LENGTH, normalizeNickname, parseServerInviteLink, type VoiceMode } from '@monky/shared';
 import { connectionStore, type CreatedServer, type SavedServer } from '../../stores/connectionStore';
 import { settingsStore } from '../../stores/settingsStore';
-import { t } from '../../i18n';
+import { t, tTouch } from '../../i18n';
 import { escapeHtml } from '../../utils/html';
 import { nicknameError } from '../../utils/nickname';
 import { openModal, type ModalShell } from '../../utils/modalShell';
@@ -337,7 +337,7 @@ class AddServerModal {
             </button>
           </div>
         `).join('') : `
-          <div class="add-server-lan-empty">${t('connection.scanHint', { button: t('connection.scan') })}</div>
+          <div class="add-server-lan-empty">${tTouch('connection.scanHint', { button: t('connection.scan') })}</div>
         `}
       </section>
     `;

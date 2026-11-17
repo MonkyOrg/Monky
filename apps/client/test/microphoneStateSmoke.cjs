@@ -110,7 +110,19 @@ async function runMicrophoneStateSmoke() {
     settings.inputMode = 'voice_activity';
     appEvents.emit('settings.updated');
     voice.setChannel('microphone-state-fixture');
-    await audio.startMicrophone();
+    // iOS leaves resume() pending until a touch; a reconnect has none, and the call waits for this microphone.
+    // Safari has no MediaStreamTrackProcessor, so its microphone goes through the Web Audio chain.
+    const resume = AudioContext.prototype.resume;
+    const processor = window.MediaStreamTrackProcessor;
+    AudioContext.prototype.resume = () => new Promise(() => {});
+    window.MediaStreamTrackProcessor = undefined;
+    try {
+      check(await Promise.race([audio.startMicrophone().then(() => true), delay(2000).then(() => false)]),
+        'a microphone opened without a user gesture does not wait for the browser to allow audio');
+    } finally {
+      AudioContext.prototype.resume = resume;
+      window.MediaStreamTrackProcessor = processor;
+    }
     state(true, false, 'voice activation opens live tracks even in silence');
     const before = notifications;
     audio.applyTrackEnabled();

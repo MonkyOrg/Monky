@@ -1,6 +1,7 @@
 import { appEvents } from '../core/EventBus';
 import { ptBR } from './locales/pt-BR';
 import { en } from './locales/en';
+import { TOUCH_POINTER_QUERY } from '../utils/viewport';
 
 /**
  * Minimal i18n layer for the renderer (#16).
@@ -140,6 +141,20 @@ export function t(key: TranslationKey, params?: Record<string, string | number>)
   return template.replace(/\{(\w+)\}/g, (match, name: string) =>
     params[name] !== undefined ? String(params[name]) : match
   );
+}
+
+/** Keys that have a `…Touch` wording for screens without a mouse. */
+export type TouchTranslationKey = {
+  [K in TranslationKey]: `${K}Touch` extends TranslationKey ? K : never;
+}[TranslationKey];
+
+/**
+ * Like `t`, but on touch screens picks the `<key>Touch` variant, which says
+ * "tap" instead of "click" and drops hover and right-click hints.
+ */
+export function tTouch(key: TouchTranslationKey, params?: Record<string, string | number>): string {
+  const touch = typeof matchMedia === 'function' && matchMedia(TOUCH_POINTER_QUERY).matches;
+  return t(touch ? `${key}Touch` : key, params);
 }
 
 /**

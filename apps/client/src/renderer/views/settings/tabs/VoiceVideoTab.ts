@@ -1,5 +1,5 @@
 import { settingsStore } from '../../../stores/settingsStore';
-import { t } from '../../../i18n';
+import { t, tTouch } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { setSurfaceVisible } from '../../../utils/surfaceVisibility';
 import { bindPttIndicators, renderPttIndicator } from '../../PttIndicator';
@@ -220,8 +220,8 @@ export class VoiceVideoTab {
             ? audioDeviceError(state.error) : t('settings.microphoneTestFailed');
         } else if (state.status === 'starting') testStatus.textContent = t('settings.microphoneTestStarting');
         else if (state.status === 'playing') testStatus.textContent = t('settings.microphoneTestPlaying');
-        else if (state.reason === 'device-changed') testStatus.textContent = t('settings.microphoneTestDeviceChanged');
-        else if (state.reason === 'disconnected') testStatus.textContent = t('settings.microphoneTestDisconnected');
+        else if (state.reason === 'device-changed') testStatus.textContent = tTouch('settings.microphoneTestDeviceChanged');
+        else if (state.reason === 'disconnected') testStatus.textContent = tTouch('settings.microphoneTestDisconnected');
         else testStatus.textContent = '';
       });
       this.microphoneTest = microphoneTest;

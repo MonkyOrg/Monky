@@ -10,7 +10,7 @@ import { sessionManager } from '../core/SessionManager';
 import { favoritesStore, soundFavoriteKey } from '../stores/favoritesStore';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
-import { t, tCount } from '../i18n';
+import { t, tCount, tTouch } from '../i18n';
 import { mediaFolderLabel, mediaSourceButton, picksMediaFolder } from '../platform/mediaFolders';
 import { showAlert, showConfirm, showConfirmWithText } from './Dialog';
 import { SoundboardPlayersBar } from './SoundboardPlayersBar';
@@ -185,7 +185,7 @@ export class SoundboardModal {
         <!-- Footer -->
         <div class="modal-footer" style="padding: 12px 20px; border-top: 1px solid var(--border-color); background: var(--bg-card);">
           <div style="font-size: 11px; color: var(--text-muted); flex: 1;">
-            ${t('soundboard.footerHint')}
+            ${tTouch('soundboard.footerHint')}
           </div>
           <button type="button" id="sb-btn-close" class="btn btn-secondary" style="padding: 6px 16px; font-size: 12px;">${t('common.close')}</button>
         </div>

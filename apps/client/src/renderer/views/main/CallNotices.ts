@@ -12,6 +12,8 @@ import { chooseSharesToStop, screenShareChooser, stopChosenShares } from '../Scr
 import type { BotScreenDock } from '../BotScreenDock';
 import { showAlert } from '../Dialog';
 import { t, tCount } from '../../i18n';
+import { COMPACT_VIEWPORT_QUERY } from '../../utils/viewport';
+import { WatchedScreenMini } from './WatchedScreenMini';
 
 export interface CallNoticesHost {
   /** The layout the notices are drawn in. */
@@ -34,6 +36,9 @@ export class CallNotices {
   // 'participants.updated' events don't rebuild it on every speaking change,
   // which would flicker the button and drop its listener (#282).
   private signature: string | null = null;
+  private readonly compact = window.matchMedia(COMPACT_VIEWPORT_QUERY);
+  private mini: WatchedScreenMini | null = null;
+  private miniLayout: HTMLElement | null = null;
 
   constructor(private readonly host: CallNoticesHost) {}
 
@@ -61,7 +66,14 @@ export class CallNotices {
       appEvents.on('voice.screen_watch_changed', () => this.updateScreenShare()),
       appEvents.on('game_share.live_changed', () => this.updateScreenShare()),
     ];
-    return () => unbind.forEach(off => off());
+    const compact = () => this.updateScreenShare();
+    this.compact.addEventListener('change', compact);
+    return () => {
+      unbind.forEach(off => off());
+      this.compact.removeEventListener('change', compact);
+      this.mini?.destroy();
+      this.mini = null;
+    };
   }
 
   /**
@@ -93,6 +105,38 @@ export class CallNotices {
     });
   }
 
+  private stopWatching(): void {
+    for (const [sessionId, shareIds] of voiceStore.getScreenWatchers()) {
+      for (const shareId of shareIds) webRtcManager.setRemoteScreenWatching(sessionId, shareId, false);
+    }
+    this.updateScreenShare();
+  }
+
+  /** Whether the watched screen is floating; when it can't, the notice row stays the way to stop. */
+  private syncMini(screen: { sessionId: string; shareId: string } | null): boolean {
+    const layout = this.host.root.querySelector<HTMLElement>('.main-layout');
+    const session = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
+    const participant = screen && session?.participants.get(screen.sessionId);
+    if (!layout || !screen || !session || !participant) {
+      this.mini?.destroy();
+      return false;
+    }
+    if (!this.mini || this.miniLayout !== layout) {
+      this.mini?.destroy();
+      this.miniLayout = layout;
+      this.mini = new WatchedScreenMini({
+        layout,
+        openStage: () => this.host.openVoiceStage(),
+        stopWatching: () => this.stopWatching(),
+      });
+    }
+    const stream = screen.shareId === 'legacy'
+      ? participant.remoteScreenStreams.values().next().value
+      : participant.remoteScreenStreams.get(screen.shareId);
+    this.mini.sync({ stream: stream ?? null, name: session.participants.displayName(participant) });
+    return true;
+  }
+
   /**
    * Sidebar notice shown while someone in the call is sharing their screen and
    * the user is looking at a text channel instead of the stage (#282). With a
@@ -113,17 +157,20 @@ export class CallNotices {
       .filter((screen) => !this.host.botScreenDock()?.isWatching(screen.id)
         && !voice.session.botScreenStore.isInvitationDismissed(screen.id)) : [];
     const loadFailed = voice?.session.botScreenStore.loadFailed ?? false;
+    // On a phone the watched screen floats over the conversation instead of taking a row.
+    const floating = this.syncMini(this.compact.matches && watchedScreens.length > 0 && this.host.contentView() !== 'stage'
+      ? watchedScreens[0] : null);
     // The count re-renders the stop button when a second screen turns it into a menu.
     const selfShareCount = isSelfSharing ? voiceStore.screenShareIds.length : 0;
     const signature = JSON.stringify([
-      this.host.contentView(), isSelfSharing, selfShareCount, watchedScreens, sharers, voice?.session.key, voice?.channelId,
+      this.host.contentView(), isSelfSharing, selfShareCount, floating ? [] : watchedScreens, sharers, voice?.session.key, voice?.channelId,
       screens.map((screen) => [screen.id, screen.instanceId, screen.title]), loadFailed,
     ]);
     if (signature === this.signature) return;
     this.signature = signature;
 
     if ((this.host.contentView() === 'stage'
-      || (watchedScreens.length === 0 && sharers.length === 0 && !isSelfSharing))
+      || ((watchedScreens.length === 0 || floating) && sharers.length === 0 && !isSelfSharing))
       && screens.length === 0 && !loadFailed) {
       slot.innerHTML = '';
       return;
@@ -143,7 +190,7 @@ export class CallNotices {
       `);
     }
 
-    if (watchedScreens.length > 0 && this.host.contentView() !== 'stage') {
+    if (watchedScreens.length > 0 && !floating && this.host.contentView() !== 'stage') {
       parts.push(`
         <div class="screenshare-notice screenshare-notice--self screenshare-notice--stacked">
           <span class="material-symbols-outlined md-16 screenshare-notice-icon">visibility</span>
@@ -235,12 +282,7 @@ export class CallNotices {
 
     this.host.root.querySelector<HTMLElement>('#screenshare-viewer-stage-btn')?.addEventListener('click', () => this.host.openVoiceStage());
 
-    this.host.root.querySelector<HTMLElement>('#screenshare-viewer-stop-btn')?.addEventListener('click', () => {
-      for (const [sessionId, shareIds] of voiceStore.getScreenWatchers()) {
-        for (const shareId of shareIds) webRtcManager.setRemoteScreenWatching(sessionId, shareId, false);
-      }
-      this.updateScreenShare();
-    });
+    this.host.root.querySelector<HTMLElement>('#screenshare-viewer-stop-btn')?.addEventListener('click', () => this.stopWatching());
 
     // Watch remote sharer handler
     if (sharers.length > 0) {

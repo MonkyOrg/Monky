@@ -2,7 +2,7 @@ import type { ReleaseHistoryEntry, ReleaseNotesResult } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import { getLanguage, t, tCount, type TranslationKey } from '../i18n';
 import { CLIENT_NOTE_GROUPS, parseClientReleaseNotes, type ClientNoteGroup, type ClientReleaseNotes } from '../utils/clientReleaseNotes';
-import { escapeHtml } from '../utils/html';
+import { escapeHtml, htmlFragment } from '../utils/html';
 import { openModal, type ModalShell } from '../utils/modalShell';
 import { openExternalUrl } from '../utils/feedback';
 import { animateEnter } from '../utils/surfaceMotion';
@@ -366,9 +366,8 @@ export class ChangelogModal {
       this.historyEl.hidden = false;
       this.historyEl.innerHTML = `<h3 class="changelog-history-heading">${escapeHtml(t('changelog.olderVersions'))}</h3>`;
     }
-    const template = document.createElement('template');
-    template.innerHTML = releases.map((release) => this.renderRelease(release)).join('');
-    for (const section of Array.from(template.content.children)) {
+    const fragment = htmlFragment(releases.map((release) => this.renderRelease(release)).join(''));
+    for (const section of Array.from(fragment.children)) {
       this.historyEl.appendChild(section);
       if (section instanceof HTMLElement) animateEnter(section, 'view');
     }

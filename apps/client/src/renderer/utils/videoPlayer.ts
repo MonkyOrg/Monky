@@ -1,5 +1,7 @@
 import { t } from '../i18n';
 import { playChatMedia, routeChatMedia } from '../core/ChatMediaOutput';
+import { reportError } from './feedback';
+import { toggleFullscreen } from './fullscreen';
 
 export function formatMediaTime(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
@@ -243,11 +245,7 @@ export function initializeCustomMediaPlayers(root: ParentNode): void {
       e.preventDefault();
       e.stopPropagation();
       try {
-        if (document.fullscreenElement === player) {
-          await document.exitFullscreen();
-        } else {
-          await player.requestFullscreen();
-        }
+        if (!await toggleFullscreen(player, video)) reportError(t('common.fullscreenUnavailable'));
       } catch (err) {
         console.warn('[VideoPlayer] Unable to toggle video fullscreen:', err);
       }

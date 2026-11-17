@@ -108,8 +108,8 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
     if (name === '@monky/shared') return shared;
     if (name === 'mediasoup-client') return { Device };
     if (modules.has(name)) return modules.get(name);
-    assert.match(name, /^\.\/(?:BrowserScreenP2p|BrowserScreenSfu|BrowserScreenSubscription|browserScreenCodecs)$/);
-    const filename = path.join(root, name.slice(2) + '.ts');
+    assert.match(name, /^(?:\.\/(?:BrowserScreenP2p|BrowserScreenSfu|BrowserScreenSubscription|browserScreenCodecs)|\.\.\/\.\.\/platform\/web\/webScreen\/screenSdp)$/);
+    const filename = path.resolve(root, name + '.ts');
     const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
     }).outputText;
@@ -378,6 +378,21 @@ test('unpublished browser media retains its high-water version and cannot be rev
   await f.sub.receive(f.control({ type: 'unpublish', kind: 'video', shareId: f.source.shareId,
     publicationId: 1, publicationVersion: 1 }));
   assert.equal(replacement.readyState, 'live');
+  assert.equal(audio.enabled, true);
+});
+
+test('a received track is matched by the id its SDP announces, not the id WebKit gives it', async t => {
+  const f = fixture(t);
+  await f.open();
+  await f.sub.receive(f.publication('video'));
+  await f.sub.receive(f.publication('audio'));
+  const msid = `a=msid:${f.source.instanceId}`;
+  await f.turn(1, ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 98', 'a=mid:0', `${msid} video-track`,
+    'm=audio 9 UDP/TLS/RTP/SAVPF 111', 'a=mid:1', `${msid} audio-track`, ''].join('\r\n'));
+  const video = f.peers[0].track('video', 'webkit-own-video-id', '0', [f.source.instanceId]).track;
+  const audio = f.peers[0].track('audio', 'webkit-own-audio-id', '1', [f.source.instanceId]).track;
+  assert.deepEqual(f.admitted, [video, audio]);
+  assert.equal(video.enabled, true);
   assert.equal(audio.enabled, true);
 });
 

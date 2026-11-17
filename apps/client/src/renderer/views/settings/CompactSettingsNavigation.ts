@@ -2,7 +2,7 @@ import { t } from '../../i18n';
 import { html } from '../../utils/html';
 import { cancelCompactPageTransition, cancelSurfaceMotion, transitionCompactPage } from '../../utils/surfaceMotion';
 import { revealWithin } from '../../utils/scroll';
-import { COMPACT_VIEWPORT_QUERY } from '../../utils/viewport';
+import { COMPACT_VIEWPORT_QUERY, PHONE_LANDSCAPE_QUERY } from '../../utils/viewport';
 
 export interface CompactSettingsOptions {
   initialDetail?: boolean;
@@ -11,9 +11,13 @@ export interface CompactSettingsOptions {
 
 let nextIndexId = 0;
 
-/** Mobile settings are a category index and a detail page, not a row of desktop tabs. */
+/**
+ * Mobile settings are a category index and a detail page, not a row of desktop tabs.
+ * A phone on its side has the width for both, so it shows them side by side again.
+ */
 export class CompactSettingsNavigation {
   private readonly compact = window.matchMedia(COMPACT_VIEWPORT_QUERY);
+  private readonly landscape = window.matchMedia(PHONE_LANDSCAPE_QUERY);
   private readonly lifetime = new AbortController();
   private readonly header = document.createElement('div');
   private readonly back = document.createElement('button');
@@ -53,12 +57,13 @@ export class CompactSettingsNavigation {
     this.back.addEventListener('click', () => this.goBack(), { signal });
     root.addEventListener('click', event => {
       const tab = event.target instanceof Element ? event.target.closest('.settings-tab-btn') : null;
-      if (tab && sidebar.contains(tab) && this.compact.matches) {
-        this.showDetail(true, tab.classList.contains('active'));
-      }
+      if (!tab || !sidebar.contains(tab)) return;
+      // Side by side, the choice still counts: turning the phone upright opens that page.
+      if (this.paged) this.showDetail(true, tab.classList.contains('active'));
+      else if (this.compact.matches) this.detail = true;
     }, { capture: true, signal });
     root.addEventListener('keydown', event => {
-      if (!this.compact.matches || this.detail || !['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+      if (!this.paged || this.detail || !['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
       const index = this.tabs.findIndex(({ button }) => button === event.target);
       if (index < 0) return;
       event.preventDefault();
@@ -71,35 +76,43 @@ export class CompactSettingsNavigation {
         revealWithin(this.sidebar, target);
       }
     }, { capture: true, signal });
-    this.compact.addEventListener('change', () => {
+    const layoutChanged = (): void => {
       cancelCompactPageTransition(this.card);
       this.apply();
       options.onPageVisibilityChanged?.(this.visible);
-    }, { signal });
+    };
+    this.compact.addEventListener('change', layoutChanged, { signal });
+    this.landscape.addEventListener('change', layoutChanged, { signal });
     this.apply();
   }
 
+  /** One page at a time: the index, then the chosen category. */
+  private get paged(): boolean {
+    return this.compact.matches && !this.landscape.matches;
+  }
+
   public get visible(): boolean {
-    return !this.compact.matches || this.detail;
+    return !this.paged || this.detail;
   }
 
   private apply(): void {
     cancelSurfaceMotion(this.main);
-    this.sidebar.hidden = this.compact.matches && this.detail;
+    this.sidebar.hidden = this.paged && this.detail;
     this.sidebar.inert = this.sidebar.hidden;
     this.main.hidden = !this.visible;
     this.main.inert = !this.visible;
-    this.header.hidden = !this.compact.matches || this.detail;
+    this.header.hidden = !this.paged || this.detail;
+    this.back.hidden = !this.paged;
     this.card.dataset.settingsScreen = this.detail ? 'detail' : 'index';
     const label = this.header.querySelector('h2')!.id;
-    if (this.compact.matches && !this.detail) this.card.setAttribute('aria-labelledby', label);
+    if (this.paged && !this.detail) this.card.setAttribute('aria-labelledby', label);
     else if (this.labelledBy) this.card.setAttribute('aria-labelledby', this.labelledBy);
     this.tabs.forEach(({ button, tabIndex }) => {
-      if (this.compact.matches) button.tabIndex = 0;
+      if (this.paged) button.tabIndex = 0;
       else if (tabIndex === null) button.removeAttribute('tabindex');
       else button.setAttribute('tabindex', tabIndex);
     });
-    if (this.compact.matches && document.activeElement instanceof HTMLElement && document.activeElement.closest('[inert]')) {
+    if (this.paged && document.activeElement instanceof HTMLElement && document.activeElement.closest('[inert]')) {
       (this.detail ? this.back : this.tabs.find(({ button }) => button.classList.contains('active'))?.button)
         ?.focus({ preventScroll: true });
     }
@@ -112,14 +125,14 @@ export class CompactSettingsNavigation {
     const reveal = () => {
       this.apply();
       this.onReveal();
-      if (focus && this.compact.matches) this.back.focus({ preventScroll: true });
+      if (focus && this.paged) this.back.focus({ preventScroll: true });
     };
-    if (changed) transitionCompactPage(this.card, reveal, 1);
+    if (changed && this.paged) transitionCompactPage(this.card, reveal, 1);
     else reveal();
   }
 
   public goBack(): boolean {
-    if (!this.compact.matches || !this.detail || !this.tabs.length) return false;
+    if (!this.paged || !this.detail || !this.tabs.length) return false;
     this.detail = false;
     this.options.onPageVisibilityChanged?.(false);
     transitionCompactPage(this.card, () => {

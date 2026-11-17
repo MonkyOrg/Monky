@@ -64,8 +64,13 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   :root .input-mode-card-title { font-size: 15px; }
   :root .input-mode-card-description { font-size: 13px; }
 
+  /* iOS scrolls the page to the focused field before the keyboard resize
+     arrives, and keeps that offset: the padding puts the app back inside the
+     visible viewport instead of leaving it raised over an empty gap. */
   :root body {
-    height: var(--viewport-height, 100dvh);
+    box-sizing: border-box;
+    height: calc(var(--viewport-top, 0px) + var(--viewport-height, 100dvh));
+    padding-top: var(--viewport-top, 0px);
     -webkit-tap-highlight-color: transparent;
   }
 
@@ -76,7 +81,10 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   }
 
   :root .main-layout[data-compact] {
+    --compact-header-height: 64px;
     --compact-search-height: 56px;
+    /* Room the header leaves for the toolbar over its end: search and members, or members alone. */
+    --compact-header-tools: 96px;
     display: grid;
     grid-template-columns: var(--compact-rail-width, 64px) minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto;
@@ -90,8 +98,9 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     grid-area: 1 / 1 / 2 / -1;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     align-self: start;
-    height: 64px;
+    height: var(--compact-header-height);
     padding: 0 4px;
     pointer-events: none;
     z-index: 90;
@@ -114,23 +123,16 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     font-size: 24px;
   }
 
-  :root .compact-navigation [data-compact-toggle="members"] {
-    margin-left: auto;
+  /* Back starts the bar and the rest packs at its end, whichever of them is shown. */
+  :root .compact-navigation .compact-back-button {
+    margin-right: auto;
   }
 
-  :root .compact-search-button {
-    margin-left: auto;
+  :root .main-layout[data-compact]:is([data-compact-stage]:not([data-compact-chat-beside]), :not(:has(.message-search-launch))) {
+    --compact-header-tools: 52px;
   }
 
-  :root .compact-search-button + [data-compact-toggle="members"] {
-    margin-left: 0;
-  }
-
-  :root [data-compact-stage] .compact-navigation [data-compact-toggle="members"] {
-    margin-left: auto;
-  }
-
-  :root .main-layout[data-compact-stage] .compact-search-button,
+  :root .main-layout[data-compact-stage]:not([data-compact-chat-beside]) .compact-search-button,
   :root .main-layout:not(:has(.message-search-launch)) .compact-search-button,
   :root [data-compact-panel="members"] .compact-search-button,
   :root [data-compact-panel="members"] [data-compact-toggle="members"] {
@@ -212,24 +214,168 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     display: block;
   }
 
+  /* One card: the voice strip (call, camera, leave) above the user row
+     (profile, microphone, headphones, settings). The voice row and the media
+     bar dissolve into the card's grid so their buttons keep their owners. */
   :root .compact-footer > .user-control-bar {
+    --compact-strip-bg: color-mix(in srgb, var(--success) 10%, var(--bg-sidebar));
+    --compact-strip-border: color-mix(in srgb, var(--success) 28%, var(--bg-sidebar));
     width: auto;
-    margin: 8px;
-    border-radius: 16px;
+    margin: 6px 8px 8px;
+    border-radius: 14px;
     border: 1px solid var(--border-color);
     box-shadow: none;
-    padding: 6px 8px;
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    background: var(--bg-sidebar);
   }
 
-  :root .compact-footer .user-media-bar,
-  :root .compact-footer .user-quick-actions > :not(#bar-btn-settings),
-  :root [data-compact-panel="content"] .compact-footer .user-control-main {
+  :root .compact-footer > .user-control-bar > * {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+
+  :root .compact-footer > .user-control-bar > :is(div[id$="-slot"]:not(:empty), .sb-notice-slot:not(:empty)) {
+    margin: 6px 6px 0;
+  }
+
+  :root .compact-footer :is(#voice-connection-row-slot, .voice-connection-row, .user-media-bar) {
+    display: contents;
+  }
+
+  :root .compact-footer :is(#media-btn-screen, #media-btn-soundboard, .noise-control-group, .audio-device-trigger, #bar-btn-disconnect),
+  :root .compact-footer .user-control-bar:not(:has(#voice-connection-row)) .camera-control-group {
     display: none;
   }
 
+  :root .compact-footer :is(.voice-conn-info, .camera-control-group, .voice-conn-actions) {
+    grid-row: auto;
+    order: 1;
+    min-height: 44px;
+    margin: 0;
+    border-radius: 0;
+    background: var(--compact-strip-bg);
+    border-bottom: 1px solid var(--compact-strip-border);
+  }
+
+  :root .compact-footer .voice-conn-info {
+    grid-column: 1;
+    padding: 0 6px 0 12px;
+    gap: 10px;
+  }
+
+  :root .compact-footer .camera-control-group {
+    grid-column: 2;
+    order: 2;
+  }
+
+  :root .compact-footer .voice-conn-actions {
+    grid-column: 3;
+    order: 3;
+    padding-right: 4px;
+  }
+
   :root .compact-footer .user-control-main {
-    min-height: 48px;
+    order: 4;
+    min-height: 52px;
+    padding: 0 4px 0 8px;
     flex-wrap: nowrap;
+  }
+
+  :root .compact-footer .voice-conn-signal { color: var(--success); }
+
+  /* The strip reads "channel / server · ping"; "Voice connected" only shows while it is not. */
+  :root .compact-footer .voice-connection-row:not(.connecting, .reconnecting) .voice-conn-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  :root .compact-footer .voice-conn-channel {
+    font-size: 14px;
+    font-weight: 650;
+    color: var(--text-primary);
+  }
+
+  :root .compact-footer .voice-conn-server,
+  :root .compact-footer .voice-conn-ping {
+    font-size: 12px;
+  }
+
+  :root .compact-footer :is(#media-btn-camera, .voice-conn-leave, .user-quick-actions .btn-icon) {
+    flex: 0 0 auto;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+  }
+
+  :root .compact-footer #media-btn-camera:not(.active) {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-secondary);
+  }
+
+  /* On the call strip the camera and leave are icons on the strip, not the
+     desktop's carded split control (footerControls.css comes later, hence the weight).
+     Live, the camera reads like a muted microphone beside it: a red icon, no key or glow. */
+  :root .compact-footer .user-control-bar .user-media-bar .audio-control-group.camera-control-group,
+  :root .compact-footer .user-control-bar .user-media-bar .audio-control-group.camera-control-group:has(> .broadcasting-pulse) {
+    --split-control-background: var(--compact-strip-bg);
+    --split-control-radius: 0;
+    height: auto;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  :root .compact-footer .user-control-bar .camera-control-group > #media-btn-camera.broadcasting-pulse {
+    background-color: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none;
+    color: var(--danger) !important;
+  }
+
+  :root .compact-footer .voice-conn-leave:not(:hover) {
+    background: transparent;
+    border-color: transparent;
+  }
+
+  /* Over a channel's content only the strip stays, with the controls a talking user reaches for. */
+  :root .main-layout:not([data-compact-split])[data-compact-panel="content"] .compact-footer :is(.user-profile-summary, #bar-btn-settings, .camera-control-group) {
+    display: none;
+  }
+
+  :root .main-layout:not([data-compact-split])[data-compact-panel="content"] .compact-footer .user-control-bar {
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+  }
+
+  :root .main-layout:not([data-compact-split])[data-compact-panel="content"] .compact-footer :is(.user-control-main, .user-quick-actions) {
+    display: contents;
+  }
+
+  :root .main-layout:not([data-compact-split])[data-compact-panel="content"] .compact-footer :is(.voice-conn-info, .voice-conn-actions) {
+    grid-column: auto;
+  }
+
+  :root .main-layout:not([data-compact-split])[data-compact-panel="content"] .compact-footer .user-quick-actions > .audio-control-group {
+    order: 2;
+    min-height: 44px;
+    border-radius: 0;
+    background: var(--compact-strip-bg);
+    border-bottom: 0;
+  }
+
+  :root .main-layout:not([data-compact-split])[data-compact-panel="content"] .compact-footer :is(.voice-conn-info, .voice-conn-actions) {
+    border-bottom: 0;
+  }
+
+  :root .main-layout:not([data-compact-split])[data-compact-panel="content"] .compact-footer .voice-conn-actions {
+    order: 3;
   }
 
   :root .compact-footer .user-profile-summary {
@@ -238,23 +384,13 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   }
 
   :root .compact-footer .user-avatar-main {
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
   }
 
   :root .compact-footer .status-indicator-button::before {
     inset: auto -4px -4px auto;
     width: 44px;
-    height: 44px;
-  }
-
-  :root .compact-footer .voice-conn-info {
-    min-height: 44px;
-  }
-
-  :root .compact-footer .noise-control-group > :is(.btn-icon, .audio-device-trigger) {
-    min-width: 44px;
-    min-height: 44px;
     height: 44px;
   }
 
@@ -274,14 +410,8 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     gap: 2px;
   }
 
-  :root .compact-footer .user-quick-actions .btn-icon,
-  :root .compact-footer .voice-conn-leave {
-    width: 44px;
-    height: 44px;
-  }
-
   :root .main-layout[data-compact] .server-header {
-    min-height: 64px;
+    min-height: var(--compact-header-height);
     padding: 12px 16px;
   }
 
@@ -293,6 +423,92 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   :root .main-layout[data-compact] .channel-item {
     min-height: 44px;
     border-radius: 12px;
+  }
+
+  /* 44 px rows and tight category headers: about 40% more channels before scrolling.
+     The ⋮ keeps its 44 px target by filling the row height instead of adding to it. */
+  :root .main-layout[data-compact]:not([data-compact-split]) .server-header {
+    min-height: 52px;
+    padding-block: 4px;
+  }
+
+  :root .main-layout[data-compact] .server-name {
+    font-size: 17px;
+  }
+
+  :root .main-layout[data-compact] .channels-list-container {
+    padding: 4px 8px 8px;
+  }
+
+  :root .main-layout[data-compact] .channel-category + .channel-category {
+    margin-top: 6px;
+  }
+
+  :root .main-layout[data-compact] .category-title {
+    padding: 0 4px;
+  }
+
+  :root .main-layout[data-compact] .category-collapse-btn {
+    min-height: 36px;
+  }
+
+  :root .main-layout[data-compact] .channel-item {
+    padding-block: 0;
+    /* The 44px buttons at the end bring their own room; padding would push them off the edge. */
+    padding-right: 0;
+    font-size: 16px;
+  }
+
+  :root .main-layout[data-compact] .voice-channel-actions {
+    gap: 0;
+  }
+
+  :root .main-layout[data-compact] .channel-item .channel-menu-btn {
+    min-height: 44px;
+    margin-block: 0;
+  }
+
+  :root .main-layout[data-compact] .voice-participants-sublist {
+    padding-left: 26px;
+  }
+
+  :root .main-layout[data-compact] .voice-participant-mini {
+    min-height: 34px;
+    gap: 8px;
+    padding-block: 0;
+    font-size: 14.5px;
+  }
+
+  :root .main-layout[data-compact] .voice-mini-avatar {
+    width: 22px;
+    height: 22px;
+  }
+
+  :root .main-layout[data-compact] .voice-mini-name {
+    flex: 1;
+    min-width: 0;
+  }
+
+  :root .main-layout[data-compact] .voice-mini-share > .material-symbols-outlined {
+    display: none;
+  }
+
+  :root .main-layout[data-compact] .voice-mini-share .voice-mini-live-text {
+    display: inline;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    background: var(--danger);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    line-height: 1.4;
+    text-transform: uppercase;
+  }
+
+  :root .main-layout[data-compact] .voice-mini-watch.voice-mini-share {
+    min-height: 34px;
+    padding: 0 2px;
   }
 
   :root .compact-home-heading {
@@ -351,11 +567,17 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   :root .main-layout[data-compact] .content-header,
   :root .main-layout[data-compact] #main-center-stage > .chat-container > .content-header {
     flex: 0 0 auto;
-    min-height: 64px;
-    height: 64px;
+    min-height: var(--compact-header-height);
+    height: var(--compact-header-height);
     gap: 8px;
-    padding: 8px 96px 8px 52px;
+    padding: 8px var(--compact-header-tools) 8px 52px;
     border-bottom: 1px solid var(--border-color);
+  }
+
+  /* Header buttons read like the toolbar beside them: an icon, not a card. */
+  :root .main-layout[data-compact] .content-header .stage-chat-toggle:not(.active, :hover) {
+    background: transparent;
+    border-color: transparent;
   }
 
   :root .main-layout[data-compact] .dm-header {
@@ -363,7 +585,7 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   }
 
   :root .main-layout[data-compact] .members-sidebar > :first-child {
-    min-height: 64px;
+    min-height: var(--compact-header-height);
     padding-left: 52px;
   }
 
@@ -385,7 +607,7 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   :root .main-layout[data-compact] > :is(.main-center-column, .voice-channel-chat-panel) > .server-tools {
     display: none;
     position: absolute;
-    top: 64px;
+    top: var(--compact-header-height);
     right: 0;
     width: 100%;
     max-width: none;
@@ -411,7 +633,7 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   }
 
   :root .main-layout[data-compact] .message-search-panel {
-    top: calc(64px + var(--compact-search-height));
+    top: calc(var(--compact-header-height) + var(--compact-search-height));
     width: 100%;
     max-width: 100%;
   }
@@ -452,7 +674,7 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   }
 
   :root .chat-input-container {
-    padding: 8px 8px max(12px, env(safe-area-inset-bottom));
+    padding: 6px 8px max(8px, env(safe-area-inset-bottom));
   }
 
   :root .chat-composer-surface {
@@ -460,23 +682,42 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     overflow: visible;
   }
 
+  /* One row: + | message | (Aa) | emoji | send. The field grows up to three lines. */
   :root #app .main-layout[data-compact] .chat-input-wrapper {
-    display: grid;
-    grid-template-columns: repeat(3, 44px) minmax(0, 1fr) 44px;
-    gap: 4px;
-    padding: 8px;
-    align-items: center;
+    display: flex;
+    gap: 2px;
+    padding: 4px;
+    align-items: flex-end;
     position: relative;
   }
 
   :root .main-layout[data-compact] #chat-message-input.chat-input-field {
-    grid-area: 1 / 1 / 2 / -1;
-    width: 100%;
+    order: 1;
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
     margin: 0;
     font-size: 16px;
     min-height: 44px;
-    padding: 10px 8px;
+    padding: 10px 6px;
     line-height: 24px;
+  }
+  /* A wrapped placeholder sets the line height, so only typed text is capped. */
+  :root .main-layout[data-compact] .chat-input-container:not(.chat-input-container--editing) .chat-input-field .cm-editor .cm-scroller:not(:has(.cm-placeholder)) { max-height: 4.2em; }
+
+  /* Editing (code included) needs the full width: the text on top, the controls on the row below. */
+  :root #app .main-layout[data-compact] .chat-input-container--editing .chat-input-wrapper {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  :root .main-layout[data-compact] .chat-input-container--editing #chat-message-input.chat-input-field {
+    order: 0;
+    flex-basis: 100%;
+  }
+
+  /* The day separator above already names the date; the full stamp stays in the title. */
+  :root .main-layout[data-compact] .chat-timestamp-date {
+    display: none;
   }
 
   :root .chat-input-field .cm-placeholder {
@@ -484,9 +725,12 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     overflow-wrap: anywhere;
   }
 
-  :root .chat-input-wrapper .chat-create-wrap { grid-area: 2 / 1; }
-  :root .chat-input-wrapper #btn-emoji { grid-area: 2 / 2; }
-  :root .chat-input-wrapper #btn-format { grid-area: 2 / 3; }
+  :root .chat-input-wrapper .chat-create-wrap { order: 0; flex: none; }
+  :root .chat-input-wrapper #btn-format { order: 2; flex: none; }
+  :root .chat-input-wrapper #btn-emoji { order: 3; flex: none; }
+  /* Channels reach formatting through "+"; editing hides "+", so the button returns. */
+  :root .chat-input-container:not(.chat-input-container--editing) .chat-input-wrapper:has(#chat-create-menu) #btn-format { display: none; }
+  :root .chat-create-menu .chat-create-format { display: flex; }
   :root .chat-input-wrapper .chat-attach-btn {
     width: 44px;
     height: 44px;
@@ -497,7 +741,8 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     border-radius: 50%;
   }
   :root .chat-composer-surface .chat-send-btn {
-    grid-area: 2 / 5;
+    order: 4;
+    flex: none;
     width: 44px;
     height: 44px;
     padding: 0;
@@ -506,15 +751,27 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   }
   :root .chat-input-wrapper button > .material-symbols-outlined { font-size: 24px; }
   :root .chat-send-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  /* The counter appears only near the limit, floating above the row. */
   :root .chat-composer-surface .chat-char-count {
-    grid-area: 2 / 4;
-    position: static;
-    justify-self: end;
-    margin: 0 4px 0 0;
+    position: absolute;
+    right: 12px;
+    bottom: calc(100% + 2px);
+    margin: 0;
+    padding: 0 6px;
+    border-radius: 8px;
+    background: var(--bg-panel);
     font-size: 12px;
     line-height: 20px;
     white-space: nowrap;
   }
+  :root .chat-input-container:not(.chat-input-container--editing) .chat-composer-surface .chat-char-count:not([data-near-limit]) { display: none; }
+  :root .chat-input-container--editing .chat-composer-surface .chat-char-count {
+    position: static;
+    order: 4;
+    margin-left: auto;
+    background: none;
+  }
+  :root .chat-input-container--editing .chat-composer-surface .chat-send-btn { order: 5; }
   :root .chat-composer-surface .chat-char-count:not(.code-char-count--over) { color: var(--text-secondary); }
 
   :root .chat-input-wrapper > button,
@@ -544,7 +801,7 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   }
 
   :root .friends-home-heading {
-    min-height: 64px;
+    min-height: var(--compact-header-height, 64px);
     padding-left: 40px;
   }
 
@@ -625,6 +882,11 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     flex-shrink: 0;
   }
 
+  /* It would cover the video; compactFocusHint says it once in a toast instead. */
+  :root .main-layout[data-compact] .stage-focus-hint-badge {
+    display: none;
+  }
+
   :root .stage-call-controls {
     flex: 0 0 auto;
     max-width: 100%;
@@ -655,7 +917,18 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     border-radius: 24px;
   }
 
-  :root #stage-btn-leave > :not(.material-symbols-outlined) {
+  /* Shown while sharing; round here like the other call buttons. */
+  :root .stage-call-controls #stage-btn-stop-share {
+    flex-shrink: 0;
+    width: 44px;
+    min-width: 44px;
+    height: 44px !important;
+    padding: 0 !important;
+    margin-left: 0 !important;
+    border-radius: 50%;
+  }
+
+  :root :is(#stage-btn-leave, #stage-btn-stop-share) > :not(.material-symbols-outlined) {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -663,7 +936,7 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     overflow: hidden;
   }
 
-  :root #stage-btn-leave .material-symbols-outlined {
+  :root :is(#stage-btn-leave, #stage-btn-stop-share) .material-symbols-outlined {
     margin: 0 !important;
     font-size: 24px;
   }
@@ -673,8 +946,10 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     display: none;
   }
 
-  /* The banner above the stage stops a share; the view shows this labelled button with an inline display. */
-  :root .stage-call-controls #stage-btn-stop-share {
+  /* A phone has no room for the live banner over the stage: the lit camera
+     button and the stop-share button in the call controls already say it.
+     The view sets the banner's display inline, hence !important. */
+  :root .main-layout[data-compact] #stage-broadcast-banner-wrapper {
     display: none !important;
   }
 
@@ -1047,6 +1322,302 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   :root .floating-context-menu .server-dropdown-item { gap: 12px; font-size: 14px; padding: 10px 12px; }
 }
 
+/* A phone on its side (ResponsiveShell sets data-compact-split): the server
+   rail, the channels and the conversation share the screen instead of taking
+   turns. The user footer sits under the channel column, members open as a
+   drawer over the conversation, and a stage in front takes the whole screen. */
+:root .main-layout[data-compact-split] {
+  --compact-header-height: 40px;
+  --compact-rail-width: 52px;
+  grid-template-columns: var(--compact-rail-width) 212px minmax(0, 1fr) auto;
+}
+
+:root .main-layout[data-compact-split] > :is(.main-center-column, .server-rail, .channels-sidebar, .home-sidebar-shell) {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+:root .main-layout[data-compact-split] > .server-rail {
+  grid-row: 1 / -1;
+  padding: 8px 0;
+}
+
+:root .main-layout[data-compact-split] > :is(.channels-sidebar, .home-sidebar-shell) {
+  border-radius: 14px 0 0 0;
+}
+
+:root .main-layout[data-compact-split] > .main-center-column {
+  grid-column: 3 / 4;
+  grid-row: 1 / -1;
+  border-left: 1px solid var(--border-color);
+}
+
+:root .main-layout[data-compact-split] > .members-sidebar {
+  grid-column: 3 / -1;
+  grid-row: 1 / -1;
+  justify-self: end;
+  width: min(240px, 100%) !important;
+  z-index: 95;
+  background: var(--bg-sidebar);
+  border-left: 1px solid var(--border-color);
+  box-shadow: -12px 0 32px rgb(0 0 0 / 35%);
+  transform: translateX(100%);
+  transition: transform 180ms ease, visibility 0s linear 180ms;
+}
+
+:root .main-layout[data-compact-split][data-compact-panel="members"] > .members-sidebar {
+  transform: none;
+  transition: transform 180ms ease;
+}
+
+:root .main-layout[data-compact-split] .members-sidebar > :first-child {
+  padding-left: 12px;
+}
+
+:root .main-layout[data-compact-split] > .voice-channel-chat-panel {
+  grid-area: 1 / 3 / -1 / -1;
+}
+
+:root .main-layout[data-compact-split][data-compact-stage] > .voice-channel-chat-panel {
+  grid-column: 4;
+  width: 300px !important;
+}
+
+:root .main-layout[data-compact-split] > .voice-channel-chat-panel .voice-chat-close {
+  top: 4px;
+}
+
+:root .main-layout[data-compact-split] > .compact-navigation {
+  display: flex;
+  grid-area: 1 / 3 / 2 / -1;
+}
+
+:root .main-layout[data-compact-split][data-compact-stage] > .compact-navigation {
+  grid-column-end: 4;
+  padding-right: 4px;
+}
+
+:root .main-layout[data-compact-split] .compact-navigation .btn-icon {
+  width: 40px;
+  height: 40px;
+}
+
+:root .main-layout[data-compact-split] .compact-navigation .material-symbols-outlined {
+  font-size: 22px;
+}
+
+/* Navigation is already on screen; only the immersive stage needs a way back. */
+:root .main-layout[data-compact-split]:not([data-compact-stage][data-compact-panel="content"]) .compact-back-button {
+  display: none;
+}
+
+:root .main-layout[data-compact-split]:not([data-compact-stage][data-compact-panel="content"]) .content-header,
+:root .main-layout[data-compact-split]:not([data-compact-stage][data-compact-panel="content"]) #main-center-stage > .chat-container > .content-header {
+  padding: 0 calc(var(--compact-header-tools, 96px) - 4px) 0 12px;
+}
+
+/* The 40px header fits icon buttons drawn at 36px; the ::after keeps a 44px touch target. */
+:root .main-layout[data-compact-split] .content-header .btn-icon {
+  position: relative;
+  width: min(36px, var(--compact-header-height));
+  min-width: min(36px, var(--compact-header-height));
+  height: min(36px, var(--compact-header-height));
+  min-height: min(36px, var(--compact-header-height));
+}
+
+:root .main-layout[data-compact-split] .content-header .btn-icon::after {
+  content: "";
+  position: absolute;
+  inset: calc((min(36px, var(--compact-header-height)) - 44px) / 2);
+}
+
+:root .main-layout[data-compact-split] .server-header {
+  height: var(--compact-header-height);
+  min-height: 0;
+  padding: 0 8px 0 12px;
+}
+
+:root .main-layout[data-compact-split] .server-dropdown-toggle {
+  height: 32px;
+  min-height: 32px;
+}
+
+/* ServerHeader matches the menu to the toggle inline; the narrow column would squeeze its labels. */
+:root .main-layout[data-compact-split] .server-dropdown-menu {
+  min-width: 250px !important;
+}
+
+:root .main-layout[data-compact-split] .voice-participants-sublist {
+  padding-left: 12px;
+}
+
+:root .main-layout[data-compact-split] .server-name {
+  font-size: 15px;
+}
+
+:root .main-layout[data-compact-split] .compact-home-heading {
+  padding: 10px 8px 8px;
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root .main-layout[data-compact-split] .friends-home-heading {
+  padding-left: 0;
+}
+
+:root .main-layout[data-compact-split] .friends-home-heading h1 {
+  font-size: 17px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-status-text {
+  font-size: 12px;
+}
+
+:root .main-layout[data-compact-split] > .compact-footer {
+  display: block;
+  grid-area: 2 / 2 / 3 / 3;
+  max-height: none;
+  background: var(--bg-sidebar);
+}
+
+:root .main-layout[data-compact-split][data-compact-stage][data-compact-panel="content"] > :is(.server-rail, .channels-sidebar, .home-sidebar-shell) {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+:root .main-layout[data-compact-split][data-compact-stage][data-compact-panel="content"] > :is(.main-center-column, .compact-navigation) {
+  grid-column: 1 / 4;
+  border-left: 0;
+}
+
+:root .main-layout[data-compact-split][data-compact-stage][data-compact-panel="content"] > .compact-footer {
+  display: none;
+}
+
+/* The footer of a 212 px column: a 38 px call pill (channel, microphone,
+   leave) above a 48 px user row (profile, headphones, settings). */
+:root .main-layout[data-compact-split] .compact-footer > .user-control-bar {
+  margin: 0 6px 6px;
+  border-radius: 12px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .camera-control-group {
+  display: none;
+}
+
+:root .main-layout[data-compact-split] .compact-footer :is(.voice-conn-info, .voice-conn-actions) {
+  min-height: 38px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .voice-conn-info {
+  padding: 0 4px 0 10px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .voice-conn-channel {
+  font-size: 13px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer :is(.voice-conn-server, .voice-conn-ping) {
+  display: none;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-control-main {
+  min-height: 48px;
+  padding: 0 4px 0 8px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer :is(#media-btn-camera, .voice-conn-leave, .user-quick-actions .btn-icon) {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  border-radius: 10px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-avatar-main {
+  width: 30px;
+  height: 30px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-profile-summary {
+  min-height: 44px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-name-display {
+  font-size: 14px;
+}
+
+/* Out of a call the card holds three buttons beside the name in a 212 px column. */
+:root .main-layout[data-compact-split] .compact-footer .user-control-bar:not(:has(#voice-connection-row)) .user-quick-actions {
+  gap: 0;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-control-bar:not(:has(#voice-connection-row)) .user-quick-actions .btn-icon {
+  width: 32px;
+  min-width: 32px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer :is(.user-name-display, .user-status-text) {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-control-bar:has(#voice-connection-row) :is(.user-control-main, .user-quick-actions) {
+  display: contents;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-control-bar:has(#voice-connection-row) .user-quick-actions > .audio-control-group:first-child {
+  grid-column: 2;
+  order: 2;
+  min-height: 38px;
+  border-radius: 0;
+  background: var(--compact-strip-bg);
+  border-bottom: 1px solid var(--compact-strip-border);
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-control-bar:has(#voice-connection-row) .user-profile-summary {
+  grid-column: 1;
+  order: 4;
+  min-height: 48px;
+  padding-left: 8px;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-control-bar:has(#voice-connection-row) .user-quick-actions > .audio-control-group:nth-child(2) {
+  grid-column: 2;
+  order: 5;
+  align-self: center;
+}
+
+:root .main-layout[data-compact-split] .compact-footer .user-control-bar:has(#voice-connection-row) #bar-btn-settings {
+  grid-column: 3;
+  order: 6;
+  align-self: center;
+  margin-right: 4px;
+}
+
+/* Typing on a phone on its side: the keyboard takes half the height, so the
+   side columns step aside and the header shrinks to a line. */
+:root[data-keyboard-open] .main-layout[data-compact-split] {
+  --compact-header-height: 30px;
+}
+
+:root[data-keyboard-open] .main-layout[data-compact-split] > :is(.server-rail, .channels-sidebar, .home-sidebar-shell, .compact-footer, .compact-navigation) {
+  display: none;
+}
+
+:root[data-keyboard-open] .main-layout[data-compact-split] > :is(.main-center-column, .voice-channel-chat-panel) {
+  grid-column: 1 / -1;
+  border-left: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root .main-layout[data-compact-split] > .members-sidebar { transition: none; }
+}
+
 /* A phone on its side has width to spare and little height. The call controls
    become a rail on the right and the focus strip a column beside the main tile,
    so a focused screen share keeps the stage's whole height. A nearly square
@@ -1054,7 +1625,7 @@ html[data-compact-transition]::view-transition-new(compact-page) {
 @media (max-height: 540px) and (min-aspect-ratio: 3/2) {
   :root .main-layout[data-compact] .voice-stage-container {
     --stage-rail-width: 56px;
-    --stage-rail-top: 72px;
+    --stage-rail-top: calc(var(--compact-header-height) + 8px);
     --stage-bottom: max(8px, env(safe-area-inset-bottom));
     padding-right: calc(20px + var(--stage-rail-width));
     padding-bottom: var(--stage-bottom);
@@ -1082,7 +1653,10 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     scrollbar-width: none;
   }
 
+  /* Hanging up stays reachable when a short screen makes the rail scroll. */
   :root .main-layout[data-compact] .stage-call-controls #stage-btn-leave {
+    position: sticky;
+    bottom: 0;
     width: 44px;
     min-width: 44px;
     height: 48px !important;
@@ -1115,14 +1689,439 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     height: auto;
   }
 
-  :root .main-layout[data-compact] .stage-focus-hint-badge {
-    display: none;
-  }
-
   :root .main-layout[data-compact] .stage-grid {
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     grid-auto-rows: minmax(96px, 1fr);
   }
+
+  /* Wide rows, not tall columns: video on its side fills a 2×2 or 3×2 grid. */
+  :root .main-layout[data-compact] .stage-grid:has(> :nth-child(4)) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  :root .main-layout[data-compact] .stage-grid:has(> :nth-child(5)) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  :root .main-layout[data-compact] .stage-grid:has(> :nth-child(7)) {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* The watched screen floating over a conversation on a phone (WatchedScreenMini):
+   JS keeps it in a corner between the header and the composer. */
+.watched-screen-mini {
+  position: fixed;
+  z-index: 40;
+  top: 0;
+  left: 0;
+  width: min(42vw, 200px);
+  max-height: 34dvh;
+  aspect-ratio: var(--watched-screen-aspect, 1.7778);
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background: #000;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%), 0 0 0 1px rgb(255 255 255 / 10%);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: left var(--motion-panel-duration) var(--motion-easing), top var(--motion-panel-duration) var(--motion-easing);
+}
+
+.watched-screen-mini[data-dragging] {
+  transition: none;
+  cursor: grabbing;
+}
+
+.main-layout:not([data-compact-panel="content"]) > .watched-screen-mini {
+  display: none;
+}
+
+.watched-screen-mini-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.watched-screen-mini-waiting {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.watched-screen-mini[data-waiting] .watched-screen-mini-waiting {
+  display: grid;
+}
+
+.watched-screen-mini-name {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  max-width: calc(100% - 12px);
+  padding: 2px 6px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: rgb(0 0 0 / 60%);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.watched-screen-mini-open {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.watched-screen-mini-open:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
+  border-radius: inherit;
+}
+
+.watched-screen-mini-close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: rgb(0 0 0 / 60%);
+  color: #fff;
+  cursor: pointer;
+}
+
+.watched-screen-mini-close:focus-visible {
+  outline: 2px solid var(--accent-primary);
+}
+
+/* The call chat opened on a phone held upright: the stage stays pinned on top
+   in a 16:9 band and the chat takes the rest, so the video never disappears.
+   With the keyboard up the band shrinks to a strip and the call controls step
+   aside; the footer is already hidden while the stage is on screen. */
+:root .main-layout[data-compact-chat-below] {
+  --stage-pinned-video: min(calc(100vw - 16px) * 0.5625, 34dvh);
+  --stage-pinned-controls: 52px;
+  grid-template-rows: calc(var(--compact-header-height) + var(--stage-pinned-video) + var(--stage-pinned-controls)) minmax(0, 1fr) auto;
+}
+
+:root[data-keyboard-open] .main-layout[data-compact-chat-below] {
+  --stage-pinned-video: 120px;
+  --stage-pinned-controls: 8px;
+}
+
+/* The footer card ends 8px above the address bar Safari floats over the
+   keyboard; the call chat's composer keeps that same dark gap, the first room
+   given up when the screen is too short for the composer. */
+:root[data-keyboard-open] .main-layout[data-compact-chat-below] > .voice-channel-chat-panel .chat-container::after {
+  content: '';
+  flex: 0 1 8px;
+  min-height: 0;
+  background: var(--bg-app);
+}
+
+:root[data-keyboard-open] .main-layout[data-compact-chat-below] :is(.stage-card-controls, .stage-viewers, .stage-capture-mode-badge, .stage-ping-badge),
+:root[data-keyboard-open] .main-layout[data-compact-chat-below] .stage-call-controls,
+:root .main-layout[data-compact-chat-below] .stage-focused-strip {
+  display: none;
+}
+
+:root .main-layout[data-compact-chat-below] > .voice-channel-chat-panel {
+  grid-area: 2 / 1 / 3 / -1;
+  --compact-header-height: 52px;
+  border-top: 1px solid var(--border-color);
+}
+
+:root .main-layout[data-compact-chat-below].main-layout--voice-chat-open .compact-navigation {
+  padding-right: 0;
+}
+
+:root .main-layout[data-compact][data-compact-chat-below] .voice-channel-chat-panel .content-header {
+  min-height: var(--compact-header-height);
+  height: var(--compact-header-height);
+  padding: 4px 52px 4px 16px;
+}
+
+:root .main-layout[data-compact-chat-below] .voice-channel-chat-panel .voice-chat-close {
+  top: 4px;
+}
+
+:root .main-layout[data-compact-chat-below] .voice-stage-container {
+  gap: 0;
+  padding: 0 8px;
+}
+
+:root .main-layout[data-compact-chat-below] .stage-focused-layout {
+  --stage-video-max-height: 100cqh;
+  gap: 0;
+}
+
+/* Without a focus the cards line up in a row to swipe through, as tall as the band.
+   A closing chat hands them back to the grid at once, so they travel while the stage grows. */
+:root .main-layout[data-compact-chat-below]:not(:has(> .voice-channel-chat-panel[data-ui-closing])) .stage-grid {
+  grid-template-columns: none;
+  grid-template-rows: minmax(0, 1fr);
+  grid-auto-flow: column;
+  grid-auto-columns: min(78%, calc(var(--stage-pinned-video) * 1.45));
+  grid-auto-rows: auto;
+  overflow: auto hidden;
+  overscroll-behavior: contain;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+
+:root .main-layout[data-compact-chat-below]:not(:has(> .voice-channel-chat-panel[data-ui-closing])) .stage-grid > * {
+  scroll-snap-align: start;
+}
+
+:root .main-layout[data-compact-chat-below] .stage-call-controls {
+  min-height: var(--stage-pinned-controls);
+  margin: 4px auto;
+  padding: 2px 6px;
+  gap: 6px;
+}
+
+:root .main-layout[data-compact-chat-below] .stage-call-controls :is(.btn-icon, #stage-btn-leave, #stage-btn-stop-share) {
+  width: 40px;
+  min-width: 40px;
+  height: 40px !important;
+}
+
+/* A phone in portrait: a single focused frame takes the video's shape (see
+   FocusedVideoFrame), up to two thirds of the stage, and the people in the
+   call fill the space below it in larger cards instead of black bars. */
+@media (orientation: portrait) {
+  :root .main-layout[data-compact]:not([data-compact-chat-below]) .stage-focused-layout:has(> .stage-focused-stack:not(.stage-focused-stack--split)) {
+    --stage-video-max-height: 66cqh;
+    container-type: size;
+    justify-content: center;
+  }
+
+  :root .main-layout[data-compact]:not([data-compact-chat-below]) .stage-focused-layout:not(:has(> .stage-focused-strip)) {
+    --stage-video-max-height: 100cqh;
+  }
+
+  :root .main-layout[data-compact]:not([data-compact-chat-below]) .stage-focused-stack:not(.stage-focused-stack--split) {
+    flex: 0 0 auto;
+    justify-content: center;
+  }
+
+  :root .main-layout[data-compact]:not([data-compact-chat-below]) .stage-focused-stack:not(.stage-focused-stack--split) > .stage-focused-main {
+    flex: 0 0 auto;
+    width: min(100cqw, var(--stage-video-max-height) * var(--stage-video-aspect, 1.7778));
+    aspect-ratio: var(--stage-video-aspect, 1.7778);
+  }
+
+  :root .main-layout[data-compact]:not([data-compact-chat-below]) .stage-focused-stack:not(.stage-focused-stack--split) ~ .stage-focused-strip {
+    flex: 1 1 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: auto;
+    grid-auto-rows: minmax(96px, 140px);
+    align-content: start;
+    height: auto;
+    min-height: 0;
+    padding: 0 2px 2px;
+    gap: 8px;
+    overflow: hidden auto;
+    overscroll-behavior: contain;
+  }
+
+  :root .main-layout[data-compact]:not([data-compact-chat-below]) .stage-focused-stack:not(.stage-focused-stack--split) ~ .stage-focused-strip::before {
+    content: attr(data-label);
+    grid-column: 1 / -1;
+    padding: 4px 6px 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  :root .main-layout[data-compact]:not([data-compact-chat-below]) .stage-focused-stack:not(.stage-focused-stack--split) ~ .stage-focused-strip > .stage-mini-card {
+    width: auto;
+    height: auto;
+    aspect-ratio: auto;
+    border-radius: 16px;
+  }
+
+  :root .main-layout[data-compact]:not([data-compact-chat-below]) .stage-focused-stack:not(.stage-focused-stack--split) ~ .stage-focused-strip .stage-avatar-img {
+    width: 56px;
+    height: 56px;
+  }
+}
+
+:root .main-layout[data-compact-immersive] {
+  --stage-column: 60px;
+  --stage-edge: max(6px, env(safe-area-inset-right));
+  --stage-chrome-top: 48px;
+  /* Microphone, headphones, camera, options and leave, stacked at the foot of the column. */
+  --stage-controls-block: 240px;
+}
+
+:root .main-layout[data-compact-immersive]:where(:has(#stage-btn-stop-share:not([hidden]))) {
+  /* Stopping a share adds a sixth button to the column. */
+  --stage-controls-block: 288px;
+}
+
+/* ResponsiveShell sets data-compact-immersive on a phone on its side when the
+   stage is the whole page. With a tile in focus the video runs from top to
+   bottom, the channel title floats over it, and one narrow column on the right
+   holds the thumbnails above the call controls. ImmersiveStageChrome fades all
+   of it after a few seconds. The grid keeps the landscape rail above. */
+:root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .voice-stage-container {
+  padding: 0 0 0 env(safe-area-inset-left);
+  gap: 0;
+  background: #000;
+}
+
+:root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .voice-stage-container > .content-header {
+  position: absolute;
+  inset: 0 calc(var(--stage-column) + var(--stage-edge) + 6px) auto 0;
+  z-index: 6;
+  height: var(--stage-chrome-top);
+  margin: 0;
+  padding: 0 52px 0 calc(48px + env(safe-area-inset-left));
+  border: 0;
+  background: linear-gradient(rgb(0 0 0 / 70%), transparent);
+}
+
+:root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) > .compact-navigation {
+  height: var(--stage-chrome-top);
+  margin-right: calc(var(--stage-column) + var(--stage-edge) + 6px);
+  padding-left: env(safe-area-inset-left);
+}
+
+:root .main-layout[data-compact-immersive]:has(.stage-focused-main) .stage-grid-toggle {
+  display: inline-flex;
+}
+
+:root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .stage-focused-layout {
+  padding-right: calc(var(--stage-column) + var(--stage-edge) + 6px);
+}
+
+:root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .stage-focused-stack {
+  gap: 2px;
+}
+
+:root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .stage-focused-main {
+  border: 0;
+  border-radius: 0;
+  background: #000;
+}
+
+:root .main-layout[data-compact-immersive] .stage-focused-main :is(.stage-capture-mode-badge, .stage-viewers),
+:root .main-layout[data-compact-immersive] .stage-focused-main .telemetry-overlay:is(.position-top-left, .position-top-right) {
+  top: var(--stage-chrome-top);
+}
+
+:root .main-layout[data-compact-immersive] .stage-focused-main .stage-card-controls :is(button, [data-volume-slot] > *) {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+:root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .stage-focused-strip {
+  position: absolute;
+  top: 8px;
+  right: var(--stage-edge);
+  bottom: 8px;
+  align-items: center;
+  width: var(--stage-column);
+  min-width: 0;
+  padding: 0;
+  gap: 6px;
+}
+
+:root .main-layout[data-compact-immersive] .voice-stage-container:has(.stage-call-controls) .stage-focused-strip {
+  bottom: calc(var(--stage-controls-block) + max(8px, env(safe-area-inset-bottom)) + 8px);
+}
+
+:root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .stage-focused-strip > .stage-mini-card {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 42px;
+  aspect-ratio: auto;
+  border-radius: 10px;
+}
+
+/* The compact strips clip their overflow, and touch keeps :hover on the last tile tapped: a growing tile loses its border. */
+:root .main-layout[data-compact] .stage-focused-strip > .stage-mini-card:hover {
+  transform: none;
+}
+
+:root .main-layout[data-compact-immersive] .stage-mini-card :is(.stage-badges-overlay, .stage-card-controls) {
+  display: none;
+}
+
+:root .main-layout[data-compact-immersive] .stage-mini-card .stage-avatar-img {
+  width: 28px;
+  height: 28px;
+}
+
+:root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .stage-call-controls {
+  top: auto;
+  right: var(--stage-edge);
+  bottom: max(8px, env(safe-area-inset-bottom));
+  align-items: center;
+  width: var(--stage-column);
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root .main-layout[data-compact-immersive] :is(
+  .compact-navigation,
+  .voice-stage-container > .content-header,
+  .stage-call-controls,
+  .stage-focused-strip,
+  .stage-focused-main :is(.stage-card-controls, .stage-badges-overlay, .stage-capture-mode-badge, .stage-viewers)
+) {
+  transition: opacity var(--motion-popover-duration) var(--motion-easing);
+}
+
+/* A very short screen cannot stack five or six buttons and still show the
+   thumbnails above them: the column widens and the controls pair up. */
+@media (max-height: 400px) {
+  :root .main-layout[data-compact-immersive]:has(.stage-focused-main) {
+    --stage-column: 92px;
+    --stage-controls-block: 144px;
+  }
+
+  :root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .stage-call-controls {
+    display: grid;
+    grid-template-columns: repeat(2, 44px);
+    gap: 4px;
+  }
+}
+
+/* Faded, not hidden: assistive technology and the keyboard still reach the
+   controls, and focusing one brings the chrome back. */
+:root .main-layout[data-compact-immersive][data-stage-chrome-hidden] :is(
+  .compact-navigation,
+  .voice-stage-container > .content-header,
+  .stage-call-controls,
+  .stage-focused-strip,
+  .stage-focused-main :is(.stage-card-controls, .stage-badges-overlay, .stage-capture-mode-badge, .stage-viewers)
+) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+:root .main-layout[data-compact-immersive][data-stage-chrome-hidden] :is(.compact-navigation, .stage-call-controls, .stage-focused-strip, .stage-card-controls) * {
+  pointer-events: none !important;
 }
 
 @media (max-width: 600px) {
@@ -1165,5 +2164,10 @@ html[data-compact-transition]::view-transition-new(compact-page) {
 
   :root :is(.channel-item, .home-dm-open, .home-nav-entry, .server-dropdown-item, .monky-select-option) {
     min-height: 44px;
+  }
+
+  /* A tap leaves :hover behind; the accent border would read as a selected participant. */
+  :root .stage-mini-card:hover:not(.speaking) {
+    border-color: var(--border-color);
   }
 }

@@ -4,7 +4,8 @@ import { voiceStore } from '../../stores/voiceStore';
 import { html } from '../../utils/html';
 import { openModal, type ModalShell } from '../../utils/modalShell';
 import { cancelCompactPageTransition, cancelSurfaceMotion, hasOwnedSurface, topModal, transitionCompactPage } from '../../utils/surfaceMotion';
-import { COMPACT_VIEWPORT_QUERY } from '../../utils/viewport';
+import { COMPACT_VIEWPORT_QUERY, PHONE_LANDSCAPE_QUERY } from '../../utils/viewport';
+import { ImmersiveStageChrome } from './ImmersiveStageChrome';
 
 type Panel = 'content' | 'navigation' | 'members';
 
@@ -33,6 +34,9 @@ export class ResponsiveShell {
     let callOptionsSource: Element | null = null;
     let pagePending = false;
     const compact = window.matchMedia(COMPACT_VIEWPORT_QUERY);
+    // On a phone on its side, navigation and content share the screen instead of taking turns.
+    const landscape = window.matchMedia(PHONE_LANDSCAPE_QUERY);
+    const isSplit = (): boolean => compact.matches && landscape.matches;
     const center = layout.querySelector<HTMLElement>(':scope > .main-center-column');
     const rail = layout.querySelector<HTMLElement>(':scope > .server-rail');
     const navigation = layout.querySelector<HTMLElement>(':scope > .channels-sidebar, :scope > .home-sidebar-shell');
@@ -41,6 +45,7 @@ export class ResponsiveShell {
     const footer = layout.querySelector<HTMLElement>('.user-control-bar');
     if (!center || !rail || !navigation || !footer) return () => lifetime.abort();
 
+    const stageChrome = new ImmersiveStageChrome(layout, signal);
     const toolbar = document.createElement('nav');
     toolbar.className = 'compact-navigation';
     toolbar.setAttribute('aria-label', t('responsive.navigation'));
@@ -75,16 +80,30 @@ export class ResponsiveShell {
     panels.forEach(({ element, id }) => { element.id = id; });
 
     const apply = (panel: Panel, focus: boolean): void => {
+      const previous = this.panel;
       this.panel = panel === 'members' && !members ? 'content' : panel;
       const active = document.activeElement;
+      const split = isSplit();
+      const stage = !!center.querySelector('.voice-stage-container');
+      const chatOpen = !!voiceChat && !voiceChat.hidden;
+      // The call chat never hides the stage: beside it on a split screen, below it in portrait.
+      const chatBeside = chatOpen && stage && compact.matches;
+      const coveredByChat = chatOpen && !chatBeside;
       if (compact.matches) {
         if (footer.parentElement !== footerSlot) footerSlot.append(footer);
       } else if (footer.previousSibling !== footerPlace) footerPlace.after(footer);
       layout.toggleAttribute('data-compact', compact.matches);
+      layout.toggleAttribute('data-compact-split', split);
       layout.dataset.compactPanel = this.panel;
       layout.toggleAttribute('data-compact-call', !!voiceStore.currentVoiceChannelId);
-      layout.toggleAttribute('data-compact-stage', !!center.querySelector('.voice-stage-container') && (!voiceChat || voiceChat.hidden));
-      if (layout.hasAttribute('data-compact-stage') || !layout.querySelector('.message-search-launch')) {
+      layout.toggleAttribute('data-compact-stage', stage && !coveredByChat);
+      layout.toggleAttribute('data-compact-chat-beside', chatBeside);
+      // Its stage-over-chat rows belong to the call panel: the channel list or members keep the whole screen.
+      layout.toggleAttribute('data-compact-chat-below', chatBeside && !split && this.panel === 'content');
+      const immersive = split && this.panel === 'content' && stage && !coveredByChat;
+      layout.toggleAttribute('data-compact-immersive', immersive && !chatBeside);
+      stageChrome.setActive(immersive && !chatBeside);
+      if (layout.hasAttribute('data-compact-stage') && !chatBeside || !layout.querySelector('.message-search-launch')) {
         layout.removeAttribute('data-compact-search-open');
         toolbar.querySelector('[data-compact-search]')?.setAttribute('aria-expanded', 'false');
       }
@@ -99,8 +118,11 @@ export class ResponsiveShell {
         controls.querySelector('#stage-btn-leave')?.before(more);
       }
       panels.forEach(({ element, panel: owned, inert }) => {
-        element.inert = compact.matches
-          ? owned !== this.panel || element === center && !!voiceChat && !voiceChat.hidden : inert;
+        if (!compact.matches) element.inert = inert;
+        else if (element === center && coveredByChat) element.inert = true;
+        else if (!split) element.inert = owned !== this.panel;
+        else if (owned === 'members') element.inert = this.panel !== 'members';
+        else element.inert = owned === 'navigation' && immersive;
       });
       for (const button of toolbar.querySelectorAll<HTMLButtonElement>('[data-compact-toggle]')) {
         const selected = button.dataset.compactToggle === this.panel;
@@ -110,7 +132,18 @@ export class ResponsiveShell {
       navButton.setAttribute('aria-label', t(this.panel === 'members' ? 'responsive.content' : 'main.showNavigationSidebar'));
       const membersButton = toolbar.querySelector<HTMLButtonElement>('[data-compact-toggle="members"]');
       membersButton?.setAttribute('aria-label', t(this.panel === 'members' ? 'main.hideMembersSidebar' : 'main.showMembersSidebar'));
-      if (focus || (active instanceof HTMLElement && (active.closest('[inert]') || toolbar.contains(active)))) {
+      if (split) {
+        // Both columns stay on screen, so focus only moves into the drawer or off what just disappeared.
+        const lost = !(active instanceof HTMLElement) || active === document.body
+          || !!active.closest('[inert]') || active.getClientRects().length === 0;
+        const target = focus && this.panel === 'members'
+          ? members?.querySelector<HTMLElement>('button:not([disabled]), [tabindex="0"]')
+          : !lost ? null
+          : previous === 'members' ? membersButton
+          : immersive ? navButton
+          : navigation.querySelector<HTMLElement>('button:not([disabled]), [tabindex="0"]');
+        target?.focus({ preventScroll: true });
+      } else if (focus || (active instanceof HTMLElement && (active.closest('[inert]') || toolbar.contains(active)))) {
         // Never autofocus the composer on a phone: opening a channel must not summon the keyboard.
         if (compact.matches) {
           const target = this.panel === 'navigation'
@@ -125,10 +158,17 @@ export class ResponsiveShell {
     };
     const show = (panel: Panel, focus: boolean): void => {
       if (!compact.matches) { this.panel = panel; return; }
+      if (isSplit()) {
+        cancelCompactPageTransition(layout);
+        pagePending = false;
+        apply(panel, focus);
+        return;
+      }
       const changed = this.panel !== panel;
       this.panel = panel;
-      panels.forEach(({ element }) => cancelSurfaceMotion(element));
       if (changed) {
+        // The page snapshot replaces surface motion; staying on the page keeps a chat that is still opening.
+        panels.forEach(({ element }) => cancelSurfaceMotion(element));
         pagePending = true;
         transitionCompactPage(layout, () => {
           pagePending = false;
@@ -206,9 +246,18 @@ export class ResponsiveShell {
         if (button?.isConnected && !button.disabled) button.click();
       }, { signal: sheet.signal });
     }, { signal });
+    // The members drawer covers the conversation; touching anything outside it puts it away.
+    layout.addEventListener('pointerdown', event => {
+      if (this.panel !== 'members' || !isSplit() || !(event.target instanceof Element)
+        || members?.contains(event.target) || event.target.closest('[data-compact-toggle="members"]')) return;
+      show('content', false);
+    }, { signal });
     document.addEventListener('keydown', event => {
       if (event.key !== 'Escape' || event.defaultPrevented || !compact.matches || this.panel === 'navigation'
         || topModal() || hasOwnedSurface(layout)) return;
+      // Side by side, leaving a plain conversation for navigation would change nothing on screen.
+      if (isSplit() && this.panel === 'content' && !layout.hasAttribute('data-compact-stage')
+        && !layout.hasAttribute('data-compact-search-open')) return;
       event.preventDefault();
       if (layout.hasAttribute('data-compact-search-open')) {
         layout.removeAttribute('data-compact-search-open');
@@ -217,11 +266,13 @@ export class ResponsiveShell {
         search?.focus({ preventScroll: true });
       } else show(this.panel === 'members' ? 'content' : 'navigation', true);
     }, { signal });
-    compact.addEventListener('change', () => {
+    const relayout = (): void => {
       cancelCompactPageTransition(layout);
       pagePending = false;
       apply(this.panel, false);
-    }, { signal });
+    };
+    compact.addEventListener('change', relayout, { signal });
+    landscape.addEventListener('change', relayout, { signal });
     const observer = new MutationObserver(records => {
       if (callOptions && !callOptionsSource?.isConnected) callOptions.close('owner', true);
       if (!pagePending && records.some(record => record.target === voiceChat || [...record.addedNodes, ...record.removedNodes]
@@ -252,8 +303,12 @@ export class ResponsiveShell {
       toolbar.remove();
       footerSlot.remove();
       layout.removeAttribute('data-compact');
+      layout.removeAttribute('data-compact-split');
       layout.removeAttribute('data-compact-call');
       layout.removeAttribute('data-compact-stage');
+      layout.removeAttribute('data-compact-chat-beside');
+      layout.removeAttribute('data-compact-chat-below');
+      layout.removeAttribute('data-compact-immersive');
       layout.removeAttribute('data-compact-search-open');
       center.querySelectorAll('[data-compact-call-options]').forEach(button => button.remove());
       delete layout.dataset.compactPanel;

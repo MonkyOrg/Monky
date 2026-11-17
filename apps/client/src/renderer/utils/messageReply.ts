@@ -5,8 +5,11 @@ import { extractStickerIds, stripStickerTokens } from './stickers';
 import { renderMarkdown } from './markdown';
 
 export function formatMessageTime(timestamp: number): string {
-  const date = new Date(timestamp);
-  return `${date.toLocaleDateString(getLanguage())} ${formatMessageClock(timestamp)}`;
+  return `${formatMessageDate(timestamp)} ${formatMessageClock(timestamp)}`;
+}
+
+export function formatMessageDate(timestamp: number): string {
+  return new Date(timestamp).toLocaleDateString(getLanguage());
 }
 
 export function formatMessageClock(timestamp: number): string {

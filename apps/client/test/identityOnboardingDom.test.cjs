@@ -126,7 +126,7 @@ async function runRegression(language) {
   let painted = 0;
   let settled = null;
   void showIdentityOnboarding(container, { state: 'unreadable', reason: 'locked' }, () => { painted++; })
-    .then((identity) => { settled = identity; });
+    .then(({ identity }) => { settled = identity; });
   check(painted === 1, 'The first paint is reported once');
   check(container.querySelector('h1')?.textContent === t('identity.unreadableTitle'), 'The screen says the identity could not be opened');
   check(container.querySelector('#identity-unreadable-reason')?.textContent === t('identity.unreadableLocked'), 'The reason is explained');
@@ -168,14 +168,14 @@ async function runRegression(language) {
   // Trying again once the keychain opens hands over the stored identity.
   settled = null;
   nextStatus = { state: 'ready' };
-  void showIdentityOnboarding(container, { state: 'unreadable', reason: 'locked' }, () => {}).then((identity) => { settled = identity; });
+  void showIdentityOnboarding(container, { state: 'unreadable', reason: 'locked' }, () => {}).then(({ identity }) => { settled = identity; });
   button('btn-onboard-retry').click();
   await waitFor(() => settled, () => 'A successful retry did not finish the onboarding');
   check(calls.get === 1 && calls.create === 1, 'A successful retry reads the identity and creates nothing');
 
   // No identity yet: creating needs no confirmation.
   settled = null;
-  void showIdentityOnboarding(container, { state: 'missing' }, () => {}).then((identity) => { settled = identity; });
+  void showIdentityOnboarding(container, { state: 'missing' }, () => {}).then(({ identity }) => { settled = identity; });
   check(!button('btn-onboard-retry'), 'Without an identity there is nothing to try again');
   button('btn-onboard-create').click();
   await waitFor(() => settled, () => 'Creating the first identity did not finish the onboarding');
@@ -221,7 +221,7 @@ async function runRegression(language) {
     return { ...fixture, guest: true, nickname };
   };
   settled = null;
-  void showIdentityOnboarding(container, { state: 'missing' }, () => {}).then(identity => { settled = identity; });
+  void showIdentityOnboarding(container, { state: 'missing' }, () => {}).then(({ identity }) => { settled = identity; });
   check(button('btn-onboard-guest')?.textContent.includes(t('identity.guestAction')), 'Guest entry is localized');
   button('btn-onboard-guest').click();
   let guestDialog = await waitFor(dialog, () => 'Guest name dialog did not open');

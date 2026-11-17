@@ -1,3 +1,4 @@
+import { htmlElement } from '../../utils/html';
 import { highlightMessageJump } from '../../utils/messageJumpHighlight';
 import { restoreScrollWithMotion, smoothScrollIntoView, smoothScrollTo } from '../../utils/scroll';
 
@@ -44,13 +45,6 @@ const DRIFT_PX = 2;
 /** How close to the end an automatic scroll must get to have arrived there. */
 const ARRIVED_PX = 1;
 const TAKEOVER_EVENTS = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const;
-
-function build(markup: string): HTMLElement | null {
-  const template = document.createElement('template');
-  template.innerHTML = markup.trim();
-  const element = template.content.firstElementChild;
-  return element instanceof HTMLElement ? element : null;
-}
 
 /** A selector finding the same control in the rebuilt entry: its id, or its tag and data attributes. */
 function describe(element: HTMLElement): string {
@@ -403,7 +397,7 @@ export class MessageFeed {
   }
 
   private create(entry: FeedEntry): HTMLElement | null {
-    const element = build(entry.html);
+    const element = htmlElement(entry.html);
     if (element) this.built.set(element, { key: entry.key, html: entry.html });
     return element;
   }

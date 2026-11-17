@@ -6,6 +6,7 @@ import {
   aliasH264MainOffer, assertBrowserScreenCodec, browserAliasesH264Main, restoreH264MainAnswer, withBrowserScreenReceiveParameters,
   type H264MainAliases,
 } from './browserScreenCodecs';
+import { sentMediaBinding } from '../../platform/web/webScreen/screenSdp';
 
 type ControlBody<T = NativeScreenP2pControl> = T extends NativeScreenP2pControl
   ? Omit<T, 'protocol' | 'version' | 'callId' | 'channelId' | 'connectionId' | 'generation'> : never;
@@ -302,7 +303,7 @@ export class BrowserScreenP2p {
       const entry = this.publications.get(kind), video = this.publications.get('video');
       const publication = entry?.publication;
       if (!publication || entry.retired || (kind === 'audio' && (!video || video.retired))
-        || publication.trackId !== incoming.track.id
+        || publication.trackId !== this.announcedTrackId(incoming)
         || (publication.mid !== null && publication.mid !== incoming.transceiver.mid)
         || !this.sameStreams(publication.streamIds, incoming.streamIds)) {
         incoming.track.enabled = false;
@@ -315,6 +316,16 @@ export class BrowserScreenP2p {
         this.options.onTrack(incoming.track, incoming.receiver);
       }
     }
+  }
+
+  /**
+   * The track id the publisher announced for `incoming`. A publication names its track as the SDP does
+   * (msid), but WebKit gives every received track an id of its own, so only the SDP still carries it.
+   */
+  private announcedTrackId(incoming: IncomingTrack): string {
+    const mid = incoming.transceiver.mid;
+    const sdp = this.peer.remoteDescription?.sdp;
+    return (mid && sdp ? sentMediaBinding(sdp, mid)?.trackId : undefined) ?? incoming.track.id;
   }
 
   private sameStreams(left: readonly string[], right: readonly string[]): boolean {

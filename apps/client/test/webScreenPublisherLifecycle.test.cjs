@@ -14,7 +14,11 @@ const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 const moduleExports = { exports: {} };
-vm.runInNewContext(`(function(exports,require,module){${code}\n})`, { console, DOMException, crypto })(moduleExports.exports,
+const context = () => ({
+  console, DOMException, crypto, AbortController,
+  setInterval: (...args) => setInterval(...args), clearInterval: (...args) => clearInterval(...args),
+});
+vm.runInNewContext(`(function(exports,require,module){${code}\n})`, context())(moduleExports.exports,
   request => request === '@monky/shared' ? shared : {}, moduleExports);
 const { WebScreenPublisher } = moduleExports.exports;
 
@@ -29,6 +33,7 @@ function fixture() {
   const video = track(), audio = track();
   publisher.pipelines.set('source', {
     id: randomUUID(), key: 'source', video, audio, viewers: new Map(), ready: Promise.resolve(), closing: null, sfu: null,
+    geometry: new AbortController(),
   });
   publisher.viewers.set('viewer', {
     sessionId: 'viewer', subscriptionId: randomUUID(), quality: 'source', backend: 'browser', generation: 1,
@@ -65,7 +70,7 @@ test('publisher teardown also retires a rendition whose asynchronous setup finis
   f.publisher.pending.add(pending.promise.then(() => {
     f.publisher.pipelines.set('late', {
       id: randomUUID(), key: 'late', video: late, audio: null,
-      viewers: new Map(), ready: Promise.resolve(), closing: null, sfu: null,
+      viewers: new Map(), ready: Promise.resolve(), closing: null, sfu: null, geometry: new AbortController(),
     });
   }));
   const closing = f.publisher.close('source-unavailable', false);
@@ -81,18 +86,24 @@ const compile = (file, imports) => {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText;
   const module = { exports: {} };
-  vm.runInNewContext(`(function(exports,require,module){${output}\n})`, { console, DOMException, crypto })(module.exports,
+  vm.runInNewContext(`(function(exports,require,module){${output}\n})`, context())(module.exports,
     request => request === '@monky/shared' ? shared : imports(request), module);
   return module.exports;
 };
 
 /** A publisher whose connections are spies, sharing a capture that keeps `size` after `applyConstraints`. */
 function scaledFixture(mode, size, constraints = Promise.resolve()) {
-  const peers = [], renditions = [];
+  const peers = [], renditions = [], applied = [], rescaled = [];
+  const capture = { size };
   const profile = compile('browserScreenProfile.ts', () => ({ runsOnWebKit: () => false }));
+  const geometry = compile('renditionGeometry.ts', () => ({}));
   const { WebScreenPublisher: Publisher } = compile('webScreenPublisher.ts', request => {
     if (request === './browserScreenProfile') return profile;
-    if (request === './browserScreenPeer') return { BrowserScreenPeer: class { constructor(options) { peers.push(options); } } };
+    if (request === './renditionGeometry') return geometry;
+    if (request === './browserScreenPeer') return { BrowserScreenPeer: class {
+      constructor(options) { peers.push(options); }
+      setScaleResolutionDownBy(scale) { rescaled.push(scale); return Promise.resolve(); }
+    } };
     if (request === './screenP2pPublisherPeer') return { ScreenP2pPublisherPeer: class { start() {} close() { return Promise.resolve(); } } };
     if (request === './webScreenSfuRendition') return { WebScreenSfuRendition: class {
       constructor(options) { renditions.push(options); this.ready = Promise.resolve(); }
@@ -101,7 +112,8 @@ function scaledFixture(mode, size, constraints = Promise.resolve()) {
     return {};
   });
   const copy = {
-    readyState: 'live', applyConstraints: () => constraints, getSettings: () => size,
+    readyState: 'live', getSettings: () => capture.size,
+    applyConstraints: value => { applied.push(value); return constraints; },
     stop() { this.readyState = 'ended'; },
   };
   const source = {
@@ -110,14 +122,15 @@ function scaledFixture(mode, size, constraints = Promise.resolve()) {
   };
   const publisher = new Publisher({
     call: { sessionId: 'host', channelId: 'room', mode, iceServers: [] }, source, format: 'compatible',
-    capture: { video: { clone: () => copy }, audioTrack: null, ended: false }, audioBitrateKbps: 128,
+    capture: { video: { clone: () => copy, getSettings: () => capture.size, readyState: 'live' }, audioTrack: null, ended: false },
+    audioBitrateKbps: 128,
     signal: () => Promise.resolve(), rpc: () => Promise.resolve(), onError: error => { throw error; },
   });
   const watch = () => publisher.receive({
     action: 'watch', fromSessionId: 'viewer', targetSessionId: 'host', publisherSessionId: 'host', channelId: 'room',
     shareId: source.shareId, sourceInstanceId: source.instanceId, subscriptionId: randomUUID(), quality: 'source', backend: 'browser',
   });
-  return { publisher, peers, renditions, watch };
+  return { publisher, peers, renditions, watch, capture, applied, rescaled };
 }
 
 test('an iPhone capture Safari keeps whole is scaled by the encoder to the rendition, in P2P and on the SFU', async () => {
@@ -145,4 +158,29 @@ test('a copy the browser already resized to its rendition is sent as it is', asy
   await f.watch();
   assert.equal(f.peers[0].scaleResolutionDownBy, 1);
   await f.publisher.close('source-unavailable', false);
+});
+
+const plain = value => JSON.parse(JSON.stringify(value));
+
+test('a capture that turns or changes shape refits its rendition and the encoder of every viewer', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = scaledFixture('p2p', { width: 1206, height: 2622 });
+  await f.watch();
+  assert.deepEqual(plain(f.applied.at(-1)), { width: { max: 328 }, height: { max: 720 }, frameRate: { max: 30 } });
+  // Turned sideways, the copy is held in the same rendition turned with it, never cropped to an upright frame.
+  f.capture.size = { width: 2622, height: 1206 };
+  t.mock.timers.tick(1000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(plain(f.applied.at(-1)), { width: { max: 720 }, height: { max: 328 }, frameRate: { max: 30 } });
+  assert.deepEqual(plain(f.rescaled), [], 'the same pixels turned need no other scale');
+  // A copy Safari keeps whole in a new shape is shrunk again by the encoder.
+  f.capture.size = { width: 2000, height: 2000 };
+  t.mock.timers.tick(1000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(plain(f.rescaled), [2000 / 328]);
+  await f.publisher.close('source-unavailable', false);
+  const settled = f.applied.length;
+  f.capture.size = { width: 1206, height: 2622 };
+  t.mock.timers.tick(1000);
+  assert.equal(f.applied.length, settled, 'a retired rendition stops following its capture');
 });

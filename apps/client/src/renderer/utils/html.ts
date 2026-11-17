@@ -65,3 +65,21 @@ export function html(strings: TemplateStringsArray, ...values: readonly HtmlValu
   });
   return new SafeHtml(markup);
 }
+
+/**
+ * Parses markup into nodes owned by the page. A template parses in a document
+ * with no window, and iOS WebKit plays a <video> born there once it is adopted
+ * but never paints it: the stage showed black cameras and screens. Importing
+ * makes fresh nodes in this document, keeping the template's parsing rules.
+ */
+export function htmlFragment(markup: string): DocumentFragment {
+  const template = document.createElement('template');
+  template.innerHTML = markup;
+  return document.importNode(template.content, true);
+}
+
+/** The first element a piece of markup renders, owned by the page. */
+export function htmlElement(markup: string): HTMLElement | null {
+  const element = htmlFragment(markup.trim()).firstElementChild;
+  return element instanceof HTMLElement ? element : null;
+}

@@ -9,20 +9,28 @@ import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
 import { nicknameError } from '../utils/nickname';
 import { reportError, validateForm } from '../utils/feedback';
 import { pickAndCropImage } from './ImageCropModal';
+import { showIdentityExportDialog } from './IdentityDialogs';
+
+export interface IdentityProfileStepOptions {
+  /** A new identity that lives only in this browser: the step offers to save a copy of it. */
+  webBackupClientId?: string;
+}
 
 export function hasValidLocalProfile(): boolean {
   return getNicknameIssue(connectionStore.savedNickname) === null;
 }
 
-export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
+export function showIdentityProfileStep(container: HTMLElement, options: IdentityProfileStepOptions = {}): Promise<void> {
   return new Promise((resolve) => {
+    const listeners = new AbortController();
+    const backupClientId = options.webBackupClientId;
     let avatar = connectionStore.savedAvatarBase64 || '';
     let avatarPicked = false;
     let detachEmoji: (() => void) | null = null;
     const render = (): void => {
       detachEmoji?.();
       container.innerHTML = `
-        <div class="identity-onboarding identity-profile-step">
+        <div class="identity-onboarding identity-profile-step identity-profile-setup">
           <img src="${logoUrl}" alt="Monky" class="identity-profile-logo">
           <h1>${t('identity.profileTitle')}</h1>
           <p>${t('identity.profileDesc')}</p>
@@ -50,6 +58,12 @@ export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
               <span class="material-symbols-outlined md-18" aria-hidden="true">check</span>
               ${t('identity.profileContinue')}
             </button>
+            ${backupClientId ? `
+              <div class="identity-backup-strip" role="note">
+                <span class="material-symbols-outlined md-18" aria-hidden="true">info</span>
+                <span class="identity-backup-strip-text">${t('identity.webBackupStrip')}</span>
+                <button type="button" class="btn btn-secondary identity-backup-strip-action" id="identity-profile-backup">${t('identity.webBackupSave')}</button>
+              </div>` : ''}
           </form>
         </div>
       `;
@@ -66,6 +80,11 @@ export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
         const preview = container.querySelector<HTMLImageElement>('#identity-profile-avatar-preview');
         if (preview) preview.src = cropped;
       });
+      if (backupClientId) {
+        container.querySelector<HTMLButtonElement>('#identity-profile-backup')?.addEventListener('click', () => {
+          void showIdentityExportDialog(backupClientId);
+        }, { signal: listeners.signal });
+      }
       const form = container.querySelector<HTMLFormElement>('#identity-profile-form');
       // The browser's own balloon would speak the system's language, not the app's.
       if (form) form.noValidate = true;
@@ -83,6 +102,7 @@ export function showIdentityProfileStep(container: HTMLElement): Promise<void> {
         stampProfileChange({ nickname: true, avatar: avatarPicked });
         detachEmoji?.();
         detachEmoji = null;
+        listeners.abort();
         resolve();
       });
     };

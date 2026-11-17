@@ -821,6 +821,22 @@ async function setupStageSmoke() {
   diagnosticCanvas.getContext('2d').fillRect(0, 0, 16, 16);
   const diagnosticStream = diagnosticCanvas.captureStream(0);
   diagnosticParticipant.remoteStream = diagnosticStream;
+  // iOS WebKit plays but never paints a <video> parsed in a windowless document (a template) and
+  // then adopted, and Chromium hides the difference after insertion: catch it on the way in.
+  const windowlessVideos = [];
+  const insertions = [[Node.prototype, ['appendChild', 'insertBefore', 'replaceChild']],
+    [Element.prototype, ['append', 'prepend', 'before', 'after', 'replaceWith', 'replaceChildren']]];
+  const originalInsertions = insertions.flatMap(([prototype, names]) => names.map(name => [prototype, name, prototype[name]]));
+  for (const [prototype, name, original] of originalInsertions) {
+    prototype[name] = function (...nodes) {
+      for (const node of nodes) {
+        if (!(node instanceof Node) || node.ownerDocument === document) continue;
+        const videos = node instanceof Element && node.matches('video') ? [node] : [...(node.querySelectorAll?.('video') ?? [])];
+        if (videos.length) windowlessVideos.push(videos.map(video => video.className).join(' '));
+      }
+      return original.apply(this, nodes);
+    };
+  }
   const stage = new VoiceStageView(root);
   const codecStats = new Map([
     ['first-capability', { type: 'codec', mimeType: 'video/AV1' }],
@@ -967,7 +983,7 @@ async function setupStageSmoke() {
       await delay();
       await finishAnimations(['#stage-btn-camera', '#stage-btn-screen', '#stage-btn-overlay']
         .flatMap(selector => animations(button(selector))));
-      check(button('#stage-btn-stop-share').style.display === 'inline-flex'
+      check(!button('#stage-btn-stop-share').hidden
         && button('#btn-stage-quick-stop'), 'Sharing exposes both real stop actions');
       check(!button('.screen-audio-badge').hidden, 'Active screen audio badge is retained');
       check(motionCount() === 0, 'Only changed existing controls receive broadcasting feedback, not new stop buttons');
@@ -1108,7 +1124,7 @@ async function setupStageSmoke() {
         enter(button('.stage-volume-btn'));
         check(animations(button('.stage-volume-btn')).length === 1, 'Replacement cards bind exactly once');
       }
-      for (const control of buttons().filter((control) => !control.hidden && control.style.display !== 'none')) {
+      for (const control of buttons().filter(control => control.checkVisibility())) {
         enter(control);
         const animation = animations(control)[0];
         check(animation && animation.effect.getTiming().iterations === 1
@@ -1142,6 +1158,9 @@ async function setupStageSmoke() {
       check(motionCount() === 0 && actions.overlay === 2, 'Reduced motion preserves actions without click animation');
     },
     async cleanup() {
+      for (const [prototype, name, original] of originalInsertions) prototype[name] = original;
+      check(root.querySelectorAll('video.stage-video-element').length >= 2 && windowlessVideos.length === 0,
+        'Stage videos are created in the page document, never adopted from a template: ' + JSON.stringify(windowlessVideos));
       await finishAnimations(buttons().flatMap(animations));
       check(!matchMedia('(prefers-reduced-motion: reduce)').matches && motionCount() === 0,
         'Re-enabling motion does not autoplay the stage');

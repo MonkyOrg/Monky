@@ -630,6 +630,8 @@ function fixture(language = 'en') {
     picker, quality, SettingsSectionNavigation, i18n, load, mountQuality, document, api, controls, sources, source,
     notifyNativeFailure: appEventHandler('native_screen.source_failed', {
       t: i18n.t, showAlert: stubs['views/Dialog'].showAlert,
+      // On the desktop a terminal failure stays in a dialog; a phone's toast is checked in shellNavigationDom.
+      mediaFailure: (title, message) => stubs['views/Dialog'].showAlert({ title, message, variant: 'danger' }),
       showInfoToast: (message, durationMs) => traces.push(['info-toast', message, durationMs]),
     }),
     notifyCaptureFallback: appEventHandler('native_screen.capture_fallback', {

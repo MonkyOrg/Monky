@@ -8,7 +8,7 @@ import {
   browserScreenFormats, browserScreenProfile, browserSourceProfile, encoderScaleDown, h264Level31Profile, isScreenCodec,
   screenSenderCodecs,
 } from '../src/renderer/platform/web/webScreen/browserScreenProfile';
-import { sameMediaBinding, sentMediaBinding, withScreenStreamId } from '../src/renderer/platform/web/webScreen/screenSdp';
+import { sameMediaBinding, sentMediaBinding, withScreenStreamId, withoutVideoOrientation } from '../src/renderer/platform/web/webScreen/screenSdp';
 import {
   SCREEN_P2P_LIMITS, ScreenP2pPublisherPeer,
   type ScreenIceCandidate, type ScreenMediaKind, type ScreenPeerPort,
@@ -209,6 +209,17 @@ test('a browser capture announces the chosen quality fitted to what it captured 
   assert.deepEqual({ ...browserScreenProfile(requested, {}) }, requested);
 });
 
+test('an upright phone fills the chosen quality long side to long side, as a sideways one does', () => {
+  const requested = { width: 852, height: 480, fps: 30, maxBitrateKbps: 1500 };
+  // An iPhone held upright once shrank to 220×480 inside the landscape box.
+  assert.deepEqual({ ...browserScreenProfile(requested, { width: 1206, height: 2622, frameRate: 30 }) },
+    { width: 388, height: 852, fps: 30, maxBitrateKbps: 1500 });
+  assert.deepEqual({ ...browserScreenProfile(requested, { width: 2622, height: 1206, frameRate: 30 }) },
+    { width: 852, height: 390, fps: 30, maxBitrateKbps: 1500 });
+  assert.deepEqual({ ...browserScreenProfile(requested, { width: 1920, height: 1080, frameRate: 30 }) },
+    { width: 852, height: 478, fps: 30, maxBitrateKbps: 1500 });
+});
+
 const macroblocks = (width: number, height: number): number => Math.ceil(width / 16) * Math.ceil(height / 16);
 
 test('a screen fitted to H.264 Level 3.1 keeps its shape inside 3600 macroblocks and 30 FPS at that size', () => {
@@ -247,6 +258,8 @@ test('the encoder shrinks a copy the browser did not resize to its rendition, ne
   assert.ok(1206 / scale <= rendition.width && 2622 / scale <= rendition.height);
   // Turned sideways, the same scale keeps the frame inside the level.
   assert.ok(macroblocks(Math.round(2622 / scale), Math.round(1206 / scale)) <= 3600);
+  // The rendition of an upright capture holds the same capture rotated, at the same scale.
+  assert.equal(encoderScaleDown({ width: 2622, height: 1206 }, rendition), scale);
   assert.equal(encoderScaleDown({ width: 328, height: 720 }, rendition), 1);
   assert.equal(encoderScaleDown({ width: 200, height: 400 }, rendition), 1);
   assert.equal(encoderScaleDown({}, rendition), 1);
@@ -458,4 +471,118 @@ test('a share started in Firefox, whose streams are named {uuid}, gets a share i
   assert.equal(firefox.id, firefox.id, 'the id stays the same every time it is read');
   next = 'Q2o7mVb1xK0dLr9sTz4wHy3nUe6cGj5pFa8i';
   assert.equal(createScreenShareStream().id, next, 'an id the rule accepts is kept');
+});
+
+test('a browser screen never negotiates the orientation mark, so a turned phone sends its pixels turned', () => {
+  const sdp = ['m=video 9 UDP/TLS/RTP/SAVPF 96', 'a=mid:0', 'a=extmap:3 urn:3gpp:video-orientation',
+    'a=extmap:4/sendrecv urn:3gpp:video-orientation', 'a=extmap:5 urn:ietf:params:rtp-hdrext:sdes:mid', 'a=sendonly', ''].join('\r\n');
+  assert.equal(withoutVideoOrientation(sdp),
+    ['m=video 9 UDP/TLS/RTP/SAVPF 96', 'a=mid:0', 'a=extmap:5 urn:ietf:params:rtp-hdrext:sdes:mid', 'a=sendonly', ''].join('\r\n'));
+});
+
+test('Safari answers a desktop viewer whose renegotiation offers H.264 at Level 6, read as the 5.2 WebKit parses', async (t: TestContext) => {
+  const received: string[] = [];
+  class FakePeer {
+    public onicecandidate: unknown = null;
+    public onconnectionstatechange: unknown = null;
+    addTransceiver() { return { setCodecPreferences() {}, sender: {}, mid: '0' }; }
+    // WebKit drops a codec at a level its parser predates: the screen's section is left with none.
+    async setRemoteDescription(description: RTCSessionDescriptionInit) {
+      if (/profile-level-id=[0-9a-f]{4}3[5-9a-f]/i.test(description.sdp ?? '')) throw new Error('Failed to setup RTCP mux.');
+      received.push(description.sdp ?? '');
+    }
+    close() {}
+  }
+  const names = ['RTCPeerConnection', 'MediaStream'] as const;
+  const descriptors = names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
+  t.after(() => {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name);
+    }
+  });
+  Object.defineProperty(globalThis, 'RTCPeerConnection', { value: FakePeer, configurable: true, writable: true });
+  Object.defineProperty(globalThis, 'MediaStream', { value: class { id = 'stream'; }, configurable: true, writable: true });
+  const { BrowserScreenPeer } = await import('../src/renderer/platform/web/webScreen/browserScreenPeer');
+  const offer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 98 96 35', 'a=mid:0', 'a=recvonly', 'a=rtpmap:98 H264/90000',
+    'a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e03c', 'a=rtpmap:96 H264/90000',
+    'a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d0033', 'a=rtpmap:35 AV1/90000',
+    'a=fmtp:35 level-idx=23;profile=0;tier=0', ''].join('\r\n');
+  await new Promise<void>((resolve, reject) => inBrowser(t, SAFARI_VIDEO_CODECS, () => {
+    const peer = new BrowserScreenPeer({
+      iceServers: [], format: 'compatible', streamId: INSTANCE, video: {} as MediaStreamTrack, audio: null,
+      maxBitrateBps: 2_500_000, maxFramerate: 30, scaleResolutionDownBy: 1, audioBitrateBps: 128_000,
+      onCandidate: () => {}, onState: () => {},
+    });
+    peer.setRemote('offer', offer).then(resolve, reject);
+  }));
+  assert.match(received[0], /a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e034\r\n/);
+  assert.match(received[0], /profile-level-id=4d0033\r\n/, 'a level WebKit reads stays');
+  assert.match(received[0], /a=fmtp:35 level-idx=23;profile=0;tier=0\r\n/, 'only H.264 carries a profile level');
+});
+
+test('Safari declares the Constrained Baseline its VideoToolbox keyframes omit, which the desktop requires to show them', async (t: TestContext) => {
+  // The SPS WebKit sends on macOS and the iPhone: profile 66, constraint flags 0x00, level 5.2.
+  const sps = [0, 0, 0, 1, 0x27, 0x42, 0x00, 0x34, 0xab, 0x40, 0x28, 0x02, 0xdd];
+  const slice = [0, 0, 0, 1, 0x25, 0x88, 0x84];
+  const sender: { transform: unknown } = { transform: null };
+  const workers: string[] = [];
+  class FakePeer {
+    public onicecandidate: unknown = null;
+    public onconnectionstatechange: unknown = null;
+    addTransceiver() { return { setCodecPreferences() {}, sender, mid: '0' }; }
+    close() {}
+  }
+  const names = ['RTCPeerConnection', 'MediaStream', 'Worker', 'RTCRtpScriptTransform'] as const;
+  const descriptors = names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
+  t.after(() => {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name);
+    }
+  });
+  const define = (name: string, value: unknown): void => { Object.defineProperty(globalThis, name, { value, configurable: true, writable: true }); };
+  define('RTCPeerConnection', FakePeer);
+  define('MediaStream', class { id = 'stream'; });
+  define('Worker', class { onerror: unknown = null; constructor(url: string) { workers.push(url); } terminate() {} });
+  define('RTCRtpScriptTransform', class { constructor(public readonly worker: unknown) {} });
+  const { BrowserScreenPeer } = await import('../src/renderer/platform/web/webScreen/browserScreenPeer');
+  const open = (userAgent: string) => inBrowser(t, SAFARI_VIDEO_CODECS, () => {
+    define('navigator', { userAgent });
+    new BrowserScreenPeer({
+      iceServers: [], format: 'compatible', streamId: INSTANCE, video: {} as MediaStreamTrack, audio: null,
+      maxBitrateBps: 2_500_000, maxFramerate: 30, scaleResolutionDownBy: 1, audioBitrateBps: 128_000,
+      onCandidate: () => {}, onState: () => {},
+    }).close();
+  });
+  open('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36');
+  assert.equal(sender.transform, null, 'Chromium encoders already declare it: their frames are left alone');
+  open('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1');
+  assert.ok(sender.transform, 'the screen video passes through the declaring transform');
+
+  // The worker runs only its own source text.
+  const { resolveObjectURL } = await import('node:buffer');
+  const source = await resolveObjectURL(workers[0])!.text();
+  const { runInNewContext } = await import('node:vm');
+  const scope = new EventTarget();
+  runInNewContext(source, { self: scope, TransformStream });
+  const frames = [{ type: 'key', data: new Uint8Array([...sps, ...slice]).buffer },
+    { type: 'delta', data: new Uint8Array([0, 0, 0, 1, 0x21, 0x9a]).buffer }];
+  const sent: Uint8Array[] = [];
+  const done = new Promise<void>(resolve => scope.dispatchEvent(Object.assign(new Event('rtctransform'), {
+    transformer: {
+      readable: new ReadableStream({ start(controller) { frames.forEach(frame => controller.enqueue(frame)); controller.close(); } }),
+      writable: new WritableStream<{ data: ArrayBuffer }>({ write: frame => { sent.push(new Uint8Array(frame.data)); }, close: resolve }),
+    },
+  })));
+  await done;
+  assert.deepEqual([...sent[0]], [...sps.slice(0, 6), 0x40, ...sps.slice(7), ...slice], 'constraint_set1 now declared');
+  assert.deepEqual([...sent[1]], [0, 0, 0, 1, 0x21, 0x9a]);
+});
+
+test('Only a Baseline SPS that omits it is declared Constrained Baseline', async () => {
+  const { declareConstrainedBaseline } = await import('../src/renderer/platform/web/webScreen/constrainedBaseline');
+  const declared = (bytes: number[]) => { const frame = new Uint8Array(bytes); return [declareConstrainedBaseline(frame), [...frame]]; };
+  assert.deepEqual(declared([0, 0, 1, 0x67, 0x42, 0xc0, 0x1f]), [false, [0, 0, 1, 0x67, 0x42, 0xc0, 0x1f]]);
+  assert.deepEqual(declared([0, 0, 1, 0x67, 0x4d, 0x00, 0x33]), [false, [0, 0, 1, 0x67, 0x4d, 0x00, 0x33]], 'Main is not Baseline');
+  assert.deepEqual(declared([0, 0, 1, 0x67, 0x42, 0x0c, 0x1f]), [true, [0, 0, 1, 0x67, 0x42, 0x40, 0x1f]], 'constraint_set4/5 cleared');
+  assert.deepEqual(declared([0, 0, 1, 0x65, 0x42, 0x00, 0x1f]), [false, [0, 0, 1, 0x65, 0x42, 0x00, 0x1f]], 'only an SPS');
 });
