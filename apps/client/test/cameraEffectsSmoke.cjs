@@ -1691,7 +1691,8 @@ async function runCameraEffectsSmoke(phase) {
     console.log('CAMERA TEST mirroring');
     // The source stripes sit on the left; mirrored video shows them on the right.
     const imageColor = [222, 32, 170];
-    await service.setCameraEffects({ mirror: true });
+    // Physical chroma replaces the green with the image in every phase, without depending on segmentation.
+    await service.setCameraEffects({ mode: 'chroma', backgroundSource: 'image', mirror: true });
     await watch(service.getCameraStream());
     await expectVideoPixel(0.07, 0.2, actual => near(actual, imageColor), 'Mirroring moves the left stripes away from the left side');
     await expectVideoPixel(0.93, 0.2, actual => !near(actual, imageColor, 60),
