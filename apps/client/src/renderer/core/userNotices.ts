@@ -6,16 +6,34 @@ import { sessionManager } from './SessionManager';
 import { soundEffects } from './SoundEffects';
 import { translateProtocolError } from '../i18n/protocolErrors';
 import { cameraEffectErrorMessage } from '../utils/cameraEffectErrors';
-import { showInfoToast } from '../views/CopyToast';
+import { showErrorNotice, showInfoToast, type ToastAction } from '../views/CopyToast';
 import { showAlert } from '../views/Dialog';
+import { reportError } from '../utils/feedback';
+import { COMPACT_VIEWPORT_QUERY } from '../utils/viewport';
+import { settingsStore } from '../stores/settingsStore';
+import { microphoneFailureReason, selectAudioDevice } from './AudioDeviceService';
 import { t } from '../i18n';
 
 /**
  * What the app tells the person on its own, with no action of theirs to answer.
  * A terminal media failure (reconnection, microphone, camera, screen capture)
- * stays in a dialog so it is not missed; passing news goes to a toast.
+ * stays in a dialog so it is not missed; passing news goes to a toast. On a
+ * phone that dialog would be a sheet over the call, so there the failure is an
+ * alert toast in the corner, carrying the action that fixes it.
  */
 export function bindUserNotices(): () => void {
+  const compact = window.matchMedia(COMPACT_VIEWPORT_QUERY);
+  const mediaFailure = (title: string, message: string, action?: ToastAction): void => {
+    if (compact.matches) showErrorNotice({ title, message, action });
+    else void showAlert({ title, message, variant: 'danger' });
+  };
+  const retryMicrophone: ToastAction = {
+    label: t('voiceJoin.microphoneRetry'),
+    run: () => {
+      selectAudioDevice('input', settingsStore.selectedMicrophoneId)
+        .catch((error: unknown) => reportError(microphoneFailureReason(error), { log: 'AUDIO', error }));
+    },
+  };
   const unbind = [
     appEvents.on('community.event_started', notice => {
       soundEffects.play('chat_message');
@@ -34,27 +52,24 @@ export function bindUserNotices(): () => void {
     }),
 
     appEvents.on('camera.error_notice', (error) => {
-      void showAlert({ title: t('stage.cameraErrorTitle'), message: cameraEffectErrorMessage(error), variant: 'danger' });
+      mediaFailure(t('stage.cameraErrorTitle'), cameraEffectErrorMessage(error));
     }),
 
     appEvents.on('voice.rejoin_failed', (payload: { error: string }) => {
-      void showAlert({
-        title: t('voiceReconnect.failedTitle'),
-        message: t('voiceReconnect.failed', { error: payload.error }),
-        variant: 'danger',
-      });
+      mediaFailure(t('voiceReconnect.failedTitle'), t('voiceReconnect.failed', { error: payload.error }));
     }),
 
     appEvents.on('voice.microphone_failed', (payload: { error: string }) => {
-      void showAlert({
-        title: t('voiceJoin.microphoneTitle'),
-        message: t('voiceJoin.microphoneUnavailable', { error: payload.error }),
-        variant: 'danger',
-      });
+      if (compact.matches) {
+        // The toast is short: only the reason, the title already says the call goes on without a microphone.
+        mediaFailure(t('voiceJoin.microphoneTitle'), payload.error, retryMicrophone);
+      } else {
+        mediaFailure(t('voiceJoin.microphoneTitle'), t('voiceJoin.microphoneUnavailable', { error: payload.error }));
+      }
     }),
 
     appEvents.on('audio.processing_error', () => {
-      void showAlert({ title: t('audioNoise.title'), message: t('audioNoise.processingFailed'), variant: 'danger' });
+      mediaFailure(t('audioNoise.title'), t('audioNoise.processingFailed'));
     }),
 
     appEvents.on('native_screen.capture_fallback', (_payload: { shareId: string }) => {
@@ -69,12 +84,8 @@ export function bindUserNotices(): () => void {
         showInfoToast(t('screenShare.nativeFailure.connection-failed'), 8000);
         return;
       }
-      void showAlert({
-        title: t('screenShare.errorTitle'),
-        message: payload.code === 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE'
-          ? t('screenShare.gameCaptureUnavailable') : t(`screenShare.nativeFailure.${payload.reason}`),
-        variant: 'danger',
-      });
+      mediaFailure(t('screenShare.errorTitle'), payload.code === 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE'
+        ? t('screenShare.gameCaptureUnavailable') : t(`screenShare.nativeFailure.${payload.reason}`));
     }),
 
     // A server ended the session on purpose (closed, updating or removed us).

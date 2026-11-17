@@ -15,14 +15,14 @@ import { connectionStore } from '../../stores/connectionStore';
 import { formatBytes, fileIconName } from '../../utils/attachment';
 import { getAvatarUrl } from '../../utils/avatar';
 import { openFileInputPicker } from '../../utils/buttonLoading';
-import { escapeHtml, html, trustedHtml, type SafeHtml } from '../../utils/html';
+import { escapeHtml, html, htmlElement, trustedHtml, type SafeHtml } from '../../utils/html';
 import { renderMarkdown } from '../../utils/markdown';
 import type { MessageClipboardContent } from '../../utils/messageClipboard';
 import { formatMessageClock, formatMessageTime, renderReplyPreview } from '../../utils/messageReply';
 import { setSurfaceVisible } from '../../utils/surfaceVisibility';
 import { animateEnter } from '../../utils/surfaceMotion';
 import { renderLoadingSkeleton } from '../../utils/loadingSkeleton';
-import { bindChatComposer, renderChatComposer, renderChatEditComposer, setComposerEditMode } from '../ChatComposer';
+import { bindChatComposer, renderChatComposer, renderChatEditComposer, setComposerCounter, setComposerEditMode } from '../ChatComposer';
 import { contextMenu, type ContextMenuEntry } from '../ContextMenu';
 import { showErrorToast } from '../CopyToast';
 import { showConfirm } from '../Dialog';
@@ -77,13 +77,6 @@ function rowKey(messageId: string): string {
 
 function isMessageKey(key: string): boolean {
   return key.startsWith('message:');
-}
-
-function elementFromHtml(markup: string): HTMLElement | null {
-  const template = document.createElement('template');
-  template.innerHTML = markup.trim();
-  const element = template.content.firstElementChild;
-  return element instanceof HTMLElement ? element : null;
 }
 
 /** Consecutive messages from the same author on the same local day share one header. */
@@ -391,11 +384,7 @@ export class DmConversationView {
   }
 
   private updateCounter(): void {
-    const length = this.input()?.value.length ?? 0;
-    const counter = this.query('#chat-char-counter');
-    if (!counter) return;
-    counter.textContent = `${length}/${DM_MAX_MESSAGE_LENGTH}`;
-    counter.classList.toggle('code-char-count--over', length > DM_MAX_MESSAGE_LENGTH);
+    setComposerCounter(this.query('#chat-char-counter'), this.input()?.value.length ?? 0, DM_MAX_MESSAGE_LENGTH);
   }
 
   private renderTyping(): void {
@@ -521,7 +510,7 @@ export class DmConversationView {
     const selector = `[data-dm-file="${CSS.escape(fileId)}"]`;
     const patched = markup !== null && feed.patch(rowKey(messageId), markup, (row) => {
       const card = row.querySelector(selector);
-      const fresh = elementFromHtml(markup)?.querySelector(selector);
+      const fresh = htmlElement(markup)?.querySelector(selector);
       if (!card || !fresh) return false;
       card.replaceWith(fresh);
       return true;
@@ -556,14 +545,13 @@ export class DmConversationView {
 
   private renderMessage(message: DmMessageView, grouped: boolean, reply: SafeHtml | null): string {
     const author = this.authorInfo(message.author);
-    const time = formatMessageTime(message.createdAt);
     const writable = this.canWrite();
     const avatarUrl = getAvatarUrl(author.avatar);
     const lead = grouped ? html`<span class="dm-grouped-time" aria-hidden="true">${formatMessageClock(message.createdAt)}</span>` : undefined;
     if (message.deleted) {
       return renderMessageRow({
         id: message.id, classes: ['chat-message-deleted', grouped && 'dm-message-row--grouped'], focusable: false,
-        lead, avatarUrl, author: author.name, time, content: renderDeletedNotice(),
+        lead, avatarUrl, author: author.name, createdAt: message.createdAt, content: renderDeletedNotice(),
       });
     }
     const pending = author.mine && message.delivery === 'pending';
@@ -577,7 +565,7 @@ export class DmConversationView {
       lead,
       avatarUrl,
       author: author.name,
-      time,
+      createdAt: message.createdAt,
       // A grouped message has no header to hold the mark: it follows the text instead.
       meta: grouped ? undefined : edited,
       content: html`

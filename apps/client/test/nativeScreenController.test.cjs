@@ -13,7 +13,7 @@ const ts = require('typescript');
 const shared = require('@monky/shared');
 const rendererRoot = path.resolve(__dirname, '..', 'src', 'renderer');
 // The controller and its parts under nativeScreen/ run for real; every other renderer module must be modeled.
-const realModules = ['core/webrtc/NativeScreenController', 'core/webrtc/nativeScreen/', 'core/webrtc/browserScreenCodecs', 'utils/qualityProfileLimits'];
+const realModules = ['core/webrtc/NativeScreenController', 'core/webrtc/nativeScreen/', 'core/webrtc/browserScreenCodecs', 'utils/qualityProfileLimits', 'utils/inlineVideo'];
 const compiledModules = new Map();
 function compileRendererModule(filename) {
   let run = compiledModules.get(filename);
@@ -105,7 +105,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     addTrack(track) { if (!this.tracks.includes(track)) this.tracks.push(track); }
     removeTrack(track) { this.tracks = this.tracks.filter(value => value !== track); }
   }
-  class Video {
+  class Video extends EventTarget {
     srcObject = null;
     pause() {}
     setAttribute() {}

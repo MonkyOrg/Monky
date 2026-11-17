@@ -127,6 +127,21 @@ export function restoreH264MainAnswer(sdp: string, aliases: H264MainAliases): st
   });
 }
 
+/** H.264 Level 5.2, the highest WebKit's WebRTC reads: 4K at 60 FPS. */
+const H264_HIGHEST_WEBKIT_LEVEL = 0x34;
+
+/**
+ * A remote description whose H.264 levels above 5.2 read as 5.2. WebKit's SDP parser predates Level 6 and
+ * drops a codec offered at it, so Safari, sharing to a desktop viewer whose renegotiation offers its Level 6
+ * receiver, rejected its own screen and failed the answer. A viewer's level only bounds what it is sent,
+ * which a browser screen never takes above 5.2.
+ */
+export function withH264LevelsWebKitReads(sdp: string): string {
+  return rewriteH264Profiles(sdp, (_payload, profileLevelId) =>
+    Number.parseInt(profileLevelId.slice(4), 16) > H264_HIGHEST_WEBKIT_LEVEL
+      ? `${profileLevelId.slice(0, 4)}${H264_HIGHEST_WEBKIT_LEVEL.toString(16)}` : null);
+}
+
 /**
  * Whether this browser's WebRTC receiver lists the codec of Monky screens at all: AV1 profile 0, or H.264 as
  * Main or as the Constrained Baseline the web shares by default (Firefox lists only the latter; Safari aliases Main).

@@ -15,6 +15,7 @@ import { formatBytes } from '../utils/attachment';
 import { botRequestError } from '../utils/botInputs';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 import { reportError } from '../utils/feedback';
+import { toggleFullscreen } from '../utils/fullscreen';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
 import { BotScreenFrame } from './BotScreenFrame';
 import { BotBrowserView } from './BotBrowserView';
@@ -549,8 +550,7 @@ export class BotScreenView {
   private async toggleFullscreen(): Promise<void> {
     if (!this.canRead()) return;
     try {
-      if (document.fullscreenElement === this.element) await document.exitFullscreen();
-      else await this.element.requestFullscreen();
+      if (!await toggleFullscreen(this.element, this.element.querySelector('video'))) this.report(t('common.fullscreenUnavailable'));
     } catch (error: unknown) {
       console.warn('[Bot screens] Could not change stage fullscreen.', error);
     }

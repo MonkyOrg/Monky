@@ -22,9 +22,10 @@ function errorText(error: unknown): string {
 
 /**
  * In a browser, clearing the site's data deletes the identity with it (#858):
- * right after creating one, the person is urged to export a copy.
+ * right after creating one, the person is urged to export a copy. The profile
+ * step offers it inline; this dialog is for when that step is skipped.
  */
-async function offerWebBackup(identity: AppIdentityResult): Promise<void> {
+export async function offerWebBackup(clientId: string): Promise<void> {
   const exportNow = await showConfirm({
     title: t('identity.webBackupTitle'),
     message: t('identity.webBackupMessage'),
@@ -32,7 +33,13 @@ async function offerWebBackup(identity: AppIdentityResult): Promise<void> {
     cancelLabel: t('identity.webBackupLater'),
     variant: 'info',
   });
-  if (exportNow) await showIdentityExportDialog(identity.clientId);
+  if (exportNow) await showIdentityExportDialog(clientId);
+}
+
+export interface IdentityOnboardingResult {
+  identity: AppIdentityResult;
+  /** A new identity that lives only in this browser, which should be backed up now. */
+  offerBackup: boolean;
 }
 
 /**
@@ -41,17 +48,19 @@ async function offerWebBackup(identity: AppIdentityResult): Promise<void> {
  * user first gets to try again; creating another identity then needs an
  * explicit confirmation, and the unreadable file is set aside, never deleted.
  *
- * Resolves with the identity the user ends up with. `onPainted` runs after the
- * first paint, which lifts the post-update splash (#498).
+ * Resolves with the identity the user ends up with, and whether it still needs
+ * a backup. `onPainted` runs after the first paint, which lifts the
+ * post-update splash (#498).
  */
 export function showIdentityOnboarding(
   container: HTMLElement,
   initial: AppIdentityStatus,
   onPainted: () => void,
-): Promise<AppIdentityResult> {
+): Promise<IdentityOnboardingResult> {
   return new Promise((resolve) => {
     let status = initial;
     let busy = false;
+    let created = false;
 
     /** One action at a time; whatever happens, the screen ends up matching the stored identity. */
     const run = async (
@@ -63,7 +72,7 @@ export function showIdentityOnboarding(
       try {
         const identity = await action();
         if (identity) {
-          resolve(identity);
+          resolve({ identity, offerBackup: created && !platformSupports('durableIdentity') });
           return;
         }
       } catch (error) {
@@ -87,7 +96,7 @@ export function showIdentityOnboarding(
         if (!confirmed) return null;
       }
       const identity = await window.api.createIdentity();
-      if (!platformSupports('durableIdentity')) void offerWebBackup(identity);
+      created = true;
       return identity;
     };
 
@@ -126,24 +135,26 @@ export function showIdentityOnboarding(
       if (status.state === 'unreadable') {
         container.innerHTML = html`
           <div class="identity-onboarding identity-profile-step identity-unreadable" data-reason="${status.reason}">
-            <img src="${logoUrl}" alt="Monky" class="identity-profile-logo">
-            <h1 id="identity-unreadable-title">${t('identity.unreadableTitle')}</h1>
-            <p id="identity-unreadable-reason">${t(UNREADABLE_MESSAGES[status.reason])}</p>
-            <p>${t('identity.unreadableKept')}</p>
-            <div style="display: flex; flex-direction: column; gap: 12px; width: 280px;" role="group" aria-labelledby="identity-unreadable-title">
-              <button type="button" id="btn-onboard-retry" class="btn btn-primary" style="padding: 14px 24px; font-size: 15px; font-weight: 600;">
-                <span class="material-symbols-outlined md-20" style="margin-right: 8px;" aria-hidden="true">refresh</span>
+            <div class="identity-welcome-brand">
+              <img src="${logoUrl}" alt="Monky" class="identity-profile-logo">
+              <h1 id="identity-unreadable-title">${t('identity.unreadableTitle')}</h1>
+              <p id="identity-unreadable-reason">${t(UNREADABLE_MESSAGES[status.reason])}</p>
+              <p>${t('identity.unreadableKept')}</p>
+            </div>
+            <div class="identity-welcome-actions" role="group" aria-labelledby="identity-unreadable-title">
+              <button type="button" id="btn-onboard-retry" class="btn btn-primary identity-welcome-action">
+                <span class="material-symbols-outlined md-20" aria-hidden="true">refresh</span>
                 ${t('identity.unreadableRetry')}
               </button>
-              <button type="button" id="btn-onboard-import" class="btn btn-secondary" style="padding: 14px 24px; font-size: 15px;">
-                <span class="material-symbols-outlined md-20" style="margin-right: 8px;" aria-hidden="true">qr_code_scanner</span>
+              <button type="button" id="btn-onboard-import" class="btn btn-secondary identity-welcome-action">
+                <span class="material-symbols-outlined md-20" aria-hidden="true">qr_code_scanner</span>
                 ${t('identity.onboardingImport')}
               </button>
-              <button type="button" id="btn-onboard-create" class="btn btn-secondary" style="padding: 14px 24px; font-size: 15px;">
-                <span class="material-symbols-outlined md-20" style="margin-right: 8px;" aria-hidden="true">add_circle</span>
+              <button type="button" id="btn-onboard-create" class="btn btn-secondary identity-welcome-action">
+                <span class="material-symbols-outlined md-20" aria-hidden="true">add_circle</span>
                 ${t('identity.onboardingCreate')}
               </button>
-              <button type="button" id="btn-onboard-guest" class="btn btn-secondary">${t('identity.guestAction')}</button>
+              <button type="button" id="btn-onboard-guest" class="btn btn-secondary identity-welcome-guest">${t('identity.guestAction')}</button>
             </div>
           </div>
         `.toString();
@@ -152,22 +163,22 @@ export function showIdentityOnboarding(
         return;
       }
       container.innerHTML = html`
-        <div class="identity-onboarding">
-          <img src="${logoUrl}" alt="Monky" style="width: 120px; height: 120px; object-fit: contain; margin-bottom: 16px; filter: drop-shadow(0 4px 16px rgba(88, 101, 242, 0.4));">
-          <h1 style="font-size: 28px; font-weight: 700; margin: 0 0 8px; color: var(--text-primary);">Monky</h1>
-          <p style="font-size: 14px; color: var(--text-secondary); margin: 0 0 32px; text-align: center; max-width: 360px; line-height: 1.5;">
-            ${t('identity.onboardingDesc')}
-          </p>
-          <div style="display: flex; flex-direction: column; gap: 12px; width: 280px;">
-            <button type="button" id="btn-onboard-create" class="btn btn-primary" style="padding: 14px 24px; font-size: 15px; font-weight: 600;">
-              <span class="material-symbols-outlined md-20" style="margin-right: 8px;">add_circle</span>
+        <div class="identity-onboarding identity-welcome">
+          <div class="identity-welcome-brand">
+            <img src="${logoUrl}" alt="Monky" class="identity-welcome-logo">
+            <h1>Monky</h1>
+            <p>${t('identity.onboardingDesc')}</p>
+          </div>
+          <div class="identity-welcome-actions">
+            <button type="button" id="btn-onboard-create" class="btn btn-primary identity-welcome-action">
+              <span class="material-symbols-outlined md-20" aria-hidden="true">add_circle</span>
               ${t('identity.onboardingCreate')}
             </button>
-            <button type="button" id="btn-onboard-import" class="btn btn-secondary" style="padding: 14px 24px; font-size: 15px;">
-              <span class="material-symbols-outlined md-20" style="margin-right: 8px;">qr_code_scanner</span>
+            <button type="button" id="btn-onboard-import" class="btn btn-secondary identity-welcome-action">
+              <span class="material-symbols-outlined md-20" aria-hidden="true">qr_code_scanner</span>
               ${t('identity.onboardingImport')}
             </button>
-            <button type="button" id="btn-onboard-guest" class="btn btn-secondary">${t('identity.guestAction')}</button>
+            <button type="button" id="btn-onboard-guest" class="btn btn-secondary identity-welcome-guest">${t('identity.guestAction')}</button>
           </div>
         </div>
       `.toString();

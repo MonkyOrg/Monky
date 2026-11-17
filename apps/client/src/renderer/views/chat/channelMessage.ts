@@ -75,7 +75,7 @@ export function renderChannelMessage(ctx: ChatContext, m: ChatMessage, mentions:
   const badges = html`${isBot ? html`<span class="member-badge-bot">${t('botChat.badge')}</span>` : ''}${m.isEphemeral
     ? html`<span class="bot-private-cue"><span class="material-symbols-outlined md-14" aria-hidden="true">lock</span>${t('botChat.private')}</span>`
     : ''}`;
-  const author = { avatarUrl: getAvatarUrl(m.userAvatarUrl), author: m.userNickname, time, badges, lead: botContext, bot: isBot };
+  const author = { avatarUrl: getAvatarUrl(m.userAvatarUrl), author: m.userNickname, createdAt: m.createdAt, badges, lead: botContext, bot: isBot };
 
   // A deleted message keeps its place in the conversation with a placeholder
   // instead of vanishing, so nothing silently reshuffles under the reader

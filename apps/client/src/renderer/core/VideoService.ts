@@ -16,7 +16,12 @@ export interface CameraState {
   readonly stream: MediaStream | null;
   readonly publishing: boolean;
   readonly error: CameraEffectError | null;
+  /** A phone or tablet whose cameras face both ways: the front and rear camera can be swapped. */
+  readonly canSwitchFacing: boolean;
 }
+
+/** Which way a camera looks: at the person (front) or away from them (rear). */
+export type CameraFacing = 'user' | 'environment';
 
 export interface CameraPreviewLease {
   readonly stream: MediaStream;
@@ -38,6 +43,9 @@ export class VideoService {
   private announcedCameraStream: MediaStream | null = null;
   private cameraRequested = false;
   private cameraDeviceId: string | undefined;
+  /** The way the camera should face when no specific camera was chosen. */
+  private cameraFacing: CameraFacing | undefined;
+  private cameraFacingSwitchable = false;
   private cameraStatus: CameraState['status'] = 'idle';
   private cameraError: CameraEffectError | null = null;
   private cameraOffRequiresConsent = false;
@@ -173,6 +181,18 @@ export class VideoService {
     await this.scheduleCameraChange(undefined, true);
   }
 
+  /**
+   * Swaps the front and rear camera. The current camera stops before the other opens, since a phone
+   * runs one at a time; the new one replaces the old wherever it is shown or sent.
+   */
+  public async switchCameraFacing(): Promise<void> {
+    if (!this.cameraFacingSwitchable || this.cameraStatus !== 'ready') return;
+    const current = this.cameraRawStream?.getVideoTracks()[0]?.getSettings().facingMode;
+    this.cameraFacing = current === 'environment' ? 'user' : 'environment';
+    this.cameraDeviceId = undefined;
+    await this.scheduleCameraChange(undefined, true);
+  }
+
   public async setCameraEffects(patch: Partial<CameraEffectSettings>): Promise<void> {
     const choice = patch.mode ? ++this.cameraEffectChoiceEpoch : this.cameraEffectChoiceEpoch;
     if (patch.mode && patch.mode !== 'off') this.cameraOffRequiresConsent = true;
@@ -200,6 +220,7 @@ export class VideoService {
       stream: this.cameraStatus === 'ready' ? this.cameraStream : null,
       publishing: this.announcedCameraStream !== null,
       error: this.cameraError,
+      canSwitchFacing: this.cameraFacingSwitchable,
     };
   }
 
@@ -324,6 +345,7 @@ export class VideoService {
   private async captureCamera(epoch: number): Promise<MediaStream> {
     const profile = this.getProfile();
     const target = this.cameraDeviceId;
+    const facingMode = !target && this.cameraFacing ? { ideal: this.cameraFacing } : undefined;
     clientLog.info('VIDEO', 'Starting camera', {
       deviceId: target || 'default',
       resolution: `${profile.cameraWidth}x${profile.cameraHeight}@${profile.cameraFps}fps`,
@@ -334,6 +356,7 @@ export class VideoService {
         audio: false,
         video: {
           deviceId: target ? { exact: target } : undefined,
+          facingMode,
           width: { exact: profile.cameraWidth },
           height: { exact: profile.cameraHeight },
           frameRate: { exact: profile.cameraFps },
@@ -347,6 +370,7 @@ export class VideoService {
         audio: false,
         video: {
           deviceId: target ? { exact: target } : undefined,
+          facingMode,
           width: { ideal: profile.cameraWidth },
           height: { ideal: profile.cameraHeight },
           frameRate: { ideal: profile.cameraFps, max: profile.cameraFps },
@@ -361,7 +385,21 @@ export class VideoService {
       stream.getTracks().forEach((track) => track.stop());
       throw new CameraEffectError('device');
     }
+    this.cameraFacingSwitchable = await this.facesBothWays(stream.getVideoTracks()[0]);
     return stream;
+  }
+
+  /** Only cameras that say which way they face (phones, tablets) can be swapped, and only with another one. */
+  private async facesBothWays(track: MediaStreamTrack): Promise<boolean> {
+    const facing = track.getSettings().facingMode;
+    if (facing !== 'user' && facing !== 'environment') return false;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter(device => device.kind === 'videoinput').length > 1;
+    } catch (error) {
+      clientLog.warn('VIDEO', 'Could not list the cameras', { error: String(error) });
+      return false;
+    }
   }
 
   private assertCameraEpoch(epoch: number): void {

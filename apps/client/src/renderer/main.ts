@@ -37,7 +37,7 @@ import { stopLocalScreenShares } from './core/screenShareControls';
 import { screenSharePickerModal } from './views/ScreenSharePickerModal';
 import { showAlert } from './views/Dialog';
 import { reportError } from './utils/feedback';
-import { showIdentityOnboarding } from './views/IdentityOnboarding';
+import { offerWebBackup, showIdentityOnboarding } from './views/IdentityOnboarding';
 import { initI18n, t } from './i18n';
 import { installImageFallback } from './utils/imageFallback';
 import { clientLog } from './core/ClientLogService';
@@ -62,6 +62,7 @@ import { bindUserNotices } from './core/userNotices';
 import { bindTraySync } from './core/traySync';
 import { bindKeybindActions } from './core/keybindActions';
 import { bindViewportSize } from './utils/viewport';
+import { animateStageBand } from './utils/surfaceMotion';
 
 class App {
   private appContainer: HTMLElement;
@@ -129,7 +130,7 @@ class App {
     this.appContainer = document.getElementById('app')!;
     installImageFallback();
     const disposeTooltips = initTooltips();
-    const disposeViewport = bindViewportSize();
+    const disposeViewport = bindViewportSize(animateStageBand);
   installDesktopOnlyGate();
     selectEnhancer.init();
     dateTimeControls.init();
@@ -218,9 +219,11 @@ class App {
     // offers to try again, import or explicitly create another one.
     connectionStore.hasIdentity = identityStatus.state === 'ready';
 
+    let webBackupClientId: string | undefined;
     if (!connectionStore.hasIdentity) {
-      const identity = await showIdentityOnboarding(this.appContainer, identityStatus, () => this.signalRendererReady());
+      const { identity, offerBackup } = await showIdentityOnboarding(this.appContainer, identityStatus, () => this.signalRendererReady());
       connectionStore.setIdentity(identity);
+      if (offerBackup) webBackupClientId = identity.clientId;
       // Monky always runs maximized once an identity exists; only the compact
       // first-launch identity card is shown in the smaller window.
       void window.api?.maximize?.().catch(() => clientLog.warn('APP', 'Could not maximize after choosing an identity'));
@@ -235,7 +238,9 @@ class App {
 
     connectionStore.loadUserProfile();
     if (!hasValidLocalProfile()) {
-      await showIdentityProfileStep(this.appContainer);
+      await showIdentityProfileStep(this.appContainer, { webBackupClientId });
+    } else if (webBackupClientId) {
+      void offerWebBackup(webBackupClientId);
     }
 
     this.setupGlobalEventListeners();

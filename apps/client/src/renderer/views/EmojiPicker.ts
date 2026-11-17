@@ -11,7 +11,7 @@ import { scrollWithin, smoothScrollTo } from '../utils/scroll';
 import { requestIdle } from '../utils/idleCallback';
 import { platformSupports } from '../platform/capabilities';
 import { mediaFolderLabel, mediaSourceButton, picksMediaFolder } from '../platform/mediaFolders';
-import { COMPACT_VIEWPORT_QUERY, viewportBounds } from '../utils/viewport';
+import { COMPACT_VIEWPORT_QUERY, TOUCH_POINTER_QUERY, viewportBounds } from '../utils/viewport';
 
 type PickerTab = 'emojis' | 'stickers';
 
@@ -146,7 +146,7 @@ export class EmojiPicker {
     this.unbind.push(ownSurface(root, this.options.anchor));
     animateEnter(root);
 
-    if (matchMedia('(hover: none) and (pointer: coarse)').matches) {
+    if (matchMedia(TOUCH_POINTER_QUERY).matches) {
       root.tabIndex = -1;
       root.focus({ preventScroll: true });
     } else root.querySelector<HTMLInputElement>('.emoji-picker-search-input')?.focus({ preventScroll: true });
@@ -241,7 +241,7 @@ export class EmojiPicker {
         const search = root.querySelector<HTMLInputElement>('.emoji-picker-search-input');
         if (search) search.value = '';
         this.renderBody();
-        if (!matchMedia('(hover: none) and (pointer: coarse)').matches) search?.focus();
+        if (!matchMedia(TOUCH_POINTER_QUERY).matches) search?.focus();
       };
       btn.addEventListener('click', onClick);
       this.unbind.push(() => btn.removeEventListener('click', onClick));
@@ -332,7 +332,10 @@ export class EmojiPicker {
     this.unbind.push(() => document.removeEventListener('keydown', onKeyDown, true));
 
     if (this.options.floating || root.classList.contains('emoji-picker--compact')) {
+      // A floating picker follows its button; the compact sheet sits on the screen's edge,
+      // so a chat scrolling under it (a new message, the keyboard) must not close it.
       const onScroll = (event: Event) => {
+        if (root.classList.contains('emoji-picker--compact')) return;
         if (!(event.target instanceof Node) || !root.contains(event.target)) this.close();
       };
       const onResize = () => {

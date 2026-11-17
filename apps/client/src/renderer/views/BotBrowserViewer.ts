@@ -2,6 +2,7 @@ import type { BotScreen, BotScreenBeforeCloseReason, BotScreenCloseReason } from
 import { webRtcManager } from '../core/WebRtcManager';
 import type { BrowserMiniappMediaHandle } from '../core/webrtc/BrowserMiniappMedia';
 import { t, type SupportedLanguage } from '../i18n';
+import { onPresentedFrame } from '../utils/inlineVideo';
 
 /** A participant sees only received pixels, with no URL bar or control of the host's site. */
 export class BotBrowserViewer {
@@ -16,7 +17,7 @@ export class BotBrowserViewer {
     this.element.muted = true;
     this.element.playsInline = true;
     this.element.setAttribute('aria-label', t('browser.viewer'));
-    this.element.addEventListener('playing', () => webRtcManager.browserMiniappMedia.playing(screen), { signal: this.lifecycle.signal });
+    onPresentedFrame(this.element, () => webRtcManager.browserMiniappMedia.playing(screen), this.lifecycle.signal);
     void webRtcManager.browserMiniappMedia.watch(screen, stream => {
       if (this.lifecycle.signal.aborted) { stream.getTracks().forEach(track => track.stop()); return; }
       this.element.srcObject = stream;

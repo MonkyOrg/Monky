@@ -138,6 +138,7 @@ function fixture(t, { sessionId = 'host', current = true, ice = [] } = {}) {
   const { BotBrowserViewer } = compile(path.join('views', 'BotBrowserViewer.ts'), request => {
     if (request === '../core/WebRtcManager') return { webRtcManager: { browserMiniappMedia: media } };
     if (request === '../i18n') return { t: key => key };
+    if (request === '../utils/inlineVideo') return compile(path.join('utils', 'inlineVideo.ts'), () => ({}));
     throw new Error(`Unexpected viewer import: ${request}`);
   });
   const track = new Track(), stream = new Stream([track]), abort = new AbortController();
@@ -404,6 +405,20 @@ test('browser source withdrawal closes viewer normally but connection failure re
   assert.equal(closed, 1);
   assert.match(String(f.errors[0]), /connection-failed/);
   assert.equal(f.receivers[1].closed, true);
+});
+
+test('viewer counts the screen as presented at its first decoded frame, not at an early playing event', async t => {
+  const f = fixture(t, { sessionId: 'viewer' });
+  const screen = { ...f.screen, broadcastSource: {
+    shareId: `browser-${f.screen.instanceId}`, instanceId: f.screen.instanceId, audio: false, codec: 'h264',
+    video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 6000 },
+  } };
+  const surface = new f.BotBrowserViewer(screen, error => f.errors.push(error), () => surface.retire('ended'));
+  surface.element.dispatchEvent(new Event('playing'));
+  assert.equal(f.receivers[0].presented, undefined);
+  surface.element.data();
+  assert.equal(f.receivers[0].presented, true);
+  surface.retire('leave');
 });
 
 test('viewer suppresses only playback failures belonging to a retired surface', async t => {

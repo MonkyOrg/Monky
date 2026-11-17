@@ -1,6 +1,7 @@
 import type { MessageReply } from '@monky/shared';
 import { t } from '../../i18n';
 import { html, trustedHtml, type SafeHtml } from '../../utils/html';
+import { formatMessageClock, formatMessageDate, formatMessageTime } from '../../utils/messageReply';
 import { renderReplyPreview } from '../../utils/messageReply';
 
 /**
@@ -27,7 +28,7 @@ export interface MessageRowModel {
   author: string;
   /** After the author name: bot badge, private cue. */
   badges?: SafeHtml;
-  time: string;
+  createdAt: number;
   /** After the time: delivery state, edited badge. */
   meta?: SafeHtml;
   content: SafeHtml;
@@ -64,7 +65,7 @@ export function renderMessageRow(row: MessageRowModel): string {
     <div class="chat-message-body${row.bot ? ' bot-response-bubble' : ''}">
       <div class="chat-author-header">
         <span class="chat-author-name">${row.author}</span>${row.badges}
-        <span class="chat-timestamp">${row.time}</span>${row.meta}
+        <span class="chat-timestamp" title="${formatMessageTime(row.createdAt)}"><span class="chat-timestamp-date">${formatMessageDate(row.createdAt)} </span>${formatMessageClock(row.createdAt)}</span>${row.meta}
       </div>
       ${row.content}
       ${row.reactions === undefined ? '' : html`<div class="chat-reactions">${row.reactions}</div>`}

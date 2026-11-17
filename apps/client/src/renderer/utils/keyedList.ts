@@ -1,4 +1,4 @@
-import type { SafeHtml } from './html';
+import { htmlFragment, type SafeHtml } from './html';
 
 export interface KeyedItem {
   /** Names the item across renders; unique within the list. */
@@ -32,10 +32,9 @@ export function renderKeyedList(container: HTMLElement, items: readonly KeyedIte
     const markup = String(html);
     const existing = current.get(key);
     if (existing && built.get(existing)?.html === markup) return existing;
-    const template = document.createElement('template');
-    template.innerHTML = markup;
-    const element = template.content.firstElementChild;
-    if (!element || template.content.childElementCount !== 1) throw new Error(`List item "${key}" must render one element.`);
+    const fragment = htmlFragment(markup);
+    const element = fragment.firstElementChild;
+    if (!element || fragment.childElementCount !== 1) throw new Error(`List item "${key}" must render one element.`);
     built.set(element, { key, html: markup });
     return element;
   });

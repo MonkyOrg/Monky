@@ -345,10 +345,14 @@ export class ChannelSidebar {
           ${isRelayed ? html`<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
           ${trustedHtml(renderAudioMuteIndicators({ ...p.voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened, permissionMuted: isPermissionMuted }))}
           ${p.voiceState?.isScreenSharing ? (isLocal
-            ? html`<span class="material-symbols-outlined md-14 voice-mini-icon live" title="${t('main.sharingScreen')}">screen_share</span>`
-            : html`<button type="button" class="voice-mini-icon live voice-mini-watch" data-watch-live="${sessionId}"
+            ? html`<span class="voice-mini-icon live voice-mini-share" title="${t('main.sharingScreen')}">
+                <span class="material-symbols-outlined md-14" aria-hidden="true">screen_share</span>
+                <span class="voice-mini-live-text" aria-hidden="true">${t('main.liveBadge')}</span>
+              </span>`
+            : html`<button type="button" class="voice-mini-icon live voice-mini-watch voice-mini-share" data-watch-live="${sessionId}"
                 title="${watchLabel}" aria-label="${watchLabel}">
                 <span class="material-symbols-outlined md-14" aria-hidden="true">screen_share</span>
+                <span class="voice-mini-live-text" aria-hidden="true">${t('main.liveBadge')}</span>
               </button>`) : ''}
           ${p.voiceState?.isCameraOn ? html`<span class="material-symbols-outlined md-14 voice-mini-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
           ${p.voiceState ? trustedHtml(renderMiniappMemberIndicators(p.user.id, p.voiceState.channelId)) : ''}

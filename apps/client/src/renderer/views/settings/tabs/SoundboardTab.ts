@@ -1,6 +1,6 @@
 import { settingsStore } from '../../../stores/settingsStore';
 import { soundboardService, SoundItem } from '../../../core/SoundboardService';
-import { t, tCount } from '../../../i18n';
+import { t, tCount, tTouch } from '../../../i18n';
 import { platformSupports } from '../../../platform/capabilities';
 import { isDesktopOnly, lockedAttributes, lockedBadge } from '../../../utils/desktopOnly';
 import { mediaFolderLabel, mediaSourceButton } from '../../../platform/mediaFolders';
@@ -116,7 +116,7 @@ export class SoundboardTab {
           </label>
         </div>
         <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">
-          ${t('soundboard.footerHint')}
+          ${tTouch('soundboard.footerHint')}
         </div>
         <!-- Outside the list it filters: re-rendering the list never replaces the field being typed in. -->
         <div id="sb-shortcuts-controls" ${this.showsControls() ? '' : 'hidden'}>

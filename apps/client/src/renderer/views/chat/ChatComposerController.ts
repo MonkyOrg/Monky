@@ -22,7 +22,7 @@ import { errorMessage, reportError } from '../../utils/feedback';
 import { renderReplyPreview } from '../../utils/messageReply';
 import { stickerToken } from '../../utils/stickers';
 import { setSurfaceVisible } from '../../utils/surfaceVisibility';
-import { bindChatComposer, setComposerEditMode } from '../ChatComposer';
+import { bindChatComposer, setComposerCounter, setComposerEditMode } from '../ChatComposer';
 import { buildCodeMessage, codeBlockModal } from '../CodeBlockModal';
 import { EmojiPicker } from '../EmojiPicker';
 import type { MarkdownInput } from '../MarkdownInput';
@@ -72,8 +72,6 @@ export class ChatComposerController {
     const { server } = this.ctx;
     return server.serverDetails?.maxMessageLength ?? (server.serverDetails ? 2000 : LIMITS.MAX_MESSAGE_LENGTH);
   }
-
-  private get messageLimitLabel(): string { return this.messageLengthLimit === 0 ? '∞' : String(this.messageLengthLimit); }
 
   private isMessageTooLong(content: string): boolean {
     return this.messageLengthLimit > 0 && content.length > this.messageLengthLimit;
@@ -339,11 +337,7 @@ export class ChatComposerController {
     const channelId = this.ctx.channelId;
     const blocks = channelId && !this.messageEdit ? store.getBlockDraft(channelId) : [];
     const content = blocks.length ? messageBlocksContent([...blocks, { type: 'text', text: input.value }]) : input.value;
-    const counter = container.querySelector<HTMLElement>('#chat-char-counter');
-    if (counter) {
-      counter.textContent = `${content.length}/${this.messageLimitLabel}`;
-      counter.classList.toggle('code-char-count--over', this.isMessageTooLong(content));
-    }
+    setComposerCounter(container.querySelector<HTMLElement>('#chat-char-counter'), content.length, this.messageLengthLimit);
   }
 
   public syncPermissionState(): void {
@@ -443,7 +437,8 @@ export class ChatComposerController {
       btnCode.disabled = readOnly;
       btnCode.setAttribute('aria-disabled', btnCode.disabled ? 'true' : 'false');
     }
-    container.querySelectorAll<HTMLButtonElement>('#btn-format, [data-format]').forEach(button => { button.disabled = readOnly; });
+    container.querySelectorAll<HTMLButtonElement>('#btn-format, [data-format], [data-chat-create="format"]')
+      .forEach(button => { button.disabled = readOnly; });
 
     const { mentions, commands } = this.ctx;
     if (readOnly) {
@@ -686,6 +681,13 @@ export class ChatComposerController {
         if (serverStore.hasPermission(Permission.ATTACH_FILES, channelId)) openFileInputPicker(fileInput, btnAttach);
       } else if (action === 'poll' && channelId && !serverStore.getChannel(channelId)?.forumId) {
         openNativePollWizard(this.ctx.client, this.ctx.server, channelId);
+      } else if (action === 'format') {
+        // The compact composer keeps formatting in this menu instead of a third button.
+        const format = container.querySelector<HTMLButtonElement>('#btn-format');
+        if (format && !format.disabled) {
+          format.click();
+          container.querySelector<HTMLElement>('#chat-message-input')?.focus();
+        }
       }
     });
     const closeCreateOutside = (event: PointerEvent) => {
@@ -1098,6 +1100,6 @@ export class ChatComposerController {
   }
 
   private setCounter(length: number): void {
-    if (this.counter) this.counter.textContent = `${length}/${this.messageLimitLabel}`;
+    setComposerCounter(this.counter, length, this.messageLengthLimit);
   }
 }

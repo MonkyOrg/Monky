@@ -4,8 +4,9 @@ import {
   type NativeScreenVideoProfile, type ScreenShareQuality, type ScreenFormat,
 } from '@monky/shared';
 import { BrowserScreenPeer } from './browserScreenPeer';
-import { encoderScaleDown } from './browserScreenProfile';
+import { encoderScaleDown, type CapturedVideoSettings } from './browserScreenProfile';
 import type { DisplayCapture } from './displayCaptures';
+import { renditionConstraints, watchCaptureSize } from './renditionGeometry';
 import { ScreenP2pPublisherPeer } from './screenP2pPublisherPeer';
 import { WebScreenSfuRendition, type WebScreenRpc } from './webScreenSfuRendition';
 
@@ -25,6 +26,10 @@ interface Pipeline {
   /** How much the encoder shrinks `video` to the profile, known once `ready` settles. */
   scaleResolutionDownBy: number;
   ready: Promise<void>;
+  /** The refits that follow the capture as it turns, in order. */
+  refitting: Promise<void>;
+  /** Stops following the capture's size once the rendition retires. */
+  readonly geometry: AbortController;
   sfu: WebScreenSfuRendition | null;
   closing: Promise<void> | null;
 }
@@ -37,6 +42,7 @@ interface Viewer {
   readonly generation: number;
   pipeline: Pipeline | null;
   peer: ScreenP2pPublisherPeer | null;
+  port: BrowserScreenPeer | null;
   retiring: boolean;
   setup: Promise<void> | null;
   retirement: Promise<void> | null;
@@ -129,7 +135,7 @@ export class WebScreenPublisher {
     }
     const viewer: Viewer = {
       sessionId: request.fromSessionId, subscriptionId: request.subscriptionId, quality: request.quality,
-      backend: request.backend, generation: ++this.generation, pipeline: null, peer: null, retiring: false,
+      backend: request.backend, generation: ++this.generation, pipeline: null, peer: null, port: null, retiring: false,
       setup: null, retirement: null,
     };
     this.viewers.set(viewer.sessionId, viewer);
@@ -179,6 +185,7 @@ export class WebScreenPublisher {
       onError: error => { void this.track(this.failViewer(viewer, error)); },
     });
     viewer.peer = peer;
+    viewer.port = port;
     peer.start();
   }
 
@@ -230,15 +237,32 @@ export class WebScreenPublisher {
     const pipeline: Pipeline = {
       key, id: crypto.randomUUID(), profile, viewers: new Map(), video,
       audio: this.options.source.audio && capture.audioTrack ? capture.audioTrack.clone() : null,
-      scaleResolutionDownBy: 1, ready: Promise.resolve(), sfu: null, closing: null,
+      scaleResolutionDownBy: 1, ready: Promise.resolve(), refitting: Promise.resolve(), geometry: new AbortController(),
+      sfu: null, closing: null,
     };
-    // The browser scales the copy to the rendition; where it refuses (Safari), the encoder scales it instead.
-    pipeline.ready = video.applyConstraints({
-      width: { max: profile.width }, height: { max: profile.height }, frameRate: { max: profile.fps },
-    }).catch((error: unknown) => console.warn('[WebScreen] The capture kept its own size for this rendition:', error))
-      .then(() => { pipeline.scaleResolutionDownBy = encoderScaleDown(video.getSettings(), profile); });
+    pipeline.ready = this.fit(pipeline, capture.video.getSettings());
+    // A phone that turns sends its screen sideways: the copy and its encoder follow, never cropping it.
+    watchCaptureSize(capture.video, settings => {
+      const refit = pipeline.refitting.then(() => Promise.allSettled([pipeline.ready])).then(async () => {
+        if (pipeline.closing) return;
+        const previous = pipeline.scaleResolutionDownBy;
+        await this.fit(pipeline, settings);
+        const scale = pipeline.scaleResolutionDownBy;
+        if (pipeline.closing || scale === previous) return;
+        await Promise.all([pipeline.sfu?.setScaleResolutionDownBy(scale),
+          ...[...pipeline.viewers.values()].map(viewer => viewer.port?.setScaleResolutionDownBy(scale))]);
+      });
+      pipeline.refitting = this.track(refit).catch(() => {});
+    }, pipeline.geometry.signal);
     this.pipelines.set(key, pipeline);
     return pipeline;
+  }
+
+  /** The browser scales the copy to the rendition; where it refuses (Safari), the encoder scales it instead. */
+  private async fit(pipeline: Pipeline, captured: CapturedVideoSettings): Promise<void> {
+    await pipeline.video.applyConstraints(renditionConstraints(captured, pipeline.profile))
+      .catch((error: unknown) => console.warn('[WebScreen] The capture kept its own size for this rendition:', error));
+    pipeline.scaleResolutionDownBy = encoderScaleDown(pipeline.video.getSettings(), pipeline.profile);
   }
 
   private async failPipeline(pipeline: Pipeline, error: unknown): Promise<void> {
@@ -268,6 +292,7 @@ export class WebScreenPublisher {
 
   private retirePipeline(pipeline: Pipeline): Promise<void> {
     if (pipeline.closing) return pipeline.closing;
+    pipeline.geometry.abort();
     pipeline.closing = (async () => {
       try { await pipeline.sfu?.close(); }
       finally {
@@ -301,7 +326,7 @@ export class WebScreenPublisher {
     const notices = notifyViewers ? viewers.map(viewer => this.signal(viewer, { action: 'closed', reason })) : [];
     this.closed = true;
     // Stop pixels before any network acknowledgement or SFU teardown can delay revocation.
-    for (const pipeline of this.pipelines.values()) { pipeline.video.stop(); pipeline.audio?.stop(); }
+    for (const pipeline of this.pipelines.values()) { pipeline.geometry.abort(); pipeline.video.stop(); pipeline.audio?.stop(); }
     this.closing = (async () => {
       const results = await Promise.allSettled([...notices, ...viewers.map(viewer => this.retireViewer(viewer))]);
       await Promise.allSettled([...this.pending]);

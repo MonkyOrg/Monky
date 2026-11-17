@@ -4,6 +4,7 @@
 @import './base.css';
 @import './audioStateIcon.css';
 @import './responsive.css';
+@import './responsiveDialogs.css';
 
 .bot-screen-header, .bot-screen-controls {
   display: flex;
@@ -2037,6 +2038,36 @@
   place-items: center;
   background: rgba(0, 0, 0, 0.48);
   color: #fff;
+}
+
+.identity-backup-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid rgba(88, 101, 242, 0.35);
+  border-radius: var(--radius-md);
+  background: rgba(88, 101, 242, 0.12);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.identity-backup-strip > .material-symbols-outlined {
+  flex-shrink: 0;
+  color: var(--accent-primary);
+}
+
+.identity-backup-strip-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.identity-backup-strip-action {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 /* .modal-card (declared later) caps cards at 520px; this one needs more room. */
@@ -4295,8 +4326,52 @@
   outline: 2px solid var(--accent-primary);
   outline-offset: 1px;
 }
+/* A titled notice: what happened, why, and the one action that fixes it. */
+.chat-copy-toast--notice {
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+}
+.chat-copy-toast-text {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-width: 0;
+}
+.chat-copy-toast-title {
+  font-weight: 600;
+}
+.chat-copy-toast--notice .chat-copy-toast-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.chat-copy-toast-action {
+  flex: 0 0 auto;
+  align-self: center;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background-color 140ms ease;
+}
+.chat-copy-toast-action:hover,
+.chat-copy-toast-action:focus-visible {
+  background: var(--bg-card-hover);
+}
+.chat-copy-toast-action:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+}
 @media (prefers-reduced-motion: reduce) {
-  .chat-copy-toast-close { transition: none; }
+  .chat-copy-toast-close,
+  .chat-copy-toast-action { transition: none; }
 }
 .version-copy {
   padding: 2px 4px;
@@ -6996,6 +7071,8 @@
   outline: none;
 }
 .chat-create-menu button:disabled { opacity: 0.45; cursor: not-allowed; }
+/* The compact composer moves formatting into this menu (responsive.css). */
+.chat-create-menu .chat-create-format { display: none; }
 
 .native-poll-wizard > [data-community-content] {
   display: grid;
@@ -8707,6 +8784,11 @@
   position: relative;
 }
 
+/* Only the immersive stage of a phone on its side, where a tap no longer leaves focus, shows it. */
+.stage-grid-toggle {
+  display: none;
+}
+
 .stage-chat-toggle.active {
   color: var(--text-primary);
   background: var(--bg-card-hover);
@@ -9449,6 +9531,20 @@
   padding: 16px;
   text-align: center;
   pointer-events: none;
+  container-type: size;
+}
+
+/* Grid tiles on a phone lying down are ~165px tall: the viewers pill (top) and
+   the name tag (bottom) would cover the button, so the caption gives way. */
+@container (max-height: 240px) {
+  .stage-watch-overlay:not(.stage-watch-overlay--mini) .stage-watch-caption {
+    display: none;
+  }
+
+  .stage-watch-overlay:not(.stage-watch-overlay--mini) .stage-watch-btn {
+    padding: 8px 14px;
+    font-size: 13px;
+  }
 }
 
 .stage-watch-btn {
@@ -9908,6 +10004,7 @@
 }
 
 .stage-fullscreen-btn,
+.stage-camera-flip-btn,
 .stage-pip-btn,
 .stage-diagnostics-btn {
   position: relative;
@@ -9935,6 +10032,7 @@
 }
 
 .stage-fullscreen-btn:hover,
+.stage-camera-flip-btn:hover,
 .stage-pip-btn:hover,
 .stage-diagnostics-btn:hover {
   background-color: rgba(0, 0, 0, 0.85);
@@ -10969,6 +11067,16 @@ button[data-loading="1"]::after {
 
 .voice-mini-icon.live {
   color: var(--danger);
+}
+
+.voice-mini-share {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Spelled out as a badge on phones (responsive.css); the icon is enough beside a mouse. */
+.voice-mini-live-text {
+  display: none;
 }
 
 /* Someone else's share icon and LIVE badge open their broadcast. */
@@ -13692,6 +13800,52 @@ button:hover .role-option-check:not(.checked) {
   height: 100%;
   padding: 40px 20px;
   animation: fadeIn 0.3s ease;
+}
+
+.identity-welcome-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.identity-welcome-logo {
+  width: 120px;
+  height: 120px;
+  object-fit: contain;
+  margin-bottom: 16px;
+  filter: drop-shadow(0 4px 16px rgba(88, 101, 242, 0.4));
+}
+
+.identity-welcome h1 {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  color: var(--text-primary);
+}
+
+.identity-welcome p {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin: 0 0 32px;
+  max-width: 360px;
+  line-height: 1.5;
+}
+
+.identity-welcome-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 280px;
+}
+
+.identity-welcome-action {
+  padding: 14px 24px;
+  font-size: 15px;
+}
+
+.identity-welcome-action.btn-primary {
+  font-weight: 600;
 }
 
 @keyframes fadeIn {

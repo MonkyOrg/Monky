@@ -1,6 +1,8 @@
 import type { ScreenFormat, NativeScreenCall } from '@monky/shared';
+import { withH264LevelsWebKitReads } from '../../../core/webrtc/browserScreenCodecs';
 import { screenSenderCodecs } from './browserScreenProfile';
-import { sentMediaBinding, withScreenStreamId, type ScreenMediaBinding } from './screenSdp';
+import { declareConstrainedBaselineOn } from './constrainedBaseline';
+import { sentMediaBinding, withScreenStreamId, withoutVideoOrientation, type ScreenMediaBinding } from './screenSdp';
 import type { ScreenIceCandidate, ScreenMediaKind, ScreenPeerPort } from './screenP2pPublisherPeer';
 
 export interface BrowserScreenPeerOptions {
@@ -28,6 +30,9 @@ export class BrowserScreenPeer implements ScreenPeerPort {
   private readonly peer: RTCPeerConnection;
   private readonly stream: MediaStream;
   private readonly transceivers = new Map<ScreenMediaKind, RTCRtpTransceiver>();
+  /** Encoding changes in order: a sender refuses parameters read before another change landed. */
+  private encodingUpdates: Promise<void> = Promise.resolve();
+  private readonly releaseTransform: (() => void) | null;
   private closed = false;
 
   constructor(private readonly options: BrowserScreenPeerOptions) {
@@ -46,6 +51,7 @@ export class BrowserScreenPeer implements ScreenPeerPort {
       throw new Error(`This browser cannot send screens in the ${options.format} format.`);
     }
     video.setCodecPreferences(codecs);
+    this.releaseTransform = declareConstrainedBaselineOn(video.sender);
     this.transceivers.set('video', video);
     if (options.audio) {
       this.transceivers.set('audio', this.peer.addTransceiver(options.audio, {
@@ -70,7 +76,7 @@ export class BrowserScreenPeer implements ScreenPeerPort {
   }
 
   public setRemote(type: 'offer' | 'answer', sdp: string): Promise<void> {
-    return this.peer.setRemoteDescription({ type, sdp });
+    return this.peer.setRemoteDescription({ type, sdp: withH264LevelsWebKitReads(withoutVideoOrientation(sdp)) });
   }
 
   public addIceCandidate(candidate: ScreenIceCandidate): Promise<void> {
@@ -83,13 +89,28 @@ export class BrowserScreenPeer implements ScreenPeerPort {
     return mid && sdp ? sentMediaBinding(sdp, mid) : null;
   }
 
-  public async setSending(kind: ScreenMediaKind, sending: boolean): Promise<void> {
-    const sender = this.transceivers.get(kind)?.sender;
-    if (!sender) throw new Error(`The screen connection has no ${kind} sender.`);
-    const parameters = sender.getParameters();
-    if (!parameters.encodings.length) throw new Error(`The ${kind} screen sender has no encoding.`);
-    for (const encoding of parameters.encodings) encoding.active = sending;
-    await sender.setParameters(parameters);
+  private updateEncodings(kind: ScreenMediaKind, update: (encoding: RTCRtpEncodingParameters) => void): Promise<void> {
+    const apply = async (): Promise<void> => {
+      const sender = this.transceivers.get(kind)?.sender;
+      if (!sender) throw new Error(`The screen connection has no ${kind} sender.`);
+      const parameters = sender.getParameters();
+      if (!parameters.encodings.length) throw new Error(`The ${kind} screen sender has no encoding.`);
+      for (const encoding of parameters.encodings) update(encoding);
+      await sender.setParameters(parameters);
+    };
+    const updated = this.encodingUpdates.then(apply);
+    this.encodingUpdates = updated.catch(() => {});
+    return updated;
+  }
+
+  public setSending(kind: ScreenMediaKind, sending: boolean): Promise<void> {
+    return this.updateEncodings(kind, encoding => { encoding.active = sending; });
+  }
+
+  /** How much the encoder now shrinks the video, after the capture changed size. */
+  public setScaleResolutionDownBy(scale: number): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    return this.updateEncodings('video', encoding => { encoding.scaleResolutionDownBy = scale; });
   }
 
   public stats(): Promise<RTCStatsReport> {
@@ -103,5 +124,6 @@ export class BrowserScreenPeer implements ScreenPeerPort {
     this.peer.onconnectionstatechange = null;
     // The tracks belong to the screen's renditions: the connection only stops sending them.
     this.peer.close();
+    this.releaseTransform?.();
   }
 }

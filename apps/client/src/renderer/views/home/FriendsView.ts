@@ -1,4 +1,4 @@
-import { t, type TranslationKey } from '../../i18n';
+import { t, tTouch, type TranslationKey } from '../../i18n';
 import { getAvatarUrl } from '../../utils/avatar';
 import { escapeHtml } from '../../utils/html';
 import {
@@ -113,15 +113,15 @@ export class FriendsView {
   private renderPanel(snapshot: FriendsHomeSnapshot): string {
     if (this.activeTab === 'online') {
       const online = snapshot.friends.filter(friend => friend.presence === 'online');
-      return online.length ? this.renderFriendRows(online) : this.renderEmpty('home.emptyAvailableTitle', 'home.emptyAvailableDesc', 'person_add');
+      return online.length ? this.renderFriendRows(online) : this.renderEmpty('home.emptyAvailableTitle', tTouch('home.emptyAvailableDesc'), 'person_add');
     }
     if (this.activeTab === 'all') {
-      return snapshot.friends.length ? this.renderFriendRows(snapshot.friends) : this.renderEmpty('home.emptyAllTitle', 'home.emptyAllDesc', 'group_add');
+      return snapshot.friends.length ? this.renderFriendRows(snapshot.friends) : this.renderEmpty('home.emptyAllTitle', tTouch('home.emptyAllDesc'), 'group_add');
     }
     if (this.activeTab === 'pending') {
-      return snapshot.pending.length ? this.renderPendingRows(snapshot.pending) : this.renderEmpty('home.emptyPendingTitle', 'home.emptyPendingDesc', 'hourglass_empty');
+      return snapshot.pending.length ? this.renderPendingRows(snapshot.pending) : this.renderEmpty('home.emptyPendingTitle', t('home.emptyPendingDesc'), 'hourglass_empty');
     }
-    return snapshot.blocked.length ? this.renderBlockedRows(snapshot.blocked) : this.renderEmpty('home.emptyBlockedTitle', 'home.emptyBlockedDesc', 'block');
+    return snapshot.blocked.length ? this.renderBlockedRows(snapshot.blocked) : this.renderEmpty('home.emptyBlockedTitle', t('home.emptyBlockedDesc'), 'block');
   }
 
   private actionButton(action: FriendRowAction, icon: string, label: string, danger = false): string {
@@ -200,12 +200,12 @@ export class FriendsView {
     `;
   }
 
-  private renderEmpty(titleKey: string, descKey: string, icon: string): string {
+  private renderEmpty(titleKey: TranslationKey, description: string, icon: string): string {
     return `
       <div class="friends-empty-state" role="status">
         <span class="material-symbols-outlined" aria-hidden="true">${icon}</span>
-        <h2>${t(titleKey as TranslationKey)}</h2>
-        <p>${t(descKey as TranslationKey)}</p>
+        <h2>${t(titleKey)}</h2>
+        <p>${description}</p>
       </div>
     `;
   }

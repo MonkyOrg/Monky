@@ -1,6 +1,7 @@
 import { Device, type types as SfuTypes } from 'mediasoup-client';
 import { MessageType, type ScreenFormat, type NativeScreenRendition } from '@monky/shared';
 import { isScreenCodec } from './browserScreenProfile';
+import { VIDEO_ORIENTATION_EXTENSION } from './screenSdp';
 
 export type WebScreenRpc = (method: MessageType, payload: Record<string, unknown>) => Promise<unknown>;
 
@@ -38,10 +39,13 @@ export class WebScreenSfuRendition {
   private transport: SfuTypes.Transport | null = null;
   private serverTransportId: string | null = null;
   private disconnectedTimer: ReturnType<typeof setTimeout> | null = null;
+  private scaleResolutionDownBy: number;
+  private rescaling: Promise<void> = Promise.resolve();
   private stopping = false;
   private closing: Promise<void> | null = null;
 
   constructor(private readonly options: WebScreenSfuRenditionOptions) {
+    this.scaleResolutionDownBy = options.scaleResolutionDownBy;
     this.ready = this.open();
     void this.ready.catch(() => {});
   }
@@ -60,7 +64,9 @@ export class WebScreenSfuRendition {
     this.current();
     if (!isRecord(router) || router.channelId !== channelId || !isRtpCapabilities(router.rtpCapabilities))
       throw new Error('The screen router capabilities belong to another channel.');
-    await this.device.load({ routerRtpCapabilities: router.rtpCapabilities });
+    // Without the orientation extension the browser rotates a turned phone's pixels itself (see screenSdp).
+    await this.device.load({ routerRtpCapabilities: { ...router.rtpCapabilities,
+      headerExtensions: router.rtpCapabilities.headerExtensions?.filter(extension => extension.uri !== VIDEO_ORIENTATION_EXTENSION) } });
     this.current();
     const { format } = this.options;
     const codec = this.device.rtpCapabilities.codecs?.find(value => value.kind === 'video' && isScreenCodec({
@@ -109,8 +115,9 @@ export class WebScreenSfuRendition {
         this.disconnectedTimer = null;
       }
     });
-    const { shareId, video, audio, audioBitrateBps, scaleResolutionDownBy } = this.options;
-    const encoding = { maxBitrate: rendition.video.maxBitrateKbps * 1000, maxFramerate: rendition.video.fps, scaleResolutionDownBy };
+    const { shareId, video, audio, audioBitrateBps } = this.options;
+    const encoding = { maxBitrate: rendition.video.maxBitrateKbps * 1000, maxFramerate: rendition.video.fps,
+      scaleResolutionDownBy: this.scaleResolutionDownBy };
     const producer = await transport.produce({
       track: video, codec, stopTracks: false, encodings: [encoding],
       codecOptions: { videoGoogleStartBitrate: Math.min(5000, rendition.video.maxBitrateKbps) },
@@ -134,6 +141,20 @@ export class WebScreenSfuRendition {
       }));
       this.current();
     }
+  }
+
+  /** How much the encoder now shrinks the video, after the capture changed size. */
+  public setScaleResolutionDownBy(scale: number): Promise<void> {
+    this.scaleResolutionDownBy = scale;
+    const rescaled = this.rescaling.then(() => Promise.allSettled([this.ready])).then(async () => {
+      const sender = this.producers[0]?.rtpSender;
+      if (this.stopping || !sender) return;
+      const parameters = sender.getParameters();
+      for (const sent of parameters.encodings) sent.scaleResolutionDownBy = this.scaleResolutionDownBy;
+      await sender.setParameters(parameters);
+    });
+    this.rescaling = rescaled.catch(() => {});
+    return rescaled;
   }
 
   public stats(): Promise<RTCStatsReport | null> {

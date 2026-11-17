@@ -43,6 +43,8 @@ export function initTooltips(doc: Document = document): () => void {
   /** The element the anchor's `data-tooltip-source` named at the last refresh. */
   let anchorSource: Element | null = null;
   let keyboard = false;
+  /** Typing on a phone's on-screen keyboard is not keyboard navigation: there, only Tab is. */
+  let touch = win.matchMedia?.('(hover: none)').matches ?? false;
   let dismissed = false;
   let timer: number | undefined;
   let frame: number | undefined;
@@ -298,14 +300,15 @@ export function initTooltips(doc: Document = document): () => void {
     hide();
   }
 
-  function onPointerDown(): void {
+  function onPointerDown(event: PointerEvent): void {
+    touch = event.pointerType === 'touch';
     keyboard = false;
     dismiss();
   }
 
   function onKeyDown(event: KeyboardEvent): void {
     if (event.key === 'Escape') dismiss();
-    else {
+    else if (!touch || event.key === 'Tab') {
       keyboard = true;
       if (event.key === 'Tab') dismissed = false;
     }

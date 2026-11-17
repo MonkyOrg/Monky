@@ -1,4 +1,4 @@
-import { t } from '../i18n';
+import { t, tTouch } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { isButtonLoading, withButtonLoading } from '../utils/buttonLoading';
 import { MESSAGE_SELECTION_MAX, dragSelection, edgeScrollSpeed } from '../utils/messageSelection';
@@ -368,7 +368,7 @@ export class MessageSelection {
     const ids = this.ids();
     const count = bar.querySelector<HTMLElement>('.message-selection-count');
     if (count) {
-      count.textContent = ids.length === 0 ? t('chat.selectionHint')
+      count.textContent = ids.length === 0 ? tTouch('chat.selectionHint')
         : t(ids.length === 1 ? 'chat.selectionCount.one' : 'chat.selectionCount.other', { count: ids.length });
     }
     const list = bar.querySelector<HTMLElement>('.message-selection-actions');

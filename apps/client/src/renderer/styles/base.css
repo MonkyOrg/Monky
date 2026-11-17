@@ -20,6 +20,7 @@
   --motion-view-duration: 200ms;
   --motion-notice-duration: 140ms;
   --motion-step-duration: 240ms;
+  --motion-sheet-duration: 320ms;
   --motion-easing: cubic-bezier(0.2, 0, 0, 1);
   --server-rail-width: 60px;
   --bg-app: #0b0e14;
@@ -86,6 +87,7 @@
     --motion-view-duration: 0ms;
     --motion-notice-duration: 0ms;
     --motion-step-duration: 0ms;
+    --motion-sheet-duration: 0ms;
   }
 }
 

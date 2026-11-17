@@ -7,6 +7,7 @@ import { t } from '../../../i18n';
 import { settingsStore, type ScreenShareReceiver } from '../../../stores/settingsStore';
 import { voiceStore } from '../../../stores/voiceStore';
 import { resolveAudioOutput } from '../../../utils/audioPreferences';
+import { onPresentedFrame } from '../../../utils/inlineVideo';
 import { showInfoToast } from '../../../views/CopyToast';
 import { BrowserScreenSubscription } from '../BrowserScreenSubscription';
 import { browserScreenFailureReason } from '../browserScreenCodecs';
@@ -46,6 +47,7 @@ export interface Presentation extends RewatchEntry {
   retirement?: Promise<void>;
   stoppingTask?: Promise<void>;
   browser?: BrowserScreenSubscription;
+  frameWatch?: AbortController;
   audioTrack?: MediaStreamTrack;
   captureMode?: NativeScreenCaptureMode;
 }
@@ -263,13 +265,15 @@ export class RemoteScreenPresentations {
 
   private createBrowserSubscription(call: Call, entry: Presentation): BrowserScreenSubscription {
     const key = keyOf(entry.publisherSessionId, entry.source.shareId);
-    entry.video.onplaying = () => {
-      if (entry.stopping) return;
+    entry.frameWatch?.abort();
+    entry.frameWatch = new AbortController();
+    onPresentedFrame(entry.video, () => {
+      if (entry.stopping || entry.state.state === 'playing') return;
       entry.browser?.playing();
       entry.state = { state: 'playing' };
       this.rewatch(call).outcome(key, entry);
       announceScreenChange();
-    };
+    }, entry.frameWatch.signal);
     return new BrowserScreenSubscription({
       call: call.config, publisherSessionId: entry.publisherSessionId, source: entry.source, quality: entry.quality,
       muted: this.audioPreferences(call, entry).muted,
@@ -466,7 +470,7 @@ export class RemoteScreenPresentations {
       if (entry.browser) {
         if (entry.audioTrack) await this.mediaRouter.cleanupScreenAudio(entry.publisherSessionId, entry.audioTrack);
         await this.retireBrowser(call, entry.browser);
-        entry.video.onplaying = null;
+        entry.frameWatch?.abort();
         entry.video.pause();
         entry.video.srcObject = null;
       } else if (entry.attachment) await call.api.stopNativeScreenPresentation(entry.presentationId);

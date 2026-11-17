@@ -42,8 +42,8 @@ export function reducedMotion(): boolean {
   return preference.matches;
 }
 
-export function motionDuration(kind: SurfaceKind | 'step'): number {
-  const defaults = { modal: 200, popover: 140, panel: 200, notice: 140, view: 200, step: 240 };
+export function motionDuration(kind: SurfaceKind | 'step' | 'sheet'): number {
+  const defaults = { modal: 200, popover: 140, panel: 200, notice: 140, view: 200, step: 240, sheet: 320 };
   const token = getComputedStyle(document.documentElement).getPropertyValue(`--motion-${kind}-duration`).trim();
   // Production CSS minification can convert milliseconds to seconds.
   const value = Number.parseFloat(token) * (token.endsWith('s') && !token.endsWith('ms') ? 1000 : 1);
@@ -171,6 +171,12 @@ function move(element: HTMLElement, kind: SurfaceKind, leaving: boolean, finish?
   const opacity = previous ? getComputedStyle(element).opacity : leaving ? '1' : '0';
   const card = kind === 'view' ? null : kind === 'modal' ? element.querySelector<HTMLElement>(':scope > .modal-card') : element;
   const translation = previous && card ? getComputedStyle(card).translate : null;
+  const layoutRows = previous && card?.matches('.voice-channel-chat-panel') && card.parentElement
+    ? getComputedStyle(card.parentElement).gridTemplateRows : null;
+  // Where the stage cards are seen now, mid-flight included, before the chat moves them.
+  const stageCards = card?.matches('.voice-channel-chat-panel') && card.parentElement
+    ? [...card.parentElement.querySelectorAll<HTMLElement>('.voice-stage-container .stage-card')]
+      .map(tile => ({ tile, from: tile.getBoundingClientRect() })) : [];
   cancelSurfaceMotion(element);
   const motion: Motion = {
     animations: [], finish, inert: element.inert, ariaHidden: element.getAttribute('aria-hidden'),
@@ -187,14 +193,31 @@ function move(element: HTMLElement, kind: SurfaceKind, leaving: boolean, finish?
   }
   const compact = matchMedia(COMPACT_VIEWPORT_QUERY).matches;
   const sheet = compact && card?.matches('.emoji-picker--compact');
-  const duration = motionDuration(sheet ? 'modal' : kind);
+  // On a phone held upright the call chat opens under the stage: the stage band
+  // shrinks from the whole screen as the chat rises with it, and grows back on close.
+  const stageLayout = compact && card?.matches('.voice-channel-chat-panel') ? card.parentElement : null;
+  const underStage = stageLayout && (leaving ? stageLayout.matches('[data-compact-chat-below]')
+    : stageLayout.matches('[data-compact-panel="content"]:not([data-compact-split])')
+      && !!stageLayout.querySelector('.voice-stage-container')) ? stageLayout : null;
+  const duration = motionDuration(underStage ? 'sheet' : sheet ? 'modal' : kind);
   const easing = getComputedStyle(document.documentElement).getPropertyValue('--motion-easing').trim()
     || 'cubic-bezier(0.2, 0, 0, 1)';
   element.dataset.uiMotion = '';
   motion.animations.push(element.animate([{ opacity }, { opacity: leaving ? 0 : 1 }], {
     duration, easing, fill: 'both',
   }));
-  if (card) {
+  if (underStage) {
+    // The open end is the layout's live rows, set once the shell sees the chat.
+    const wholeScreen = { gridTemplateRows: '100% minmax(0, 1fr) auto' };
+    const from = layoutRows ? { gridTemplateRows: layoutRows } : null;
+    const rows = underStage.animate(leaving ? from ? [from, wholeScreen] : [wholeScreen]
+      : [{ ...from ?? wholeScreen, offset: 0 }], { duration, easing, fill: 'both' });
+    motion.animations.push(rows);
+    // The shell settles the chat's layout before this frame paints.
+    requestAnimationFrame(() => {
+      if (motions.get(element) === motion) followStage(underStage, stageCards, rows, motion.animations, duration);
+    });
+  } else if (card) {
     const popoverOffset = kind === 'popover' ? Math.max(0, Math.min(compact ? 16 : 4,
       viewportBounds().bottom - card.getBoundingClientRect().bottom - 8)) : compact ? 16 : 4;
     const offset = sheet ? '0 100%' : kind === 'modal' && compact
@@ -210,6 +233,108 @@ function move(element: HTMLElement, kind: SurfaceKind, leaving: boolean, finish?
     () => settle(element, motion),
     () => { if (motions.get(element) === motion) settle(element, motion); },
   );
+}
+
+/**
+ * The stage cards trade a grid for a row above the call chat. Each card travels from
+ * where it was seen to its new place at the pace of the stage band, sampled from the
+ * band's own animation, so cards and band never part ways.
+ */
+function followStage(
+  layout: HTMLElement, cards: { tile: HTMLElement; from: DOMRect }[], rows: Animation, animations: Animation[], duration: number,
+): void {
+  const stage = layout.querySelector<HTMLElement>('.voice-stage-container');
+  const tiles = cards.filter(({ tile, from }) => tile.isConnected && from.width > 0 && from.height > 0);
+  const now = rows.currentTime;
+  if (!stage || !tiles.length || typeof now !== 'number') return;
+  const steps = 12;
+  const samples = Array.from({ length: steps + 1 }, (_, index) => {
+    rows.currentTime = duration * index / steps;
+    return { band: stage.getBoundingClientRect().height, rects: tiles.map(({ tile }) => tile.getBoundingClientRect()) };
+  });
+  rows.currentTime = now;
+  const start = samples[0].band;
+  const end = samples[steps].band;
+  tiles.forEach(({ tile, from }, card) => {
+    const to = samples[steps].rects[card];
+    if (to.width <= 0 || to.height <= 0) return;
+    const keyframes = samples.map((sample, index) => {
+      const progress = end === start ? index / steps : (sample.band - start) / (end - start);
+      const at = sample.rects[card];
+      const left = from.left + (to.left - from.left) * progress;
+      const top = from.top + (to.top - from.top) * progress;
+      const width = from.width + (to.width - from.width) * progress;
+      const height = from.height + (to.height - from.height) * progress;
+      return {
+        offset: index / steps,
+        transformOrigin: '0 0',
+        transform: `translate(${left - at.left}px, ${top - at.top}px) scale(${width / Math.max(1, at.width)}, ${height / Math.max(1, at.height)})`,
+      };
+    });
+    const animation = tile.animate(keyframes, { duration, fill: 'both' });
+    animation.currentTime = now;
+    animations.push(animation);
+  });
+}
+
+let stageBand: { layout: HTMLElement; animations: Animation[] } | null = null;
+
+function stopStageBand(): void {
+  if (!stageBand) return;
+  const { layout, animations } = stageBand;
+  stageBand = null;
+  animations.forEach(animation => animation.cancel());
+  layout.style.removeProperty('grid-template-rows');
+}
+
+/**
+ * The tallest the band may start while the call chat below still holds its header
+ * and composer. Squeezed past them the composer drops off the screen, and Safari
+ * scrolls the whole page after the caret until the band settles.
+ */
+function stageBandStart(layout: HTMLElement, top: number): number {
+  const end = parseFloat(getComputedStyle(layout).gridTemplateRows);
+  const feed = layout.querySelector<HTMLElement>(':scope > .voice-channel-chat-panel .chat-messages-feed');
+  if (!feed || !Number.isFinite(end)) return top;
+  const style = getComputedStyle(feed);
+  const room = feed.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  return Math.min(top, end + Math.max(0, room));
+}
+
+/**
+ * Typing shrinks the stage band above the call chat. The band eases to its new
+ * height with the keyboard instead of jumping ahead of it, which would throw the
+ * chat up before the keyboard arrives; closing the keyboard grows it back the same way.
+ */
+export function animateStageBand(update: () => void): void {
+  const layout = document.querySelector<HTMLElement>('.main-layout[data-compact-chat-below]');
+  const animate = !!layout && !reducedMotion() && layout.checkVisibility({ checkVisibilityCSS: true });
+  const top = animate ? parseFloat(getComputedStyle(layout).gridTemplateRows) : NaN;
+  const stageCards = animate
+    ? [...layout.querySelectorAll<HTMLElement>('.voice-stage-container .stage-card')]
+      .map(tile => ({ tile, from: tile.getBoundingClientRect() })) : [];
+  stopStageBand();
+  update();
+  if (!layout || !Number.isFinite(top) || !layout.matches('[data-compact-chat-below]')) return;
+  const from = `${stageBandStart(layout, top)}px minmax(0, 1fr) auto`;
+  const duration = motionDuration('sheet');
+  const easing = getComputedStyle(document.documentElement).getPropertyValue('--motion-easing').trim()
+    || 'cubic-bezier(0.2, 0, 0, 1)';
+  const animations: Animation[] = [];
+  const rows = layout.animate([{ gridTemplateRows: from, offset: 0 }], { duration, easing });
+  animations.push(rows);
+  followStage(layout, stageCards, rows, animations, duration);
+  const band = { layout, animations };
+  stageBand = band;
+  // WebKit applies a new animation only from the frame after it is ready: hold
+  // the start meanwhile, or the chat flashes at its final place first.
+  layout.style.gridTemplateRows = from;
+  void rows.ready.then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (stageBand === band) layout.style.removeProperty('grid-template-rows');
+  })), () => {});
+  void rows.finished.then(() => {
+    if (stageBand === band) stopStageBand();
+  }, () => {});
 }
 
 export function animateEnter(element: HTMLElement, kind: SurfaceKind = 'popover'): void {

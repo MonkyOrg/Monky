@@ -5,6 +5,7 @@ import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { openModal } from '../utils/modalShell';
 import { setSurfaceVisible } from '../utils/surfaceVisibility';
+import { showInlineStream } from '../utils/inlineVideo';
 import { showWithMotion } from '../utils/surfaceMotion';
 import { copyText, errorMessage, reportError } from '../utils/feedback';
 import { applyBackup, BACKUP_FILE_EXTENSION, BackupScope, collectBackup, parseBackup, scopesInBackup } from '../utils/backup';
@@ -299,7 +300,9 @@ export async function showIdentityImportDialog(): Promise<IdentityInfo | null> {
           return;
         }
         stream = camera;
-        video.srcObject = camera;
+        void showInlineStream(video, camera).catch((error: unknown) => {
+          if (generation === scanGeneration) showError(errorMessage(error, t('identity.cameraError')), error);
+        });
         setSurfaceVisible(scanWrap, true);
         scanButton.textContent = t('identity.stopScan');
         scanFrame = requestAnimationFrame(scanLoop);

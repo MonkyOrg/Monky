@@ -13,6 +13,7 @@ import rvmLicenseUrl from '../../assets/camera-effects/RVM-LICENSE?url';
 import sourcesUrl from '../../assets/camera-effects/SOURCES.json?url&no-inline';
 import { openFileInputPicker } from '../../utils/buttonLoading';
 import { setSurfaceVisible } from '../../utils/surfaceVisibility';
+import { isShowingStream, showInlineStream } from '../../utils/inlineVideo';
 import './cameraEffects.css';
 
 const modeLabels: Record<CameraEffectMode, TranslationKey> = {
@@ -462,14 +463,13 @@ export class CameraEffectsControl {
 
   private setPreviewStream(stream: MediaStream | null): void {
     const video = this.element<HTMLVideoElement>('camera-effects-preview');
-    if (!video || video.srcObject === stream) return;
+    if (!video || isShowingStream(video, stream)) return;
     const playback = ++this.previewPlaybackGeneration;
-    video.pause();
-    video.srcObject = stream;
+    const started = showInlineStream(video, stream);
     video.hidden = !stream;
     if (stream) {
       const generation = this.previewGeneration;
-      void video.play().catch((error: unknown) => {
+      void started.catch((error: unknown) => {
         if (generation === this.previewGeneration && playback === this.previewPlaybackGeneration && this.previewWanted) {
           this.stopPreview();
           this.failure = error;

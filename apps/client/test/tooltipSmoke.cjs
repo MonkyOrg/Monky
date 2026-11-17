@@ -460,6 +460,17 @@ async function runTooltipSmoke() {
     ping.blur();
     if (!document.hasFocus()) ping.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
     ping.remove();
+    // A tap, typing on the on-screen keyboard and focus coming back to a control (a dialog closed by
+    // its Enter) is not keyboard navigation: nothing would ever take that tooltip away on a phone.
+    document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    button.focus();
+    if (!document.hasFocus()) button.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    await wait(180);
+    check(closed(), 'Focus after a tap and on-screen typing must not open a tooltip');
+    button.blur();
+    if (!document.hasFocus()) button.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'mouse' }));
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
     button.focus();
     // Hidden windows have an activeElement but no OS focus/focusin dispatch.

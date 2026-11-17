@@ -1,5 +1,5 @@
 import { getScreenShareQualities, screenShareQualitySchema, type NativeScreenSource } from '@monky/shared';
-import { escapeHtml, html, trustedHtml } from '../utils/html';
+import { escapeHtml, html, htmlElement, trustedHtml } from '../utils/html';
 import { cancelVisibilityMotion, setSurfaceVisible } from '../utils/surfaceVisibility';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
 import { appEvents } from '../core/EventBus';
@@ -30,7 +30,7 @@ import { setButtonLoading, isButtonLoading } from '../utils/buttonLoading';
 import { soundboardModal } from './SoundboardModal';
 import { overlayConfigModal } from './OverlayConfigModal';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
-import { t } from '../i18n';
+import { t, tTouch } from '../i18n';
 import { toggleCamera as toggleCallCamera, turnCameraOff } from '../core/CameraPublication';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { BotScreenDock, type BotScreenStage } from './BotScreenDock';
@@ -42,9 +42,14 @@ import {
 } from './stage/stageTiles';
 import { StageTelemetryMonitor } from './stage/StageTelemetryMonitor';
 import { FocusedScreenZoom } from './stage/FocusedScreenZoom';
+import { bindCameraFlip, renderCameraFlipButton } from './stage/StageCameraFlip';
+import { bindFocusedVideoFrame, syncFocusedVideoFrames } from './stage/FocusedVideoFrame';
+import { announceCompactFocus } from './stage/compactFocusHint';
 import { bindWatchControls, renderStopWatchingButton, renderWatchOverlay } from './stage/StageWatchControls';
 import { showErrorToast } from './CopyToast';
 import { reportError } from '../utils/feedback';
+import { toggleFullscreen } from '../utils/fullscreen';
+import { isShowingStream, showInlineStream } from '../utils/inlineVideo';
 import { platformSupports } from '../platform/capabilities';
 import { lockedAttributes } from '../utils/desktopOnly';
 
@@ -341,6 +346,10 @@ export class VoiceStageView {
           </div>
 
           <div style="display: flex; align-items: center; gap: 10px;">
+            <button id="stage-btn-grid" type="button" class="btn btn-icon stage-grid-toggle"
+              aria-label="${t('stage.showGrid')}" title="${t('stage.showGrid')}">
+              <span class="material-symbols-outlined" aria-hidden="true">grid_view</span>
+            </button>
             <button id="stage-btn-chat" class="btn btn-icon stage-chat-toggle ${this.chatOpen ? 'active' : ''}"
               aria-pressed="${this.chatOpen}" aria-label="${t(this.chatOpen ? 'voiceChat.hide' : 'voiceChat.show')}"
               title="${t(this.chatOpen ? 'voiceChat.hide' : 'voiceChat.show')}">
@@ -391,7 +400,7 @@ export class VoiceStageView {
           <button id="stage-btn-soundboard" class="btn btn-icon" title="${t('main.openSoundboard')}"${lockedAttributes('mediaFolders', 'mediaLibrary')}>
             <span class="material-symbols-outlined">music_note</span>
           </button>
-          <button id="stage-btn-stop-share" class="btn btn-danger" style="display: ${voiceStore.isScreenSharing ? 'inline-flex' : 'none'}; margin-left: 12px; padding: 0 16px; height: 38px;" title="${t('stage.stopScreenShare')}">
+          <button id="stage-btn-stop-share" class="btn btn-danger" style="margin-left: 12px; padding: 0 16px; height: 38px;" title="${t('stage.stopScreenShare')}"${voiceStore.isScreenSharing ? '' : ' hidden'}>
             <span class="material-symbols-outlined md-18" style="margin-right: 4px;">stop_screen_share</span>
             <span>${t('screenShare.stopSharing')}</span>
           </button>
@@ -489,7 +498,7 @@ export class VoiceStageView {
 
     if (btnStopShare) {
       const hasScreenAudio = voiceStore.hasScreenAudio;
-      btnStopShare.style.display = voiceStore.isScreenSharing ? 'inline-flex' : 'none';
+      btnStopShare.hidden = !voiceStore.isScreenSharing;
       btnStopShare.title = hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare');
       btnStopShare.setAttribute('aria-haspopup', voiceStore.screenShareIds.length > 1 ? 'menu' : 'false');
     }
@@ -686,10 +695,12 @@ export class VoiceStageView {
     const commit = () => {
       if (!current()) return;
       this.clearFocusError();
+      const entering = this.focusedTileKeys.length === 0 && tileKeys.length > 0;
       this.focusedTileKeys = tileKeys;
       hooks?.beforeRender?.();
       this.renderParticipants();
       hooks?.afterRender?.();
+      if (entering) announceCompactFocus(this.container);
     };
     const changingLayout = tileKeys.length !== this.focusedTileKeys.length
       || this.focusedTileKeys.some((key, index) => tileKeys[index] !== key);
@@ -818,6 +829,7 @@ export class VoiceStageView {
       }
     }
     if (otherTiles.length === 0) containers.strip?.remove();
+    else containers.strip?.setAttribute('data-label', t('stage.inCall', { count: participants.length }));
     for (const { key, card } of created) {
       if (this.stageCards.get(key) === card) Object.assign(card, this.bindStageCard(card.element));
     }
@@ -825,6 +837,7 @@ export class VoiceStageView {
     this.zoom.attach(area);
     this.updateSpeakingClasses();
     this.refreshParticipantMedia(tiles);
+    syncFocusedVideoFrames(area);
   }
 
   /**
@@ -905,7 +918,7 @@ export class VoiceStageView {
         <div class="stage-focused-main ${speaking}" ${this.tileAttributes(tile)}>
           ${tile.kind === 'miniapp' ? '' : `<div class="stage-focus-hint-badge">
             <span class="material-symbols-outlined md-14">zoom_in</span>
-            <span>${t('stage.focusMode')}</span>
+            <span>${tTouch('stage.focusMode')}</span>
           </div>`}
           ${this.renderCardContent(tile, true)}
         </div>
@@ -931,9 +944,7 @@ export class VoiceStageView {
    * volume and quality chosen, the preview liveness and the reconnecting notice (#490).
    */
   private buildStageCard(tile: StageTile, placement: StagePlacement): { element: HTMLElement; signature: string } {
-    const template = document.createElement('template');
-    template.innerHTML = this.stageCardMarkup(tile, placement);
-    const element = template.content.firstElementChild;
+    const element = htmlElement(this.stageCardMarkup(tile, placement));
     const normalized = element?.cloneNode(true);
     if (!(element instanceof HTMLElement) || !(normalized instanceof HTMLElement)) throw new Error('A stage tile rendered no card.');
     normalized.className = [...normalized.classList].filter((name) => name !== 'speaking').join(' ');
@@ -1141,11 +1152,10 @@ export class VoiceStageView {
       const ids = [`video-${sidOf(tile.p)}-${suffix}`, `video-mini-${sidOf(tile.p)}-${suffix}`];
       ids.forEach((id) => {
         const el = document.getElementById(id) as HTMLVideoElement | null;
-        if (el && el.srcObject !== stream) {
-          el.muted = true;
-          el.srcObject = stream;
+        if (el && !isShowingStream(el, stream)) {
+          const playback = showInlineStream(el, stream);
           this.hideVideoLoadingWhenReady(el, id);
-          el.play().catch(() => {});
+          playback.catch(() => {});
         }
       });
     });
@@ -1271,15 +1281,11 @@ export class VoiceStageView {
       if (!webRtcManager.getNativeScreenSource(sessionId, shareId)) continue;
       const video = card.querySelector<HTMLVideoElement>('video.stage-video-element');
       const stream = participantManager.get(sessionId)?.remoteScreenStreams.get(shareId) ?? null;
-      if (video && video.srcObject !== stream) {
+      if (video && !isShowingStream(video, stream)) {
         this.videoLoadingListeners.get(video)?.();
-        video.pause();
-        video.srcObject = stream;
-        if (stream) {
-          video.muted = true;
-          this.hideVideoLoadingWhenReady(video, video.id);
-          void video.play().catch((error: unknown) => console.warn('[VoiceStage] Could not show the screen:', error));
-        }
+        const playback = showInlineStream(video, stream);
+        if (stream) this.hideVideoLoadingWhenReady(video, video.id);
+        void playback.catch((error: unknown) => console.warn('[VoiceStage] Could not show the screen:', error));
       }
       const state = webRtcManager.getNativeScreenWatchState(sessionId, shareId);
       const existing = card.querySelector<HTMLElement>('.stage-native-error:not([data-ui-closing])');
@@ -1314,14 +1320,10 @@ export class VoiceStageView {
       const video = document.getElementById(id);
       if (!(video instanceof HTMLVideoElement) || !this.container.contains(video)) continue;
       const stream = voiceStore.isCameraOn ? state.stream : null;
-      if (video.srcObject === stream) continue;
-      video.pause();
-      video.srcObject = stream;
-      if (stream) {
-        video.muted = true;
-        this.hideVideoLoadingWhenReady(video, id);
-        void video.play().catch((error: unknown) => console.warn('[VoiceStage] Could not show the local camera:', error));
-      }
+      if (isShowingStream(video, stream)) continue;
+      const playback = showInlineStream(video, stream);
+      if (stream) this.hideVideoLoadingWhenReady(video, id);
+      void playback.catch((error: unknown) => console.warn('[VoiceStage] Could not show the local camera:', error));
     }
   }
 
@@ -1355,11 +1357,7 @@ export class VoiceStageView {
     if (!videoEl) return;
     const target = (videoEl.closest('.stage-card, .stage-focused-main, .stage-mini-card') as HTMLElement | null) ?? videoEl;
     try {
-      if (document.fullscreenElement === target) {
-        await document.exitFullscreen();
-      } else {
-        await target.requestFullscreen();
-      }
+      if (!await toggleFullscreen(target, videoEl)) reportError(t('common.fullscreenUnavailable'));
     } catch (err) {
       console.warn('[VoiceStageView] Fullscreen request failed:', err);
     }
@@ -1585,6 +1583,7 @@ export class VoiceStageView {
                 <span class="material-symbols-outlined md-18">content_copy</span>
               </button>
             ` : ''}
+            ${hasVideo && isLocal && tile.kind === 'camera' ? renderCameraFlipButton() : ''}
             ${hasVideo ? html`<button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
               <span class="material-symbols-outlined md-18">fullscreen</span>
             </button>` : ''}
@@ -1757,6 +1756,8 @@ export class VoiceStageView {
       if (stream) this.seenScreenStarts.add(stream);
     }
     this.unbindEvents.push(bindStageControlsMotion(this.container));
+    this.unbindEvents.push(bindCameraFlip(this.container));
+    this.unbindEvents.push(bindFocusedVideoFrame(this.container));
     const btnMic = document.getElementById('stage-btn-mic');
     const btnDeafen = document.getElementById('stage-btn-deafen');
     const btnCam = document.getElementById('stage-btn-camera');
@@ -1769,6 +1770,9 @@ export class VoiceStageView {
     btnChat?.addEventListener('click', () => {
       if (this.currentChannelId) this.onToggleChat?.(this.currentChannelId);
     });
+
+    // A tap on a phone on its side shows the stage controls, so the grid needs its own way back.
+    this.container.querySelector('#stage-btn-grid')?.addEventListener('click', () => this.setFocusedTiles([]));
 
     btnJoin?.addEventListener('click', async () => {
       const channelId = this.currentChannelId;

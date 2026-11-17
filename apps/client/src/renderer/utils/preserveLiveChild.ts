@@ -1,3 +1,5 @@
+import { htmlFragment } from './html';
+
 /**
  * Rebuild translated siblings without ever detaching a live iframe's ancestors.
  * Removing and reinserting an iframe would reload its document even with the same DOM node.
@@ -6,9 +8,7 @@ export function replaceAroundLiveChild(container: HTMLElement, markup: string, r
   const root = container.querySelector<HTMLElement>(rootSelector);
   const child = root?.querySelector<HTMLElement>(childSelector);
   if (!root || !child) return false;
-  const template = document.createElement('template');
-  template.innerHTML = markup;
-  const nextRoot = template.content.querySelector<HTMLElement>(rootSelector);
+  const nextRoot = htmlFragment(markup).querySelector<HTMLElement>(rootSelector);
   const marker = nextRoot?.querySelector<HTMLElement>(childSelector);
   if (!nextRoot || !marker) return false;
 

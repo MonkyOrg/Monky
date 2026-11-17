@@ -237,6 +237,7 @@ class WebAudioMicrophoneChain implements MicrophoneChain {
   private readonly destination: MediaStreamAudioDestinationNode;
   private node: NoiseSuppressorNode | null = null;
   private destroyed = false;
+  private readonly audioUnlock = new AbortController();
 
   public constructor(raw: MediaStream, private readonly options: ChainOptions) {
     ({ context: this.context, analyser: this.analyser } = createMeter());
@@ -249,9 +250,27 @@ class WebAudioMicrophoneChain implements MicrophoneChain {
   }
 
   public async start(mode: NoiseSuppressionMode): Promise<void> {
-    await this.context.resume();
-    if (this.destroyed) throw cancelled();
+    this.resumeWithoutWaiting();
     (await this.prepareSuppression(mode)).commit();
+  }
+
+  /**
+   * iOS leaves resume() pending until the user touches the page, and a reconnect has no touch:
+   * waiting for it held the whole call. The graph is built suspended and plays from the next touch or key.
+   */
+  private resumeWithoutWaiting(): void {
+    const unlock = this.audioUnlock;
+    const resume = (): void => {
+      if (this.context.state !== 'suspended') {
+        unlock.abort();
+        return;
+      }
+      this.context.resume().then(() => unlock.abort(), () => undefined);
+    };
+    for (const type of ['pointerup', 'touchend', 'keydown'] as const) {
+      window.addEventListener(type, resume, { capture: true, signal: unlock.signal });
+    }
+    resume();
   }
 
   public setInput(stream: MediaStream): void {
@@ -299,6 +318,7 @@ class WebAudioMicrophoneChain implements MicrophoneChain {
   public destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.audioUnlock.abort();
     destroyNoiseSuppressor(this.node);
     this.node = null;
     for (const node of [this.source, this.analyser, this.gain, this.destination]) {
