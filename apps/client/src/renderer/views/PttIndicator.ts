@@ -14,7 +14,7 @@ export function renderPttIndicator(): string {
 }
 
 export function renderMicrophoneButton(): string {
-  return `<button id="bar-btn-mic" class="btn btn-icon microphone-control" data-microphone-control type="button">
+  return `<button id="bar-btn-mic" data-haptic="impact" class="btn btn-icon microphone-control" data-microphone-control type="button">
     ${renderAudioStateIcon('mic')}
     <span class="microphone-control-ptt" data-ptt-mode aria-hidden="true" hidden></span>
   </button>`;

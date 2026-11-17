@@ -1,6 +1,7 @@
 import { Device, type types as SfuTypes } from 'mediasoup-client';
 import { MessageType, type ScreenFormat, type NativeScreenRendition } from '@monky/shared';
 import { isScreenCodec } from './browserScreenProfile';
+import { declareConstrainedBaselineOn } from './constrainedBaseline';
 import { VIDEO_ORIENTATION_EXTENSION } from './screenSdp';
 
 export type WebScreenRpc = (method: MessageType, payload: Record<string, unknown>) => Promise<unknown>;
@@ -43,6 +44,7 @@ export class WebScreenSfuRendition {
   private rescaling: Promise<void> = Promise.resolve();
   private stopping = false;
   private closing: Promise<void> | null = null;
+  private releaseTransform: (() => void) | null = null;
 
   constructor(private readonly options: WebScreenSfuRenditionOptions) {
     this.scaleResolutionDownBy = options.scaleResolutionDownBy;
@@ -128,6 +130,8 @@ export class WebScreenSfuRendition {
     // mediasoup's Safari handler announces the encoding to the server but never hands it to the browser's sender.
     const sender = producer.rtpSender;
     if (sender) {
+      // The desktop rejects WebKit's Baseline SPS here as in P2P; it asks for a keyframe once it consumes.
+      this.releaseTransform = declareConstrainedBaselineOn(sender);
       const parameters = sender.getParameters();
       for (const sent of parameters.encodings) Object.assign(sent, encoding);
       await sender.setParameters(parameters);
@@ -179,6 +183,8 @@ export class WebScreenSfuRendition {
       }));
       this.producers.length = 0;
       this.transport?.close();
+      this.releaseTransform?.();
+      this.releaseTransform = null;
       const transportId = this.serverTransportId;
       this.serverTransportId = null;
       if (transportId) {

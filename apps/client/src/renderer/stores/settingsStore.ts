@@ -105,6 +105,7 @@ function savedSettings(store: SettingsStore) {
     keybindShortcuts: store.keybindShortcuts,
     chatMessageSoundEnabled: store.chatMessageSoundEnabled,
     chatMessageSoundMentionsOnly: store.chatMessageSoundMentionsOnly,
+    hapticsEnabled: store.hapticsEnabled,
     updateBetaChannel: store.updateBetaChannel,
     minimizeToTrayOnClose: store.minimizeToTrayOnClose,
     askShutdownOnLastLeave: store.askShutdownOnLastLeave,
@@ -286,6 +287,7 @@ export class SettingsStore {
   public keybindShortcuts: Record<string, { accelerator: string; display: string }> = {};
   public chatMessageSoundEnabled: boolean = true; // play a cue when a chat message arrives (#152)
   public chatMessageSoundMentionsOnly: boolean = false; // only play the cue when you are mentioned (#153)
+  public hapticsEnabled: boolean = true; // controls reply to the touch on phones (utils/haptics)
   public updateBetaChannel: boolean = false; // opt into receiving beta (pre-release) updates
   public minimizeToTrayOnClose: boolean = true; // minimize to tray when closing window (#256)
   // Ask whether to shut the local server down when its owner is the last one
@@ -501,6 +503,9 @@ export class SettingsStore {
         }
         if (typeof this.chatMessageSoundMentionsOnly !== 'boolean') {
           this.chatMessageSoundMentionsOnly = false;
+        }
+        if (typeof this.hapticsEnabled !== 'boolean') {
+          this.hapticsEnabled = true;
         }
         if (typeof this.updateBetaChannel !== 'boolean') {
           this.updateBetaChannel = false;

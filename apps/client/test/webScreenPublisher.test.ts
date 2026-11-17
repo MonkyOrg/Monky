@@ -220,6 +220,31 @@ test('an upright phone fills the chosen quality long side to long side, as a sid
     { width: 852, height: 478, fps: 30, maxBitrateKbps: 1500 });
 });
 
+test('the browser captures an upright phone up to the long side of the chosen quality, not inside a landscape box', async (t: TestContext) => {
+  const names = ['navigator', 'window'] as const;
+  const descriptors = names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
+  t.after(() => {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name);
+    }
+  });
+  const requests: DisplayMediaStreamOptions[] = [];
+  const video = Object.assign(new EventTarget(), {
+    label: 'Screen', contentHint: '', getSettings: () => ({ width: 1320, height: 2868, displaySurface: 'monitor' }), stop: () => {},
+  });
+  const stream = { getVideoTracks: () => [video], getAudioTracks: () => [], getTracks: () => [video] };
+  const getDisplayMedia = (options: DisplayMediaStreamOptions): Promise<typeof stream> => { requests.push(options); return Promise.resolve(stream); };
+  Object.defineProperty(globalThis, 'navigator', { value: { mediaDevices: { getDisplayMedia } }, configurable: true, writable: true });
+  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true, writable: true });
+  const { DisplayCaptures } = await import('../src/renderer/platform/web/webScreen/displayCaptures');
+  const captures = new DisplayCaptures();
+  await captures.capture({ audio: false, video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 2500 } });
+  captures.releaseAll();
+  const requested = requests[0]?.video;
+  assert.ok(requested && typeof requested === 'object');
+  assert.deepEqual({ width: requested.width, height: requested.height }, { width: { max: 1280 }, height: { max: 1280 } });
+});
+
 const macroblocks = (width: number, height: number): number => Math.ceil(width / 16) * Math.ceil(height / 16);
 
 test('a screen fitted to H.264 Level 3.1 keeps its shape inside 3600 macroblocks and 30 FPS at that size', () => {

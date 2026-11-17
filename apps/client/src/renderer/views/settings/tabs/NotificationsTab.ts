@@ -6,6 +6,7 @@ import { renderSwitch } from '../../../utils/formControls';
 import { clientLog } from '../../../core/ClientLogService';
 import { reportError } from '../../../utils/feedback';
 import { setButtonLoading } from '../../../utils/buttonLoading';
+import { haptic, hapticsSupported } from '../../../utils/haptics';
 
 export class NotificationsTab {
   private unbind: (() => void) | null = null;
@@ -57,6 +58,25 @@ export class NotificationsTab {
           </div>
         </div>
       </div>
+
+      ${hapticsSupported() ? `
+      <!-- Haptics: only where the device can reply to the touch -->
+      <div data-settings-section="haptics" data-settings-label="${escapeHtml(t('settings.haptics'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
+        <div class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin-bottom: 0;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+            <div>
+              <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-haptics">
+                <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">vibration</span>
+                ${t('settings.haptics')}
+              </label>
+              <div style="font-size: 11px; color: var(--text-muted);">
+                ${t('settings.hapticsDesc')}
+              </div>
+            </div>
+            ${renderSwitch({ id: 'checkbox-haptics', label: t('settings.haptics'), checked: settingsStore.hapticsEnabled })}
+          </div>
+        </div>
+      </div>` : ''}
 
       <!-- Custom Sounds -->
       <div data-settings-section="custom-sounds" data-settings-label="${escapeHtml(t('settings.customSounds'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
@@ -110,6 +130,16 @@ export class NotificationsTab {
       }
     };
 
+    const checkboxHaptics = container.querySelector<HTMLInputElement>('#checkbox-haptics');
+    const onHaptics = () => {
+      if (checkboxHaptics) {
+        settingsStore.hapticsEnabled = checkboxHaptics.checked;
+        settingsStore.save();
+        // The tap itself came before the reply was on: it confirms that it now is.
+        if (checkboxHaptics.checked) haptic('selection');
+      }
+    };
+
     const onMentions = () => {
       if (checkboxChatSoundMentions) {
         settingsStore.chatMessageSoundMentionsOnly = checkboxChatSoundMentions.checked;
@@ -126,10 +156,12 @@ export class NotificationsTab {
     };
     checkboxChatSound?.addEventListener('change', onChatSound);
     checkboxChatSoundMentions?.addEventListener('change', onMentions);
+    checkboxHaptics?.addEventListener('change', onHaptics);
     container.addEventListener('click', onClick);
     this.unbind = () => {
       checkboxChatSound?.removeEventListener('change', onChatSound);
       checkboxChatSoundMentions?.removeEventListener('change', onMentions);
+      checkboxHaptics?.removeEventListener('change', onHaptics);
       container.removeEventListener('click', onClick);
     };
   }

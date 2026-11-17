@@ -1973,6 +1973,8 @@ export const ptBR = {
   'settings.customSoundFailed': 'Não foi possível alterar o som personalizado. Tente novamente ou restaure o som padrão.',
   'settings.chatSoundEnabled': 'Tocar som ao receber mensagens',
   'settings.chatSoundEnabledDesc': 'Reproduz um som quando uma nova mensagem de outra pessoa chega em um canal de texto.',
+  'settings.haptics': 'Resposta tátil',
+  'settings.hapticsDesc': 'O celular vibra de leve ao tocar nos controles da chamada e nas chaves, e quando algo dá errado.',
   'settings.chatSoundMentionsDesc': 'Toca o som somente quando você for mencionado na mensagem.',
   'settings.customBadge': 'Personalizado',
   'settings.playSound': 'Ouvir',
