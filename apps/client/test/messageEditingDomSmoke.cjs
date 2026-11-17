@@ -2028,9 +2028,15 @@ async function installFixture() {
     },
     // The rows and the composer change size as an edit starts or ends. With the feed kept at
     // the newest message since the channel opened (#840), it comes to rest before a menu is
-    // opened over it: any scroll closes an open menu.
+    // opened over it: any scroll closes an open menu. The composer's own motion (the reply
+    // bar collapsing) resizes the feed only when it ends, so wait for it first.
     async feedAtRest() {
       const feed = document.querySelector('.chat-messages-feed');
+      const chat = feed?.closest('.chat-container');
+      await Promise.all(document.getAnimations()
+        .filter(animation => chat?.contains(animation.effect?.target ?? null)
+          && Number.isFinite(animation.effect.getComputedTiming().endTime))
+        .map(animation => animation.finished.catch(() => {})));
       for (let frame = 0, quiet = 0, top = feed?.scrollTop; feed && frame < 120 && quiet < 6; frame++) {
         await new Promise(requestAnimationFrame);
         quiet = feed.scrollTop === top ? quiet + 1 : 0;

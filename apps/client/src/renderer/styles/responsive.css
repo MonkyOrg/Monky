@@ -702,7 +702,18 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     padding: 10px 6px;
     line-height: 24px;
   }
-  :root .main-layout[data-compact] .chat-input-field .cm-editor .cm-scroller { max-height: 4.2em; }
+  /* A wrapped placeholder sets the line height, so only typed text is capped. */
+  :root .main-layout[data-compact] .chat-input-container:not(.chat-input-container--editing) .chat-input-field .cm-editor .cm-scroller:not(:has(.cm-placeholder)) { max-height: 4.2em; }
+
+  /* Editing (code included) needs the full width: the text on top, the controls on the row below. */
+  :root #app .main-layout[data-compact] .chat-input-container--editing .chat-input-wrapper {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  :root .main-layout[data-compact] .chat-input-container--editing #chat-message-input.chat-input-field {
+    order: 0;
+    flex-basis: 100%;
+  }
 
   /* The day separator above already names the date; the full stamp stays in the title. */
   :root .main-layout[data-compact] .chat-timestamp-date {
@@ -710,9 +721,8 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   }
 
   :root .chat-input-field .cm-placeholder {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   :root .chat-input-wrapper .chat-create-wrap { order: 0; flex: none; }
@@ -754,7 +764,14 @@ html[data-compact-transition]::view-transition-new(compact-page) {
     line-height: 20px;
     white-space: nowrap;
   }
-  :root .chat-composer-surface .chat-char-count:not([data-near-limit]) { display: none; }
+  :root .chat-input-container:not(.chat-input-container--editing) .chat-composer-surface .chat-char-count:not([data-near-limit]) { display: none; }
+  :root .chat-input-container--editing .chat-composer-surface .chat-char-count {
+    position: static;
+    order: 4;
+    margin-left: auto;
+    background: none;
+  }
+  :root .chat-input-container--editing .chat-composer-surface .chat-send-btn { order: 5; }
   :root .chat-composer-surface .chat-char-count:not(.code-char-count--over) { color: var(--text-secondary); }
 
   :root .chat-input-wrapper > button,

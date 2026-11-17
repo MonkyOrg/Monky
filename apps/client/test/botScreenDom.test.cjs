@@ -396,12 +396,16 @@ if (!process.versions.electron) {
     await run(aliceWindow, `Promise.all(document.querySelector(".modal-backdrop:not([data-ui-closing])")
       .getAnimations({ subtree: true }).filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime))
       .map(animation => animation.finished)).then(() => null)`);
+    // Desktop scrolls the message inside the card; the compact layout scrolls the whole card
+    // under a sticky title and sticky buttons. Either way the text starts visible.
     assert.equal(await run(aliceWindow, `(() => {
       const message = document.querySelector(".dialog-message");
-      const card = document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card").getBoundingClientRect();
-      const confirm = document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card [data-action=confirm]").getBoundingClientRect();
-      return card.top >= 0 && card.bottom <= innerHeight && confirm.bottom <= innerHeight &&
-        message.scrollHeight > message.clientHeight && message.scrollTop === 0;
+      const cardElement = document.querySelector(".modal-backdrop:not([data-ui-closing]) .dialog-card");
+      const card = cardElement.getBoundingClientRect();
+      const confirm = cardElement.querySelector("[data-action=confirm]").getBoundingClientRect();
+      const scrolls = element => element.scrollHeight > element.clientHeight && element.scrollTop === 0;
+      return card.top >= 0 && card.bottom <= innerHeight && confirm.bottom <= innerHeight && confirm.bottom <= card.bottom &&
+        message.getBoundingClientRect().top >= card.top && (scrolls(message) || scrolls(cardElement));
     })()`), true, 'Long permission text scrolls without hiding its beginning or the deny/allow controls');
     const beforeConsent = leaks;
     assert.equal(frames(aliceWindow).length, 0, 'Opening a tile is not consent to execute the bot app');
