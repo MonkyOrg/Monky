@@ -132,16 +132,99 @@
   flex: 1;
 }
 
-.camera-effects-image-row img {
-  width: 96px;
-  max-height: 64px;
-  object-fit: cover;
-  border-radius: 5px;
-}
-
 .camera-effects-image-row span {
   max-width: 100%;
   overflow-wrap: anywhere;
+}
+
+.camera-effects-mirror-row {
+  margin: 10px 0 12px;
+}
+
+.camera-effects-framing {
+  margin-top: 12px;
+}
+
+.camera-effects-framing-frame {
+  position: relative;
+  width: min(100%, 360px);
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  touch-action: none;
+}
+
+.camera-effects-framing-frame.is-movable:not([aria-disabled="true"]) {
+  cursor: grab;
+}
+
+.camera-effects-framing-frame.is-dragging {
+  cursor: grabbing;
+}
+
+.camera-effects-framing-frame:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 3px;
+}
+
+.camera-effects-framing-frame img {
+  position: absolute;
+  display: block;
+  max-width: none;
+  pointer-events: none;
+}
+
+/* Rule-of-thirds grid: shows the frame can be composed and helps place the image. */
+.camera-effects-framing-frame::after {
+  --framing-line: rgba(255, 255, 255, 0.7);
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right,
+      transparent calc(100% / 3 - 0.5px), var(--framing-line) calc(100% / 3 - 0.5px),
+      var(--framing-line) calc(100% / 3 + 0.5px), transparent calc(100% / 3 + 0.5px),
+      transparent calc(200% / 3 - 0.5px), var(--framing-line) calc(200% / 3 - 0.5px),
+      var(--framing-line) calc(200% / 3 + 0.5px), transparent calc(200% / 3 + 0.5px)),
+    linear-gradient(to bottom,
+      transparent calc(100% / 3 - 0.5px), var(--framing-line) calc(100% / 3 - 0.5px),
+      var(--framing-line) calc(100% / 3 + 0.5px), transparent calc(100% / 3 + 0.5px),
+      transparent calc(200% / 3 - 0.5px), var(--framing-line) calc(200% / 3 - 0.5px),
+      var(--framing-line) calc(200% / 3 + 0.5px), transparent calc(200% / 3 + 0.5px));
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.8));
+  opacity: 0.45;
+  transition: opacity var(--motion-popover-duration) var(--motion-easing);
+}
+
+.camera-effects-framing-frame:not([aria-disabled="true"]):hover::after,
+.camera-effects-framing-frame:not([aria-disabled="true"]):focus-visible::after,
+.camera-effects-framing-frame.is-dragging::after {
+  opacity: 1;
+}
+
+.camera-effects-framing-frame[aria-disabled="true"]::after {
+  opacity: 0;
+}
+
+.camera-effects-framing-move {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--motion-popover-duration) var(--motion-easing);
+}
+
+.camera-effects-framing-frame.is-movable:not([aria-disabled="true"]):not(.is-dragging) .camera-effects-framing-move {
+  opacity: 1;
 }
 
 .camera-effects-preview-controls {

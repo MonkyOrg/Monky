@@ -125,7 +125,9 @@ async function runMediaSettingsPopoverSmoke() {
     keyTolerance: 'cameraEffects.keyToleranceHelp', keySoftness: 'cameraEffects.keySoftnessHelp',
     spillReduction: 'cameraEffects.spillReductionHelp', backgroundSource: 'cameraEffects.chromaReplacementHelp',
     backgroundColor: 'cameraEffects.backgroundColorHelp', backgroundImage: 'cameraEffects.imageHelp',
-    limitQuality: 'cameraEffects.limitQualityHelp',
+    limitQuality: 'cameraEffects.limitQualityHelp', mirror: 'cameraEffects.mirrorHelp',
+    personFocus: 'cameraEffects.personFocusHelp', backgroundFraming: 'cameraEffects.framingHelp',
+    backgroundZoom: 'cameraEffects.backgroundZoomHelp',
   };
   const verifyHelp = scope => {
     check(scope.querySelectorAll('[data-camera-help]').length === Object.keys(helpKeys).length,

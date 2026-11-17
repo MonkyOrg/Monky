@@ -1,4 +1,4 @@
-import { CameraEffectError, needsBackgroundImage, type CameraEffectSettings } from '../../utils/cameraEffects';
+import { CameraEffectError, backgroundImageRect, needsBackgroundImage, type CameraEffectSettings } from '../../utils/cameraEffects';
 
 const VERTEX = `#version 300 es
 out vec2 uv;
@@ -18,7 +18,7 @@ uniform sampler2D backgroundTexture;
 uniform vec3 backgroundColor;
 uniform vec3 keyColor;
 uniform vec3 keySettings;
-uniform vec2 backgroundScale;
+uniform vec4 backgroundRect;
 uniform int chroma;
 uniform int matting;
 uniform int backgroundKind;
@@ -49,7 +49,7 @@ void main() {
   }
   vec3 background = backgroundColor;
   if (backgroundKind != 0) {
-    vec4 image = texture(backgroundTexture, (point - 0.5) * backgroundScale + 0.5);
+    vec4 image = texture(backgroundTexture, (point - backgroundRect.xy) / backgroundRect.zw);
     if (backgroundKind == 2) {
       background = image.a > 0.0001 ? image.rgb / image.a : backgroundColor;
     } else {
@@ -283,9 +283,12 @@ export class CameraGpuCompositor {
     gl.uniform1i(this.uniform(this.composite, 'chroma'), settings.mode === 'chroma' ? 1 : 0);
     gl.uniform1i(this.uniform(this.composite, 'matting'), matte ? 1 : 0);
     gl.uniform1i(this.uniform(this.composite, 'backgroundKind'), blurred ? 2 : needsBackgroundImage(settings) ? 1 : 0);
-    const aspect = needsBackgroundImage(settings) && background
-      ? (bitmap.width / bitmap.height) / (background.width / background.height) : 1;
-    gl.uniform2f(this.uniform(this.composite, 'backgroundScale'), Math.min(1, aspect), Math.min(1, 1 / aspect));
+    // Normalized placement of the background in the frame; the blurred frame fills it exactly.
+    const rect = !blurred && needsBackgroundImage(settings) && background
+      ? backgroundImageRect(bitmap.width, bitmap.height, background.width, background.height, settings)
+      : { x: 0, y: 0, width: bitmap.width, height: bitmap.height };
+    gl.uniform4f(this.uniform(this.composite, 'backgroundRect'), rect.x / bitmap.width, rect.y / bitmap.height,
+      rect.width / bitmap.width, rect.height / bitmap.height);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     if (gl.isContextLost() || gl.getError() !== gl.NO_ERROR) throw new CameraEffectError('processing');
   }

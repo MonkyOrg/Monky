@@ -4,6 +4,8 @@ export { isHexColor } from './colors';
 export const CAMERA_EFFECT_MODES = ['off', 'blur', 'color', 'image', 'chroma'] as const;
 export type CameraEffectMode = typeof CAMERA_EFFECT_MODES[number];
 export type CameraBackgroundSource = 'color' | 'image';
+export const CAMERA_PERSON_FOCUS = ['all', 'main'] as const;
+export type CameraPersonFocus = typeof CAMERA_PERSON_FOCUS[number];
 
 export interface CameraEffectSettings {
   mode: CameraEffectMode;
@@ -17,6 +19,14 @@ export interface CameraEffectSettings {
   keySoftness: number;
   spillReduction: number;
   limitQuality: boolean;
+  /** Flips the transmitted video horizontally; the replacement background is not flipped. */
+  mirror: boolean;
+  personFocus: CameraPersonFocus;
+  /** Percentage over the size that covers the frame (100 = cover). */
+  backgroundZoom: number;
+  /** CSS object-position percentages of the background image inside the frame. */
+  backgroundPositionX: number;
+  backgroundPositionY: number;
 }
 
 export const DEFAULT_CAMERA_EFFECT_SETTINGS: Readonly<CameraEffectSettings> = Object.freeze({
@@ -31,7 +41,14 @@ export const DEFAULT_CAMERA_EFFECT_SETTINGS: Readonly<CameraEffectSettings> = Ob
   keySoftness: 10,
   spillReduction: 50,
   limitQuality: false,
+  mirror: false,
+  personFocus: 'all',
+  backgroundZoom: 100,
+  backgroundPositionX: 50,
+  backgroundPositionY: 50,
 });
+
+export const CAMERA_BACKGROUND_ZOOM = Object.freeze({ min: 100, max: 400 });
 
 export const CAMERA_EFFECT_LIMITS = Object.freeze({
   maxWidth: 1280,
@@ -94,9 +111,15 @@ export function restoreCameraEffectSettings(value: unknown): CameraEffectSetting
       ? typeof value.limitQuality !== 'boolean'
       : !Object.hasOwn(value, 'limitFpsTo30') && !Object.hasOwn(value, 'maxFps'))
     || (Object.hasOwn(value, 'limitFpsTo30') && typeof value.limitFpsTo30 !== 'boolean')
-    || (Object.hasOwn(value, 'maxFps') && !numberInRange(value.maxFps, 5, 24))) {
+    || (Object.hasOwn(value, 'maxFps') && !numberInRange(value.maxFps, 5, 24))
+    || !optional(value, 'mirror', mirror => typeof mirror === 'boolean')
+    || !optional(value, 'personFocus', focus => CAMERA_PERSON_FOCUS.some(option => option === focus))
+    || !optional(value, 'backgroundZoom', zoom => numberInRange(zoom, CAMERA_BACKGROUND_ZOOM.min, CAMERA_BACKGROUND_ZOOM.max))
+    || !optional(value, 'backgroundPositionX', position => numberInRange(position, 0, 100))
+    || !optional(value, 'backgroundPositionY', position => numberInRange(position, 0, 100))) {
     throw new CameraEffectError('settings');
   }
+  const defaults = DEFAULT_CAMERA_EFFECT_SETTINGS;
   return {
     mode: value.mode,
     backgroundColor: value.backgroundColor.toLowerCase(),
@@ -110,6 +133,94 @@ export function restoreCameraEffectSettings(value: unknown): CameraEffectSetting
     spillReduction: value.spillReduction,
     // Preserve the explicit legacy switch; older numeric caps stay removed.
     limitQuality: typeof value.limitQuality === 'boolean' ? value.limitQuality : value.limitFpsTo30 === true,
+    // Choices added later are absent from older saves and start at their defaults.
+    mirror: typeof value.mirror === 'boolean' ? value.mirror : defaults.mirror,
+    personFocus: value.personFocus === 'main' ? 'main' : defaults.personFocus,
+    backgroundZoom: typeof value.backgroundZoom === 'number' ? value.backgroundZoom : defaults.backgroundZoom,
+    backgroundPositionX: typeof value.backgroundPositionX === 'number' ? value.backgroundPositionX : defaults.backgroundPositionX,
+    backgroundPositionY: typeof value.backgroundPositionY === 'number' ? value.backgroundPositionY : defaults.backgroundPositionY,
+  };
+}
+
+/** A missing field is accepted, but a present one must be valid. */
+function optional(record: Record<string, unknown>, key: string, valid: (value: unknown) => boolean): boolean {
+  return !Object.hasOwn(record, key) || valid(record[key]);
+}
+
+/** The camera needs the processor whenever its pixels differ from the raw capture. */
+export function needsCameraProcessing(settings: CameraEffectSettings): boolean {
+  return settings.mode !== 'off' || settings.mirror;
+}
+
+export const CAMERA_FRAMING_KEYS = Object.freeze(['backgroundZoom', 'backgroundPositionX', 'backgroundPositionY'] as const);
+export type CameraBackgroundFraming = Pick<CameraEffectSettings, typeof CAMERA_FRAMING_KEYS[number]>;
+
+/** Framing only places the chosen picture: it never decides which camera pixels are shown. */
+export function isCameraFramingPatch(patch: Partial<CameraEffectSettings>): boolean {
+  const keys = Object.keys(patch);
+  return keys.length > 0 && keys.every(key => (CAMERA_FRAMING_KEYS as readonly string[]).includes(key));
+}
+export interface CameraImageRect { x: number; y: number; width: number; height: number }
+
+/**
+ * Places the background image like CSS `object-fit: cover` plus a zoom and an
+ * `object-position`, so the editor preview and the transmitted frame always agree.
+ */
+export function backgroundImageRect(
+  frameWidth: number,
+  frameHeight: number,
+  imageWidth: number,
+  imageHeight: number,
+  settings: CameraBackgroundFraming,
+): CameraImageRect {
+  if (![frameWidth, frameHeight, imageWidth, imageHeight].every(value => Number.isFinite(value) && value > 0)) {
+    throw new CameraEffectError('processing');
+  }
+  const scale = Math.max(frameWidth / imageWidth, frameHeight / imageHeight) * settings.backgroundZoom / 100;
+  const width = imageWidth * scale;
+  const height = imageHeight * scale;
+  return {
+    x: (frameWidth - width) * settings.backgroundPositionX / 100,
+    y: (frameHeight - height) * settings.backgroundPositionY / 100,
+    width,
+    height,
+  };
+}
+
+/**
+ * The position (0..100) that places the image at `offset` pixels from the frame edge,
+ * the inverse of `backgroundImageRect` used while dragging. A fully covering image has
+ * no slack along that axis, so its position stays centered.
+ */
+export function backgroundPositionForOffset(frameSize: number, imageSize: number, offset: number): number {
+  const slack = frameSize - imageSize;
+  if (slack > -0.5) return 50;
+  return Math.max(0, Math.min(100, offset / slack * 100));
+}
+
+/**
+ * The framing after zooming to `zoom` around a point of the frame (in frame pixels): the
+ * part of the image under that point stays under it, like zooming in an image editor.
+ */
+export function zoomBackgroundAt(
+  frameWidth: number,
+  frameHeight: number,
+  imageWidth: number,
+  imageHeight: number,
+  settings: CameraBackgroundFraming,
+  zoom: number,
+  pointX: number,
+  pointY: number,
+): CameraBackgroundFraming {
+  const before = backgroundImageRect(frameWidth, frameHeight, imageWidth, imageHeight, settings);
+  const backgroundZoom = Math.max(CAMERA_BACKGROUND_ZOOM.min, Math.min(CAMERA_BACKGROUND_ZOOM.max, zoom));
+  const ratio = backgroundZoom / settings.backgroundZoom;
+  const axis = (frameSize: number, size: number, offset: number, point: number) =>
+    backgroundPositionForOffset(frameSize, size * ratio, point - (point - offset) * ratio);
+  return {
+    backgroundZoom,
+    backgroundPositionX: axis(frameWidth, before.width, before.x, pointX),
+    backgroundPositionY: axis(frameHeight, before.height, before.y, pointY),
   };
 }
 

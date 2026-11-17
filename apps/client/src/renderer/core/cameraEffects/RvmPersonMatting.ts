@@ -5,9 +5,12 @@ import { MathBackendCPU } from '@tensorflow/tfjs-backend-cpu';
 import modelUrl from '../../assets/camera-effects/rvm-model.json?url';
 import weightsUrl from '../../assets/camera-effects/rvm-mobilenetv3.bin?url';
 import { CameraEffectError, needsPersonSegmentation, type CameraEffectSettings } from '../../utils/cameraEffects';
+import { ProminentPersonTracker } from '../../utils/cameraPersonFocus';
 import { CameraGpuCompositor } from './CameraGpuCompositor';
 
 const MODEL_OUTPUTS = ['fgr', 'pha', 'r1o', 'r2o', 'r3o', 'r4o'];
+/** Longest side of the grid used to tell people apart; enough for faces at call distance. */
+const FOCUS_GRID = 128;
 let modForwarded = false;
 
 // WebGL has no CPU path for FloorMod, so RVM's tiny padding math ran on the GPU and
@@ -36,6 +39,7 @@ export class RvmPersonMatting {
   private ratio: tf.Scalar | null = null;
   private size = '';
   private disposed = false;
+  private readonly focus = new ProminentPersonTracker();
   private readonly compositor: CameraGpuCompositor;
 
   public static async create(): Promise<RvmPersonMatting> {
@@ -69,6 +73,7 @@ export class RvmPersonMatting {
   }
 
   public reset(): void {
+    this.focus.reset();
     tf.dispose(this.recurrent);
     this.ratio?.dispose();
     this.ratio = null;
@@ -124,6 +129,7 @@ export class RvmPersonMatting {
     if (!this.ratio) throw new CameraEffectError('processing');
     let source: tf.Tensor | undefined;
     let rgba: tf.Tensor | undefined;
+    let focused: tf.Tensor | undefined;
     let results: tf.Tensor[] = [];
     let data: tf.GPUData | undefined;
     try {
@@ -137,7 +143,10 @@ export class RvmPersonMatting {
       const [foreground, alpha, ...next] = results;
       if (foreground.shape.join(',') !== `1,${bitmap.height},${bitmap.width},3`
         || alpha.shape.join(',') !== `1,${bitmap.height},${bitmap.width},1`) throw new CameraEffectError('processing');
-      rgba = tf.tidy(() => tf.squeeze(tf.concat([foreground, alpha], -1), [0]));
+      if (settings.personFocus === 'main') focused = await this.focusMainPerson(alpha as tf.Tensor4D);
+      else this.focus.reset();
+      const matte = focused ?? alpha;
+      rgba = tf.tidy(() => tf.squeeze(tf.concat([foreground, matte], -1), [0]));
       data = rgba.dataToGPU({ customTexShape: [bitmap.height, bitmap.width] });
       if (!data.texture) throw new CameraEffectError('processing');
       const output = await this.compositor.renderMatting(bitmap, settings, data.texture, background, () => this.waitForGpu());
@@ -147,8 +156,23 @@ export class RvmPersonMatting {
       return output;
     } finally {
       data?.tensorRef.dispose();
-      source?.dispose(); rgba?.dispose(); tf.dispose(results);
+      source?.dispose(); rgba?.dispose(); focused?.dispose(); tf.dispose(results);
     }
+  }
+
+  /** Separates people on a small grid, then scales the chosen person's weight back up. */
+  private async focusMainPerson(alpha: tf.Tensor4D): Promise<tf.Tensor> {
+    const [, height, width] = alpha.shape;
+    const scale = Math.min(1, FOCUS_GRID / Math.max(width, height));
+    const gridWidth = Math.max(1, Math.round(width * scale));
+    const gridHeight = Math.max(1, Math.round(height * scale));
+    const small = tf.image.resizeBilinear(alpha, [gridHeight, gridWidth]);
+    let values: Awaited<ReturnType<tf.Tensor['data']>>;
+    try { values = await small.data(); } finally { small.dispose(); }
+    if (!(values instanceof Float32Array)) throw new CameraEffectError('processing');
+    const weights = this.focus.select(values, gridWidth, gridHeight);
+    return tf.tidy(() => tf.mul(alpha, tf.image.resizeBilinear(
+      tf.tensor4d(weights, [1, gridHeight, gridWidth, 1]), [height, width])));
   }
 
   public async dispose(): Promise<void> {

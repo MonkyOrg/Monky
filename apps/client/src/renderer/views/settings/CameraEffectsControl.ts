@@ -1,8 +1,10 @@
 import { videoService, type CameraPreviewLease, type CameraState } from '../../core/VideoService';
 import { cameraEffectsStore } from '../../stores/cameraEffectsStore';
 import {
-  CAMERA_EFFECT_MODES, CameraEffectError, isCameraEffectMode, isCameraOperationCancelled, needsBackgroundImage,
-  needsPersonSegmentation, type CameraEffectMode, type CameraEffectSettings,
+  CAMERA_BACKGROUND_ZOOM, CAMERA_EFFECT_MODES, CAMERA_FRAMING_KEYS, CAMERA_PERSON_FOCUS, CameraEffectError, DEFAULT_CAMERA_EFFECT_SETTINGS,
+  backgroundImageRect, backgroundPositionForOffset, isCameraEffectMode, isCameraOperationCancelled, needsBackgroundImage,
+  needsCameraProcessing, needsPersonSegmentation, zoomBackgroundAt, type CameraBackgroundFraming, type CameraEffectMode, type CameraEffectSettings,
+  type CameraPersonFocus,
 } from '../../utils/cameraEffects';
 import { CameraPreferenceError, cameraDeviceSelectionError, selectCameraDevice } from './CameraDeviceSelection';
 import { ColorPicker } from '../ColorPicker';
@@ -41,7 +43,32 @@ const ranges = [
   { setting: 'keyTolerance', label: 'cameraEffects.keyTolerance', help: 'cameraEffects.keyToleranceHelp', min: 5, max: 60, unit: 'cameraEffects.percentage' },
   { setting: 'keySoftness', label: 'cameraEffects.keySoftness', help: 'cameraEffects.keySoftnessHelp', min: 1, max: 30, unit: 'cameraEffects.percentage' },
   { setting: 'spillReduction', label: 'cameraEffects.spillReduction', help: 'cameraEffects.spillReductionHelp', min: 0, max: 100, unit: 'cameraEffects.percentage' },
+  {
+    setting: 'backgroundZoom', label: 'cameraEffects.backgroundZoom', help: 'cameraEffects.backgroundZoomHelp',
+    min: CAMERA_BACKGROUND_ZOOM.min, max: CAMERA_BACKGROUND_ZOOM.max, unit: 'cameraEffects.percentage',
+  },
 ] as const;
+
+const focusChoices: ReadonlyArray<{ value: CameraPersonFocus; label: TranslationKey; icon: string }> = [
+  { value: 'all', label: 'cameraEffects.focusAll', icon: 'groups' },
+  { value: 'main', label: 'cameraEffects.focusMain', icon: 'person' },
+];
+
+/** Keyboard nudges and wheel zooms of the framing are saved together once they rest. */
+const FRAMING_COMMIT_DELAY_MS = 500;
+const FRAMING_KEY_STEP = 2;
+const FRAMING_KEY_STEP_LARGE = 10;
+/** Zoom change per wheel pixel: one mouse notch (~100 px) zooms about 20%. */
+const FRAMING_WHEEL_RATE = 0.002;
+const FRAMING_WHEEL_LINE_PX = 16;
+
+function isCameraPersonFocus(value: unknown): value is CameraPersonFocus {
+  return CAMERA_PERSON_FOCUS.some((focus) => focus === value);
+}
+
+function clampPosition(value: number): number {
+  return Math.round(Math.max(0, Math.min(100, value)) * 10) / 10;
+}
 
 
 /** Which adjustment panels the chosen effect uses. */
@@ -52,7 +79,8 @@ function visiblePanels(settings: CameraEffectSettings): Record<string, boolean> 
     chroma: settings.mode === 'chroma',
     color: settings.mode === 'color' || (settings.mode === 'chroma' && settings.backgroundSource === 'color'),
     image: needsBackgroundImage(settings),
-    performance: settings.mode !== 'off',
+    // The mirror alone also runs through the processor, so its limits apply too.
+    performance: needsCameraProcessing(settings),
   };
 }
 
@@ -73,6 +101,13 @@ export class CameraEffectsControl {
   private previewLease: CameraPreviewLease | null = null;
   private thumbnailUrl: string | null = null;
   private thumbnailId: string | null = null;
+  /** Framing shown while it is dragged, zoomed or nudged, before it is saved. */
+  private framingDraft: Partial<CameraBackgroundFraming> | null = null;
+  private framingTimer: ReturnType<typeof setTimeout> | null = null;
+  private framingDrag: {
+    pointerId: number; startX: number; startY: number;
+    originX: number; originY: number; frameWidth: number; frameHeight: number; imageWidth: number; imageHeight: number;
+  } | null = null;
   private readonly colorPickers: Record<'keyColor' | 'backgroundColor', ColorPicker>;
 
   public constructor(private readonly prefix = '') {
@@ -145,6 +180,16 @@ export class CameraEffectsControl {
         <div data-settings-section="camera-effects" data-settings-label="${escapeHtml(t('cameraEffects.title'))}">
         <h3>${t('cameraEffects.title')}</h3>
         <p class="camera-effects-hint" id="${this.id('camera-effects-local')}">${t('cameraEffects.localOnly')}</p>
+        <div class="camera-effects-field-heading camera-effects-mirror-row">
+          <span class="camera-effects-label">
+            <span id="${this.id('camera-effect-mirror-label')}">${t('cameraEffects.mirror')}</span>
+            ${help('mirror', 'cameraEffects.mirror', 'cameraEffects.mirrorHelp')}
+          </span>
+          <button id="${this.id('camera-effect-mirror')}" type="button" class="camera-effects-switch"
+            data-camera-setting="mirror" data-camera-mirror role="switch" aria-checked="${settings.mirror}"
+            aria-labelledby="${this.id('camera-effect-mirror-label')}"
+            aria-describedby="${helpId('mirror')} ${this.id('camera-effects-status')}"><span aria-hidden="true"></span></button>
+        </div>
         <div class="camera-effects-cards" role="group" aria-label="${escapeHtml(t('cameraEffects.title'))}" aria-describedby="${this.id('camera-effects-local')} ${this.id('camera-effects-description')}">
           ${CAMERA_EFFECT_MODES.map((mode) => `
             <button class="voice-mode-card camera-effect-card" type="button" data-camera-mode="${mode}" aria-pressed="${settings.mode === mode}">
@@ -155,6 +200,21 @@ export class CameraEffectsControl {
         <p id="${this.id('camera-effects-description')}" class="camera-effects-hint">${t(modeDescriptions[settings.mode])}</p>
         <div data-camera-panel="blur" ${shown('blur')}>${range('blurRadius')}</div>
         <div data-camera-panel="person" ${shown('person')}>
+          <div class="camera-effects-field-heading">
+            <span class="camera-effects-label">
+              <span id="${this.id('camera-effects-focus-label')}">${t('cameraEffects.personFocus')}</span>
+              ${help('personFocus', 'cameraEffects.personFocus', 'cameraEffects.personFocusHelp')}
+            </span>
+          </div>
+          <div class="camera-effects-cards camera-effects-pair" role="group"
+            aria-labelledby="${this.id('camera-effects-focus-label')}" aria-describedby="${helpId('personFocus')}">
+            ${focusChoices.map((choice) => `
+              <button type="button" class="voice-mode-card camera-effect-card" data-camera-focus="${choice.value}" aria-pressed="${settings.personFocus === choice.value}">
+                <span class="material-symbols-outlined md-20" aria-hidden="true">${choice.icon}</span>
+                <span>${t(choice.label)}</span>
+              </button>`).join('')}
+          </div>
+          <p class="camera-effects-hint">${t('cameraEffects.focusMainHint')}</p>
           <p class="camera-effects-hint">${t('cameraEffects.mattingHint')}</p>
           <p class="camera-effects-hint">${t('cameraEffects.approximation')}</p>
         </div>
@@ -195,7 +255,6 @@ export class CameraEffectsControl {
             </span>
           </div>
           <div class="camera-effects-image-row">
-            <img id="${this.id('camera-effects-image-preview')}" alt="${escapeHtml(t('cameraEffects.imagePreview'))}" hidden>
             <span id="${this.id('camera-effects-image-name')}" class="camera-effects-hint"></span>
           </div>
           <div class="camera-effects-actions">
@@ -204,6 +263,25 @@ export class CameraEffectsControl {
           </div>
           <input id="${this.id('camera-effects-file')}" type="file" accept="image/png,image/jpeg,image/webp" hidden>
           <p class="camera-effects-hint">${t('cameraEffects.imageHint')}</p>
+          <div class="camera-effects-framing" data-camera-framing ${cameraEffectsStore.snapshot.image ? '' : 'hidden'}>
+            <div class="camera-effects-field-heading">
+              <span class="camera-effects-label">
+                <span id="${this.id('camera-effects-framing-label')}">${t('cameraEffects.framing')}</span>
+                ${help('backgroundFraming', 'cameraEffects.framing', 'cameraEffects.framingHelp')}
+              </span>
+              <output id="${this.id('camera-effects-framing-value')}"></output>
+            </div>
+            <div id="${this.id('camera-effects-framing-frame')}" class="camera-effects-framing-frame" data-camera-framing-frame
+              tabindex="0" role="group" aria-labelledby="${this.id('camera-effects-framing-label')}"
+              aria-describedby="${this.id('camera-effects-framing-value')} ${helpId('backgroundFraming')}">
+              <img id="${this.id('camera-effects-image-preview')}" alt="${escapeHtml(t('cameraEffects.imagePreview'))}" draggable="false" hidden>
+              <span class="material-symbols-outlined md-18 camera-effects-framing-move" aria-hidden="true">open_with</span>
+            </div>
+            ${range('backgroundZoom')}
+            <div class="camera-effects-actions">
+              <button type="button" class="btn btn-secondary" data-camera-framing-reset>${t('cameraEffects.resetFraming')}</button>
+            </div>
+          </div>
         </div>
         <div data-camera-panel="performance" ${shown('performance')}>
           <div class="camera-effects-field-heading">
@@ -261,11 +339,32 @@ export class CameraEffectsControl {
         });
       });
     }
+    for (const card of root.querySelectorAll<HTMLButtonElement>('[data-camera-focus]')) {
+      bind(card, 'click', () => {
+        void this.apply(async () => {
+          const personFocus = card.dataset.cameraFocus;
+          if (!isCameraPersonFocus(personFocus)) {
+            videoService.stopCamera();
+            throw new CameraEffectError('settings');
+          }
+          await videoService.setCameraEffects({ personFocus });
+        });
+      });
+    }
     for (const field of ranges) {
       const input = this.element<HTMLInputElement>(`camera-effect-${field.setting}`);
       if (!input) continue;
-      bind(input, 'input', () => this.showRangeValue(field.setting, Number(input.value)));
+      bind(input, 'input', () => {
+        const value = Number(input.value);
+        this.showRangeValue(field.setting, value);
+        if (field.setting === 'backgroundZoom') this.draftFraming({ backgroundZoom: value });
+      });
       bind(input, 'change', () => {
+        if (field.setting === 'backgroundZoom') {
+          this.draftFraming({ backgroundZoom: Number(input.value) });
+          this.commitFraming();
+          return;
+        }
         const patch: Partial<CameraEffectSettings> = { [field.setting]: Number(input.value) };
         void this.apply(() => videoService.setCameraEffects(patch));
       });
@@ -283,6 +382,18 @@ export class CameraEffectsControl {
     onClick('[data-camera-quality-limit]', () => {
       void this.apply(() => videoService.setCameraEffects({ limitQuality: !cameraEffectsStore.snapshot.settings.limitQuality }));
     });
+    onClick('[data-camera-mirror]', () => {
+      void this.apply(() => videoService.setCameraEffects({ mirror: !cameraEffectsStore.snapshot.settings.mirror }));
+    });
+    onClick('[data-camera-framing-reset]', () => {
+      this.draftFraming({
+        backgroundZoom: DEFAULT_CAMERA_EFFECT_SETTINGS.backgroundZoom,
+        backgroundPositionX: DEFAULT_CAMERA_EFFECT_SETTINGS.backgroundPositionX,
+        backgroundPositionY: DEFAULT_CAMERA_EFFECT_SETTINGS.backgroundPositionY,
+      });
+      this.commitFraming();
+    });
+    this.bindFraming(bind);
     const imagePicker = root.querySelector<HTMLButtonElement>('[data-camera-pick-image]');
     onClick('[data-camera-pick-image]', () => openFileInputPicker(fileInput, imagePicker));
     onClick('[data-camera-remove-image]', () => { void this.apply(() => videoService.removeCameraBackgroundImage()); });
@@ -346,6 +457,212 @@ export class CameraEffectsControl {
     await videoService.setCameraEffects(patch);
   }
 
+  /** Saved settings with the framing being edited on top. */
+  private framingSettings(): CameraEffectSettings {
+    return { ...cameraEffectsStore.snapshot.settings, ...this.framingDraft };
+  }
+
+  /** The image's place in the camera frame, in the camera profile's pixels. */
+  private framingGeometry(): { frameWidth: number; frameHeight: number; rect: ReturnType<typeof backgroundImageRect> } | null {
+    const image = this.element<HTMLImageElement>('camera-effects-image-preview');
+    if (!image || image.hidden || !image.naturalWidth || !image.naturalHeight) return null;
+    const { cameraWidth, cameraHeight } = videoService.getProfile();
+    return {
+      frameWidth: cameraWidth,
+      frameHeight: cameraHeight,
+      rect: backgroundImageRect(cameraWidth, cameraHeight, image.naturalWidth, image.naturalHeight, this.framingSettings()),
+    };
+  }
+
+  private framingEditable(): boolean {
+    return !this.busy && cameraEffectsStore.isLoaded && !!cameraEffectsStore.snapshot.image && this.framingGeometry() !== null;
+  }
+
+  private draftFraming(patch: Partial<CameraBackgroundFraming>): void {
+    this.framingDraft = { ...this.framingDraft, ...patch };
+    this.renderFraming();
+  }
+
+  private cancelFramingCommit(): void {
+    if (this.framingTimer !== null) clearTimeout(this.framingTimer);
+    this.framingTimer = null;
+  }
+
+  /** What the draft changes from the saved framing. */
+  private framingChanges(): Partial<CameraBackgroundFraming> | null {
+    const draft = this.framingDraft;
+    if (!draft) return null;
+    const saved = cameraEffectsStore.snapshot.settings;
+    const changes: Partial<CameraBackgroundFraming> = {};
+    for (const key of CAMERA_FRAMING_KEYS) {
+      const value = draft[key];
+      if (value !== undefined && value !== saved[key]) changes[key] = value;
+    }
+    return Object.keys(changes).length > 0 ? changes : null;
+  }
+
+  /**
+   * A gesture is saved once, when it ends. Framing reaches the running camera without
+   * reconfiguring it, so saving never marks the control busy: that would flash the editor.
+   */
+  private commitFraming(): void {
+    this.cancelFramingCommit();
+    const draft = this.framingDraft;
+    const changes = this.framingChanges();
+    if (!changes) {
+      this.framingDraft = null;
+      this.refresh();
+      return;
+    }
+    const generation = this.generation;
+    void videoService.setCameraEffects(changes).catch((error: unknown) => {
+      if (!isCameraOperationCancelled(error) && generation === this.generation) this.failure = error;
+    }).finally(() => {
+      if (generation !== this.generation) return;
+      if (this.framingDraft === draft) this.framingDraft = null;
+      this.refresh();
+    });
+  }
+
+  private bindFraming(bind: (element: Element, event: string, listener: EventListener) => void): void {
+    const frame = this.element<HTMLElement>('camera-effects-framing-frame');
+    const image = this.element<HTMLImageElement>('camera-effects-image-preview');
+    if (!frame || !image) return;
+    bind(image, 'load', () => this.renderFraming());
+    bind(frame, 'pointerdown', (event) => {
+      if (!(event instanceof PointerEvent) || event.button !== 0 || !this.framingEditable()) return;
+      const geometry = this.framingGeometry();
+      const box = frame.getBoundingClientRect();
+      if (!geometry || box.width <= 0 || box.height <= 0) return;
+      event.preventDefault();
+      this.cancelFramingCommit();
+      const scaleX = box.width / geometry.frameWidth;
+      const scaleY = box.height / geometry.frameHeight;
+      this.framingDrag = {
+        pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
+        originX: geometry.rect.x * scaleX, originY: geometry.rect.y * scaleY,
+        frameWidth: box.width, frameHeight: box.height,
+        imageWidth: geometry.rect.width * scaleX, imageHeight: geometry.rect.height * scaleY,
+      };
+      frame.setPointerCapture(event.pointerId);
+      frame.focus({ preventScroll: true });
+      frame.classList.add('is-dragging');
+    });
+    bind(frame, 'pointermove', (event) => {
+      const drag = this.framingDrag;
+      if (!(event instanceof PointerEvent) || !drag || event.pointerId !== drag.pointerId) return;
+      const current = this.framingSettings();
+      // An axis the image already fills exactly has nothing to move and keeps its value.
+      const axis = (frameSize: number, imageSize: number, offset: number, value: number) => imageSize - frameSize > 0.5
+        ? clampPosition(backgroundPositionForOffset(frameSize, imageSize, offset)) : value;
+      this.draftFraming({
+        backgroundPositionX: axis(drag.frameWidth, drag.imageWidth, drag.originX + event.clientX - drag.startX, current.backgroundPositionX),
+        backgroundPositionY: axis(drag.frameHeight, drag.imageHeight, drag.originY + event.clientY - drag.startY, current.backgroundPositionY),
+      });
+    });
+    const end = (event: Event) => {
+      const drag = this.framingDrag;
+      if (!(event instanceof PointerEvent) || !drag || event.pointerId !== drag.pointerId) return;
+      this.framingDrag = null;
+      frame.classList.remove('is-dragging');
+      if (event.type !== 'pointercancel') {
+        this.commitFraming();
+        return;
+      }
+      this.framingDraft = null;
+      this.refresh();
+    };
+    bind(frame, 'pointerup', end);
+    bind(frame, 'pointercancel', end);
+    bind(frame, 'lostpointercapture', end);
+    bind(frame, 'keydown', (event) => {
+      if (event instanceof KeyboardEvent) this.nudgeFraming(event);
+    });
+    bind(frame, 'wheel', (event) => {
+      if (event instanceof WheelEvent) this.zoomFraming(event, frame);
+    });
+    bind(frame, 'blur', () => {
+      if (this.framingTimer !== null) this.commitFraming();
+    });
+  }
+
+  /** Arrows move the image the way a drag in that direction would. */
+  private nudgeFraming(event: KeyboardEvent): void {
+    const step = event.shiftKey ? FRAMING_KEY_STEP_LARGE : FRAMING_KEY_STEP;
+    const moves: Partial<Record<string, readonly [number, number]>> = {
+      ArrowLeft: [step, 0], ArrowRight: [-step, 0], ArrowUp: [0, step], ArrowDown: [0, -step],
+    };
+    const move = moves[event.key];
+    if (!move || event.altKey || event.ctrlKey || event.metaKey) return;
+    event.preventDefault();
+    const geometry = this.framingGeometry();
+    if (!geometry || this.framingDrag || !this.framingEditable()) return;
+    const current = this.framingSettings();
+    const { rect, frameWidth, frameHeight } = geometry;
+    this.draftFraming({
+      backgroundPositionX: rect.width - frameWidth > 0.5 ? clampPosition(current.backgroundPositionX + move[0]) : current.backgroundPositionX,
+      backgroundPositionY: rect.height - frameHeight > 0.5 ? clampPosition(current.backgroundPositionY + move[1]) : current.backgroundPositionY,
+    });
+    this.cancelFramingCommit();
+    this.framingTimer = setTimeout(() => this.commitFraming(), FRAMING_COMMIT_DELAY_MS);
+  }
+
+  /** The wheel zooms around the pointer; over an editable frame it never scrolls the page. */
+  private zoomFraming(event: WheelEvent, frame: HTMLElement): void {
+    if (event.deltaY === 0 || this.framingDrag || !this.framingEditable()) return;
+    const geometry = this.framingGeometry();
+    const image = this.element<HTMLImageElement>('camera-effects-image-preview');
+    const box = frame.getBoundingClientRect();
+    if (!geometry || !image || box.width <= 0 || box.height <= 0) return;
+    event.preventDefault();
+    const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? FRAMING_WHEEL_LINE_PX
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? box.height : 1;
+    const current = this.framingSettings();
+    let zoom = Math.round(current.backgroundZoom * Math.exp(-event.deltaY * unit * FRAMING_WHEEL_RATE));
+    // Touchpads send tiny deltas; each one still moves the zoom by at least a step.
+    if (zoom === current.backgroundZoom) zoom -= Math.sign(event.deltaY);
+    const { frameWidth, frameHeight } = geometry;
+    const next = zoomBackgroundAt(
+      frameWidth, frameHeight, image.naturalWidth, image.naturalHeight, current, zoom,
+      (event.clientX - box.left) / box.width * frameWidth, (event.clientY - box.top) / box.height * frameHeight,
+    );
+    if (next.backgroundZoom === current.backgroundZoom) return;
+    this.draftFraming({
+      backgroundZoom: next.backgroundZoom,
+      backgroundPositionX: clampPosition(next.backgroundPositionX),
+      backgroundPositionY: clampPosition(next.backgroundPositionY),
+    });
+    this.cancelFramingCommit();
+    this.framingTimer = setTimeout(() => this.commitFraming(), FRAMING_COMMIT_DELAY_MS);
+  }
+
+  private renderFraming(): void {
+    const frame = this.element<HTMLElement>('camera-effects-framing-frame');
+    const image = this.element<HTMLImageElement>('camera-effects-image-preview');
+    if (!frame || !image) return;
+    const settings = this.framingSettings();
+    const { cameraWidth, cameraHeight } = videoService.getProfile();
+    frame.style.aspectRatio = `${cameraWidth} / ${cameraHeight}`;
+    frame.setAttribute('aria-disabled', String(!this.framingEditable()));
+    const zoomInput = this.element<HTMLInputElement>('camera-effect-backgroundZoom');
+    if (zoomInput && zoomInput.value !== String(settings.backgroundZoom)) zoomInput.value = String(settings.backgroundZoom);
+    this.showRangeValue('backgroundZoom', settings.backgroundZoom);
+    const value = this.element<HTMLOutputElement>('camera-effects-framing-value');
+    if (value) {
+      value.value = t('cameraEffects.framingPosition', {
+        x: Math.round(settings.backgroundPositionX), y: Math.round(settings.backgroundPositionY),
+      });
+    }
+    const geometry = this.framingGeometry();
+    if (!geometry) return;
+    const { rect, frameWidth, frameHeight } = geometry;
+    image.style.left = `${rect.x / frameWidth * 100}%`;
+    image.style.top = `${rect.y / frameHeight * 100}%`;
+    image.style.width = `${rect.width / frameWidth * 100}%`;
+    image.style.height = `${rect.height / frameHeight * 100}%`;
+    frame.classList.toggle('is-movable', rect.width - frameWidth > 0.5 || rect.height - frameHeight > 0.5);
+  }
+
   public activate(): void {
     if (this.active) return;
     this.showPreview();
@@ -394,6 +711,12 @@ export class CameraEffectsControl {
 
   public cleanup(): void {
     this.generation++;
+    const pending = this.framingTimer !== null ? this.framingChanges() : null;
+    this.cancelFramingCommit();
+    // Closing keeps the nudges already shown; a failure surfaces through the camera state.
+    if (pending) void videoService.setCameraEffects(pending).catch(() => undefined);
+    this.framingDraft = null;
+    this.framingDrag = null;
     this.deactivate();
     this.previewEnabled = false;
     this.intersecting = false;
@@ -500,17 +823,22 @@ export class CameraEffectsControl {
     for (const card of root.querySelectorAll<HTMLButtonElement>('[data-camera-background]')) {
       card.setAttribute('aria-pressed', String(card.dataset.cameraBackground === settings.backgroundSource));
     }
+    for (const card of root.querySelectorAll<HTMLButtonElement>('[data-camera-focus]')) {
+      card.setAttribute('aria-pressed', String(card.dataset.cameraFocus === settings.personFocus));
+    }
     root.querySelector('[data-camera-quality-limit]')?.setAttribute('aria-checked', String(settings.limitQuality));
+    root.querySelector('[data-camera-mirror]')?.setAttribute('aria-checked', String(settings.mirror));
     const description = this.element<HTMLElement>('camera-effects-description');
     if (description) description.textContent = t(modeDescriptions[settings.mode]);
     const visible = visiblePanels(settings);
     for (const panel of root.querySelectorAll<HTMLElement>('[data-camera-panel]')) {
       setSurfaceVisible(panel, visible[panel.dataset.cameraPanel ?? ''] === true, 'panel');
     }
+    const framing = this.framingSettings();
     for (const field of ranges) {
       const input = this.element<HTMLInputElement>(`camera-effect-${field.setting}`);
-      if (input) input.value = String(settings[field.setting]);
-      this.showRangeValue(field.setting, settings[field.setting]);
+      if (input) input.value = String(framing[field.setting]);
+      this.showRangeValue(field.setting, framing[field.setting]);
     }
     for (const setting of ['backgroundColor', 'keyColor'] as const) {
       const picker = this.colorPickers[setting];
@@ -531,6 +859,14 @@ export class CameraEffectsControl {
         thumbnail.hidden = false;
       }
     }
+    const framingPanel = root.querySelector<HTMLElement>('[data-camera-framing]');
+    if (framingPanel) setSurfaceVisible(framingPanel, !!image, 'panel');
+    const reset = root.querySelector<HTMLButtonElement>('[data-camera-framing-reset]');
+    if (reset) {
+      reset.disabled = this.busy || !image
+        || CAMERA_FRAMING_KEYS.every((key) => framing[key] === DEFAULT_CAMERA_EFFECT_SETTINGS[key]);
+    }
+    this.renderFraming();
     this.refreshStatus();
   }
 
