@@ -90,7 +90,16 @@ export class CameraEffectsStore {
   public setImage(image: CameraBackgroundImage): Promise<CameraEffectsSnapshot> {
     return this.write(async () => {
       const previous = await this.load();
-      return { settings: previous.settings, image };
+      // A framing chosen for another picture means nothing for this one.
+      return {
+        settings: {
+          ...previous.settings,
+          backgroundZoom: DEFAULT_CAMERA_EFFECT_SETTINGS.backgroundZoom,
+          backgroundPositionX: DEFAULT_CAMERA_EFFECT_SETTINGS.backgroundPositionX,
+          backgroundPositionY: DEFAULT_CAMERA_EFFECT_SETTINGS.backgroundPositionY,
+        },
+        image,
+      };
     });
   }
 

@@ -5,8 +5,8 @@ import { clientLog } from './ClientLogService';
 import { cameraEffectsStore } from '../stores/cameraEffectsStore';
 import { CameraEffectProcessor } from './cameraEffects/CameraEffectProcessor';
 import {
-  CameraEffectError, cameraCaptureError, cameraOperationCancelled, isCameraOperationCancelled,
-  needsBackgroundImage, type CameraEffectSettings,
+  CameraEffectError, cameraCaptureError, cameraOperationCancelled, isCameraFramingPatch, isCameraOperationCancelled,
+  needsBackgroundImage, needsCameraProcessing, type CameraEffectSettings,
 } from '../utils/cameraEffects';
 import { prepareCameraBackground } from '../utils/cameraBackgroundImage';
 
@@ -194,6 +194,10 @@ export class VideoService {
   }
 
   public async setCameraEffects(patch: Partial<CameraEffectSettings>): Promise<void> {
+    if (isCameraFramingPatch(patch)) {
+      await this.setCameraFraming(patch);
+      return;
+    }
     const choice = patch.mode ? ++this.cameraEffectChoiceEpoch : this.cameraEffectChoiceEpoch;
     if (patch.mode && patch.mode !== 'off') this.cameraOffRequiresConsent = true;
     await this.scheduleCameraChange(async () => {
@@ -236,6 +240,19 @@ export class VideoService {
     if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
       window.removeEventListener('pagehide', this.stopCameraOnPageHide);
     }
+  }
+
+  /**
+   * Framing only places the chosen picture, so it reaches the running effect directly:
+   * reconfiguring would blank the output and restart the preview on every adjustment.
+   */
+  private setCameraFraming(patch: Partial<CameraEffectSettings>): Promise<void> {
+    const operation = this.cameraJobs.then(async () => {
+      const { settings } = await cameraEffectsStore.update(patch);
+      this.cameraProcessor?.setFraming(settings);
+    });
+    this.cameraJobs = operation.then(() => undefined, () => undefined);
+    return operation;
   }
 
   private hasCameraDemand(): boolean {
@@ -316,7 +333,7 @@ export class VideoService {
     }
     const raw = this.cameraRawStream;
     let output: MediaStream;
-    if (snapshot.settings.mode === 'off') {
+    if (!needsCameraProcessing(snapshot.settings)) {
       this.cameraProcessor?.stop();
       this.cameraProcessor = null;
       this.cameraStream?.getTracks().forEach((track) => track.stop());

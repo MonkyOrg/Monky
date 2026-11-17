@@ -1,6 +1,6 @@
 import {
-  CameraEffectError, CameraFrameAdmission, applyChromaKey, fitCameraEffectSize, needsBackgroundImage,
-  needsPersonSegmentation, restoreCameraEffectSettings, type CameraEffectSettings,
+  CameraEffectError, CameraFrameAdmission, applyChromaKey, backgroundImageRect, fitCameraEffectSize, needsBackgroundImage,
+  needsCameraProcessing, needsPersonSegmentation, restoreCameraEffectSettings, type CameraEffectSettings,
 } from '../../utils/cameraEffects';
 import type { CameraEffectOutputLimits, CameraEffectRequest, CameraEffectResponse } from './cameraEffectProtocol';
 import type { CameraBackgroundImage } from '../../utils/cameraBackgroundImage';
@@ -48,6 +48,8 @@ class CameraEffectWorker {
   private readonly foreground = new OffscreenCanvas(2, 2);
   private readonly outputContext = context2d(this.output, true);
   private readonly foregroundContext = context2d(this.foreground, true);
+  private readonly mirrorCanvas = new OffscreenCanvas(2, 2);
+  private readonly mirrorContext = context2d(this.mirrorCanvas);
   private gpu: CameraGpuCompositor | null = null;
   private compositorInitialized = false;
   private frameWidth = 0;
@@ -63,6 +65,10 @@ class CameraEffectWorker {
     if (message.type === 'suspend') return;
     if (message.type === 'limits') {
       if (this.pipeline) this.pipeline.limits = message.limits;
+      return;
+    }
+    if (message.type === 'framing') {
+      if (this.settings) this.settings = restoreCameraEffectSettings({ ...this.settings, ...message.framing });
       return;
     }
     if (message.type === 'pipeline') {
@@ -113,7 +119,7 @@ class CameraEffectWorker {
 
   private async configure(settings: CameraEffectSettings, image: CameraBackgroundImage | null): Promise<void> {
     this.settings = restoreCameraEffectSettings(settings);
-    if (this.settings.mode === 'off') throw new CameraEffectError('settings');
+    if (!needsCameraProcessing(this.settings)) throw new CameraEffectError('settings');
     if (this.settings.mode === 'chroma' && !this.compositorInitialized) {
       this.gpu = CameraGpuCompositor.create();
       this.compositorInitialized = true;
@@ -148,6 +154,27 @@ class CameraEffectWorker {
 
   /** Renders one frame; the result is either a bitmap or a canvas valid until the next frame. */
   private async compose(bitmap: ImageBitmap, settings: CameraEffectSettings): Promise<ImageBitmap | OffscreenCanvas> {
+    if (!settings.mirror) return await this.applyEffect(bitmap, settings);
+    // Flip only the camera, before the effect, so a replacement background keeps its orientation.
+    const { width, height } = bitmap;
+    if (this.mirrorCanvas.width !== width || this.mirrorCanvas.height !== height) {
+      this.mirrorCanvas.width = width;
+      this.mirrorCanvas.height = height;
+    }
+    this.mirrorContext.globalCompositeOperation = 'copy';
+    this.mirrorContext.setTransform(-1, 0, 0, 1, width, 0);
+    this.mirrorContext.drawImage(bitmap, 0, 0, width, height);
+    this.mirrorContext.setTransform(1, 0, 0, 1, 0, 0);
+    if (settings.mode === 'off') return this.mirrorCanvas;
+    const mirrored = this.mirrorCanvas.transferToImageBitmap();
+    try {
+      return await this.applyEffect(mirrored, settings);
+    } finally {
+      mirrored.close();
+    }
+  }
+
+  private async applyEffect(bitmap: ImageBitmap, settings: CameraEffectSettings): Promise<ImageBitmap | OffscreenCanvas> {
     if (needsPersonSegmentation(settings.mode)) {
       if (!this.matting) throw new CameraEffectError('model');
       return await this.matting.render(bitmap, settings, this.background);
@@ -174,12 +201,8 @@ class CameraEffectWorker {
     this.outputContext.fillRect(0, 0, width, height);
     if (needsBackgroundImage(settings)) {
       if (!this.background) throw new CameraEffectError('imageMissing');
-      const scale = Math.max(width / this.background.width, height / this.background.height);
-      const drawnWidth = this.background.width * scale;
-      const drawnHeight = this.background.height * scale;
-      this.outputContext.drawImage(
-        this.background, (width - drawnWidth) / 2, (height - drawnHeight) / 2, drawnWidth, drawnHeight,
-      );
+      const rect = backgroundImageRect(width, height, this.background.width, this.background.height, settings);
+      this.outputContext.drawImage(this.background, rect.x, rect.y, rect.width, rect.height);
     }
     this.outputContext.drawImage(this.foreground, 0, 0);
     return this.output;
@@ -320,7 +343,7 @@ class CameraEffectWorker {
       this.background = null;
       this.backgroundId = null;
       this.settings = null;
-      for (const canvas of [this.output, this.foreground, this.frameCopy]) {
+      for (const canvas of [this.output, this.foreground, this.mirrorCanvas, this.frameCopy]) {
         if (!canvas) continue;
         canvas.width = 1;
         canvas.height = 1;

@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   CAMERA_EFFECT_MODES, CameraEffectError, CameraFrameAdmission, DEFAULT_CAMERA_EFFECT_SETTINGS,
-  applyChromaKey, cameraCaptureError, cameraEffectFrameRate, fitCameraEffectSize, isCameraEffectMode,
-  needsBackgroundImage, needsPersonSegmentation, restoreCameraEffectSettings, smoothStep, writePersonMask,
+  applyChromaKey, backgroundImageRect, backgroundPositionForOffset, cameraCaptureError, cameraEffectFrameRate,
+  fitCameraEffectSize, isCameraEffectMode, needsBackgroundImage, needsCameraProcessing, needsPersonSegmentation,
+  restoreCameraEffectSettings, smoothStep, writePersonMask, zoomBackgroundAt,
 } from '../src/renderer/utils/cameraEffects';
+import { ProminentPersonTracker } from '../src/renderer/utils/cameraPersonFocus';
 import { cameraImageDimensions, validateStoredCameraBackground } from '../src/renderer/utils/cameraBackgroundImage';
 import { CameraEffectsStore } from '../src/renderer/stores/cameraEffectsStore';
 import { COLOR_PRESETS, hexToHsv, hsvToHex, isHexColor, normalizeHexColor } from '../src/renderer/utils/colors';
@@ -107,6 +109,135 @@ test('valid legacy FPS settings migrate to profile FPS without changing privacy 
   }
   assert.equal(restoreCameraEffectSettings({ ...defaults(), limitQuality: true }).limitQuality, true);
   assert.equal(restoreCameraEffectSettings({ ...legacy, maxFps: 15, limitFpsTo30: true }).limitQuality, true);
+});
+
+test('settings saved before mirror, person focus and framing existed load with their defaults', () => {
+  const {
+    mirror: _mirror, personFocus: _focus, backgroundZoom: _zoom, backgroundPositionX: _x, backgroundPositionY: _y, ...older
+  } = defaults();
+  assert.deepEqual(restoreCameraEffectSettings({ ...older, mode: 'image' }), { ...defaults(), mode: 'image' });
+  const chosen = { ...defaults(), mirror: true, personFocus: 'main', backgroundZoom: 250, backgroundPositionX: 12.5, backgroundPositionY: 100 };
+  assert.deepEqual(restoreCameraEffectSettings(chosen), chosen);
+  for (const patch of [
+    { mirror: 'true' }, { mirror: null }, { personFocus: 'nearest' }, { personFocus: null },
+    { backgroundZoom: 99 }, { backgroundZoom: 401 }, { backgroundZoom: NaN },
+    { backgroundPositionX: -1 }, { backgroundPositionY: 101 }, { backgroundPositionX: '50' },
+  ]) {
+    assert.throws(() => restoreCameraEffectSettings({ ...defaults(), ...patch }), isSettingsError);
+  }
+});
+
+test('mirroring alone still routes the camera through the processor', () => {
+  assert.equal(needsCameraProcessing(defaults()), false);
+  assert.equal(needsCameraProcessing({ ...defaults(), mirror: true }), true);
+  for (const mode of CAMERA_EFFECT_MODES.filter((value) => value !== 'off')) {
+    assert.equal(needsCameraProcessing({ ...defaults(), mode }), true);
+  }
+});
+
+const framing = (backgroundZoom: number, backgroundPositionX: number, backgroundPositionY: number) =>
+  ({ backgroundZoom, backgroundPositionX, backgroundPositionY });
+
+test('the background image covers the frame at any zoom and position, and dragging inverts the placement', () => {
+  // `+ 0` turns -0 into 0: both place the image at the same pixel.
+  const place = (...args: Parameters<typeof backgroundImageRect>) => {
+    const { x, y, width, height } = backgroundImageRect(...args);
+    return { x: x + 0, y: y + 0, width, height };
+  };
+  assert.deepEqual(place(40, 40, 120, 40, framing(100, 50, 50)), { x: -40, y: 0, width: 120, height: 40 });
+  assert.deepEqual(place(40, 40, 120, 40, framing(200, 0, 0)), { x: 0, y: 0, width: 240, height: 80 });
+  assert.deepEqual(place(40, 40, 120, 40, framing(200, 100, 100)), { x: -200, y: -40, width: 240, height: 80 });
+  for (const zoom of [100, 175, 400]) {
+    for (const position of [0, 33, 100]) {
+      const rect = backgroundImageRect(64, 36, 30, 50, framing(zoom, position, position));
+      assert.ok(rect.x <= 0 && rect.y <= 0 && rect.x + rect.width >= 64 - 1e-9 && rect.y + rect.height >= 36 - 1e-9);
+      assert.ok(Math.abs(backgroundPositionForOffset(36, rect.height, rect.y) - position) < 1e-9);
+    }
+  }
+  assert.equal(backgroundPositionForOffset(40, 40, 0), 50, 'An axis without slack stays centered');
+  assert.equal(backgroundPositionForOffset(40, 120, 30), 0, 'Dragging past an edge stops at that edge');
+  assert.equal(backgroundPositionForOffset(40, 120, -500), 100);
+  for (const size of [0, -1, NaN, Infinity]) {
+    assert.throws(() => backgroundImageRect(size, 40, 120, 40, framing(100, 50, 50)), (error: unknown) =>
+      error instanceof CameraEffectError && error.code === 'processing');
+  }
+});
+
+test('zooming around a point keeps the image under it and never uncovers the frame', () => {
+  const at = (settings: ReturnType<typeof framing>, zoom: number, x: number, y: number) =>
+    zoomBackgroundAt(64, 36, 128, 72, settings, zoom, x, y);
+  const imageFraction = (settings: ReturnType<typeof framing>, x: number, y: number) => {
+    const rect = backgroundImageRect(64, 36, 128, 72, settings);
+    return [(x - rect.x) / rect.width, (y - rect.y) / rect.height];
+  };
+  const zoomed = at(framing(100, 50, 50), 200, 16, 9);
+  assert.deepEqual(zoomed, framing(200, 25, 25));
+  assert.deepEqual(imageFraction(zoomed, 16, 9), imageFraction(framing(100, 50, 50), 16, 9));
+  assert.deepEqual(at(framing(100, 50, 50), 300, 32, 18), framing(300, 50, 50), 'The center zooms in place');
+  assert.deepEqual(at(framing(400, 0, 0), 200, 64, 36), framing(200, 0, 0), 'Zooming out stops at the frame edges');
+  assert.deepEqual(at(framing(200, 10, 90), 100, 5, 5), framing(100, 50, 50), 'Without slack the image is centered');
+  assert.equal(at(framing(100, 50, 50), 1000, 0, 0).backgroundZoom, 400);
+  assert.equal(at(framing(150, 50, 50), 10, 0, 0).backgroundZoom, 100);
+});
+
+/** A matte drawn from rows of text: '#' is a person, '.' is background. */
+function matte(rows: string[]): { alpha: Float32Array; width: number; height: number } {
+  const width = rows[0].length;
+  const alpha = new Float32Array(rows.length * width);
+  rows.forEach((row, y) => [...row].forEach((cell, x) => { alpha[y * width + x] = cell === '#' ? 0.9 : 0; }));
+  return { alpha, width, height: rows.length };
+}
+
+function kept(weights: Float32Array, width: number, x: number, y: number): boolean {
+  return weights[y * width + x] === 1;
+}
+
+test('the main person is the largest one, and the margin around them never reaches another person', () => {
+  const tracker = new ProminentPersonTracker();
+  const { alpha, width, height } = matte([
+    '##.......###',
+    '##.......###',
+    '.........###',
+    '.........###',
+  ]);
+  const weights = tracker.select(alpha, width, height);
+  assert.ok(kept(weights, width, 10, 2), 'The largest person is kept');
+  assert.ok(kept(weights, width, 8, 1), 'Soft edges around the main person are kept');
+  assert.ok(!kept(weights, width, 0, 0) && !kept(weights, width, 1, 1), 'The smaller person gets the background effect');
+  assert.ok(!kept(weights, width, 4, 3), 'Far background is not kept');
+
+  const touching = matte([
+    '##.###',
+    '#####.',
+  ]);
+  const neighbor = new ProminentPersonTracker().select(touching.alpha, touching.width, touching.height);
+  assert.ok([...neighbor].every((value, index) => value === 1 || touching.alpha[index] === 0),
+    'People touching each other form a single region');
+
+  const close = matte(['###...##', '###...##']);
+  const margin = new ProminentPersonTracker().select(close.alpha, close.width, close.height);
+  assert.ok(kept(margin, close.width, 4, 0), 'Background beside the main person is kept as its edge');
+  assert.ok(!kept(margin, close.width, 6, 0), 'Even within the margin, another person is excluded');
+});
+
+test('focus stays on the current person while comparable in size and resets without anyone in view', () => {
+  const tracker = new ProminentPersonTracker();
+  const first = matte(['###.......##', '###.......##', '###.......##']);
+  assert.ok(kept(tracker.select(first.alpha, first.width, first.height), first.width, 0, 0));
+  // The other person grows a little larger: the current one keeps the focus.
+  const similar = matte(['###.....####', '###.....####', '###.....####']);
+  const weights = tracker.select(similar.alpha, similar.width, similar.height);
+  assert.ok(kept(weights, similar.width, 0, 0) && !kept(weights, similar.width, 11, 0));
+  // The other person becomes clearly larger: the focus moves.
+  const larger = matte(['#.....######', '#.....######', '#.....######']);
+  const moved = tracker.select(larger.alpha, larger.width, larger.height);
+  assert.ok(kept(moved, larger.width, 11, 0) && !kept(moved, larger.width, 0, 0));
+
+  const empty = matte(['....', '....']);
+  assert.ok(tracker.select(empty.alpha, empty.width, empty.height).every((value) => value === 1),
+    'Without anyone clearly present the matte is left untouched');
+  assert.throws(() => tracker.select(new Float32Array(3), 2, 2), (error: unknown) =>
+    error instanceof CameraEffectError && error.code === 'processing');
 });
 
 test('the prior FPS-only switch migrates to the combined quality policy without losing its choice', () => {

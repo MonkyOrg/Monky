@@ -51,6 +51,10 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.media-settings-popover--camera .camera-effects-cards.camera-effects-pair {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .media-settings-popover .camera-effects-notices {
   flex-wrap: wrap;
 }

@@ -1,5 +1,5 @@
 import type { CameraBackgroundImage } from '../../utils/cameraBackgroundImage';
-import type { CameraEffectErrorCode, CameraEffectSettings } from '../../utils/cameraEffects';
+import type { CameraBackgroundFraming, CameraEffectErrorCode, CameraEffectSettings } from '../../utils/cameraEffects';
 
 /** Output cadence and size bound applied to camera frames before processing. */
 export interface CameraEffectOutputLimits {
@@ -14,6 +14,8 @@ export type CameraEffectRequest =
   // Worker pipeline: the worker reads camera frames and writes processed frames itself.
   | { type: 'pipeline'; readable: ReadableStream<VideoFrame>; writable: WritableStream<VideoFrame>; limits: CameraEffectOutputLimits }
   | { type: 'limits'; limits: CameraEffectOutputLimits }
+  // Moves the background picture of the current revision without suspending its frames.
+  | { type: 'framing'; framing: CameraBackgroundFraming }
   | { type: 'suspend'; revision: number }
   | { type: 'dispose' };
 

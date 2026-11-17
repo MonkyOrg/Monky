@@ -2,7 +2,7 @@ import type { QualityProfile } from '@monky/shared';
 import type { CameraEffectsSnapshot } from '../../stores/cameraEffectsStore';
 import {
   CAMERA_EFFECT_LIMITS, CameraEffectError, CameraFrameAdmission, cameraEffectFrameRate, cameraOperationCancelled,
-  fitCameraEffectSize, isCameraOperationCancelled,
+  fitCameraEffectSize, isCameraOperationCancelled, type CameraBackgroundFraming,
 } from '../../utils/cameraEffects';
 import type { CameraEffectOutputLimits, CameraEffectRequest, CameraEffectResponse } from './cameraEffectProtocol';
 
@@ -210,6 +210,23 @@ export class CameraEffectProcessor {
       } catch (error) {
         this.fail(new CameraEffectError('processing', { cause: error }));
       }
+    }
+  }
+
+  /** Moves the background picture while frames keep flowing, unlike `update`. */
+  public setFraming(framing: CameraBackgroundFraming): void {
+    if (this.stopped || !this.worker) return;
+    try {
+      this.send({
+        type: 'framing',
+        framing: {
+          backgroundZoom: framing.backgroundZoom,
+          backgroundPositionX: framing.backgroundPositionX,
+          backgroundPositionY: framing.backgroundPositionY,
+        },
+      });
+    } catch (error) {
+      this.fail(new CameraEffectError('processing', { cause: error }));
     }
   }
 

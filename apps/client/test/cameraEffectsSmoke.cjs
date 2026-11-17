@@ -736,11 +736,13 @@ async function runCameraEffectsSmoke(phase) {
     check(accepts(observed), message, details);
     return observed;
   }
-  async function backgroundImage(name = 'chosen <b>background</b>.png') {
+  async function backgroundImage(name = 'chosen <b>background</b>.png', left = [222, 32, 170], right = left) {
     const canvas = new OffscreenCanvas(160, 90);
     const context = canvas.getContext('2d');
-    context.fillStyle = '#de20aa';
-    context.fillRect(0, 0, 160, 90);
+    context.fillStyle = `rgb(${left.join(',')})`;
+    context.fillRect(0, 0, 80, 90);
+    context.fillStyle = `rgb(${right.join(',')})`;
+    context.fillRect(80, 0, 80, 90);
     return new File([await canvas.convertToBlob({ type: 'image/png' })], name, { type: 'image/png' });
   }
   const allCapturedTracksStopped = () => captures.every(stream => stream.getTracks().every(track => track.readyState === 'ended'));
@@ -1654,6 +1656,22 @@ async function runCameraEffectsSmoke(phase) {
     check(reloaded.image.blob.size > 0 && reloaded.image.blob.size <= 2 * 1024 * 1024, 'Saved image is bounded');
     check(container.querySelector('#camera-effects-image-name').textContent === image.name
       && !container.querySelector('#camera-effects-image-name b'), 'Custom image names are rendered as text, never HTML');
+    // Framing only moves the picture: it must reach the running effect without blanking or restarting the camera.
+    await service.setCameraBackgroundImage(await backgroundImage('split.png', [222, 32, 170], [32, 170, 222]));
+    await watch(service.getCameraStream());
+    await expectVideoPixel(0.9, 0.85, actual => near(actual, [32, 170, 222]), 'A centered split image shows its right half on the right');
+    const framingStates = [];
+    const stopFramingStates = service.subscribeCameraState(state => framingStates.push(state.status));
+    const framing = service.setCameraEffects({ backgroundZoom: 200, backgroundPositionX: 0 });
+    check(service.getCameraState().status === 'ready' && stableTrack.enabled, 'Framing the image never suspends the camera');
+    await framing;
+    await expectVideoPixel(0.9, 0.85, actual => near(actual, [222, 32, 170]), 'Framing reaches the running effect');
+    stopFramingStates();
+    check(framingStates.every(status => status === 'ready') && service.getCameraStream().getVideoTracks()[0] === stableTrack,
+      'Framing never restarts the camera preview');
+    check((await new CameraEffectsStore().load()).settings.backgroundZoom === 200, 'Framing is saved');
+    await service.setCameraBackgroundImage(image);
+    await watch(service.getCameraStream());
     if (phase !== 'chroma') {
       await service.setCameraEffects({ mode: 'color', backgroundColor: '#1122dd' });
       await watch(service.getCameraStream());
@@ -1669,6 +1687,27 @@ async function runCameraEffectsSmoke(phase) {
     }
     check(requests.length === 1 && service.getCameraStream().getVideoTracks()[0] === stableTrack,
       `${phase === 'chroma' ? 'Physical chroma settings' : 'All four effects'} share capture and reuse one outgoing canvas track`);
+
+    console.log('CAMERA TEST mirroring');
+    // The source stripes sit on the left; mirrored video shows them on the right.
+    const imageColor = [222, 32, 170];
+    // Physical chroma replaces the green with the image in every phase, without depending on segmentation.
+    await service.setCameraEffects({ mode: 'chroma', backgroundSource: 'image', mirror: true });
+    await watch(service.getCameraStream());
+    await expectVideoPixel(0.07, 0.2, actual => near(actual, imageColor), 'Mirroring moves the left stripes away from the left side');
+    await expectVideoPixel(0.93, 0.2, actual => !near(actual, imageColor, 60),
+      'Mirrored stripes appear on the right, over an unflipped replaced background');
+    await service.setCameraEffects({ mode: 'off' });
+    check(service.getCameraStream()?.getVideoTracks()[0] === stableTrack,
+      'Mirroring alone keeps the processed track instead of sending the raw camera');
+    await watch(service.getCameraStream());
+    await expectVideoPixel(0.07, 0.2, actual => near(actual, [0, 255, 0], 40), 'Mirroring works with every effect off');
+    await expectVideoPixel(0.93, 0.2, actual => !near(actual, [0, 255, 0], 60), 'Mirroring without effects still flips the stripes');
+    await service.setCameraEffects({ mirror: false });
+    await watch(service.getCameraStream());
+    await expectVideoPixel(0.93, 0.2, actual => near(actual, [0, 255, 0], 40), 'Turning mirroring off restores the original camera');
+    check(requests.length === 1, 'Mirroring never reopens the camera hardware');
+    await service.setCameraEffects({ mode: 'chroma' });
 
     console.log('CAMERA TEST quality, device switching and runtime failures');
     settings.customProfile = { ...settings.customProfile, cameraWidth: 160, cameraHeight: 90, cameraFps: 12 };
