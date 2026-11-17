@@ -112,13 +112,14 @@ export class CallNotices {
     this.updateScreenShare();
   }
 
-  private syncMini(screen: { sessionId: string; shareId: string } | null): void {
+  /** Whether the watched screen is floating; when it can't, the notice row stays the way to stop. */
+  private syncMini(screen: { sessionId: string; shareId: string } | null): boolean {
     const layout = this.host.root.querySelector<HTMLElement>('.main-layout');
     const session = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
     const participant = screen && session?.participants.get(screen.sessionId);
     if (!layout || !screen || !session || !participant) {
       this.mini?.destroy();
-      return;
+      return false;
     }
     if (!this.mini || this.miniLayout !== layout) {
       this.mini?.destroy();
@@ -133,6 +134,7 @@ export class CallNotices {
       ? participant.remoteScreenStreams.values().next().value
       : participant.remoteScreenStreams.get(screen.shareId);
     this.mini.sync({ stream: stream ?? null, name: session.participants.displayName(participant) });
+    return true;
   }
 
   /**
@@ -156,8 +158,8 @@ export class CallNotices {
         && !voice.session.botScreenStore.isInvitationDismissed(screen.id)) : [];
     const loadFailed = voice?.session.botScreenStore.loadFailed ?? false;
     // On a phone the watched screen floats over the conversation instead of taking a row.
-    const floating = this.compact.matches && watchedScreens.length > 0 && this.host.contentView() !== 'stage';
-    this.syncMini(floating ? watchedScreens[0] : null);
+    const floating = this.syncMini(this.compact.matches && watchedScreens.length > 0 && this.host.contentView() !== 'stage'
+      ? watchedScreens[0] : null);
     // The count re-renders the stop button when a second screen turns it into a menu.
     const selfShareCount = isSelfSharing ? voiceStore.screenShareIds.length : 0;
     const signature = JSON.stringify([
