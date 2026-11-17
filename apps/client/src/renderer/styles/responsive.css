@@ -2031,6 +2031,50 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   min-height: 44px;
 }
 
+/* The frame keeps the whole stage, so tapping a black bar still fades the chrome,
+   but a picture of another shape leaves bars at its sides: the name, viewers and
+   fullscreen button move in with the picture instead of hanging half off it. */
+:root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) {
+  --stage-picture-x: max(0px, (100cqw - 100cqh * var(--stage-video-aspect, 1.7778)) / 2);
+  --stage-picture-y: max(0px, (100cqh - 100cqw / var(--stage-video-aspect, 1.7778)) / 2);
+  --stage-picture-width: calc(100cqw - 2 * var(--stage-picture-x));
+  container-type: size;
+}
+
+:root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) .stage-badges-overlay {
+  /* An upright share is too narrow for the name beside the tile's buttons: below
+     360px of picture the name rises above their row (0 or 52px, nothing between). */
+  bottom: calc(12px + var(--stage-picture-y) + clamp(0px, (360px - var(--stage-picture-width)) * 100, 52px));
+  left: calc(12px + var(--stage-picture-x));
+  max-width: calc(var(--stage-picture-width) - 24px);
+}
+
+:root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) .stage-badges-overlay > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) .stage-badges-overlay > :not(:first-child) {
+  flex-shrink: 0;
+}
+
+:root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) .stage-card-controls {
+  right: calc(10px + var(--stage-picture-x));
+  bottom: calc(10px + var(--stage-picture-y));
+}
+
+:root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) .stage-viewers {
+  top: max(var(--stage-chrome-top), 10px + var(--stage-picture-y));
+  right: calc(10px + var(--stage-picture-x));
+}
+
+:root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) .stage-capture-mode-badge {
+  top: max(var(--stage-chrome-top), 10px + var(--stage-picture-y));
+  left: calc(10px + var(--stage-picture-x));
+}
+
 :root .main-layout[data-compact][data-compact-immersive]:has(.stage-focused-main) .stage-focused-strip {
   position: absolute;
   top: 8px;
@@ -2078,6 +2122,8 @@ html[data-compact-transition]::view-transition-new(compact-page) {
   max-height: none;
   padding: 0;
   border: 0;
+  /* Without its box the rail's rounded corners would only clip the corner buttons. */
+  border-radius: 0;
   background: transparent;
   box-shadow: none;
 }

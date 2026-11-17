@@ -15,7 +15,7 @@ function hiddenFor(state: CameraState): boolean {
  */
 export function renderCameraFlipButton(): SafeHtml {
   const state = videoService.getCameraState();
-  return html`<button type="button" class="stage-camera-flip-btn" data-camera-flip title="${t('stage.switchCamera')}"
+  return html`<button type="button" class="stage-camera-flip-btn" data-camera-flip data-haptic="impact" title="${t('stage.switchCamera')}"
     aria-label="${t('stage.switchCamera')}" ${hiddenFor(state) ? html`hidden` : null} ${state.status === 'ready' ? null : html`disabled`}>
     <span class="material-symbols-outlined md-18" aria-hidden="true">flip_camera_ios</span>
   </button>`;

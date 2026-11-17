@@ -567,6 +567,7 @@ function fixture(language = 'en') {
       },
     },
     'utils/modalShell': { openModal },
+    'utils/haptics': { haptic() {} },
   };
   const allowed = new Set([
     'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',

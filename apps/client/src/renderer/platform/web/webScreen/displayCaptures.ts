@@ -29,9 +29,12 @@ export class DisplayCaptures {
 
   public async capture(request: { audio: boolean; video: NativeScreenVideoProfile }): Promise<BrowserDisplayCapture | null> {
     if (!navigator.mediaDevices?.getDisplayMedia) throw new Error('This browser cannot share its screen.');
+    // The surface's orientation is unknown until it is captured: a landscape box held an upright phone to
+    // 720 pixels tall. The capture keeps the long side in either orientation; the rendition then fits it.
+    const longSide = Math.max(request.video.width, request.video.height);
     const options: ScreenCaptureOptions = {
       video: {
-        width: { max: request.video.width }, height: { max: request.video.height },
+        width: { max: longSide }, height: { max: longSide },
         frameRate: { ideal: request.video.fps, max: request.video.fps },
       },
       audio: request.audio ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false } : false,

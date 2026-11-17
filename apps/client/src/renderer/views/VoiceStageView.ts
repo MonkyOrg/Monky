@@ -381,16 +381,16 @@ export class VoiceStageView {
         ${joinedHere ? `
         <!-- Stage Bottom Controls Bar -->
         <div class="stage-call-controls">
-          <button id="stage-btn-mic" class="btn btn-icon ${voiceStore.isMuted || voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isMuted}" title="${voiceStore.isMuted ? t('stage.unmuteMic') : t('stage.muteMic')}">
+          <button id="stage-btn-mic" data-haptic="impact" class="btn btn-icon ${voiceStore.isMuted || voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isMuted}" title="${voiceStore.isMuted ? t('stage.unmuteMic') : t('stage.muteMic')}">
             ${renderAudioStateIcon('mic', false, 24)}
           </button>
-          <button id="stage-btn-deafen" class="btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isDeafened}" title="${voiceStore.isDeafened ? t('stage.undeafen') : t('stage.deafen')}">
+          <button id="stage-btn-deafen" data-haptic="impact" class="btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isDeafened}" title="${voiceStore.isDeafened ? t('stage.undeafen') : t('stage.deafen')}">
             ${renderAudioStateIcon('headphones', false, 24)}
           </button>
-          <button id="stage-btn-camera" class="btn btn-icon ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isCameraOn ? t('stage.cameraOff') : t('stage.cameraOn')}">
+          <button id="stage-btn-camera" data-haptic="impact" class="btn btn-icon ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isCameraOn ? t('stage.cameraOff') : t('stage.cameraOn')}">
             <span class="material-symbols-outlined">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>
           </button>
-          <button id="stage-btn-screen" class="btn btn-icon ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isScreenSharing ? t('stage.stopScreenShare') : t('main.shareScreen')}"${lockedAttributes('screenShare', 'screenShare')}>
+          <button id="stage-btn-screen" data-haptic="impact" class="btn btn-icon ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isScreenSharing ? t('stage.stopScreenShare') : t('main.shareScreen')}"${lockedAttributes('screenShare', 'screenShare')}>
             <span class="material-symbols-outlined">${voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share'}</span>
             <span class="material-symbols-outlined screen-audio-badge" style="font-size: 12px; position: absolute; bottom: 2px; right: 2px; color: var(--success);" hidden>volume_up</span>
           </button>
@@ -400,18 +400,18 @@ export class VoiceStageView {
           <button id="stage-btn-soundboard" class="btn btn-icon" title="${t('main.openSoundboard')}"${lockedAttributes('mediaFolders', 'mediaLibrary')}>
             <span class="material-symbols-outlined">music_note</span>
           </button>
-          <button id="stage-btn-stop-share" class="btn btn-danger" style="margin-left: 12px; padding: 0 16px; height: 38px;" title="${t('stage.stopScreenShare')}"${voiceStore.isScreenSharing ? '' : ' hidden'}>
+          <button id="stage-btn-stop-share" data-haptic="impact" class="btn btn-danger" style="margin-left: 12px; padding: 0 16px; height: 38px;" title="${t('stage.stopScreenShare')}"${voiceStore.isScreenSharing ? '' : ' hidden'}>
             <span class="material-symbols-outlined md-18" style="margin-right: 4px;">stop_screen_share</span>
             <span>${t('screenShare.stopSharing')}</span>
           </button>
-          <button id="stage-btn-leave" class="btn btn-danger" style="margin-left: 12px; padding: 0 16px; height: 38px;" title="${t('stage.leaveChannel')}">
+          <button id="stage-btn-leave" data-haptic="heavy" class="btn btn-danger" style="margin-left: 12px; padding: 0 16px; height: 38px;" title="${t('stage.leaveChannel')}">
             <span class="material-symbols-outlined md-18" style="margin-right: 4px;">call_end</span>
             <span>${t('stage.leaveVoice')}</span>
           </button>
         </div>
         ` : `
         <div class="stage-preview-controls">
-          <button id="stage-btn-join" type="button" class="btn btn-primary">
+          <button id="stage-btn-join" type="button" data-haptic="impact" class="btn btn-primary">
             <span class="material-symbols-outlined md-18" aria-hidden="true">call</span>
             <span>${t('voiceChat.join')}</span>
           </button>

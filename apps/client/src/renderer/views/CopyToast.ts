@@ -1,6 +1,7 @@
 import { escapeHtml } from '../utils/html';
 import { animateEnter, cancelSurfaceMotion, removeWithMotion } from '../utils/surfaceMotion';
 import { t } from '../i18n';
+import { haptic } from '../utils/haptics';
 
 let clearActiveToast: (() => void) | null = null;
 
@@ -45,6 +46,7 @@ function showToast(
     ? document.activeElement : null;
   document.body.appendChild(toast);
   animateEnter(toast, 'notice');
+  if (variant === 'danger') haptic('error');
   let closed = false;
   const clear = (): void => {
     if (closed) return;

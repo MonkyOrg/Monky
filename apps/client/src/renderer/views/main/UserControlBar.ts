@@ -88,14 +88,14 @@ export class UserControlBar {
         <div id="voice-connection-row-slot"></div>
         <div class="user-media-bar" id="user-media-bar">
           <div class="audio-control-group camera-control-group">
-            <button id="media-btn-camera" class="btn btn-icon media-bar-btn-lg ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${t('main.toggleCamera')}">
+            <button id="media-btn-camera" data-haptic="impact" class="btn btn-icon media-bar-btn-lg ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${t('main.toggleCamera')}">
               <span class="material-symbols-outlined md-18">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>
             </button>
             <button type="button" class="audio-device-trigger" data-audio-device="camera" aria-label="${t('cameraEffects.quickOptions')}" title="${t('cameraEffects.quickOptions')}">
               <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
             </button>
           </div>
-          <button id="media-btn-screen" class="btn btn-icon media-bar-btn-lg ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${t('main.shareScreen')}"${trustedHtml(lockedAttributes('screenShare', 'screenShare'))}>
+          <button id="media-btn-screen" data-haptic="impact" class="btn btn-icon media-bar-btn-lg ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${t('main.shareScreen')}"${trustedHtml(lockedAttributes('screenShare', 'screenShare'))}>
             <span class="material-symbols-outlined md-18">${voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share'}</span>
           </button>
           <button id="media-btn-soundboard" class="btn btn-icon media-bar-btn-lg" title="${t('main.openSoundboard')}"${trustedHtml(lockedAttributes('mediaFolders', 'mediaLibrary'))}>
@@ -121,7 +121,7 @@ export class UserControlBar {
               </button>
             </div>
             <div class="audio-control-group">
-              <button id="bar-btn-deafen" class="btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isDeafened}" title="${deafenTitle}">
+              <button id="bar-btn-deafen" data-haptic="impact" class="btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isDeafened}" title="${deafenTitle}">
                 ${trustedHtml(renderAudioStateIcon(voiceStore.isDeafened ? 'headset_off' : 'headphones', moderation.serverDeafened))}
               </button>
               <button type="button" class="audio-device-trigger" data-audio-device="output" aria-label="${t('settings.outputDevice')}" title="${t('settings.outputDevice')}">
@@ -295,7 +295,7 @@ export class UserControlBar {
               <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
             </button>
           </div>
-          <button id="sidebar-btn-leave-voice" class="btn btn-icon voice-conn-leave" title="${t('main.leaveCall')}">
+          <button id="sidebar-btn-leave-voice" data-haptic="heavy" class="btn btn-icon voice-conn-leave" title="${t('main.leaveCall')}">
             <span class="material-symbols-outlined md-18">call_end</span>
           </button>
         </div>

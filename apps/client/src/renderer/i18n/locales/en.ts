@@ -2011,6 +2011,8 @@ export const en: TranslationMap = {
   'settings.customSoundFailed': 'Could not change the custom sound. Try again or restore the default sound.',
   'settings.chatSoundEnabled': 'Play a sound for incoming messages',
   'settings.chatSoundEnabledDesc': 'Plays a sound when a new message from someone else arrives in a text channel.',
+  'settings.haptics': 'Haptic feedback',
+  'settings.hapticsDesc': 'Your phone vibrates lightly when you tap call controls and switches, and when something goes wrong.',
   'settings.chatSoundMentionsDesc': 'Plays the sound only when you are mentioned in the message.',
   'settings.customBadge': 'Custom',
   'settings.playSound': 'Play',

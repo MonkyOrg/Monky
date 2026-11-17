@@ -50,6 +50,7 @@ import { selectEnhancer } from './core/SelectEnhancer';
 import { dateTimeControls } from './core/DateTimeControls';
 import { initTooltips } from './core/TooltipService';
 import { installDesktopOnlyGate } from './utils/desktopOnly';
+import { installHaptics } from './utils/haptics';
 import { bindCameraPublication } from './core/CameraPublication';
 import { AutoEntryService } from './core/AutoEntryService';
 import { runFatalBootstrap } from './utils/fatalBootstrap';
@@ -132,6 +133,8 @@ class App {
     const disposeTooltips = initTooltips();
     const disposeViewport = bindViewportSize(animateStageBand);
   installDesktopOnlyGate();
+    // After the desktop-only gate, so a locked control's click never reaches it.
+    installHaptics();
     selectEnhancer.init();
     dateTimeControls.init();
     window.addEventListener('pagehide', () => {

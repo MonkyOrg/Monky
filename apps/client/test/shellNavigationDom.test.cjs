@@ -1272,6 +1272,20 @@ async function responsiveShellSmoke(width, height, mobile) {
         `while sharing, the larger call rail leaves the other participants uncovered (${JSON.stringify(thumbnail.getBoundingClientRect())} ${JSON.stringify(dock())})`);
       withinViewport(document.querySelector('#stage-btn-leave'), 'hang up action in focus while sharing');
       withinViewport(stopShare, 'stop sharing action in focus');
+      // The rail drops its box in focus, but its rounded corners once still clipped the corner buttons.
+      const rail = document.querySelector('.stage-call-controls');
+      const railBox = rail.getBoundingClientRect();
+      const corner = parseFloat(getComputedStyle(rail).borderTopLeftRadius) || 0;
+      const clipped = getComputedStyle(rail).overflow === 'visible' ? [] : [...rail.querySelectorAll('button')].filter(visible).filter(button => {
+        const box = button.getBoundingClientRect();
+        const radius = Math.min(box.width, box.height) / 2;
+        const x = (box.left + box.right) / 2;
+        const y = (box.top + box.bottom) / 2;
+        const arcX = x < railBox.left + corner ? railBox.left + corner : x > railBox.right - corner ? railBox.right - corner : null;
+        const arcY = y < railBox.top + corner ? railBox.top + corner : y > railBox.bottom - corner ? railBox.bottom - corner : null;
+        return arcX !== null && arcY !== null && Math.hypot(x - arcX, y - arcY) + radius > corner + 0.5;
+      });
+      check(clipped.length === 0, `the focused call rail clips none of its buttons (${clipped.map(button => button.id).join(', ')})`);
       document.querySelector('#stage-btn-grid').click();
       await until(() => !document.querySelector('.stage-focused-main'), 'Back to the grid did not release the focus while sharing');
     }
@@ -1378,9 +1392,31 @@ async function responsiveShellSmoke(width, height, mobile) {
     const focusedAspect = () => Number(sharedVideo()?.closest('.stage-focused-main')?.style.getPropertyValue('--stage-video-aspect'));
     const paint = () => shareCanvas.getContext('2d').fillRect(0, 0, shareCanvas.width, shareCanvas.height);
     await until(() => { paint(); return Math.abs(focusedAspect() - 16 / 9) < 0.01; }, 'The focused screen did not take its video\'s shape');
+    // On its side the frame keeps the whole stage; the name and fullscreen button stay on the picture, not on its black bars.
+    const overlaysOnPicture = shape => {
+      if (!layout().hasAttribute('data-compact-immersive')) return;
+      const video = sharedVideo();
+      const frame = video.getBoundingClientRect();
+      const scale = Math.min(frame.width / video.videoWidth, frame.height / video.videoHeight);
+      const left = frame.left + (frame.width - video.videoWidth * scale) / 2;
+      const top = frame.top + (frame.height - video.videoHeight * scale) / 2;
+      const right = left + video.videoWidth * scale;
+      const bottom = top + video.videoHeight * scale;
+      for (const selector of ['.stage-badges-overlay', '.stage-card-controls']) {
+        const box = video.closest('.stage-focused-main').querySelector(selector).getBoundingClientRect();
+        check(box.left >= left - 0.5 && box.right <= right + 0.5 && box.top >= top - 0.5 && box.bottom <= bottom + 0.5,
+          `on its side, ${selector} sits on the ${shape} picture, not across its black bars (${JSON.stringify(box)} ${JSON.stringify({ left, top, right, bottom })})`);
+      }
+      const name = video.closest('.stage-focused-main').querySelector('.stage-badges-overlay').getBoundingClientRect();
+      const buttons = video.closest('.stage-focused-main').querySelector('.stage-card-controls').getBoundingClientRect();
+      check(name.right <= buttons.left || name.bottom <= buttons.top,
+        `on the ${shape} picture the name and the tile's buttons do not cover each other (${JSON.stringify(name)} ${JSON.stringify(buttons)})`);
+    };
+    overlaysOnPicture('wide');
     // The sharer turns the phone upright: the frame follows the stream instead of cropping it.
     Object.assign(shareCanvas, { width: 180, height: 320 });
     await until(() => { paint(); return Math.abs(focusedAspect() - 9 / 16) < 0.01; }, 'The focused screen did not follow the turned stream');
+    overlaysOnPicture('upright');
     check(true, 'a focused share follows the sharer turning the phone');
     document.querySelector('#stage-btn-grid').click();
     await until(() => !document.querySelector('.stage-focused-main'), 'Back to the grid did not release the watched screen');

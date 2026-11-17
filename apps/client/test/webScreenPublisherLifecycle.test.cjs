@@ -184,3 +184,42 @@ test('a capture that turns or changes shape refits its rendition and the encoder
   t.mock.timers.tick(1000);
   assert.equal(f.applied.length, settled, 'a retired rendition stops following its capture');
 });
+
+test('on the SFU, Safari declares the Constrained Baseline its screen keyframes omit, until the rendition retires', async () => {
+  const { MessageType } = shared;
+  const sender = { getParameters: () => ({ encodings: [{}] }), setParameters: () => Promise.resolve() };
+  const declared = [], released = [];
+  const { WebScreenSfuRendition } = compile('webScreenSfuRendition.ts', request => {
+    if (request === './browserScreenProfile') return { isScreenCodec: () => true };
+    if (request === './screenSdp') return { VIDEO_ORIENTATION_EXTENSION: 'urn:3gpp:video-orientation' };
+    if (request === './constrainedBaseline') return { declareConstrainedBaselineOn: value => {
+      declared.push(value);
+      return () => released.push(value);
+    } };
+    if (request === 'mediasoup-client') return { Device: class {
+      rtpCapabilities = { codecs: [{ kind: 'video', mimeType: 'video/H264', parameters: {} }] };
+      load() { return Promise.resolve(); }
+      canProduce() { return true; }
+      createSendTransport(options) {
+        return { id: options.id, on() {}, close() {}, produce: () => Promise.resolve({ id: 'video', rtpSender: sender, close() {} }) };
+      }
+    } };
+    return {};
+  });
+  const rpc = (method, payload) => Promise.resolve({
+    [MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES]: { channelId: 'room', rtpCapabilities: { codecs: [], headerExtensions: [] } },
+    [MessageType.SFU_CREATE_WEBRTC_TRANSPORT]: { channelId: 'room', direction: 'send', purpose: 'screen', screenSessionId: 'pipeline',
+      transportOptions: { id: 'transport', iceParameters: {}, iceCandidates: [], dtlsParameters: {} } },
+    [MessageType.SFU_PRODUCER_CLOSED]: { channelId: 'room', producerId: payload.producerId },
+    [MessageType.SFU_CLOSE_WEBRTC_TRANSPORT]: { channelId: 'room', transportId: payload.transportId },
+  }[method]);
+  const rendition = new WebScreenSfuRendition({
+    channelId: 'room', shareId: 'browser', format: 'compatible', video: {}, audio: null, scaleResolutionDownBy: 1,
+    rendition: { pipelineId: 'pipeline', video: { width: 588, height: 1280, fps: 30, maxBitrateKbps: 2500 } },
+    audioBitrateBps: 128_000, rpc, onError: error => { throw error; },
+  });
+  await rendition.ready;
+  assert.deepEqual(declared, [sender], 'the screen video passes through the declaring transform');
+  await rendition.close();
+  assert.deepEqual(released, [sender]);
+});
