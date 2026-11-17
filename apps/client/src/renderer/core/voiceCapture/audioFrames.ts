@@ -2,6 +2,12 @@
 export const VOICE_SAMPLE_RATE = 48000;
 /** Block size the noise-suppression engines process (the Web Audio render quantum). */
 export const VOICE_BLOCK_SIZE = 128;
+/**
+ * Size of every chunk handed to the transmitted track: 10 ms, what WebRTC
+ * sends per packet. Chromium treats a change in chunk size as a new audio
+ * format and drops the samples WebRTC had buffered, so the size never varies.
+ */
+export const VOICE_CHUNK_SIZE = VOICE_SAMPLE_RATE / 100;
 
 /** Averages planar channels into one mono signal. */
 export function downmix(planes: readonly Float32Array[], frames: number): Float32Array {

@@ -122,6 +122,40 @@ async function runVoiceCaptureClockSmoke() {
     return { delivered: samples / 48000 / elapsed, contextRate };
   };
 
+  /**
+   * Fraction of real time WebRTC actually takes from `track` for sending: the
+   * media-source counter behind the voice-quality log's micCapturePct.
+   */
+  const measureSent = async (track, ms) => {
+    const sender = new RTCPeerConnection();
+    const receiver = new RTCPeerConnection();
+    try {
+      sender.onicecandidate = ({ candidate }) => { if (candidate) void receiver.addIceCandidate(candidate); };
+      receiver.onicecandidate = ({ candidate }) => { if (candidate) void sender.addIceCandidate(candidate); };
+      sender.addTrack(track, new MediaStream([track]));
+      await sender.setLocalDescription();
+      await receiver.setRemoteDescription(sender.localDescription);
+      await receiver.setLocalDescription();
+      await sender.setRemoteDescription(receiver.localDescription);
+      const source = async () => {
+        const stats = await sender.getStats();
+        for (const report of stats.values()) {
+          if (report.type === 'media-source' && report.kind === 'audio') return report;
+        }
+        return null;
+      };
+      await wait(1000);
+      const first = await source();
+      await wait(ms);
+      const last = await source();
+      if (!first || !last) return 0;
+      return (last.totalSamplesDuration - first.totalSamplesDuration) / ((last.timestamp - first.timestamp) / 1000);
+    } finally {
+      sender.close();
+      receiver.close();
+    }
+  };
+
   for (const mode of ['gtcrn', 'rnnoise', 'off']) {
     settings.noiseSuppressionMode = mode;
     await audio.startMicrophone();
@@ -129,9 +163,12 @@ async function runVoiceCaptureClockSmoke() {
     check(output !== audio.getRawMicrophoneStream().getAudioTracks()[0] && output.enabled && voice.microphoneOpen,
       `${mode}: the processed microphone is open`);
     const { delivered, contextRate } = await measure(output, audio.audioContext, 4000);
-    console.log(`[voice clock] ${mode}: transmitted ${(delivered * 100).toFixed(1)}%, output clock ${(contextRate * 100).toFixed(1)}%`);
+    const sent = await measureSent(output, 4000);
+    console.log(`[voice clock] ${mode}: transmitted ${(delivered * 100).toFixed(1)}%, sent ${(sent * 100).toFixed(1)}%, output clock ${(contextRate * 100).toFixed(1)}%`);
     check(delivered > 0.95 && delivered < 1.05,
       `${mode}: transmitted voice keeps the microphone's pace (${(delivered * 100).toFixed(1)}%)`);
+    // WebRTC must take every processed sample: chunks that change size used to reset its 10 ms buffer and drop a quarter of the voice.
+    check(sent > 0.95 && sent < 1.05, `${mode}: WebRTC sends all of the processed voice (${(sent * 100).toFixed(1)}%)`);
     audio.stopMicrophone();
   }
 
