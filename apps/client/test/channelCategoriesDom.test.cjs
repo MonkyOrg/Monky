@@ -548,6 +548,12 @@ if (!process.versions.electron) {
       for (let step = 1; step <= 8; step++) {
         await touch('touchMove', { x: scrollStart.x, y: scrollStart.y - step * 14 });
       }
+      // Rest the finger before lifting it: a native fling in this offscreen window crashes Electron's main process.
+      const scrollEnd = { x: scrollStart.x, y: scrollStart.y - 8 * 14 };
+      for (let rest = 0; rest < 3; rest++) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        await touch('touchMove', scrollEnd);
+      }
       await touch('touchEnd');
       if (!await pageBecomes(`document.querySelector('.channels-list-container').scrollTop > 40`)) {
         throw new Error('An immediate real touch on channel handles did not scroll the overflowing list');
@@ -556,10 +562,6 @@ if (!process.versions.electron) {
         && window.categoryTestRequests.length === 0 && !document.querySelector('.channel-dragging, .category-dragging')`)) {
         throw new Error('Scrolling channels left a pending hold or changed their order');
       }
-      // Stop the previous native fling before the independent teardown gesture.
-      await touch('touchStart', scrollStart);
-      await touch('touchCancel');
-      await frames();
       await browser.webContents.executeJavaScript('window.categoryTouchScrollFixture()');
       await frames();
       phase = `${locale} mobile teardown`;
