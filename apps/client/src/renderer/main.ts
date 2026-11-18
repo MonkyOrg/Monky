@@ -57,6 +57,7 @@ import { runFatalBootstrap } from './utils/fatalBootstrap';
 import { prepareDevelopmentQaProfile, startDevelopmentQa } from './core/DevelopmentQa';
 import { bindServerStateEvents, hydrateServerSession } from './core/serverStateEvents';
 import { bindChatEvents } from './core/chatEvents';
+import { bindAutomation } from './core/automation/bridge';
 import { adoptCallAfterSignIn, bindVoiceEvents, callBeforeSignIn, resumeCallAfterSignIn } from './core/voiceEvents';
 import { syncSavedServer } from './core/savedServerSync';
 import { bindUserNotices } from './core/userNotices';
@@ -160,6 +161,7 @@ class App {
     // place before any connection exists, otherwise the first events would be
     // applied to whatever store happens to be active (#400).
     sessionManager.install();
+    const unbindAutomation = bindAutomation();
     const stopResponsivenessMonitor = startResponsivenessMonitor();
     // Only starts polling if the person turned game sharing on (#675).
     gamePresence.start();
@@ -174,6 +176,7 @@ class App {
     });
     window.addEventListener('pagehide', () => {
       stopResponsivenessMonitor();
+      unbindAutomation();
       this.autoEntryService.dispose();
       gamePresence.dispose();
       gameShareRequests.dispose();

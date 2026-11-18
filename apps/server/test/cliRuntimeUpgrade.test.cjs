@@ -89,7 +89,7 @@ for (const withTurn of [true, false]) {
     const before = fs.readFileSync(fixture.database);
     const modified = fs.statSync(fixture.database).mtimeMs;
     assert.deepEqual(await lifecycle.loadStoredServer(fixture.dataDir), {
-      name: 'Existing server', turnEnabled: withTurn,
+      name: 'Existing server', turnEnabled: withTurn, voiceMode: 'p2p',
     });
     assert.deepEqual(fs.readFileSync(fixture.database), before);
     const snapshot = await DatabaseConnection.create(fixture.database, { readOnly: true });

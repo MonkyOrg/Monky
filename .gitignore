@@ -17,6 +17,7 @@ release-server/
 artifacts/
 docs-site/public/install-bot-sdk.cjs
 docs-site/public/install-bot-sdk.cjs.sha256
+docs-site/.vitepress/.temp/
 .qa/
 .native-screen/
 *.tsbuildinfo

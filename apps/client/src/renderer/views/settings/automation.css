@@ -1,0 +1,10 @@
+.automation-panel, .automation-list, .automation-editor { display: grid; gap: 16px; }
+.automation-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.automation-row > :first-child { min-width: 0; overflow-wrap: anywhere; }
+.automation-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.automation-list article { display: grid; gap: 8px; padding: 12px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; }
+.automation-panel code, .automation-setup pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.automation-panel p, .automation-editor p { margin: 0; color: var(--text-muted); }
+.automation-editor fieldset { display: grid; gap: 12px; border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; }
+.automation-editor input[type="text"] { width: 100%; box-sizing: border-box; font: inherit; color: var(--text-primary); background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px; }
+.automation-setup pre { max-height: 40vh; overflow: auto; padding: 12px; background: var(--bg-tertiary); border-radius: 8px; -webkit-user-select: text; user-select: text; }

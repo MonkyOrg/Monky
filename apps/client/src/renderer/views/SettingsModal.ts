@@ -15,6 +15,7 @@ import { KeybindsTab } from './settings/tabs/KeybindsTab';
 import { NotificationsTab } from './settings/tabs/NotificationsTab';
 import { QualityTab } from './settings/tabs/QualityTab';
 import { LocalToolsTab } from './settings/tabs/LocalToolsTab';
+import { AutomationTab } from './settings/tabs/AutomationTab';
 import { LogsTab } from './settings/tabs/LogsTab';
 import { AboutTab } from './settings/tabs/AboutTab';
 import { DiscordTab } from './settings/tabs/DiscordTab';
@@ -25,7 +26,7 @@ import { isDesktopOnly, isShown, lockedPanel, type DesktopFeature } from '../uti
 import type { PlatformCapabilities } from '../platform/api';
 
 type SettingsTabId = 'account' | 'voice_video' | 'soundboard' | 'stickers' | 'keybinds' | 'notifications'
-  | 'quality' | 'local_tools' | 'discord' | 'logs' | 'about';
+  | 'quality' | 'local_tools' | 'automation' | 'discord' | 'logs' | 'about';
 
 /** A tab of the app's settings, declared once: its entry in the sidebar, its panel and its life. */
 interface SettingsTab extends SettingsTabEntry {
@@ -57,6 +58,7 @@ export class SettingsModal {
   private notificationsTab = new NotificationsTab();
   private qualityTab = new QualityTab();
   private localToolsTab = new LocalToolsTab();
+  private automationTab = new AutomationTab();
   private logsTab = new LogsTab();
   private discordTab = new DiscordTab();
   private aboutTab = new AboutTab();
@@ -139,6 +141,12 @@ export class SettingsModal {
         attach: (root) => this.localToolsTab.attachBotStorage(root),
         cleanup: () => this.localToolsTab.cleanup(),
       },
+    },
+    {
+      id: 'automation', icon: 'smart_toy', label: 'automation.title', requires: { capability: 'automation', feature: 'automation' },
+      render: () => this.automationTab.renderHtml(),
+      attach: root => this.automationTab.attachEvents(root),
+      cleanup: () => this.automationTab.cleanup(),
     },
     {
       id: 'discord', icon: 'sports_esports', label: 'discordWeb.settingsTab', requires: { capability: 'discordWeb', feature: 'discordWeb' },

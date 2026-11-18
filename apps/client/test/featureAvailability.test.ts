@@ -5,6 +5,7 @@ import { featureAvailability, platformSupports } from '../src/renderer/platform/
 
 /** What a browser tab declares (#858): the browser's own picker and nothing of the desktop's. */
 const WEB: PlatformCapabilities = {
+  automation: false,
   windowControls: false, screenPictureInPicture: true, documentPictureInPicture: true, automaticPictureInPicture: false,
   hostServer: false, lanDiscovery: false, overlay: false, globalShortcuts: false, tray: false, autoStart: false,
   autoUpdate: false, gamePresence: false, nativeScreenAudio: false, screenShare: true, browserScreenPicker: true,

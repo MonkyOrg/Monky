@@ -18,6 +18,7 @@ const DOWNLOAD_PAGES: Readonly<Record<SupportedLanguage, string>> = {
 };
 
 const FEATURE_NAMES = {
+  automation: 'automation.title',
   hostServer: 'desktopOnly.feature.hostServer',
   overlay: 'desktopOnly.feature.overlay',
   pushToTalk: 'desktopOnly.feature.pushToTalk',

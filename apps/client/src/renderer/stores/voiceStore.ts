@@ -20,6 +20,8 @@ export class VoiceStore {
    */
   public voiceSessionKey: string | null = null;
   public isMuted: boolean = settingsStore.isMuted;
+  /** A remotely requested call starts without physical capture, until a manual unmute. */
+  public microphoneCaptureDeferred = false;
   public isDeafened: boolean = settingsStore.isDeafened;
   public serverMuted: boolean = false;
   public serverDeafened: boolean = false;
@@ -420,6 +422,7 @@ export class VoiceStore {
   }
 
   public reset(): void {
+    this.microphoneCaptureDeferred = false;
     this.clearScreenWatching();
     const hadChannel = this.currentVoiceChannelId !== null;
     const wasReconnecting = this.isReconnecting;

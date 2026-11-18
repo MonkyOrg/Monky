@@ -752,11 +752,13 @@ test('a preview in the private worker reuses the tools Main verified instead of 
   `);
   const files: string[][] = [];
   f.setOnRemove(async directory => { files.push(await fs.readdir(directory)); });
-  const task = await createLocalRuntimeTask({
-    id: randomUUID(), paths: f.paths, signal: new AbortController().signal,
-    spec: { operation: 'youtube.preview', url: track.url },
-  }, f.tools, f.logError);
-  await assert.rejects(task.result, { reason: 'provider_unavailable' });
+  await assert.rejects(async () => {
+    const task = await createLocalRuntimeTask({
+      id: randomUUID(), paths: f.paths, signal: new AbortController().signal,
+      spec: { operation: 'youtube.preview', url: track.url },
+    }, f.tools, f.logError);
+    await task.result;
+  }, { reason: 'provider_unavailable' });
   await until(() => f.removed.length === 1);
   assert.ok(files[0]?.includes('resolved'), 'The preview reached its provider request');
   assert.equal(files[0]?.includes('checked'), false, 'Node, yt-dlp and FFmpeg are not launched again before each preview');

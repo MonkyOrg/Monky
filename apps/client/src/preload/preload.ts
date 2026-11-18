@@ -11,6 +11,7 @@ import {
   LOCAL_EXECUTION_TASK_FAILED, MEDIA_FOLDERS_IPC, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, SERVER_INVITE_AVAILABLE,
   SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, SOUNDBOARD_FILES_IPC, UPDATER_IPC,
   nativeScreenEventSchema,
+  AUTOMATION_IPC, AUTOMATION_REQUEST, AUTOMATION_CANCEL, AUTOMATION_CHANGED,
   type ConfiguredMediaFolders,
 } from '@monky/shared';
 import type { PlatformApi } from '../renderer/platform/api';
@@ -88,7 +89,15 @@ window.addEventListener('beforeunload', () => {
   nativePresentationErrors.clear();
 });
 const api: PlatformApi = {
+  getAutomationSnapshot: () => invoke(AUTOMATION_IPC.snapshot),
+  mutateAutomation: input => invoke(AUTOMATION_IPC.mutate, input),
+  automationReady: () => invoke(AUTOMATION_IPC.ready),
+  replyAutomation: reply => invoke(AUTOMATION_IPC.reply, reply),
+  onAutomationRequest: callback => subscribe(AUTOMATION_REQUEST, callback),
+  onAutomationCancel: callback => subscribe(AUTOMATION_CANCEL, callback),
+  onAutomationChanged: callback => subscribe(AUTOMATION_CHANGED, callback),
   capabilities: {
+    automation: true,
     windowControls: true, screenPictureInPicture: true, documentPictureInPicture: false, automaticPictureInPicture: true, hostServer: true, lanDiscovery: true, overlay: true, globalShortcuts: true, tray: true,
     autoStart: true, autoUpdate: true, gamePresence: true, nativeScreenAudio: true, screenShare: true,
     browserScreenPicker: false, screenEncoderChoice: true,

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Conecte assistentes como o Codex CLI ao Monky Desktop por MCP local. Autorize servidores e ações para consultar informações, enviar mensagens, criar eventos e entrar ou sair de chamadas. Entradas por assistentes começam mutadas, sem capturar o microfone.",
+  "en": "Connect assistants such as Codex CLI to Monky Desktop through local MCP. Authorize servers and actions to read information, send messages, create events, and join or leave calls. Calls joined by assistants start muted without capturing your microphone."
+}

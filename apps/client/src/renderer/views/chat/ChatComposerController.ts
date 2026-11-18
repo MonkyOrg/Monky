@@ -1,4 +1,4 @@
-import { LIMITS, MessageType, Permission, messageBlocksContent, messageBlocksInput, parseFencedMessageBlocks } from '@monky/shared';
+import { LIMITS, MessageType, Permission, messageBlocksContent, messageBlocksInput, messageLengthLimitFor, parseFencedMessageBlocks } from '@monky/shared';
 import type {
   AttachmentMeta,
   ChatMessage,
@@ -69,8 +69,7 @@ export class ChatComposerController {
   }
 
   public get messageLengthLimit(): number {
-    const { server } = this.ctx;
-    return server.serverDetails?.maxMessageLength ?? (server.serverDetails ? 2000 : LIMITS.MAX_MESSAGE_LENGTH);
+    return messageLengthLimitFor(this.ctx.server.serverDetails);
   }
 
   private isMessageTooLong(content: string): boolean {

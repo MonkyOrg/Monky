@@ -21,6 +21,7 @@ import type { TaskbarCallControls } from './taskbarCallControls';
 import type { TrayManager } from './trayManager';
 import { registerUpdaterIpc } from './updater';
 import { registerAppIpc } from './ipc/appIpc';
+import { registerAutomationIpc } from './ipc/automationIpc';
 import { registerClientLogIpc } from './ipc/clientLogIpc';
 import { DesktopSourceCatalog, registerDesktopSourcesIpc, windowsDesktopSources } from './ipc/desktopSourcesIpc';
 import { registerFilesIpc } from './ipc/filesIpc';
@@ -85,6 +86,7 @@ export function setupIpcHandlers(
   mainWindow.once('closed', () => registry.dispose());
   const miniappBrowsers = registerMiniappBrowserIpc(mainWindow);
   const discordWeb = registerDiscordWebIpc(registry, mainWindow);
+  const automation = registerAutomationIpc(registry, mainWindow, app.getPath('userData'));
 
   registerWindowIpc(registry, { window: mainWindow, pipWindows: new ScreenPictureInPictureWindows(mainWindow) });
   registerOverlayIpc(registry, overlayManager);
@@ -136,6 +138,7 @@ export function setupIpcHandlers(
   return {
     service: localExecution.service,
     freezeAdmissions: () => {
+      void automation.close();
       desktopSources.freeze();
       localExecution.freezeAdmissions();
       nativeScreenSharing.freezeAdmissions();
@@ -143,10 +146,10 @@ export function setupIpcHandlers(
     prepareShutdown: async () => {
       localExecution.freezeAdmissions();
       discordWeb.dispose();
-      await Promise.all([desktopSources.close(), nativeScreenSharing.prepareShutdown(), miniappBrowsers.dispose()]);
+      await Promise.all([desktopSources.close(), nativeScreenSharing.prepareShutdown(), miniappBrowsers.dispose(), automation.close()]);
     },
     async dispose() {
-      const results = await Promise.allSettled([desktopSources.close(), nativeScreenSharing.dispose(), localExecution.dispose()]);
+      const results = await Promise.allSettled([desktopSources.close(), nativeScreenSharing.dispose(), localExecution.dispose(), automation.close()]);
       const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
       if (errors.length) throw new AggregateError(errors, 'Application resource shutdown failed.');
     },

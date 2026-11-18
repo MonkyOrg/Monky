@@ -5,12 +5,14 @@ import { botStorageEn } from './botStorage';
 import { messageSearchEn } from '../messageSearch';
 import { browserHomeEn } from './browserHome';
 import { discordWebEn } from './discordWeb';
+import { automationEn } from './automation';
 
 /**
  * English catalog (#16). Keys mirror `pt-BR.ts`; anything missing here falls
  * back to the Portuguese text at runtime instead of blanking the UI.
  */
 export const en: TranslationMap = {
+  ...automationEn,
   'identity.guestAction': 'Enter as a guest',
   'identity.guestHint': 'Your temporary identity exists only in this app session. You are a server member only while connected. To keep an identity or host a server, leave this mode and create or import a permanent identity.',
   'identity.guestOwnerRequired': 'This server has no owner yet. A permanent identity must claim it before guests can enter.',
