@@ -90,7 +90,7 @@ const char* ColorName(ColorSource source) noexcept {
   switch (source) {
     case ColorSource::Sps: return "sps";
     case ColorSource::MediaType: return "media-type";
-    default: return "configured-bt709-limited";
+    default: return "configured";
   }
 }
 
@@ -101,6 +101,7 @@ struct Metadata {
   std::uint32_t coded_width = 0, coded_height = 0;
   screen_video::VideoFrameRect visible{};
   ColorSource color_source = ColorSource::Configured;
+  screen_video::VideoColor color;
 };
 
 struct Cell {
@@ -366,7 +367,7 @@ class D3D11Exporter final : public Exporter {
         {"maximumTextureBytes", options_.maximum_texture_bytes},
         {"observationTimeoutMs", options_.observation_timeout.count()},
         {"byteAccounting", "estimated NV12 coded pixel bytes; source slice + pooled export + allocation reservations, not measured VRAM"},
-        {"format", "NV12"}, {"colorSpace", "BT709-limited"},
+        {"format", "NV12"}, {"colorSpace", "decoded SDR colour, presented as described"},
         {"ntHandleOwnership", "exporter-owned; borrowed by SharedFrame; Electron duplicates"},
         {"sourceDevicePolicy", "borrow original protected device; never create or reopen private input"},
         {"deviceLossPolicy", "quarantine and retain; UINT64_MAX is never completion"},
@@ -425,7 +426,7 @@ class D3D11Exporter final : public Exporter {
         !frame->readyFence || !frame->readyValue || frame->readyValue == kMaximumFenceValue ||
         timestamp_us < -static_cast<std::int64_t>(kMaxId) ||
         timestamp_us > static_cast<std::int64_t>(kMaxId) ||
-        frame->colorSpace.fullRange || frame->codedWidth > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        frame->codedWidth > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
         frame->codedHeight > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) return false;
     bytes = policy::Nv12PixelBytes(frame->codedWidth, frame->codedHeight);
     const auto& crop = frame->visibleRect;
@@ -433,13 +434,16 @@ class D3D11Exporter final : public Exporter {
         crop.width > frame->codedWidth ||
         crop.height > frame->codedHeight || crop.x > frame->codedWidth - crop.width ||
         crop.y > frame->codedHeight - crop.height) return false;
+    const auto& color = frame->colorSpace.color;
+    if (screen_video::PresentableColor(color.primaries, color.transfer, color.matrix, color.fullRange) != color)
+      return false;
     ColorSource source;
     if (frame->colorSpace.source == "sps") source = ColorSource::Sps;
     else if (frame->colorSpace.source == "media-type") source = ColorSource::MediaType;
-    else if (frame->colorSpace.source == "configured-bt709-limited") source = ColorSource::Configured;
+    else if (frame->colorSpace.source == "configured") source = ColorSource::Configured;
     else return false;
     result = {id, route, timestamp_us, frame->timestampUs, frame->durationUs,
-              frame->codedWidth, frame->codedHeight, crop, source};
+              frame->codedWidth, frame->codedHeight, crop, source, color};
     return true;
   }
 
@@ -962,6 +966,7 @@ class D3D11Exporter final : public Exporter {
     frame.texture = cell.slot.texture;
     frame.ready_fence = cell.slot.fence;
     frame.ready_value = cell.slot.copy_value;
+    frame.color = metadata.color;
     frame.info = {};
     frame.info.struct_size = sizeof(frame.info);
     frame.info.abi_version = MONKY_ENGINE_ABI_VERSION;

@@ -133,7 +133,7 @@ void VideoDecoder::Submit(const EncodedFrame& frame) {
       frame.duration_us <= 1000000 && self.pending.load() < 8, "ERR_MAC_DECODE_INPUT");
   const auto access_unit = self.bitstream.Convert(frame.bytes);
   Require(self.bitstream.Verified() && access_unit.hasPicture && access_unit.keyFrame == frame.keyframe &&
-      screen_video::IsBt709LimitedCompatible(self.bitstream.Sps()), "ERR_MAC_DECODE_BITSTREAM");
+      screen_video::PresentableColor(self.bitstream.Sps()), "ERR_MAC_DECODE_BITSTREAM");
   std::vector<uint8_t> payload;
   for (const auto nal : Nals(frame.bytes)) {
     const auto type = nal.front() & 31;

@@ -135,14 +135,52 @@ const char* H264ProfileName(H264Profile profile) {
   throw std::runtime_error("Unsupported H264 profile");
 }
 
+namespace {
+struct ColorCode {
+  std::uint8_t code;
+  const char* name;
+};
+// SDR descriptions both decoders and Electron name, in either range: an iPhone's Safari sends its screen full range.
+constexpr std::array<ColorCode, 5> kPrimaries{{
+    {1, "bt709"}, {5, "bt470bg"}, {6, "smpte170m"}, {7, "smpte240m"}, {12, "p3"}}};
+constexpr std::array<ColorCode, 4> kTransfers{{
+    {1, "bt709"}, {6, "smpte170m"}, {7, "smpte240m"}, {13, "srgb"}}};
+constexpr std::array<ColorCode, 4> kMatrices{{
+    {1, "bt709"}, {5, "bt470bg"}, {6, "smpte170m"}, {7, "smpte240m"}}};
+
+template <std::size_t N>
+const char* ColorName(const std::array<ColorCode, N>& names, std::uint8_t code) {
+  for (const auto& entry : names) if (entry.code == code) return entry.name;
+  return nullptr;
+}
+// Value 2 is unspecified, just like an absent colour description: the BT.709 the capture contract supplies.
+std::uint8_t DescribedCode(std::uint8_t value) { return value == 2 ? 1 : value; }
+}  // namespace
+
+std::optional<VideoColor> PresentableColor(std::uint8_t primaries, std::uint8_t transfer, std::uint8_t matrix,
+                                           bool fullRange) {
+  const VideoColor color{DescribedCode(primaries), DescribedCode(transfer), DescribedCode(matrix), fullRange};
+  if (!ColorName(kPrimaries, color.primaries) || !ColorName(kTransfers, color.transfer) ||
+      !ColorName(kMatrices, color.matrix)) return std::nullopt;
+  return color;
+}
+
+std::optional<VideoColor> PresentableColor(const H264Sps& sps) {
+  return PresentableColor(sps.colorPrimaries.value_or(2), sps.transferCharacteristics.value_or(2),
+      sps.matrixCoefficients.value_or(2), sps.fullRange.value_or(false));
+}
+
+VideoColorNames NameVideoColor(const VideoColor& color) {
+  const VideoColorNames names{ColorName(kPrimaries, color.primaries), ColorName(kTransfers, color.transfer),
+      ColorName(kMatrices, color.matrix), color.fullRange ? "full" : "limited"};
+  if (!names.primaries || !names.transfer || !names.matrix)
+    throw std::runtime_error("The video colour has no presentable name");
+  return names;
+}
+
 bool IsBt709LimitedCompatible(const H264Sps& sps) {
-  // H.264 value 2 is unspecified, just like an absent colour description.
-  // The capture/decoder contract supplies BT.709 limited; conflicting VUI is rejected.
-  const auto compatible = [](std::optional<std::uint8_t> value) {
-    return !value || *value == 1 || *value == 2;
-  };
-  return !sps.fullRange.value_or(false) && compatible(sps.colorPrimaries) &&
-      compatible(sps.transferCharacteristics) && compatible(sps.matrixCoefficients);
+  // Senders produce BT.709 limited; conflicting VUI is rejected.
+  return PresentableColor(sps) == VideoColor{};
 }
 
 bool MatchesH264Profile(const H264Sps& sps, H264Profile profile) {

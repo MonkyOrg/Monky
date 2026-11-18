@@ -353,6 +353,15 @@ release requires Chromium's actual reference-retirement proof. Original audio
 uses Mach timestamps, not QPC. Per-decoder counters and native clocks measure
 FPS without confusing the requested profile with observed delivery.
 
+Both native receivers accept the colour the H.264 SPS declares, as long as it
+is SDR: limited or full range, and BT.709, BT.601, SMPTE 240M, sRGB or
+Display P3 primaries, transfer and matrix (`h264_bitstream.cc`). iPhone
+screens arrive in full range. VideoToolbox converts them to limited range and
+Media Foundation delivers the actual range; on both, the colour space travels
+with each frame to `importSharedTexture`, so the stage draws the right
+colours. HDR (BT.2020, PQ, HLG) is still refused. Safari on iPhone does not
+capture screen sound, so those shares arrive without audio.
+
 Each demanded profile owns a pipeline; viewers of the same profile share
 capture/encoding, but not viewing authorization. Limits are four profiles per
 source and 16 viewers per profile. With no demand, the pipeline closes and only

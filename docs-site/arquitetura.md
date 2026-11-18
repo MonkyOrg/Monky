@@ -357,6 +357,15 @@ ao Main, com liberação condicionada à devolução real das referências do Ch
 O áudio original usa timestamps Mach, não QPC. Contadores por decoder e relógios
 nativos medem FPS sem confundir o perfil solicitado com a taxa observada.
 
+Os dois receptores nativos aceitam a cor que o SPS H.264 declara, desde que
+seja SDR: faixa limitada ou completa e primárias, transferência e matriz
+BT.709, BT.601, SMPTE 240M, sRGB ou Display P3 (`h264_bitstream.cc`). A tela
+do iPhone chega em faixa completa. O VideoToolbox converte para a faixa
+limitada e o Media Foundation entrega a faixa real; nos dois, o espaço de cor
+segue com cada frame até o `importSharedTexture`, para o palco desenhar as
+cores certas. HDR (BT.2020, PQ, HLG) continua recusado. O Safari do iPhone não
+captura o som da tela, então essas transmissões chegam sem áudio.
+
 Cada perfil demandado tem seu próprio pipeline; espectadores do mesmo perfil
 compartilham captura/encoder, mas não a autorização de assistir. Há no máximo
 quatro perfis por fonte e 16 espectadores por perfil. Sem demanda, o pipeline

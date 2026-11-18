@@ -641,9 +641,12 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
         found->second.published = true;
       }
       const auto& info = frame->info;
+      const auto color = screen_video::NameVideoColor(frame->color);
       Json data{{"frameId", id}, {"width", info.width}, {"height", info.height},
            {"codedWidth", info.coded_width}, {"codedHeight", info.coded_height},
            {"timestampUs", info.timestamp_us}, {"format", "NV12"}, {"gpuCopy", info.gpu_copy_count != 0},
+           {"colorSpace", {{"primaries", color.primaries}, {"transfer", color.transfer},
+                           {"matrix", color.matrix}, {"range", color.range}}},
            {"routeKind", frame->route.IsPeer() ? "peer" : "consumer"}};
       if (frame->route.IsPeer()) {
         data["receiverId"] = frame->route.receiver_id;

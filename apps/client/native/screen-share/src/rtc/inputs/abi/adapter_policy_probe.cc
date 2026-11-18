@@ -229,9 +229,17 @@ void VerifyAdaptiveDecoderSessions() {
     incomplete.insert(incomplete.end(), {0, 0, 0, 1, 0x65, 0xbc});
     plan(full_info.sps, policy::InspectAccessUnit(incomplete), incomplete);
   }).has_value(), "Replacement accepted IDR with an unresolved PPS");
-  auto limited = small_info;
-  limited.sps->fullRange = true;
-  Reject([&] { plan(full_info.sps, limited, smaller); }, "ERR_RTC_NEGOTIATED_SPS");
+  // An iPhone's Safari sends full-range BT.601: same geometry, new colour, so a session the MFT is told about.
+  auto iphone = small_info;
+  iphone.sps->fullRange = true;
+  iphone.sps->colorPrimaries = iphone.sps->transferCharacteristics = iphone.sps->matrixCoefficients = 6;
+  const auto recoloured = plan(small_info.sps, iphone, smaller);
+  Check(recoloured && recoloured->color == screen_video::VideoColor{6, 6, 6, true},
+        "A full-range BT.601 SPS did not replace the MF session with its own colour");
+  Check(!plan(iphone.sps, iphone, smaller), "An unchanged full-range SPS replaced the MF session");
+  auto hdr = small_info;
+  hdr.sps->transferCharacteristics = 16;
+  Reject([&] { plan(full_info.sps, hdr, smaller); }, "ERR_RTC_NEGOTIATED_SPS");
   auto main_sps = small_sps;
   main_sps[1] = 77;
   main_sps[2] = 0;

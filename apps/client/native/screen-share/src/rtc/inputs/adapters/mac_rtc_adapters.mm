@@ -98,8 +98,8 @@ void Require(bool value, const char* code) {
 }
 class PixelBuffer : public webrtc::VideoFrameBuffer {
  public:
-  PixelBuffer(std::shared_ptr<NativeRtcContext::State> state, CVPixelBufferRef pixel)
-      : state_(std::move(state)), frame_(std::make_shared<PixelFrame>(pixel)) {
+  PixelBuffer(std::shared_ptr<NativeRtcContext::State> state, CVPixelBufferRef pixel, sv::VideoColor color)
+      : state_(std::move(state)), frame_(std::make_shared<PixelFrame>(pixel, color)) {
     Require(CVPixelBufferGetIOSurface(pixel) &&
         CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         "ERR_RTC_MAC_PIXEL_FORMAT");
@@ -157,12 +157,14 @@ struct DecoderOutput : std::enable_shared_from_this<DecoderOutput> {
   std::shared_ptr<DecodeGate> callbacks;
   std::shared_ptr<DecoderMetrics> metrics;
   const uint64_t id, generation;
+  const sv::VideoColor color;
   std::atomic<bool> failed{false};
   std::mutex mutex;
   std::map<int64_t, Metadata> pending;
-  DecoderOutput(std::shared_ptr<NativeRtcContext::State> context,
-      std::shared_ptr<DecodeGate> gate, std::shared_ptr<DecoderMetrics> counters, uint64_t session, uint64_t epoch)
-      : state(std::move(context)), callbacks(std::move(gate)), metrics(std::move(counters)), id(session), generation(epoch) {}
+  DecoderOutput(std::shared_ptr<NativeRtcContext::State> context, std::shared_ptr<DecodeGate> gate,
+      std::shared_ptr<DecoderMetrics> counters, uint64_t session, uint64_t epoch, sv::VideoColor output)
+      : state(std::move(context)), callbacks(std::move(gate)), metrics(std::move(counters)), id(session),
+        generation(epoch), color(output) {}
   void Receive(CVPixelBufferRef pixel, int64_t timestamp) {
     Metadata metadata;
     {
@@ -174,10 +176,10 @@ struct DecoderOutput : std::enable_shared_from_this<DecoderOutput> {
     }
     if (failed) return;
     auto frame = webrtc::VideoFrame::Builder()
-        .set_video_frame_buffer(webrtc::make_ref_counted<PixelBuffer>(state, pixel))
+        .set_video_frame_buffer(webrtc::make_ref_counted<PixelBuffer>(state, pixel, color))
         .set_rtp_timestamp(metadata.rtp).set_ntp_time_ms(metadata.ntp_ms)
         .set_timestamp_us(metadata.render_ms > 0 ? metadata.render_ms * 1000 : 0)
-        .set_color_space(codec_policy::Bt709Limited()).build();
+        .set_color_space(codec_policy::ToColorSpace(color)).build();
     const auto owner = shared_from_this();
     // Never invoke WebRTC inside VideoToolbox's callback: a callback may release
     // its decoder, which must be able to wait for VideoToolbox without waiting on itself.
@@ -277,14 +279,14 @@ class Decoder final : public webrtc::VideoDecoder {
           sps = sv::ParseH264Sps({image.data() + nal.payload_start_offset, nal.payload_size});
       }
       if (sps) {
+        const auto color = sv::PresentableColor(*sps);
         Require(sps->width >= 4 && sps->width <= 3840 && sps->height >= 2 && sps->height <= 2160 &&
             !(sps->width & 1) && !(sps->height & 1) && sps->levelIdc <= mode_.level &&
-            sv::DecodesAsH264Profile(*sps, mode_.profile) && sv::IsBt709LimitedCompatible(*sps),
-            "ERR_RTC_MAC_DECODER_SPS");
-        if (width_ != sps->width || height_ != sps->height) {
+            sv::DecodesAsH264Profile(*sps, mode_.profile) && color, "ERR_RTC_MAC_DECODER_SPS");
+        if (width_ != sps->width || height_ != sps->height || color_ != *color) {
           Require(keyframe, "ERR_RTC_MAC_DECODER_RESIZE");
           CloseCore();
-          width_ = sps->width; height_ = sps->height;
+          width_ = sps->width; height_ = sps->height; color_ = *color;
         }
       }
       if (output_ && output_->failed.load()) {
@@ -305,7 +307,11 @@ class Decoder final : public webrtc::VideoDecoder {
             metrics_->hardware.reset();
           }
           const DecoderOperation operation(*state_, *metrics_, "core-create");
-          const auto output = std::make_shared<DecoderOutput>(state_, callbacks_, metrics_, id_, generation_);
+          // VideoToolbox writes the requested 420v, converting a full-range stream to limited range.
+          auto presented = color_;
+          presented.fullRange = false;
+          const auto output = std::make_shared<DecoderOutput>(state_, callbacks_, metrics_, id_, generation_,
+              presented);
           core_ = std::make_unique<capture::VideoDecoder>(width_, height_,
             [output](CVPixelBufferRef pixel, int64_t timestamp) { output->Receive(pixel, timestamp); },
             [output](const char* code, OSStatus status) {
@@ -380,6 +386,7 @@ class Decoder final : public webrtc::VideoDecoder {
   uint64_t generation_ = 0, unwrapped_rtp_ = 0;
   std::optional<uint32_t> last_rtp_;
   uint32_t width_ = 0, height_ = 0;
+  sv::VideoColor color_;
   bool configured_ = false;
   std::shared_ptr<DecoderOutput> output_;
   const std::shared_ptr<DecoderMetrics> metrics_ = std::make_shared<DecoderMetrics>();

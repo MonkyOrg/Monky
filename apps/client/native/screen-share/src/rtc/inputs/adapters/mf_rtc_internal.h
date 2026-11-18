@@ -295,6 +295,8 @@ using codec_policy::SupportedFormats;
 using codec_policy::IsSupportedLevel;
 using codec_policy::Bt709Limited;
 using codec_policy::IsBt709Limited;
+using codec_policy::PresentableColor;
+using codec_policy::ToColorSpace;
 
 class RtpTimeline {
  public:

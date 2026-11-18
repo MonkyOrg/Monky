@@ -108,6 +108,14 @@ napi_value SharedFrameEnvelope(napi_env env, const StateOwner& state,
     ContractFailure(env, "Only explicit NV12 decoded leases are supported");
   }
   const bool gpu_copy = Boolean(env, Get(env, data, "gpuCopy"), "Decoded gpuCopy must be boolean");
+  const auto color = Get(env, data, "colorSpace");
+  Record(env, color, "Decoded colorSpace must be an object");
+  // Electron's names; the presentation bridge admits only those it can show.
+  const auto color_name = [&](const char* name) {
+    return String(env, Get(env, color, name), 1, 16, "Decoded colorSpace fields must be short names");
+  };
+  const auto primaries = color_name("primaries"), transfer = color_name("transfer");
+  const auto matrix = color_name("matrix"), range = color_name("range");
 
   MonkyEngineSharedFrame frame{};
   frame.struct_size = sizeof(frame);
@@ -175,10 +183,10 @@ napi_value SharedFrameEnvelope(napi_env env, const StateOwner& state,
   DefineNumber(env, visible_rect, "width", frame.width);
   DefineNumber(env, visible_rect, "height", frame.height);
   auto color_space = Object(env);
-  Define(env, color_space, "primaries", Text(env, "bt709"));
-  Define(env, color_space, "transfer", Text(env, "bt709"));
-  Define(env, color_space, "matrix", Text(env, "bt709"));
-  Define(env, color_space, "range", Text(env, "limited"));
+  Define(env, color_space, "primaries", Text(env, primaries.data(), primaries.size()));
+  Define(env, color_space, "transfer", Text(env, transfer.data(), transfer.size()));
+  Define(env, color_space, "matrix", Text(env, matrix.data(), matrix.size()));
+  Define(env, color_space, "range", Text(env, range.data(), range.size()));
   auto texture_info = Object(env);
   Define(env, texture_info, "pixelFormat", Text(env, "nv12"));
   Define(env, texture_info, "handle", handles);

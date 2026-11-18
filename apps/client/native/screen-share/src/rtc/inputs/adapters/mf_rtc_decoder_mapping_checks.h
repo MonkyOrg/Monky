@@ -144,7 +144,7 @@ class Decoder final : public webrtc::VideoDecoder {
     metadata.diagnostic->OutputMatched(output_diagnostic.begin());
     auto pixels = webrtc::I420Buffer::Create(2, 2);
     pixels->InitializeData();
-    auto output = Access::BuildOutput(metadata, pixels);
+    auto output = Access::BuildOutput(metadata, pixels, sv::VideoColor{});
     during_admission = metadata.admission;
     during_lease = metadata.frame_info;
     fixture.check(metadata.accepted && metadata.accepted_ms == fixture.env.clock().TimeInMilliseconds() &&

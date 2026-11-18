@@ -96,15 +96,24 @@ webrtc::ColorSpace Bt709Limited() {
   return {webrtc::ColorSpace::PrimaryID::kBT709, webrtc::ColorSpace::TransferID::kBT709,
           webrtc::ColorSpace::MatrixID::kBT709, webrtc::ColorSpace::RangeID::kLimited};
 }
-bool IsBt709Limited(const webrtc::ColorSpace& color) {
-  return (color.primaries() == webrtc::ColorSpace::PrimaryID::kBT709 ||
-          color.primaries() == webrtc::ColorSpace::PrimaryID::kUnspecified) &&
-         (color.transfer() == webrtc::ColorSpace::TransferID::kBT709 ||
-          color.transfer() == webrtc::ColorSpace::TransferID::kUnspecified) &&
-         (color.matrix() == webrtc::ColorSpace::MatrixID::kBT709 ||
-          color.matrix() == webrtc::ColorSpace::MatrixID::kUnspecified) &&
-         (color.range() == webrtc::ColorSpace::RangeID::kLimited ||
-          color.range() == webrtc::ColorSpace::RangeID::kInvalid) && !color.hdr_metadata();
+bool IsBt709Limited(const webrtc::ColorSpace& color) { return PresentableColor(color) == sv::VideoColor{}; }
+webrtc::ColorSpace ToColorSpace(const sv::VideoColor& color) {
+  webrtc::ColorSpace result;
+  if (!result.set_primaries_from_uint8(color.primaries) || !result.set_transfer_from_uint8(color.transfer) ||
+      !result.set_matrix_from_uint8(color.matrix) ||
+      !result.set_range_from_uint8(static_cast<std::uint8_t>(
+          color.fullRange ? webrtc::ColorSpace::RangeID::kFull : webrtc::ColorSpace::RangeID::kLimited)))
+    throw AdapterError("ERR_RTC_COLOR_SPACE", "WebRTC cannot name the presentable colour");
+  return result;
+}
+std::optional<sv::VideoColor> PresentableColor(const webrtc::ColorSpace& color) {
+  const auto range = color.range();
+  if (color.hdr_metadata() || (range != webrtc::ColorSpace::RangeID::kInvalid &&
+      range != webrtc::ColorSpace::RangeID::kLimited && range != webrtc::ColorSpace::RangeID::kFull))
+    return std::nullopt;
+  return sv::PresentableColor(static_cast<std::uint8_t>(color.primaries()),
+      static_cast<std::uint8_t>(color.transfer()), static_cast<std::uint8_t>(color.matrix()),
+      range == webrtc::ColorSpace::RangeID::kFull);
 }
 EncoderSetup MakeEncoderSetup(const webrtc::VideoCodec& codec,
     const webrtc::VideoEncoder::Settings& settings, NegotiatedH264 negotiated,

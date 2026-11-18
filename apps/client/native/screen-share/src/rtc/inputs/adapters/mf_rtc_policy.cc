@@ -12,7 +12,8 @@ bool SameSpsMode(const sv::H264Sps& a, const sv::H264Sps& b) {
   return a.ProfileLevelId() == b.ProfileLevelId() &&
          a.width == b.width && a.height == b.height &&
          a.codedWidth == b.codedWidth && a.codedHeight == b.codedHeight &&
-         a.cropLeft == b.cropLeft && a.cropTop == b.cropTop;
+         a.cropLeft == b.cropLeft && a.cropTop == b.cropTop &&
+         sv::PresentableColor(a) == sv::PresentableColor(b);
 }
 
 }  // namespace
@@ -140,9 +141,9 @@ void ValidateSps(const sv::H264Sps& sps, NegotiatedH264 negotiated,
       !IsSupportedLevel(sps.levelIdc) || sps.levelIdc > negotiated.level ||
       !sv::DecodesAsH264Profile(sps, negotiated.profile) ||
       (sps.profileIdc == 66 && !(sps.compatibility & 0x40)) ||
-      !sv::IsBt709LimitedCompatible(sps)) {
+      !sv::PresentableColor(sps)) {
     throw AdapterError("ERR_RTC_NEGOTIATED_SPS",
-                       "Actual SPS violates negotiated profile/level, geometry, or BT.709-limited input");
+                       "Actual SPS violates negotiated profile/level, geometry, or presentable SDR colour");
   }
   // constraint_set4/5 carry no meaning for Baseline (H.264 7.4.2.1.1), yet AMF sets constraint_set5 and WebRTC's
   // table then refuses its Constrained Baseline. Senders that predate clearing it are still admitted.
@@ -180,6 +181,7 @@ std::optional<sv::DecoderConfig> PlanDecoderSession(
   config.maxInFlight = maximum_in_flight;
   config.maxPendingPackets = options.maximum_pending_frames;
   config.profileLevelId = sps.ProfileLevelId();
+  config.color = *sv::PresentableColor(sps);
   if (sv::RequiredH264Level(config.width, config.height, config.fps, config.bitrateBps) > sps.levelIdc ||
       static_cast<std::uint64_t>(sps.codedWidth) * sps.codedHeight * 3 / 2 *
           config.maxInFlight > 256ull * 1024 * 1024)
