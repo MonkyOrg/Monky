@@ -258,7 +258,10 @@ export async function joinCallOnSession(
   channelId: string,
   reconnect?: VoiceReconnectAdmission,
   moveId?: string,
+  options?: { signal?: AbortSignal; deferMicrophone?: boolean },
 ): Promise<void> {
+  const signal = options?.signal;
+  if (signal?.aborted) throw new DOMException('Voice admission was cancelled', 'AbortError');
   clientLog.info('CONNECTION', `Requesting voice admission on session ${sessionKey}`, { channelId });
   const session = sessionManager.get(sessionKey);
   if (!session || session.client.getStatus() !== 'CONNECTED') throw new Error(t('voiceReconnect.unavailable'));
@@ -268,6 +271,10 @@ export async function joinCallOnSession(
   const cancelled = () => new DOMException('Voice admission was cancelled', 'AbortError');
   if (reconnect && (!reconnect.isCurrent() || voiceStore.voiceSessionKey !== sessionKey
     || voiceStore.currentVoiceChannelId !== channelId)) throw cancelled();
+  if (options?.deferMicrophone) {
+    voiceStore.setMuted(true);
+    voiceStore.microphoneCaptureDeferred = true;
+  }
 
   const previousKey = voiceStore.voiceSessionKey;
   const previousChannelId = voiceStore.currentVoiceChannelId;
@@ -309,6 +316,11 @@ export async function joinCallOnSession(
   voiceStore.setConnectionHealth('connecting');
   activeVoiceAdmission = { generation, sessionKey, channelId };
   let admitted = false;
+  const cancelAdmission = (): void => {
+    if (generation === voiceAdmissionGeneration && isCurrent()) leaveCurrentCall();
+  };
+  signal?.addEventListener('abort', cancelAdmission, { once: true });
+  if (signal?.aborted) cancelAdmission();
 
   try {
     if (stoppedScreens) await stoppedScreens;
@@ -382,13 +394,13 @@ export async function joinCallOnSession(
     let audioTrack: MediaStreamTrack | null = null;
     let microphoneError: string | null = null;
     try {
-      const stream = await audioProcessor.startMicrophone();
+      const stream = voiceStore.microphoneCaptureDeferred ? null : await audioProcessor.startMicrophone();
       if (!isCurrent()) {
-        stream.getTracks().forEach((track) => track.stop());
+        stream?.getTracks().forEach((track) => track.stop());
         assertCurrent();
       }
-      audioTrack = stream.getAudioTracks()[0] ?? null;
-      if (!audioTrack || audioTrack.readyState !== 'live') {
+      audioTrack = stream?.getAudioTracks()[0] ?? null;
+      if (stream && (!audioTrack || audioTrack.readyState !== 'live')) {
         audioTrack = null;
         audioProcessor.stopMicrophone();
         microphoneError = t('voiceJoin.noAudioTrack');
@@ -450,6 +462,7 @@ export async function joinCallOnSession(
     if (generation !== voiceAdmissionGeneration) throw cancelled();
     throw error;
   } finally {
+    signal?.removeEventListener('abort', cancelAdmission);
     if (activeVoiceAdmission?.generation === generation) activeVoiceAdmission = null;
   }
 }

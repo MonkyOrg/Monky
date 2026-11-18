@@ -1,5 +1,6 @@
 import {
   DM_MAX_ATTACHMENTS, DM_MAX_MESSAGE_LENGTH, LIMITS, MessageType, Permission, ProtocolErrorCode,
+  messageLengthLimitFor,
   type ChatMessage, type ChatSendPayload, type DmPeerView,
 } from '@monky/shared';
 import { t } from '../i18n';
@@ -85,7 +86,7 @@ export function forwardBlocker(
     if (!server.hasPermission(Permission.SEND_MESSAGES, destination.channelId)) return t('chat.forwardNoPermission');
     if (hasFiles && !server.hasPermission(Permission.ATTACH_FILES, destination.channelId)) return t('chat.forwardNoFilePermission');
     const details = server.serverDetails;
-    const maxLength = details?.maxMessageLength ?? (details ? 2000 : LIMITS.MAX_MESSAGE_LENGTH);
+    const maxLength = messageLengthLimitFor(details);
     if (maxLength > 0 && items.some((item) => item.content.length > maxLength)) return t('chat.forwardTooLong', { max: maxLength });
     const maxFile = details?.attachmentStorage?.maxFileBytes ?? LIMITS.MAX_ATTACHMENT_FILE_SIZE_DEFAULT;
     if (items.some((item) => item.attachments.some((file) => file.size > maxFile))) return t('chat.forwardFileTooLarge');

@@ -166,6 +166,12 @@ jobs:
           npm run postinstall
       - name: Prepare the SFU worker for real voice transport tests
         run: npm rebuild mediasoup
+      - name: Prepare sandboxed Electron for MCP tests
+        run: |
+          npm exec --no -- install-electron
+          mcp_electron_sandbox="$(node -p "require('path').join(require('path').dirname(require('electron')), 'chrome-sandbox')")"
+          sudo chown root:root "$mcp_electron_sandbox"
+          sudo chmod 4755 "$mcp_electron_sandbox"
       - name: Build shared contracts
         run: |
           npm run build --workspace=packages/shared

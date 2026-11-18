@@ -47,6 +47,7 @@ export interface BrowserDisplayCapture {
  * browser tab can do.
  */
 export interface PlatformCapabilities {
+  automation: boolean;
   /** Window frame drawn by the app (minimize, maximize, close). */
   windowControls: boolean;
   /** A screen share popped out into its own always-on-top window. */
@@ -118,6 +119,13 @@ export interface PlatformCapabilities {
  * on the web, `platform/web/webPlatform.ts`.
  */
 export interface PlatformApi {
+  getAutomationSnapshot: Invoke<'automation:snapshot'>;
+  mutateAutomation: Invoke<'automation:mutate'>;
+  automationReady: Invoke<'automation:ready'>;
+  replyAutomation: Invoke<'automation:reply'>;
+  onAutomationRequest: Subscribe<'automation:request'>;
+  onAutomationCancel: Subscribe<'automation:cancel'>;
+  onAutomationChanged: Subscribe<'automation:changed'>;
   capabilities: PlatformCapabilities;
   /** Returns the URL of a document only the miniapp's own frame may load. */
   createBotScreenDocument: Invoke<'bot-screen-document:create'>;

@@ -4,6 +4,14 @@
  */
 
 import { z } from 'zod';
+import type { AutomationMutation, AutomationMutationResult, AutomationReply, AutomationRequest, AutomationSnapshot } from './automation.js';
+
+export const AUTOMATION_IPC = {
+  snapshot: 'automation:snapshot', mutate: 'automation:mutate', ready: 'automation:ready', reply: 'automation:reply',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const AUTOMATION_REQUEST = 'automation:request' satisfies keyof IpcEvents;
+export const AUTOMATION_CANCEL = 'automation:cancel' satisfies keyof IpcEvents;
+export const AUTOMATION_CHANGED = 'automation:changed' satisfies keyof IpcEvents;
 import type { MiniappBrowserOpen, MiniappBrowserOwnerCommand, MiniappBrowserControl, MiniappBrowserState } from './miniappBrowser.js';
 import type { DiscordWebCommand, DiscordWebDrop, DiscordWebFrame } from './discordWeb.js';
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
@@ -970,6 +978,10 @@ export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEven
  * resto do contrato delas, e entram aqui por herança.
  */
 export interface IpcInvokeChannels extends DmInvokeChannels {
+  'automation:snapshot': { args: []; returnType: AutomationSnapshot };
+  'automation:mutate': { args: [input: AutomationMutation]; returnType: AutomationMutationResult };
+  'automation:ready': { args: []; returnType: void };
+  'automation:reply': { args: [reply: AutomationReply]; returnType: void };
   'bot-screen-document:create': { args: [html: string, consent: BotScreenDocumentConsent]; returnType: string };
   'bot-screen-document:remove': { args: [url: string]; returnType: void };
   'miniapp-browser:open': { args: [input: MiniappBrowserOpen]; returnType: void };
@@ -1187,6 +1199,9 @@ export interface IpcInvokeChannels extends DmInvokeChannels {
  * Mapeamento de Eventos Unidirecionais (Main -> Renderer via webContents.send)
  */
 export interface IpcEvents {
+  'automation:request': [request: AutomationRequest];
+  'automation:cancel': [requestId: string];
+  'automation:changed': [snapshot: AutomationSnapshot];
   'miniapp-browser:state': [state: MiniappBrowserState];
   'miniapp-browser:focus-address': [];
   'miniapp-browser:closed': [requestId: string];

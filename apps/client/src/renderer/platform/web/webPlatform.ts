@@ -53,6 +53,7 @@ export function webCapabilities(): PlatformCapabilities {
     browserScreenPicker: true,
     screenEncoderChoice: false,
     localExecution: false,
+    automation: false,
     botScreens: true,
     miniappBrowser: false,
     discordWeb: false,
@@ -262,6 +263,13 @@ function isLinkPreview(value: unknown): value is LinkPreviewData {
 export function createWebPlatformApi(): PlatformApi {
   return {
     capabilities: webCapabilities(),
+    getAutomationSnapshot: unsupported('automation'),
+    mutateAutomation: unsupported('automation'),
+    automationReady: unsupported('automation'),
+    replyAutomation: unsupported('automation'),
+    onAutomationRequest: never,
+    onAutomationCancel: never,
+    onAutomationChanged: never,
     platform: 'web',
 
     // Identity.

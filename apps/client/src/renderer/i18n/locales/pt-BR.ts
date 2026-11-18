@@ -11,8 +11,10 @@ import { botStoragePtBR } from './botStorage';
 import { messageSearchPtBR } from '../messageSearch';
 import { browserHomePtBR } from './browserHome';
 import { discordWebPtBR } from './discordWeb';
+import { automationPtBR } from './automation';
 
 export const ptBR = {
+  ...automationPtBR,
   'identity.guestAction': 'Entrar como convidado',
   'identity.guestHint': 'Sua identidade é temporária e existe apenas nesta sessão do aplicativo. Você só será membro dos servidores enquanto estiver conectado. Para guardar a identidade ou hospedar um servidor, saia deste modo e crie ou importe uma identidade permanente.',
   'identity.guestOwnerRequired': 'Este servidor ainda não tem dono. Uma identidade permanente precisa assumi-lo antes da entrada de convidados.',

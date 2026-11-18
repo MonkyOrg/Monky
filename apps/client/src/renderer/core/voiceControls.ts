@@ -1,14 +1,48 @@
 import { MessageType } from '@monky/shared';
+import { appEvents } from './EventBus';
 import { voiceStore } from '../stores/voiceStore';
 import { settingsStore } from '../stores/settingsStore';
 import { applyLocalAudioState } from './localAudioState';
-import { leaveCurrentCall } from './serverConnection';
+import { isVoiceAdmissionPending, leaveCurrentCall } from './serverConnection';
 import { callClient, callServer } from './callScope';
 import { soundEffects } from './SoundEffects';
 import { sessionManager } from './SessionManager';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
 import { afkChannelIdOf } from '../utils/voiceRooms';
+import { audioProcessor } from './AudioProcessor';
+import { webRtcManager } from './WebRtcManager';
+import { microphoneFailureReason } from './AudioDeviceService';
+
+let deferredMicrophoneRequest = 0;
+
+async function startDeferredMicrophone(): Promise<void> {
+  const request = ++deferredMicrophoneRequest;
+  const session = callServer();
+  const channelId = voiceStore.currentVoiceChannelId;
+  const connectionId = session?.client.getConnectionId();
+  const current = (): boolean => request === deferredMicrophoneRequest && callServer() === session
+    && !!session && session.client.getStatus() === 'CONNECTED'
+    && session.client.getConnectionId() === connectionId && voiceStore.currentVoiceChannelId === channelId;
+  if (!current() || voiceStore.getEffectiveMuted()) return;
+  try {
+    const stream = await audioProcessor.startMicrophone();
+    if (!current() || voiceStore.getEffectiveMuted()) {
+      if (audioProcessor.getLocalAudioStream() === stream) audioProcessor.stopMicrophone();
+      else stream.getTracks().forEach(track => track.stop());
+      return;
+    }
+    await webRtcManager.setLocalAudioTrack(stream.getAudioTracks()[0] ?? null);
+    if (current() && !voiceStore.isMuted) voiceStore.microphoneCaptureDeferred = false;
+  } catch (error) {
+    if (!current() || voiceStore.isMuted) return;
+    audioProcessor.stopMicrophone();
+    voiceStore.setMuted(true);
+    applyLocalAudioState();
+    callClient().send(MessageType.VOICE_STATE_UPDATE, { isMuted: true });
+    appEvents.emit('voice.microphone_failed', { error: microphoneFailureReason(error) });
+  }
+}
 
 export function isViewingCallServer(): boolean {
   return !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === sessionManager.getActiveKey();
@@ -55,6 +89,8 @@ export function isCallInAfkChannel(): boolean {
 
 export function toggleMicrophoneMute(): void {
   if (voiceStore.permissionMuted) return;
+  if (voiceStore.isMuted && voiceStore.microphoneCaptureDeferred && voiceStore.voiceSessionKey && voiceStore.currentVoiceChannelId
+    && isVoiceAdmissionPending(voiceStore.voiceSessionKey, voiceStore.currentVoiceChannelId)) return;
   const muted = !voiceStore.isMuted;
   voiceStore.setMuted(muted);
   const undeafened = !muted && voiceStore.isDeafened;
@@ -62,6 +98,10 @@ export function toggleMicrophoneMute(): void {
 
   applyLocalAudioState();
   soundEffects.play(muted ? 'mic_mute' : 'mic_unmute');
+  if (voiceStore.microphoneCaptureDeferred) {
+    if (muted) { deferredMicrophoneRequest++; audioProcessor.stopMicrophone(); }
+    else void startDeferredMicrophone();
+  }
 
   if (voiceStore.currentVoiceChannelId) {
     callClient().send(MessageType.VOICE_STATE_UPDATE, {

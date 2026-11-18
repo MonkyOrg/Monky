@@ -306,6 +306,11 @@ export const nicknameSchema = z
     if (issue) context.addIssue({ code: z.ZodIssueCode.custom, message: NICKNAME_ISSUE_MESSAGES[issue] });
   });
 
+/** Servers predating the configurable limit use 2000; an unconnected composer uses the shared default. */
+export function messageLengthLimitFor(server: { maxMessageLength?: number } | null | undefined): number {
+  return server?.maxMessageLength ?? (server ? 2000 : LIMITS.MAX_MESSAGE_LENGTH);
+}
+
 export function createMessageContentSchema(limit: number = LIMITS.MAX_MESSAGE_LENGTH, allowEmpty = false) {
   return z.string().transform(value => value.trim())
     .refine(value => allowEmpty || value.length > 0, 'Mensagem não pode ser vazia')

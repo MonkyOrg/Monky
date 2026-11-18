@@ -1,4 +1,5 @@
-import { LIMITS, MessageType, Permission, eventSaveSchema, eventTimeInZone, type EventSave, type ServerEventPublic } from '@monky/shared';
+import { LIMITS, Permission, eventSaveSchema, eventTimeInZone, type EventSave, type ServerEventPublic } from '@monky/shared';
+import { saveCommunityEvent } from '../core/communityEvents';
 import type { CommunityFeed } from '../core/CommunityFeed';
 import { getLanguage, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
@@ -268,17 +269,10 @@ export function openServerEventWizard(feed: CommunityFeed, existing?: ServerEven
     if (saving) return;
     void modal.run(async () => {
       const payload = { ...draft, audience: audience.value(), imageSources: imageSources() };
-      // The cover images travel inside this one message. Past the transport limit the
-      // server would drop the connection, and the draft would close with it.
-      const envelope = JSON.stringify({ type: MessageType.EVENT_SAVE, requestId: crypto.randomUUID(), payload });
-      if (new TextEncoder().encode(envelope).byteLength > LIMITS.WS_MAX_PAYLOAD_BYTES) {
-        reportError(t('community.eventImagesTooLarge'));
-        return;
-      }
       saving = true;
       wizard.sync();
       try {
-        await feed.client.sendRequest(MessageType.EVENT_SAVE, payload);
+        await saveCommunityEvent(feed.client, payload);
         modal.close();
       } finally {
         saving = false;

@@ -21,7 +21,8 @@
     "test:motion": "node --test test/screenPictureInPictureIpc.test.cjs test/surfaceMotionSmoke.cjs && node test/surfaceMotionSmoke.cjs --stage-only",
     "test:pip": "tsc -p tsconfig.electron.json && npm run build:preload && node --test --test-concurrency=1 test/screenPictureInPictureIpc.test.cjs test/screenPictureInPictureWindowSmoke.cjs && node test/surfaceMotionSmoke.cjs --stage-only",
     "test:native-screen": "node --test test/videoPresentation.test.cjs test/nativeScreenController.test.cjs test/nativeScreenIpc.test.cjs test/nativeScreenDiagnostics.test.cjs test/nativeWindows.test.cjs test/desktopSourcePreviews.test.cjs test/browserScreenSubscription.test.cjs test/remoteScreenAudioLifecycle.test.cjs native/screen-share/test/*.test.cjs native/screen-audio/test/nativeBinding.test.cjs",
-    "posttest": "npm run test:native-screen",
+    "posttest": "npm run test:native-screen && npm run test:mcp",
+    "test:mcp": "node --test --test-concurrency=1 test/automationMain.test.cjs test/automationDom.test.cjs test/automationE2e.test.cjs",
     "test:packet-capture": "node native/screen-audio/test/buildPacketTests.cjs && node --test --test-concurrency=1 native/screen-audio/test/packetCapture.test.cjs",
     "test:updates": "tsc -p tsconfig.electron.json && node --test test/updaterCompatibility.test.cjs test/updateInventory.test.cjs test/updateDownload.test.cjs && node test/updateCompatibilitySmoke.cjs",
     "test:editing": "tsc -p tsconfig.test.json && node --test dist-test/test/messageEditing.test.js test/editorCommands.test.cjs test/nativeKeyboard.test.cjs && node test/messageEditingDomSmoke.cjs",
@@ -61,6 +62,7 @@
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@monky/bot-sdk": "*",
     "@monky/dm": "*",
     "@monky/screen-audio": "file:./native/screen-audio",
@@ -70,7 +72,9 @@
     "electron-updater": "^6.8.9",
     "timezones-ical-library": "^2.3.2",
     "uiohook-napi": "^1.5.5",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.24.6"
   },
   "devDependencies": {
     "@codemirror/commands": "^6.11.1",
