@@ -29,7 +29,7 @@ class SurfaceExporter final : public Exporter {
         CVPixelBufferGetPixelFormatType(pixel->pixel) != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
       throw Error("ERR_RTC_MAC_PRESENTATION_FORMAT", "Native presentation requires bounded IOSurface NV12");
     auto frame = std::make_shared<SharedFrame>();
-    frame->id = id; frame->route = route; frame->pixel = std::move(pixel);
+    frame->id = id; frame->route = route; frame->color = pixel->color; frame->pixel = std::move(pixel);
     frame->info = {sizeof(MonkyEngineSharedFrame), MONKY_ENGINE_ABI_VERSION,
       IOSurfaceGetID(surface), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
       0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), timestamp,

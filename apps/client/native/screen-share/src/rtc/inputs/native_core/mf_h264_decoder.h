@@ -79,6 +79,8 @@ struct DecoderConfig {
   std::uint32_t width = 0, height = 0, fps = 0, bitrateBps = 0;
   std::uint32_t maxInFlight = 8, maxPendingPackets = 32;
   std::string profileLevelId;
+  // The SDR colour of the session's SPS; another colour needs a new session.
+  VideoColor color;
 };
 
 enum class DecoderNativeOperation : std::uint8_t {
@@ -108,9 +110,10 @@ struct VideoFrameRect {
   std::uint32_t x = 0, y = 0, width = 0, height = 0;
 };
 
+// The decoder does not convert: its NV12 carries the SPS colour, range included.
 struct DecodedColorSpace {
-  std::string source = "configured-bt709-limited";
-  bool fullRange = false;
+  std::string source = "configured";
+  VideoColor color;
 };
 
 struct GpuDecodedFrame : GpuNv12Frame {

@@ -17,6 +17,8 @@ struct SharedFrame {
   std::uint64_t id = 0;
   FrameRoute route;
   MonkyEngineSharedFrame info{};
+  // How the shared texture's samples are presented; the ABI frame cannot carry it.
+  screen_video::VideoColor color;
 #if defined(_WIN32)
   winrt::com_ptr<ID3D11Texture2D> texture;
   winrt::com_ptr<ID3D11Fence> ready_fence;

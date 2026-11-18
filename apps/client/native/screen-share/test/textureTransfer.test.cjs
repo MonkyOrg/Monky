@@ -12,7 +12,13 @@ const {
 const { TextureTransferSender, sendTexture } = require('../runtime/textureTransfer.cjs');
 const { registerTextureTransferReceiver } = require('../runtime/textureTransferReceiver.cjs');
 const { NativePresentationBridge } = require('../runtime/nativePresentationBridge.cjs');
+const { readFileSync } = require('node:fs');
+const path = require('node:path');
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const decodedFrame = (frameId, colorSpace, surface = false) => ({ type: 'frame', target: 1, data: { frameId,
+  timestampUs: 123, format: 'NV12', gpuCopy: !surface, width: 1280, height: 720, codedWidth: 1280, codedHeight: 720,
+  textureInfo: { pixelFormat: 'nv12', timestamp: 123, handle: { [surface ? 'ioSurface' : 'ntHandle']: Buffer.alloc(8) },
+    codedSize: { width: 1280, height: 720 }, visibleRect: { x: 0, y: 0, width: 1280, height: 720 }, colorSpace } } });
 
 class Port extends EventEmitter {
   held = false;
@@ -292,7 +298,11 @@ test('renderer failure after import still requires its GPU callback before Main 
   await f.detach();
 });
 
-for (const surface of [false, true]) test(`presentation releases ${surface ? 'IOSurface' : 'NT'} leases only after renderer GPU retirement`, async () => {
+// An iPhone's Safari sends full-range BT.601: Media Foundation presents it as is, VideoToolbox converts it to limited.
+for (const [surface, colorSpace] of [
+  [false, { primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', range: 'full' }],
+  [true, { primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', range: 'limited' }],
+]) test(`presentation releases ${surface ? 'IOSurface' : 'NT'} leases only after renderer GPU retirement`, async () => {
   const f = fixture();
   let releaseMain = 0, resolveRtc;
   const rtcRetired = new Promise(resolve => { resolveRtc = resolve; });
@@ -307,15 +317,12 @@ for (const surface of [false, true]) test(`presentation releases ${surface ? 'IO
   }, {
     importSharedTexture({ textureInfo, allReferencesReleased }) {
       assert.deepEqual(Object.keys(textureInfo.handle), [surface ? 'ioSurface' : 'ntHandle']);
+      assert.deepEqual(textureInfo.colorSpace, colorSpace, 'Electron must sample the colour the decoder described');
       return { subtle: f.source, release() { releaseMain++; allReferencesReleased(); } };
     },
     sendSharedTexture() { assert.fail('The fixed-timeout Electron convenience API must not be used.'); },
   }, error => f.errors.push(error), { createTextureChannel: f.createChannel });
-  const event = { type: 'frame', target: 1, data: { frameId: 1, timestampUs: 123,
-    format: 'NV12', gpuCopy: !surface, width: 1280, height: 720, codedWidth: 1280, codedHeight: 720,
-    textureInfo: { pixelFormat: 'nv12', timestamp: 123, handle: { [surface ? 'ioSurface' : 'ntHandle']: Buffer.alloc(8) },
-      codedSize: f.transfer.codedSize, visibleRect: f.transfer.visibleRect,
-      colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } } } };
+  const event = decodedFrame(1, colorSpace, surface);
   const work = bridge.publish(event, { frame: f.destination, presentationId: f.metadata.presentationId });
   f.finishDrawing();
   await tick();
@@ -331,6 +338,42 @@ for (const surface of [false, true]) test(`presentation releases ${surface ? 'IO
   assert.equal(bridge.getStats().outstandingLeases, 0);
   assert.equal(bridge.getStats().retired, 1);
   assert.deepEqual(f.errors, []);
+});
+
+test('presentation admits every colour the native decoders name, and no HDR or unknown colour', async () => {
+  const released = [];
+  const bridge = new NativePresentationBridge({
+    request() {},
+    releaseFrame(frameId, reason) { released.push([frameId, reason]); return Promise.resolve({ frameId, ok: true }); },
+  }, {
+    importSharedTexture() { assert.fail('A dropped frame must not be imported.'); },
+    sendSharedTexture() { assert.fail('The fixed-timeout Electron convenience API must not be used.'); },
+  }, () => {});
+  const source = readFileSync(path.join(__dirname, '../src/rtc/inputs/native_core/h264_bitstream.cc'), 'utf8');
+  const named = table => [...source.match(new RegExp(`${table}\\{\\{([^;]+)\\}\\};`))[1]
+    .matchAll(/\{\d+, "([a-z0-9]+)"\}/g)].map(match => match[1]);
+  const names = { primaries: named('kPrimaries'), transfer: named('kTransfers'), matrix: named('kMatrices'),
+    range: ['limited', 'full'] };
+  assert.ok(names.primaries.includes('p3') && names.transfer.includes('srgb') && names.matrix.includes('smpte170m'));
+  const bt709 = { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' };
+  let frameId = 0;
+  for (const [field, values] of Object.entries(names)) {
+    for (const value of values) {
+      assert.deepEqual(await bridge.publishFrame(decodedFrame(++frameId, { ...bt709, [field]: value }), null),
+        { frameId, imported: false }, `${field} ${value} is named by the decoder but refused by presentation`);
+    }
+  }
+  for (const colorSpace of [
+    { ...bt709, primaries: 'bt2020' }, { ...bt709, transfer: 'pq' }, { ...bt709, transfer: 'hlg' },
+    { ...bt709, matrix: 'bt2020-ncl' }, { ...bt709, range: 'derived' }, { ...bt709, primaries: 'BT709' },
+    { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709' }, null,
+  ]) {
+    await assert.rejects(bridge.publishFrame(decodedFrame(++frameId, colorSpace), null),
+      /Invalid native decoded NV12 texture descriptor/);
+  }
+  await bridge.stop();
+  assert.equal(released.length, frameId);
+  assert.ok(released.every(([, reason]) => reason === 'unused'));
 });
 
 test('texture wire schemas reject malformed geometry, opaque data, timestamps and metadata', () => {

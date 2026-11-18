@@ -11,6 +11,9 @@
 
 #include <array>
 #include <functional>
+#include <initializer_list>
+#include <string_view>
+#include <utility>
 
 namespace monky::native_rtc::engine {
 
@@ -27,8 +30,32 @@ inline void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& 
         check(sv::IsBt709LimitedCompatible(sps), "Limited-range colour contract changed");
         sps.fullRange = true;
         check(!sv::IsBt709LimitedCompatible(sps), "Full-range H264 cannot enter the limited-range pipeline");
+        check(sv::PresentableColor(sps) == sv::VideoColor{1, 1, 1, true},
+              "A receiver must present unspecified full-range H264 as full-range BT.709");
       }
     }
+  }
+  // What an iPhone's Safari or a camera may describe: receivers present it, senders still publish BT.709 limited.
+  for (const sv::VideoColor colour : {sv::VideoColor{6, 6, 6, true}, sv::VideoColor{5, 6, 5, false},
+                                      sv::VideoColor{12, 13, 6, true}, sv::VideoColor{7, 7, 7, false}}) {
+    sv::H264Sps sps;
+    sps.colorPrimaries = colour.primaries; sps.transferCharacteristics = colour.transfer;
+    sps.matrixCoefficients = colour.matrix; sps.fullRange = colour.fullRange;
+    check(sv::PresentableColor(sps) == colour, "A described SDR H264 colour was not presentable as itself");
+    check(!sv::IsBt709LimitedCompatible(sps), "A non-BT.709-limited colour entered the sender's pipeline");
+    const auto names = sv::NameVideoColor(colour);
+    check(names.primaries && names.transfer && names.matrix &&
+              std::string_view(names.range) == (colour.fullRange ? "full" : "limited"),
+          "A presentable colour has no Electron name");
+  }
+  // HDR, wide gamut, constant luminance, identity and reserved codes stay out: Electron could not show them.
+  for (const auto [member, value] : std::initializer_list<std::pair<std::optional<std::uint8_t> sv::H264Sps::*, std::uint8_t>>{
+           {&sv::H264Sps::colorPrimaries, 9}, {&sv::H264Sps::transferCharacteristics, 16},
+           {&sv::H264Sps::transferCharacteristics, 18}, {&sv::H264Sps::matrixCoefficients, 0},
+           {&sv::H264Sps::matrixCoefficients, 9}, {&sv::H264Sps::colorPrimaries, 3}}) {
+    sv::H264Sps sps;
+    sps.*member = value;
+    check(!sv::PresentableColor(sps), "An HDR, wide-gamut or reserved H264 colour was presentable");
   }
   for (unsigned value = 0; value <= 255; ++value) {
     if (value == 1 || value == 2) continue;

@@ -9,6 +9,7 @@
 #include <wmcodecdsp.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -48,6 +49,42 @@ class EventHandle {
  private:
   HANDLE value_;
 };
+
+// Media Foundation's names for an H.273 colour; empty when it has none, like P3, whose attribute stays unset.
+std::vector<UINT32> MfPrimaries(std::uint8_t code) {
+  switch (code) {
+    case 1: return {MFVideoPrimaries_BT709};
+    case 5: return {MFVideoPrimaries_BT470_2_SysBG, MFVideoPrimaries_EBU3213};
+    case 6: return {MFVideoPrimaries_SMPTE170M, MFVideoPrimaries_SMPTE_C};
+    case 7: return {MFVideoPrimaries_SMPTE240M};
+    default: return {};
+  }
+}
+std::vector<UINT32> MfTransfer(std::uint8_t code) {
+  switch (code) {
+    case 1: case 6: return {MFVideoTransFunc_709};
+    case 7: return {MFVideoTransFunc_240M};
+    case 13: return {MFVideoTransFunc_sRGB};
+    default: return {};
+  }
+}
+std::vector<UINT32> MfMatrix(std::uint8_t code) {
+  switch (code) {
+    case 1: return {MFVideoTransferMatrix_BT709};
+    case 5: case 6: return {MFVideoTransferMatrix_BT601};
+    case 7: return {MFVideoTransferMatrix_SMPTE240M};
+    default: return {};
+  }
+}
+std::vector<UINT32> MfRange(bool full) {
+  return {static_cast<UINT32>(full ? MFNominalRange_0_255 : MFNominalRange_16_235)};
+}
+std::array<std::pair<const GUID*, std::vector<UINT32>>, 4> ColorAttributes(const VideoColor& color) {
+  return {{{&MF_MT_VIDEO_PRIMARIES, MfPrimaries(color.primaries)},
+           {&MF_MT_TRANSFER_FUNCTION, MfTransfer(color.transfer)},
+           {&MF_MT_YUV_MATRIX, MfMatrix(color.matrix)},
+           {&MF_MT_VIDEO_NOMINAL_RANGE, MfRange(color.fullRange)}}};
+}
 
 std::uint8_t ConfigLevel(const DecoderConfig& config) {
   return config.profileLevelId.empty()
@@ -264,10 +301,10 @@ struct MfH264Decoder::Impl {
     Require(MFSetAttributeRatio(type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1), "ERR_DECODER_MEDIA_TYPE", "Cannot set square pixels");
     Require(type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive), "ERR_DECODER_MEDIA_TYPE", "Cannot set progressive scan");
     Require(type->SetUINT32(MF_MT_AVG_BITRATE, config.bitrateBps), "ERR_DECODER_MEDIA_TYPE", "Cannot set input bitrate");
-    Require(type->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709), "ERR_DECODER_MEDIA_TYPE", "Cannot declare input BT.709 primaries");
-    Require(type->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709), "ERR_DECODER_MEDIA_TYPE", "Cannot declare input BT.709 transfer");
-    Require(type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709), "ERR_DECODER_MEDIA_TYPE", "Cannot declare input BT.709 matrix");
-    Require(type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235), "ERR_DECODER_MEDIA_TYPE", "Cannot declare limited-range input");
+    for (const auto& [key, values] : ColorAttributes(config.color)) {
+      if (!values.empty())
+        Require(type->SetUINT32(*key, values.front()), "ERR_DECODER_MEDIA_TYPE", "Cannot declare the input colour");
+    }
     Applied(transform->SetInputType(inputId, type.get(), 0), "ERR_DECODER_INPUT_TYPE", "Inbox MFT rejected H264 input");
     ConfigureOutput(true);
     auto codec = transform.try_as<ICodecAPI>();
@@ -296,7 +333,9 @@ struct MfH264Decoder::Impl {
     if (!sink || !accepted || !retained || config.width < 16 || config.height < 16 ||
         config.width > 4096 || config.height > 4096 || ((config.width | config.height) & 1) ||
         !config.fps || config.fps > 240 || config.bitrateBps < 64000 || config.bitrateBps > 240000000 ||
-        config.maxInFlight < 2 || config.maxInFlight > 16 || config.maxPendingPackets < 2 || config.maxPendingPackets > 128) {
+        config.maxInFlight < 2 || config.maxInFlight > 16 || config.maxPendingPackets < 2 || config.maxPendingPackets > 128 ||
+        PresentableColor(config.color.primaries, config.color.transfer, config.color.matrix,
+                         config.color.fullRange) != config.color) {
       Fail("ERR_DECODER_CONFIGURATION", "Invalid bounded native decoder configuration");
     }
     if (!config.profileLevelId.empty()) {
@@ -351,8 +390,8 @@ struct MfH264Decoder::Impl {
         sps.cropLeft != stats.sps.cropLeft || sps.cropTop != stats.sps.cropTop)) {
       Fail("ERR_DECODER_CONFIGURATION_CHANGED", "SPS profile/coded geometry/crop changed; create a new decoder session");
     }
-    if (!IsBt709LimitedCompatible(sps)) {
-      Fail("ERR_DECODER_COLOR_SPACE", "This qualifier requires limited-range BT.709, not hidden color conversion");
+    if (PresentableColor(sps) != config.color) {
+      Fail("ERR_DECODER_COLOR_SPACE", "SPS colour differs from the session's; create a new decoder session");
     }
     CheckCaps(sps.codedWidth, sps.codedHeight);
     stats.sps = sps;
@@ -415,21 +454,18 @@ struct MfH264Decoder::Impl {
 
   DecodedColorSpace ReadColor(IMFMediaType* type) {
     DecodedColorSpace color;
-    if (stats.sps.colorPrimaries && *stats.sps.colorPrimaries == 1 &&
-        stats.sps.transferCharacteristics && *stats.sps.transferCharacteristics == 1 &&
-        stats.sps.matrixCoefficients && *stats.sps.matrixCoefficients == 1) color.source = "sps";
-    const std::pair<const GUID*, UINT32> expected[] = {
-        {&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709},
-        {&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709},
-        {&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709},
-        {&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235}};
+    color.color = config.color;
+    const auto described = [](std::optional<std::uint8_t> value) { return value && *value != 2; };
+    if (described(stats.sps.colorPrimaries) && described(stats.sps.transferCharacteristics) &&
+        described(stats.sps.matrixCoefficients)) color.source = "sps";
     bool specified = true;
-    for (const auto& [key, value] : expected) {
+    for (const auto& [key, values] : ColorAttributes(config.color)) {
       UINT32 actual = 0;
       const auto hr = type->GetUINT32(*key, &actual);
-      if (hr == MF_E_ATTRIBUTENOTFOUND || (hr == S_OK && actual == 0)) { specified = false; continue; }
+      if (values.empty() || hr == MF_E_ATTRIBUTENOTFOUND || (hr == S_OK && actual == 0)) { specified = false; continue; }
       Require(hr, "ERR_DECODER_COLOR_SPACE", "Cannot inspect decoded color metadata");
-      if (actual != value) Fail("ERR_DECODER_COLOR_SPACE", "Decoded media type contradicted limited-range BT.709 input");
+      if (std::find(values.begin(), values.end(), actual) == values.end())
+        Fail("ERR_DECODER_COLOR_SPACE", "Decoded media type contradicted the SPS colour");
     }
     if (color.source != "sps" && specified) color.source = "media-type";
     return color;

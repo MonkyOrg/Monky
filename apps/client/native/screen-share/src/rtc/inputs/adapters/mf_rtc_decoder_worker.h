@@ -130,7 +130,7 @@ class DecoderWorker final : public Worker {
         throw AdapterError("ERR_RTC_DECODER_LAYERS",
                            "The native decoder accepts one spatial/temporal stream only");
       }
-      if ((image.ColorSpace() && !IsBt709Limited(*image.ColorSpace())) ||
+      if ((image.ColorSpace() && !PresentableColor(*image.ColorSpace())) ||
           image._encodedWidth > setup_.maximum_width ||
           image._encodedHeight > setup_.maximum_height ||
           ((image._encodedWidth == 0) != (image._encodedHeight == 0))) {
@@ -600,7 +600,7 @@ class DecoderWorker final : public Worker {
       return true;
     }
     if (!frame->texture || !frame->readyFence || !frame->readyValue ||
-        frame->readyValue == UINT64_MAX || frame->colorSpace.fullRange ||
+        frame->readyValue == UINT64_MAX || frame->colorSpace.color != config_.color ||
         frame->visibleRect.width != config_.width || frame->visibleRect.height != config_.height) {
       output_diagnostic.Select(DecoderOutputOutcome::InvalidLayout);
       metadata.diagnostic->ReleaseAs(DecoderInputReleaseReason::InvalidOutput);
@@ -615,20 +615,21 @@ class DecoderWorker final : public Worker {
     auto lease = std::make_shared<NativeLease>(
         shared_from_this(), frame, device_, context_, core_);
     auto buffer = MakeNativeBuffer(state(), std::move(lease));
-    auto output = BuildOutput(metadata, buffer);
+    auto output = BuildOutput(metadata, buffer, frame->colorSpace.color);
     DeliverOutput(metadata, output, output_diagnostic);
     return true;
   }
 
   static webrtc::VideoFrame BuildOutput(
-      DecodeMetadata& metadata, webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer) {
+      DecodeMetadata& metadata, webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer,
+      const sv::VideoColor& color) {
     return webrtc::VideoFrame::Builder()
         .set_video_frame_buffer(buffer)
         .set_rtp_timestamp(metadata.rtp)
         .set_timestamp_us(metadata.render_us)
         .set_ntp_time_ms(metadata.ntp_ms)
         .set_rotation(metadata.rotation)
-        .set_color_space(std::optional<webrtc::ColorSpace>(Bt709Limited()))
+        .set_color_space(std::optional<webrtc::ColorSpace>(ToColorSpace(color)))
         .set_presentation_timestamp(metadata.presentation)
         .set_id(metadata.tracking_id.value_or(webrtc::VideoFrame::kNotSetId))
         .set_packet_infos(std::move(metadata.packet_infos))

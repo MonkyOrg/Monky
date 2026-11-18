@@ -5,6 +5,7 @@
 #include "api/video/video_frame_buffer.h"
 #include "api/video_codecs/video_decoder_factory.h"
 #include "api/video_codecs/video_encoder_factory.h"
+#include "h264_bitstream.h"
 #include "json.hpp"
 #include <CoreVideo/CoreVideo.h>
 #include <array>
@@ -14,11 +15,14 @@
 
 namespace monky::native_rtc::mac {
 struct PixelFrame {
-  explicit PixelFrame(CVPixelBufferRef pixel) : pixel(pixel) { CVPixelBufferRetain(pixel); }
+  explicit PixelFrame(CVPixelBufferRef pixel, screen_video::VideoColor color = {})
+      : pixel(pixel), color(color) { CVPixelBufferRetain(pixel); }
   ~PixelFrame() { CVPixelBufferRelease(pixel); }
   PixelFrame(const PixelFrame&) = delete;
   PixelFrame& operator=(const PixelFrame&) = delete;
   CVPixelBufferRef pixel;
+  // The colour the NV12 samples carry. VideoToolbox outputs 420v, so a full-range stream arrives limited.
+  screen_video::VideoColor color;
 };
 struct AdapterOptions {
   std::uint8_t maximum_h264_level = 60;

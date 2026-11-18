@@ -170,8 +170,9 @@ struct DecoderSubmitChecksAccess {
     return worker.OnFrame(std::move(frame));
   }
   static webrtc::VideoFrame BuildOutput(
-      DecodeMetadata& metadata, webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer) {
-    return DecoderWorker::BuildOutput(metadata, std::move(buffer));
+      DecodeMetadata& metadata, webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer,
+      const sv::VideoColor& color) {
+    return DecoderWorker::BuildOutput(metadata, std::move(buffer), color);
   }
   static DecoderOutputDiagnostic ObserveOutput(DecoderWorker& worker) {
     return DecoderOutputDiagnostic(*worker.diagnostics_, &DecoderDiagnosticSnapshot::output,
@@ -352,7 +353,7 @@ class Callback final : public webrtc::DecodedImageCallback {
     decode_ms = elapsed;
     no_qp = !qp;
     cpu_buffer = output.video_frame_buffer()->type() == webrtc::VideoFrameBuffer::Type::kI420;
-    color_ok = output.color_space() && IsBt709Limited(*output.color_space());
+    if (output.color_space()) color = PresentableColor(*output.color_space());
     during = ledger->Snapshot();
     invoked_on_this_thread = gate->IsInvokingOnCurrentThread();
     if (action == CallbackAction::Unregister || action == CallbackAction::UnregisterAndStop)
@@ -374,7 +375,8 @@ class Callback final : public webrtc::DecodedImageCallback {
   std::optional<webrtc::VideoFrame::ProcessingTime> processing;
   std::optional<std::int32_t> decode_ms;
   std::optional<DecoderDiagnosticSnapshot> during;
-  bool no_qp = false, cpu_buffer = false, color_ok = false, invoked_on_this_thread = false;
+  std::optional<sv::VideoColor> color;
+  bool no_qp = false, cpu_buffer = false, invoked_on_this_thread = false;
 };
 
 struct WeakInput {
@@ -472,9 +474,9 @@ class Fixture {
       const auto packets = Packets(input.rtp, input.packet_count);
       image.SetPacketInfos(packets);
       const auto color = input.wrong_color
-          ? webrtc::ColorSpace(webrtc::ColorSpace::PrimaryID::kBT709,
-                webrtc::ColorSpace::TransferID::kBT709, webrtc::ColorSpace::MatrixID::kBT709,
-                webrtc::ColorSpace::RangeID::kFull)
+          ? webrtc::ColorSpace(webrtc::ColorSpace::PrimaryID::kBT2020,
+                webrtc::ColorSpace::TransferID::kSMPTEST2084, webrtc::ColorSpace::MatrixID::kBT2020_NCL,
+                webrtc::ColorSpace::RangeID::kLimited)
           : Bt709Limited();
       image.SetColorSpace(color);
       if (input.storage == Storage::Missing) image.ClearEncodedData();
@@ -1198,6 +1200,7 @@ void RunAcceptedAndOutputRejections(Check check, const webrtc::Environment& env,
 void DeliverCpuOutput(Fixture& fixture, webrtc::SimulatedClock& clock,
                       std::uint64_t request, std::int64_t pts, Output outcome,
                       bool absent_optional_metadata = false) {
+  const sv::VideoColor presented{6, 6, 6, true};
   auto input = fixture.Metadata(request, pts);
   if (absent_optional_metadata) {
     input.metadata.presentation.reset();
@@ -1230,13 +1233,14 @@ void DeliverCpuOutput(Fixture& fixture, webrtc::SimulatedClock& clock,
       auto observation = Access::ObserveOutput(*fixture.worker);
       metadata.diagnostic->OutputMatched(observation.begin());
       auto pixels = webrtc::I420Buffer::Create(16, 16);
-      auto output = Access::BuildOutput(metadata, pixels);
+      // An iPhone's Safari sends full-range BT.601; the output must describe it, not assume BT.709 limited.
+      auto output = Access::BuildOutput(metadata, pixels, presented);
       fixture.check(output.video_frame_buffer().get() == pixels.get() && output.rtp_timestamp() == rtp &&
                     output.timestamp_us() == render_us && output.ntp_time_ms() == ntp_ms &&
                     output.rotation() == rotation && output.presentation_timestamp() == presentation &&
                     output.id() == tracking && SamePackets(output.packet_infos(), packets) &&
-                    output.color_space() && IsBt709Limited(*output.color_space()),
-                    "Exact BuildOutput changed original RTP/render/NTP/presentation/tracking/packet provenance");
+                    output.color_space() && PresentableColor(*output.color_space()) == presented,
+                    "Exact BuildOutput changed original RTP/render/NTP/presentation/tracking/packet/colour provenance");
       const auto error = Protect([&] { Access::DeliverOutput(*fixture.worker, metadata, output, observation); });
       if (throwing) ExpectedError(fixture.check, error, "ERR_RTC_CPP", WEBRTC_VIDEO_CODEC_ERROR);
       else fixture.check(!error, "Exact CPU DeliverOutput unexpectedly threw");
@@ -1283,7 +1287,7 @@ void DeliverCpuOutput(Fixture& fixture, webrtc::SimulatedClock& clock,
                     callback.tracking == tracking && SamePackets(callback.packets, packets) &&
                     callback.processing && callback.processing->start == webrtc::Timestamp::Millis(accepted_ms) &&
                     callback.processing->finish == expected_finish && callback.decode_ms == 37 &&
-                    callback.no_qp && callback.cpu_buffer && callback.color_ok && callback.invoked_on_this_thread &&
+                    callback.no_qp && callback.cpu_buffer && callback.color == presented && callback.invoked_on_this_thread &&
                     callback.during && callback.during->output.in_progress == 1 &&
                     callback.during->output.outcomes == before.output.outcomes &&
                     At(*callback.during, Stage::OutputMatched).releases == At(before, Stage::OutputMatched).releases &&

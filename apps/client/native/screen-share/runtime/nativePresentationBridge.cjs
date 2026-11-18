@@ -7,6 +7,15 @@ const { TextureTransferSender } = require('./textureTransfer.cjs');
 const positiveId = value => Number.isSafeInteger(value) && value > 0;
 const coordinate = value => Number.isSafeInteger(value) && value >= 0;
 const dimension = value => positiveId(value) && value <= 16384 && value % 2 === 0;
+// The SDR colours the native decoders present, as Electron's importSharedTexture names them.
+const COLOR_NAMES = Object.freeze({
+  primaries: new Set(['bt709', 'bt470bg', 'smpte170m', 'smpte240m', 'p3']),
+  transfer: new Set(['bt709', 'smpte170m', 'smpte240m', 'srgb']),
+  matrix: new Set(['bt709', 'bt470bg', 'smpte170m', 'smpte240m']),
+  range: new Set(['limited', 'full']),
+});
+const presentableColor = color => color !== null && typeof color === 'object'
+  && Object.entries(COLOR_NAMES).every(([field, names]) => names.has(color[field]));
 
 function decodedTextureInfo(event) {
   const data = event?.data;
@@ -25,8 +34,7 @@ function decodedTextureInfo(event) {
     || !dimension(rect.width) || !dimension(rect.height)
     || rect.width !== data.width || rect.height !== data.height
     || rect.x + rect.width > coded.width || rect.y + rect.height > coded.height
-    || color?.primaries !== 'bt709' || color.transfer !== 'bt709'
-    || color.matrix !== 'bt709' || color.range !== 'limited'
+    || !presentableColor(color)
     || !Buffer.isBuffer(handle) || handle.length !== 8 || handle.buffer instanceof SharedArrayBuffer) {
     throw new Error('Invalid native decoded NV12 texture descriptor.');
   }
@@ -35,7 +43,7 @@ function decodedTextureInfo(event) {
     codedSize: { width: coded.width, height: coded.height },
     visibleRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
     timestamp: data.timestampUs,
-    colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' },
+    colorSpace: { primaries: color.primaries, transfer: color.transfer, matrix: color.matrix, range: color.range },
   };
 }
 

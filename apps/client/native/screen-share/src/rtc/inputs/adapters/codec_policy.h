@@ -96,6 +96,10 @@ webrtc::SdpVideoFormat ScreenAv1Format();
 bool IsScreenAv1Format(const webrtc::SdpVideoFormat&);
 webrtc::ColorSpace Bt709Limited();
 bool IsBt709Limited(const webrtc::ColorSpace&);
+// The SDR colour a decoded frame carries, as WebRTC tags it.
+webrtc::ColorSpace ToColorSpace(const ::monky::screen_video::VideoColor&);
+// The presentable colour an RTP colour-space extension describes; HDR or an unnamed code has none.
+std::optional<::monky::screen_video::VideoColor> PresentableColor(const webrtc::ColorSpace&);
 
 struct EncoderSetup {
   screen_video::EncoderConfig core;

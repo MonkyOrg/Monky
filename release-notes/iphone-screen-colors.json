@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Telas transmitidas do iPhone agora aparecem no app desktop com as cores certas, em vez de ficarem pretas ou carregando para sempre. O Safari do iPhone não envia o som da tela, então elas continuam chegando sem áudio.",
+  "en": "Screens shared from an iPhone now show up in the desktop app with the right colours, instead of staying black or loading forever. Safari on iPhone doesn't send screen sound, so they still arrive without audio."
+}

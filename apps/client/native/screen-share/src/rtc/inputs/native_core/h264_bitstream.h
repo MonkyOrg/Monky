@@ -33,6 +33,23 @@ struct H264Sps {
   std::string ProfileLevelId() const;
 };
 
+// ITU-T H.273 colour description of decoded samples.
+struct VideoColor {
+  std::uint8_t primaries = 1;
+  std::uint8_t transfer = 1;
+  std::uint8_t matrix = 1;
+  bool fullRange = false;
+  bool operator==(const VideoColor&) const = default;
+};
+
+// The names Electron's shared-texture ColorSpace gives the codes PresentableColor admits.
+struct VideoColorNames {
+  const char* primaries;
+  const char* transfer;
+  const char* matrix;
+  const char* range;
+};
+
 struct H264AccessUnit {
   std::vector<std::uint8_t> data;
   bool keyFrame = false;
@@ -50,6 +67,11 @@ bool MatchesH264Profile(const H264Sps& sps, H264Profile profile);
 // Baseline that declares Main conformance (constraint_set1, H.264 A.2.1), as browsers' OpenH264 sends.
 bool DecodesAsH264Profile(const H264Sps& sps, H264Profile negotiated);
 bool IsBt709LimitedCompatible(const H264Sps& sps);
+// The SDR colour a receiver can present as described; nullopt for HDR, BT.2020 and unnamed codes.
+std::optional<VideoColor> PresentableColor(std::uint8_t primaries, std::uint8_t transfer, std::uint8_t matrix,
+                                           bool fullRange);
+std::optional<VideoColor> PresentableColor(const H264Sps& sps);
+VideoColorNames NameVideoColor(const VideoColor& color);
 
 class H264Bitstream {
  public:
