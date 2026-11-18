@@ -245,7 +245,56 @@ void sfu(const std::string& type, const Json& payload, const std::string& room,
   }
 }
 
-bool relevant(std::string_view type) {
+Json chatMessage(const Json& value) {
+  require(value.is_object(), "Invalid chat message");
+  Json result{{"id", text(value, "id")}, {"channelId", text(value, "channelId")},
+              {"userId", text(value, "userId")}};
+  const auto& content = field(value, "content");
+  require(content.is_string(), "Invalid chat message content");
+  number(value, "createdAt");
+  result["createdAt"] = value.at("createdAt");
+  const auto author = value.find("userNickname");
+  result["author"] = author != value.end() && author->is_string() ? author->get<std::string>() : std::string();
+  const auto timestamp = [&](const char* key) {
+    const auto found = value.find(key);
+    if (found != value.end() && found->is_number()) result[key] = *found;
+  };
+  timestamp("editedAt");
+  timestamp("deletedAt");
+  result["content"] = result.contains("deletedAt") ? std::string() : content.get<std::string>();
+  for (const auto* flag : {"isSystem", "isBot", "isEphemeral"}) {
+    const auto found = value.find(flag);
+    if (found != value.end() && found->is_boolean() && found->get<bool>()) result[flag] = true;
+  }
+  if (const auto forwarded = value.find("forwarded"); forwarded != value.end() && forwarded->is_object()) {
+    result["forwarded"] = true;
+  }
+  auto files = Json::array();
+  if (const auto attachments = value.find("attachments");
+      !result.contains("deletedAt") && attachments != value.end() && attachments->is_array()) {
+    for (const auto& attachment : *attachments) {
+      if (!attachment.is_object()) continue;
+      const auto name = attachment.find("originalName");
+      if (name != attachment.end() && name->is_string()) files.push_back(*name);
+    }
+  }
+  if (!files.empty()) result["attachments"] = std::move(files);
+  if (const auto reply = value.find("reply"); reply != value.end() && reply->is_object()) {
+    Json quoted = Json::object();
+    for (const auto* key : {"messageId", "userNickname", "content"}) {
+      const auto found = reply->find(key);
+      if (found != reply->end() && found->is_string()) quoted[key] = *found;
+    }
+    const auto deleted = reply->find("deleted");
+    if (deleted != reply->end() && deleted->is_boolean() && deleted->get<bool>()) quoted["content"] = std::string();
+    if (quoted.contains("messageId")) result["reply"] = std::move(quoted);
+  }
+  return result;
+}
+
+bool relevant(std::string_view type, bool chat) {
+  if (chat && (type == msg::CHAT_MESSAGE || type == msg::CHAT_MESSAGE_UPDATED || type == msg::CHAT_HISTORY))
+    return true;
   for (auto value : {
          msg::AUTH_CHALLENGE, msg::AUTH_SUCCESS, msg::AUTH_FAILED, msg::SERVER_ERROR, msg::PONG,
          msg::SERVER_SHUTDOWN, msg::VOICE_USER_JOINED, msg::VOICE_USER_LEFT, msg::VOICE_RECONNECTED,
@@ -259,10 +308,10 @@ bool relevant(std::string_view type) {
   return false;
 }
 
-bool discardable(std::string_view frame) {
+bool discardable(std::string_view frame, bool chat) {
   TypePeek peek;
   (void)Json::sax_parse(frame.begin(), frame.end(), &peek);
-  return peek.type && !relevant(*peek.type);
+  return peek.type && !relevant(*peek.type, chat);
 }
 
 }  // namespace monky::light::reader

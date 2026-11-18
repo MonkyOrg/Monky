@@ -100,7 +100,9 @@ void ProtocolSession::send(std::string_view type, Json payload, std::string requ
   effects_.push_back([this, connection, generation, callScoped, requestId,
                       frame = envelope.dump()] {
     if (!online_ || connection != connection_ || (callScoped && generation != generation_)) return;
-    if (!requestId.empty() && requestId != authId_ && requestId != controlId_ && pending_.count(requestId) == 0) return;
+    if (!requestId.empty() && requestId != authId_ && requestId != controlId_ && pending_.count(requestId) == 0 &&
+        chatPending_.count(requestId) == 0)
+      return;
     callbacks_.outbound(frame);
   });
 }
@@ -160,7 +162,7 @@ void ProtocolSession::receive(std::uint64_t connection, std::string_view frame, 
       return true;
     });
     const auto type = text(envelope, "type");
-    if (!relevant(type)) return;
+    if (!relevant(type, chatWatching_ || !chatPending_.empty())) return;
     const auto& payload = field(envelope, "payload");
     require(payload.is_object(), "Expected payload object");
     const auto id = envelope.contains("requestId") ? text(envelope, "requestId") : std::string{};
@@ -241,6 +243,15 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
                   code, message.get<std::string>()};
     if (phase_ == SessionPhase::authenticating && id == authId_) {
       loseConnection(now, error, false);
+      return;
+    }
+    // A refused chat message answers only its request; the session is fine.
+    if (const auto chat = chatPending_.find(id); !id.empty() && chat != chatPending_.end()) {
+      auto callback = std::move(chat->second.callback);
+      chatPending_.erase(chat);
+      effects_.push_back([callback = std::move(callback), error] {
+        callback(RpcResult{{}, Json::object(), error});
+      });
       return;
     }
     auto found = pending_.find(id);
@@ -502,6 +513,10 @@ void ProtocolSession::dispatch(const std::string& type, const Json& payload,
     handleSignal(payload);
     return;
   }
+  if (type == msg::CHAT_MESSAGE || type == msg::CHAT_MESSAGE_UPDATED || type == msg::CHAT_HISTORY) {
+    chatReply(type, payload, id);
+    return;
+  }
   auto found = pending_.find(id);
   if (found != pending_.end() &&
       std::find(found->second.accepted.begin(), found->second.accepted.end(), type) != found->second.accepted.end()) {
@@ -744,6 +759,7 @@ void ProtocolSession::logout() {
   desired_.reset();
   settingsTransition_.reset();
   clearCall(cancelled());
+  failChat(cancelled());
   if (online_) send(msg::USER_LOGOUT, Json::object());
   phase_ = SessionPhase::stopped;
   authDeadline_.reset();
@@ -759,6 +775,7 @@ void ProtocolSession::loseConnection(Time now, Failure reason, bool retry) {
   settingsTransition_.reset();
   consumedTransition_.reset();
   clearCall(reason);
+  failChat(reason);
   auth_.reset();
   authId_.clear();
   authDeadline_.reset();
@@ -821,6 +838,12 @@ void ProtocolSession::tick(Time now, std::int64_t unixMilliseconds) {
       it = pending_.erase(it);
     } else ++it;
   }
+  for (auto it = chatPending_.begin(); it != chatPending_.end();) {
+    if (now >= it->second.deadline) {
+      expired.push_back(std::move(it->second.callback));
+      it = chatPending_.erase(it);
+    } else ++it;
+  }
   for (auto& callback : expired)
     effects_.push_back([callback = std::move(callback)] {
       callback(RpcResult{{}, Json::object(), Failure{FailureKind::timeout, {}, "RPC deadline exceeded"}});
@@ -846,6 +869,7 @@ std::optional<ProtocolSession::Time> ProtocolSession::nextDeadline() const {
   consider(reconnectDeadline_);
   if (transition_) consider(transition_->deadline);
   for (const auto& entry : pending_) consider(entry.second.deadline);
+  for (const auto& entry : chatPending_) consider(entry.second.deadline);
   for (const auto& entry : earlySignals_) consider(entry.deadline);
   return result;
 }
@@ -921,6 +945,98 @@ void ProtocolSession::flushEarlySignals() {
       it = earlySignals_.erase(it);
     } else ++it;
   }
+}
+
+void ProtocolSession::watchChat(bool enabled) { chatWatching_ = enabled; }
+
+void ProtocolSession::failChat(Failure reason) {
+  auto pending = std::move(chatPending_);
+  chatPending_.clear();
+  for (auto& entry : pending) {
+    auto callback = std::move(entry.second.callback);
+    effects_.push_back([callback = std::move(callback), reason] {
+      callback(RpcResult{{}, Json::object(), reason});
+    });
+  }
+}
+
+std::string ProtocolSession::loadChatHistory(std::string channelId, std::optional<std::int64_t> before, int limit,
+                                             RpcCallback callback, Time now) {
+  Flush flush{*this};
+  if (!callback) throw std::invalid_argument("Chat callback is required");
+  now_ = now;
+  if (!online_ || !auth_ || channelId.empty() || limit < 1 ||
+      limit > monky::protocol::limits::MAX_HISTORY_MESSAGES_INITIAL) {
+    effects_.push_back([callback = std::move(callback)] {
+      callback(RpcResult{{}, Json::object(), Failure{FailureKind::invalidState, {}, "Chat needs a session and a channel"}});
+    });
+    return {};
+  }
+  chatWatching_ = true;
+  Json payload{{"channelId", channelId}, {"limit", limit}};
+  if (before) payload["beforeTimestamp"] = *before;
+  const auto id = freshId();
+  chatPending_.emplace(id, ChatPending{std::string(msg::CHAT_HISTORY), std::move(channelId), now + rpcTimeout,
+                                       std::move(callback)});
+  send(msg::CHAT_LOAD_HISTORY, std::move(payload), id);
+  return id;
+}
+
+std::string ProtocolSession::sendChat(std::string channelId, std::string content, RpcCallback callback, Time now) {
+  Flush flush{*this};
+  if (!callback) throw std::invalid_argument("Chat callback is required");
+  now_ = now;
+  if (!online_ || !auth_ || channelId.empty() || content.empty()) {
+    effects_.push_back([callback = std::move(callback)] {
+      callback(RpcResult{{}, Json::object(), Failure{FailureKind::invalidState, {}, "Chat needs a session, a channel and text"}});
+    });
+    return {};
+  }
+  chatWatching_ = true;
+  const auto id = freshId();
+  // chat-delivery: the server stores one message per ID even if a retry repeats it.
+  Json payload{{"channelId", channelId}, {"content", std::move(content)}, {"clientMessageId", id}};
+  chatPending_.emplace(id, ChatPending{std::string(msg::CHAT_MESSAGE), std::move(channelId), now + rpcTimeout,
+                                       std::move(callback)});
+  send(msg::CHAT_SEND, std::move(payload), id);
+  return id;
+}
+
+void ProtocolSession::chatReply(const std::string& type, const Json& payload, const std::string& id) {
+  auto pending = id.empty() ? chatPending_.end() : chatPending_.find(id);
+  if (pending != chatPending_.end() && pending->second.reply != type) pending = chatPending_.end();
+  if (type == msg::CHAT_HISTORY) {
+    // Only an answer to our own request: an unsolicited history is no event.
+    if (pending == chatPending_.end()) return;
+    require(text(payload, "channelId") == pending->second.channelId, "Chat history for another channel");
+    arrayField(payload, "messages");
+    auto messages = Json::array();
+    for (const auto& value : payload.at("messages")) {
+      auto message = chatMessage(value);
+      require(message.at("channelId") == pending->second.channelId, "Chat history mixes channels");
+      messages.push_back(std::move(message));
+    }
+    auto callback = std::move(pending->second.callback);
+    const auto channel = pending->second.channelId;
+    chatPending_.erase(pending);
+    effects_.push_back([callback = std::move(callback), channel, messages = std::move(messages)]() mutable {
+      callback(RpcResult{std::string(msg::CHAT_HISTORY), Json{{"channelId", channel}, {"messages", std::move(messages)}},
+                         std::nullopt});
+    });
+    return;
+  }
+  auto message = chatMessage(type == msg::CHAT_MESSAGE_UPDATED ? field(payload, "message") : payload);
+  if (pending != chatPending_.end()) {
+    require(message.at("channelId") == pending->second.channelId, "Chat message stored in another channel");
+    auto callback = std::move(pending->second.callback);
+    chatPending_.erase(pending);
+    effects_.push_back([callback = std::move(callback), message] {
+      callback(RpcResult{std::string(msg::CHAT_MESSAGE), Json{{"message", message}}, std::nullopt});
+    });
+  }
+  // Our own message arrives only as this answer, so it is also an event:
+  // an interface then learns every message the same way.
+  if (chatWatching_) event(SessionEventKind::chatMessage, type, std::move(message));
 }
 
 std::string ProtocolSession::request(std::string type, Json payload, std::vector<std::string> accepted,

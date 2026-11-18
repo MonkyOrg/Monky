@@ -1005,22 +1005,92 @@ void rejoinsOutlastTheirOwnDeparture() {
 void unreadFramesAreDroppedUnparsed() {
   using monky::light::reader::discardable;
   const std::string clip(4 * 1024 * 1024, 'A');
-  check(discardable(R"({"type":"SOUNDBOARD_PLAYED","payload":{"audioBase64":")" + clip + R"("}})"),
+  check(discardable(R"({"type":"SOUNDBOARD_PLAYED","payload":{"audioBase64":")" + clip + R"("}})", false),
         "A soundboard broadcast would take room in the queue");
-  check(discardable(R"({"payload":{"audioBase64":")" + clip + R"("},"type":"SOUNDBOARD_PLAYED"})"),
+  check(discardable(R"({"payload":{"audioBase64":")" + clip + R"("},"type":"SOUNDBOARD_PLAYED"})", false),
         "A type after a large payload was not found");
-  check(discardable(R"({"payload":{"type":"VOICE_STATE_CHANGED"},"type":"CHAT_MESSAGE_CREATED"})"),
+  check(discardable(R"({"payload":{"type":"VOICE_STATE_CHANGED"},"type":"CHAT_MESSAGE_CREATED"})", false),
         "A nested type was taken for the frame's");
-  check(!discardable(R"({"payload":{"type":"CHAT_MESSAGE_CREATED"},"type":"VOICE_STATE_CHANGED"})"),
+  check(!discardable(R"({"payload":{"type":"CHAT_MESSAGE_CREATED"},"type":"VOICE_STATE_CHANGED"})", false),
         "A relevant frame was dropped for a nested type");
-  check(!discardable(R"({"type":"PONG","payload":{"timestamp":1}})"), "A heartbeat answer was dropped");
+  check(!discardable(R"({"type":"PONG","payload":{"timestamp":1}})", false), "A heartbeat answer was dropped");
+  check(discardable(R"({"type":"CHAT_MESSAGE","payload":{}})", false), "Chat nobody reads must be dropped unparsed");
+  check(!discardable(R"({"type":"CHAT_MESSAGE","payload":{}})", true), "Watched chat must reach the session");
   // Without a readable type a frame goes on, to be reported as malformed.
   for (const auto* frame : {"{", "[]", "42", "not json", R"({"payload":{}})", R"({"type":7})",
                             R"({"type":{"name":"SOUNDBOARD_PLAYED"}})", R"({"type":["SOUNDBOARD_PLAYED"]})"})
-    check(!discardable(frame), "A frame without a readable type was dropped instead of reported");
+    check(!discardable(frame, false), "A frame without a readable type was dropped instead of reported");
 }
 
 // server-key-auth (#821): the Light follows the desktop app's rule for the server's identity key.
+Json chatPayload(std::string id, std::string content = "oi", std::string channel = "text") {
+  return {{"id", std::move(id)}, {"channelId", std::move(channel)}, {"userId", "u2"}, {"userNickname", "Ana"},
+          {"content", std::move(content)}, {"createdAt", 1000}, {"reactions", Json::array()}};
+}
+
+void chatIsReadOnDemandAndOutlivesCalls() {
+  Fixture f;
+  f.auth();
+  f.receive(message::CHAT_MESSAGE, chatPayload("m0"));
+  check(f.count(SessionEventKind::chatMessage) == 0, "Chat was read while nobody watches it");
+  std::vector<RpcResult> results;
+  auto callback = [&](RpcResult result) { results.push_back(std::move(result)); };
+  f.join();
+  f.session.loadChatHistory("text", 5000, 20, callback, f.now);
+  check(f.sent.back().at("type") == std::string(message::CHAT_LOAD_HISTORY) &&
+            f.sent.back().at("payload").at("beforeTimestamp") == 5000 && f.sent.back().at("payload").at("limit") == 20,
+        "History must ask for one page before the given time");
+  const auto history = f.lastId();
+  f.session.leave();
+  check(results.empty(), "Leaving the call cancelled a chat request");
+  auto deleted = chatPayload("m1", "segredo");
+  deleted["deletedAt"] = 2000;
+  deleted["attachments"] = Json::array({{{"originalName", "foto.png"}}});
+  f.receive(message::CHAT_HISTORY, {{"channelId", "text"}, {"messages", Json::array({chatPayload("m1a"), deleted})}},
+            history);
+  check(results.size() == 1 && !results[0].failure, "The history answer was not delivered");
+  const auto& messages = results[0].payload.at("messages");
+  check(messages.size() == 2 && messages[0].at("author") == "Ana" && !messages[0].contains("reactions"),
+        "History messages must be reduced to what a text interface shows");
+  check(messages[1].at("content") == "" && !messages[1].contains("attachments") && messages[1].at("deletedAt") == 2000,
+        "A deleted message keeps its row without its text or files");
+
+  f.receive(message::CHAT_MESSAGE, chatPayload("m2"));
+  check(f.count(SessionEventKind::chatMessage) == 1, "A watched chat must report new messages");
+  f.receive(message::CHAT_MESSAGE_UPDATED, {{"message", chatPayload("m2", "editado")}});
+  check(f.count(SessionEventKind::chatMessage) == 2 && f.events.back().type == message::CHAT_MESSAGE_UPDATED &&
+            f.events.back().payload.at("content") == "editado",
+        "An edit must be reported as an update");
+
+  f.session.sendChat("text", "ol\xc3\xa1", callback, f.now);
+  const auto sent = f.lastId();
+  check(f.sent.back().at("payload").at("clientMessageId") == sent, "A message must carry its delivery ID");
+  f.receive(message::CHAT_MESSAGE, chatPayload("m3", "ol\xc3\xa1"), sent);
+  check(results.size() == 2 && results[1].payload.at("message").at("id") == "m3",
+        "The stored message must answer the send");
+  check(f.count(SessionEventKind::chatMessage) == 3, "Our own message must also reach the interface once");
+
+  f.session.sendChat("text", std::string(10, 'x'), callback, f.now);
+  const auto quiet = f.count(SessionEventKind::failure);
+  f.receive(message::SERVER_ERROR,
+            {{"code", std::string(monky::protocol::error::MESSAGE_TOO_LONG)}, {"message", "Too long"}}, f.lastId());
+  check(results.size() == 3 && results[2].failure && results[2].failure->code == monky::protocol::error::MESSAGE_TOO_LONG,
+        "A refused message must fail only its own send");
+  check(f.count(SessionEventKind::failure) == quiet, "A refused message is not a session failure");
+
+  f.session.watchChat(false);
+  f.receive(message::CHAT_MESSAGE, chatPayload("m4"));
+  check(f.count(SessionEventKind::chatMessage) == 3, "Chat must stop being read when closed");
+
+  f.session.sendChat("text", "", callback, f.now);
+  check(results.size() == 4 && results[3].failure && results[3].failure->kind == FailureKind::invalidState,
+        "An empty message must be refused locally");
+  f.session.loadChatHistory("text", std::nullopt, 10, callback, f.now);
+  f.session.disconnected(f.session.connection(), f.now);
+  check(results.size() == 5 && results[4].failure && results[4].failure->kind == FailureKind::disconnected,
+        "A lost connection must fail pending chat requests");
+}
+
 void serverKeyBinding() {
   const auto key = [](char digit) { return "302a300506032b6570032100" + std::string(64, digit); };
   const auto challenge = [](std::string serverKey, std::string signature = std::string(128, 'c')) {
@@ -1147,6 +1217,7 @@ int main() {
     admittedRetiredJoinsLeave();
     rejoinsOutlastTheirOwnDeparture();
     unreadFramesAreDroppedUnparsed();
+    chatIsReadOnDemandAndOutlivesCalls();
     serverKeyBinding();
     std::cout << "Protocol session: 18 focused native test groups passed\n";
     return 0;

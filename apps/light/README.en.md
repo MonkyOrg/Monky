@@ -85,6 +85,8 @@ Enter one JSON object per line in the terminal, using the received channel ID:
 {"command":"set-input-mode","mode":"push_to_talk"}
 {"command":"ptt","active":true}
 {"command":"set-volume","sessionId":"SESSION-ID","volume":150}
+{"command":"chat-history","channelId":"TEXT-CHANNEL-ID"}
+{"command":"chat-send","channelId":"TEXT-CHANNEL-ID","content":"hi"}
 {"command":"stats","id":"my-query"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -172,6 +174,35 @@ WebRTC applies the gain to the decoded stream before mixing: there is no extra
 processing, and 100% costs nothing. Setting 100 again removes the entry. The
 profile keeps up to 256 sessions with a changed volume; beyond that, `set-volume`
 is rejected until one is set back to 100.
+
+### Text chat
+
+Chat is **read on demand**. Until something opens it, the messages the server
+broadcasts to everyone are dropped at the transport before they are parsed, as
+soundboard broadcasts already are: a busy server costs nothing to a Light that
+nobody is reading.
+
+- `chat-history` (`channelId`, optional `before` in ms and `limit` up to 100,
+  default 50) answers with `chat-history` and its messages, oldest first. To
+  page back, pass the oldest message's `createdAt` as `before`.
+- `chat-send` (`channelId`, `content`) answers with `chat-sent` once the server
+  stored the message. Each send carries a `clientMessageId` (the
+  `chat-delivery` feature), so the server never stores it twice. A refusal,
+  such as a missing permission or a message that is too long, comes back as
+  `command-error` with the server's `code`, without hurting the session.
+- Both commands turn reading on. From then on `chat-message` (new, yours
+  included) and `chat-message-updated` (edited or deleted) arrive for every
+  text channel you can read. `chat-watch` with `enabled:false` drops them again.
+- Messages are reduced to what a text interface shows: `id`, `channelId`,
+  `userId`, `author`, `content`, `createdAt` and, when present, `editedAt`,
+  `deletedAt` (with an empty `content`), attachment names, the quoted reply,
+  `forwarded`, and the system and bot marks. Reactions, polls, blocks, and
+  attachment contents are left out.
+- Chat does not depend on the call: joining, leaving, or switching rooms never
+  cancels a pending history or send. Only a lost connection ends them.
+
+The tray's chat window is the next step; until then chat is used through the
+commands.
 
 ## Opening as an application
 
