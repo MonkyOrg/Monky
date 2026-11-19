@@ -92,7 +92,9 @@ const compile = (file, imports) => {
 };
 
 /** A publisher whose connections are spies, sharing a capture that keeps `size` after `applyConstraints`. */
-function scaledFixture(mode, size, constraints = Promise.resolve()) {
+function scaledFixture(mode, size, constraints = Promise.resolve(), {
+  quality = 'source', video = { width: 328, height: 720, fps: 30, maxBitrateKbps: 2500 },
+} = {}) {
   const peers = [], renditions = [], applied = [], rescaled = [];
   const capture = { size };
   const profile = compile('browserScreenProfile.ts', () => ({ runsOnWebKit: () => false }));
@@ -117,8 +119,7 @@ function scaledFixture(mode, size, constraints = Promise.resolve()) {
     stop() { this.readyState = 'ended'; },
   };
   const source = {
-    shareId: 'browser', instanceId: randomUUID(), audio: false, codec: 'h264',
-    video: { width: 328, height: 720, fps: 30, maxBitrateKbps: 2500 },
+    shareId: 'browser', instanceId: randomUUID(), audio: false, codec: 'h264', video,
   };
   const publisher = new Publisher({
     call: { sessionId: 'host', channelId: 'room', mode, iceServers: [] }, source, format: 'compatible',
@@ -128,10 +129,35 @@ function scaledFixture(mode, size, constraints = Promise.resolve()) {
   });
   const watch = () => publisher.receive({
     action: 'watch', fromSessionId: 'viewer', targetSessionId: 'host', publisherSessionId: 'host', channelId: 'room',
-    shareId: source.shareId, sourceInstanceId: source.instanceId, subscriptionId: randomUUID(), quality: 'source', backend: 'browser',
+    shareId: source.shareId, sourceInstanceId: source.instanceId, subscriptionId: randomUUID(), quality, backend: 'browser',
   });
   return { publisher, peers, renditions, watch, capture, applied, rescaled };
 }
+
+test('an upright iPhone watched at a lower quality keeps the quality long side to long side, in P2P and on the SFU', async () => {
+  // Shared at 480p, an iPhone announces 388x852; its 480p rendition is 388x480 to every peer.
+  const options = { quality: '480p30', video: { width: 388, height: 852, fps: 30, maxBitrateKbps: 1500 } };
+  const p2p = scaledFixture('p2p', { width: 1206, height: 2622 }, undefined, options);
+  await p2p.watch();
+  // Inside 388x480 as drawn the screen shrank to 220x480 on the desktop.
+  assert.equal(p2p.peers[0].scaleResolutionDownBy, 1206 / 388);
+  assert.deepEqual(plain(p2p.applied.at(-1)), { width: { max: 388 }, height: { max: 852 }, frameRate: { max: 30 } });
+  await p2p.publisher.close('source-unavailable', false);
+
+  const sfu = scaledFixture('sfu', { width: 1206, height: 2622 }, undefined, options);
+  await sfu.watch();
+  assert.equal(sfu.renditions[0].scaleResolutionDownBy, 1206 / 388);
+  assert.deepEqual(plain(sfu.renditions[0].rendition.video), { width: 388, height: 480, fps: 30, maxBitrateKbps: 1500 },
+    'the server and older peers still know the rendition by its profile');
+  await sfu.publisher.close('source-unavailable', false);
+
+  // A landscape screen's rendition is the profile itself.
+  const wide = scaledFixture('p2p', { width: 2560, height: 1440 }, undefined,
+    { quality: '480p30', video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 2500 } });
+  await wide.watch();
+  assert.equal(wide.peers[0].scaleResolutionDownBy, 2560 / 852);
+  await wide.publisher.close('source-unavailable', false);
+});
 
 test('an iPhone capture Safari keeps whole is scaled by the encoder to the rendition, in P2P and on the SFU', async () => {
   // Safari ignores applyConstraints on the copy of a 1206x2622 portrait screen; at that size its encoder emitted no frame.
