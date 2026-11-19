@@ -4826,6 +4826,15 @@
   color: var(--text-secondary);
 }
 
+/* "Send logs to a channel": the forward picker's cards, one server and one channel. */
+.send-logs-modal { max-width: 480px; }
+.send-logs-modal .btn:disabled { opacity: .45; cursor: not-allowed; }
+.send-logs-description {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 /* A deleted message keeps its slot with a placeholder rather than vanishing,
    so the conversation does not silently reshuffle for whoever is reading (#504). */
 .chat-message-deleted-text {
