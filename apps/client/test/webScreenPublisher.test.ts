@@ -611,3 +611,13 @@ test('Only a Baseline SPS that omits it is declared Constrained Baseline', async
   assert.deepEqual(declared([0, 0, 1, 0x67, 0x42, 0x0c, 0x1f]), [true, [0, 0, 1, 0x67, 0x42, 0x40, 0x1f]], 'constraint_set4/5 cleared');
   assert.deepEqual(declared([0, 0, 1, 0x65, 0x42, 0x00, 0x1f]), [false, [0, 0, 1, 0x65, 0x42, 0x00, 0x1f]], 'only an SPS');
 });
+
+test('An iPhone screen the encoder levels below 3.1 is declared at Level 3.1, the lowest the desktop receives', async () => {
+  const { declareConstrainedBaseline } = await import('../src/renderer/platform/web/webScreen/constrainedBaseline');
+  const declared = (bytes: number[]) => { const frame = new Uint8Array(bytes); return [declareConstrainedBaseline(frame), [...frame]]; };
+  // An upright phone at 480p: 300×652 at 30 FPS fits Level 3.0, the level VideoToolbox picks for it.
+  assert.deepEqual(declared([0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1e, 0xab, 0x40]), [true, [0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0xab, 0x40]]);
+  assert.deepEqual(declared([0, 0, 1, 0x67, 0x42, 0x00, 0x16]), [true, [0, 0, 1, 0x67, 0x42, 0x40, 0x1f]], 'and its profile flag with it');
+  assert.deepEqual(declared([0, 0, 1, 0x67, 0x42, 0x50, 0x0b]), [true, [0, 0, 1, 0x67, 0x42, 0x40, 0x1f]], 'Level 1b loses constraint_set3');
+  assert.deepEqual(declared([0, 0, 1, 0x67, 0x42, 0xc0, 0x34]), [false, [0, 0, 1, 0x67, 0x42, 0xc0, 0x34]], 'a higher level is kept');
+});
