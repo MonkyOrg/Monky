@@ -115,19 +115,24 @@ async function runRegression(language, readPermission) {
   };
 
   const channel = (id, name, type = 'TEXT') => ({ id, name, type });
-  const session = (key, name, channels, blocked = []) => ({
+  const session = (key, name, channels, blocked = [], iconUrl = null) => ({
     key, host: `${key}.example`, port: 7300,
-    client: { getStatus: () => 'CONNECTED' },
+    client: { getStatus: () => 'CONNECTED', getHttpBaseUrl: () => `http://${key}.example:7300` },
     serverStore: {
-      serverDetails: { name, channels },
+      serverDetails: { name, channels, iconUrl },
       hasPermission: (permission, channelId) => permission === readPermission || !blocked.includes(channelId),
     },
   });
+  const icon = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const picture = root => {
+    const element = root?.querySelector('.initial-picture');
+    return element && { letter: element.querySelector('.initial-picture-letter')?.textContent, image: element.querySelector('img')?.getAttribute('src') ?? null };
+  };
   const filler = Array.from({ length: 60 }, (_, index) => channel(`a-${index}`, `canal-${String(index).padStart(2, '0')}`));
   const alpha = session('alpha', 'Alpha', [
     channel('a-general', 'general'), channel('a-support', 'support'), channel('a-locked', 'locked'),
     channel('a-voice', 'support-voice', 'VOICE'), ...filler,
-  ], ['a-locked']);
+  ], ['a-locked'], icon);
   const beta = session('beta', 'Beta', [channel('b-news', 'news'), channel('b-offtopic', 'offtopic')]);
   let sessions = [alpha, beta];
   const originals = { getAll: sessionManager.getAll, getActive: sessionManager.getActive };
@@ -144,6 +149,8 @@ async function runRegression(language, readPermission) {
     check(servers instanceof HTMLSelectElement && channels instanceof HTMLSelectElement, 'Server and channel are selects');
     check(!modal.querySelector('.forward-destination'), 'No destination cards are rendered');
     check(servers.value === 'alpha' && servers.options.length === 2, 'Every connected server is an option and the active one is chosen');
+    const field = modal.querySelector('[data-send-logs-server-field]');
+    check(picture(field)?.letter === 'A' && picture(field)?.image === icon, 'The closed field shows the chosen server picture');
     const locked = [...channels.options].find(item => item.value === 'a-locked');
     check(locked?.disabled && locked.label.includes(t('chat.forwardNoPermission')), 'A blocked channel is disabled and says why');
     check(![...channels.options].some(item => item.value === 'a-voice'), 'Only text channels are offered');
@@ -163,10 +170,16 @@ async function runRegression(language, readPermission) {
     check(modal.querySelector('#send-logs-channel') === channels && channels.value === 'a-support' && servers.value === 'alpha',
       'A connection update refreshes the options in place and keeps the choice');
 
-    const serverSearch = search(servers, 'bet');
+    const serverSearch = search(servers, '');
+    const serverRows = [...popup().querySelectorAll('.monky-select-option')];
+    check(picture(serverRows[0])?.image === icon && picture(serverRows[1])?.letter === 'B' && picture(serverRows[1])?.image === null,
+      'Each server option shows its picture, or its initial when it has none');
+    serverSearch.value = 'bet';
+    serverSearch.dispatchEvent(new Event('input', { bubbles: true }));
     check(rows().length === 1 && rows()[0] === 'Beta', 'Typing filters the servers');
     key(serverSearch, 'Enter');
     check(servers.value === 'beta', 'The other server is chosen');
+    check(picture(field)?.letter === 'B' && picture(field)?.image === null, 'The closed field follows the chosen server');
     check(channels.value === '' && confirm.disabled, 'Changing the server clears the chosen channel');
     check([...channels.options].filter(item => !item.hidden).map(item => item.value).join() === 'b-news,b-offtopic', 'The channels follow the chosen server');
 

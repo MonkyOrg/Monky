@@ -8,6 +8,9 @@ import { appEvents } from '../../core/EventBus';
 import { sessionManager, type ServerSession } from '../../core/SessionManager';
 import { channelPostBlocker, maxAttachmentBytes, sendToServerChannel, type ForwardItem } from '../../core/MessageForwarder';
 import { showSuccessToast } from '../CopyToast';
+import { resolveImageUrl } from '../../utils/avatar';
+import { firstInitial } from '../../utils/initial';
+import { initialPicture } from '../../utils/initialPicture';
 
 function connectedSessions(): ServerSession[] {
   return sessionManager.getAll().filter(session => session.client.getStatus() === 'CONNECTED' && session.serverStore.serverDetails);
@@ -17,16 +20,25 @@ function serverName(session: ServerSession): string {
   return session.serverStore.serverDetails?.name ?? session.host;
 }
 
-function option(label: string, value: string, icon: string | null, searchTerms = ''): HTMLOptionElement {
+function serverPicture(session: ServerSession): { image: string | null; initial: string } {
+  return {
+    image: resolveImageUrl(session.serverStore.serverDetails?.iconUrl, session.client.getHttpBaseUrl()),
+    initial: firstInitial(serverName(session)),
+  };
+}
+
+function option(label: string, value: string, data: { icon?: string; image?: string | null; initial?: string; searchTerms?: string } = {}): HTMLOptionElement {
   const element = new Option(label, value);
-  if (icon) element.dataset.icon = icon;
-  if (searchTerms) element.dataset.searchTerms = searchTerms;
+  if (data.icon) element.dataset.icon = data.icon;
+  if (data.image) element.dataset.image = data.image;
+  if (data.initial) element.dataset.initial = data.initial;
+  if (data.searchTerms) element.dataset.searchTerms = data.searchTerms;
   return element;
 }
 
 /** Shown while nothing is chosen; when the list is empty it explains why instead. */
 function placeholder(label: string, hasChoices: boolean): HTMLOptionElement {
-  const element = option(label, '', null);
+  const element = option(label, '');
   element.disabled = true;
   element.hidden = hasChoices;
   return element;
@@ -39,8 +51,9 @@ function textChannels(session: ServerSession): HTMLOptionElement[] {
     .filter(channel => channel.type === 'TEXT' && !channel.forumId && server.hasPermission(Permission.READ_MESSAGES, channel.id))
     .map(channel => {
       const blocker = channelPostBlocker(server, channel.id, true);
-      if (!blocker) return option(channel.name, channel.id, 'tag');
-      const element = option(t('settings.logsSendChannelBlocked', { channel: channel.name, reason: blocker }), channel.id, 'tag', blocker);
+      if (!blocker) return option(channel.name, channel.id, { icon: 'tag' });
+      const element = option(t('settings.logsSendChannelBlocked', { channel: channel.name, reason: blocker }), channel.id,
+        { icon: 'tag', searchTerms: blocker });
       element.disabled = true;
       return element;
     });
@@ -63,8 +76,10 @@ export function openSendLogsModal(owner: AbortSignal): void {
         <p class="send-logs-description">${t('settings.logsSendDesc')}</p>
         <fieldset class="send-logs-fields" data-send-logs-fields>
           <div class="form-group"><label for="send-logs-server">${t('settings.logsSendServer')}</label>
-            <select id="send-logs-server" class="input-field" data-send-logs-server
-              data-search-placeholder="${t('settings.logsSendServerSearch')}" data-empty-label="${t('settings.logsSendServerNoResults')}"></select></div>
+            <div class="send-logs-server-field" data-send-logs-server-field>
+              <select id="send-logs-server" class="input-field" data-send-logs-server
+                data-search-placeholder="${t('settings.logsSendServerSearch')}" data-empty-label="${t('settings.logsSendServerNoResults')}"></select>
+            </div></div>
           <div class="form-group"><label for="send-logs-channel">${t('settings.logsSendChannel')}</label>
             <select id="send-logs-channel" class="input-field" data-send-logs-channel
               data-search-placeholder="${t('settings.logsSendChannelSearch')}" data-empty-label="${t('settings.logsSendChannelNoResults')}"></select></div>
@@ -76,12 +91,21 @@ export function openSendLogsModal(owner: AbortSignal): void {
       </div></div>`,
   });
   const fields = modal.card.querySelector<HTMLFieldSetElement>('[data-send-logs-fields]');
+  const serverField = modal.card.querySelector<HTMLElement>('[data-send-logs-server-field]');
   const servers = modal.card.querySelector<HTMLSelectElement>('[data-send-logs-server]');
   const channels = modal.card.querySelector<HTMLSelectElement>('[data-send-logs-channel]');
   const confirm = modal.card.querySelector<HTMLButtonElement>('[data-send-logs-confirm]');
-  if (!fields || !servers || !channels || !confirm) return;
+  if (!fields || !serverField || !servers || !channels || !confirm) return;
 
   const selectedSession = (): ServerSession | undefined => connectedSessions().find(session => session.key === serverKey);
+  // The closed field repeats the chosen server's picture, as its option does in the popup.
+  const syncServerPicture = (): void => {
+    const session = selectedSession();
+    serverField.querySelector(':scope > .initial-picture')?.remove();
+    if (!session) return;
+    const { image, initial } = serverPicture(session);
+    serverField.prepend(initialPicture(image, initial));
+  };
   const syncConfirm = (): void => {
     fields.disabled = busy;
     confirm.disabled = busy || !selectedSession() || !channelId;
@@ -107,10 +131,11 @@ export function openSendLogsModal(owner: AbortSignal): void {
       channelId = null;
     }
     servers.replaceChildren(...(sessions.length
-      ? sessions.map(session => option(serverName(session), session.key, 'dns', `${session.host}:${session.port}`))
+      ? sessions.map(session => option(serverName(session), session.key, { ...serverPicture(session), searchTerms: `${session.host}:${session.port}` }))
       : [placeholder(t('settings.logsSendNoServers'), false)]));
     servers.value = serverKey ?? '';
     servers.disabled = !sessions.length;
+    syncServerPicture();
     syncChannels();
   };
 
@@ -118,6 +143,7 @@ export function openSendLogsModal(owner: AbortSignal): void {
     if (busy || servers.value === serverKey) return;
     serverKey = servers.value;
     channelId = null;
+    syncServerPicture();
     syncChannels();
   }, { signal: modal.signal });
 

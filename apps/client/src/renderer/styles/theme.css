@@ -4835,6 +4835,15 @@
   padding: 0;
   border: 0;
 }
+.send-logs-server-field { position: relative; }
+.send-logs-server-field > .initial-picture {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.send-logs-server-field:has(> .initial-picture) > select { padding-left: 44px; }
 .send-logs-description {
   margin: 0;
   font-size: 13px;

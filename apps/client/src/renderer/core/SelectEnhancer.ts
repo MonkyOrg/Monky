@@ -1,6 +1,7 @@
 import { animateEnter, ownSurface, positionAnchoredSurface, removeWithMotion } from '../utils/surfaceMotion';
 import { normalizeSearchString } from '../utils/search';
 import { smoothScrollIntoView } from '../utils/scroll';
+import { initialPicture } from '../utils/initialPicture';
 
 const OPEN_ATTRIBUTES = ['aria-expanded', 'aria-controls', 'aria-activedescendant'] as const;
 
@@ -338,7 +339,11 @@ export class SelectEnhancer {
       element.setAttribute('aria-selected', String(option.selected));
       element.setAttribute('aria-disabled', String(!this.available(option)));
       element.textContent = option.label;
-      if (option.dataset.icon) {
+      if (option.dataset.initial) {
+        element.prepend(initialPicture(option.dataset.image ?? null, option.dataset.initial));
+        element.classList.add('has-icon');
+        element.setAttribute('aria-label', option.label);
+      } else if (option.dataset.icon) {
         const icon = document.createElement('span');
         icon.className = 'material-symbols-outlined md-20';
         icon.setAttribute('aria-hidden', 'true');
