@@ -4826,9 +4826,15 @@
   color: var(--text-secondary);
 }
 
-/* "Send logs to a channel": the forward picker's cards, one server and one channel. */
+/* "Send logs to a channel": two searchable selects, so twenty servers or a hundred channels stay one field each. */
 .send-logs-modal { max-width: 480px; }
 .send-logs-modal .btn:disabled { opacity: .45; cursor: not-allowed; }
+.send-logs-fields {
+  min-width: 0;
+  margin: 16px 0 0;
+  padding: 0;
+  border: 0;
+}
 .send-logs-description {
   margin: 0;
   font-size: 13px;

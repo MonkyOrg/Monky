@@ -869,8 +869,9 @@ sensíveis. O [Monitor do Servidor](/criar-seu-servidor#monitor-do-servidor)
 
 Em **Configurações → Logs**, **Enviar para um canal** publica os logs como um
 arquivo de texto em um canal de texto de qualquer servidor ao qual você esteja
-conectado. Escolha o servidor e o canal e clique em **Enviar**. Só ficam
-disponíveis os canais onde você pode enviar arquivos. Todos com acesso ao canal
+conectado. Escolha o servidor e o canal e clique em **Enviar**; os dois campos
+aceitam busca pelo nome. Só ficam disponíveis os canais onde você pode enviar
+arquivos. Todos com acesso ao canal
 podem ler o arquivo. Quando os logs passam do limite de tamanho de arquivo do
 servidor, só os registros mais recentes vão, e a mensagem avisa isso.
 

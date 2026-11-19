@@ -849,7 +849,8 @@ subject to that server's permissions.
 
 Under **Settings → Logs**, **Send to a channel** posts the logs as a text file
 in a text channel of any server you are connected to. Choose the server and the
-channel, then **Send**. Only channels where you can send files are available.
+channel, then **Send**; both fields can be searched by name. Only channels where
+you can send files are available.
 Everyone with access to the channel can read the file. When the logs exceed the
 server's file size limit, only the most recent entries go, and the message says
 so.

@@ -1,6 +1,6 @@
 import { Permission } from '@monky/shared';
 import { t } from '../../i18n';
-import { html, trustedHtml, type SafeHtml } from '../../utils/html';
+import { html } from '../../utils/html';
 import { openModal } from '../../utils/modalShell';
 import { errorMessage, reportError } from '../../utils/feedback';
 import { withButtonLoading } from '../../utils/buttonLoading';
@@ -8,17 +8,6 @@ import { appEvents } from '../../core/EventBus';
 import { sessionManager, type ServerSession } from '../../core/SessionManager';
 import { channelPostBlocker, maxAttachmentBytes, sendToServerChannel, type ForwardItem } from '../../core/MessageForwarder';
 import { showSuccessToast } from '../CopyToast';
-
-const SERVER = 'data-send-logs-server';
-const CHANNEL = 'data-send-logs-channel';
-
-interface Option {
-  value: string;
-  label: string;
-  detail?: string;
-  icon: string;
-  blocker?: string | null;
-}
 
 function connectedSessions(): ServerSession[] {
   return sessionManager.getAll().filter(session => session.client.getStatus() === 'CONNECTED' && session.serverStore.serverDetails);
@@ -28,30 +17,33 @@ function serverName(session: ServerSession): string {
   return session.serverStore.serverDetails?.name ?? session.host;
 }
 
-/** Text channels the user can read; the ones that refuse files stay listed with the reason. */
-function textChannels(session: ServerSession): Option[] {
+function option(label: string, value: string, icon: string | null, searchTerms = ''): HTMLOptionElement {
+  const element = new Option(label, value);
+  if (icon) element.dataset.icon = icon;
+  if (searchTerms) element.dataset.searchTerms = searchTerms;
+  return element;
+}
+
+/** Shown while nothing is chosen; when the list is empty it explains why instead. */
+function placeholder(label: string, hasChoices: boolean): HTMLOptionElement {
+  const element = option(label, '', null);
+  element.disabled = true;
+  element.hidden = hasChoices;
+  return element;
+}
+
+/** Text channels the user can read; the ones that refuse files stay listed, disabled, with the reason. */
+function textChannels(session: ServerSession): HTMLOptionElement[] {
   const server = session.serverStore;
   return (server.serverDetails?.channels ?? [])
     .filter(channel => channel.type === 'TEXT' && !channel.forumId && server.hasPermission(Permission.READ_MESSAGES, channel.id))
-    .map(channel => ({ value: channel.id, label: channel.name, icon: 'tag', blocker: channelPostBlocker(server, channel.id, true) }));
-}
-
-function renderOptions(attribute: typeof SERVER | typeof CHANNEL, label: string, options: readonly Option[], selected: string | null): SafeHtml {
-  const name = trustedHtml(attribute);
-  return html`<div class="forward-destinations" role="group" aria-label="${label}">${options.map(option => html`
-    <button type="button" class="forward-destination" ${name}="${option.value}" aria-pressed="${option.value === selected}"
-      aria-disabled="${!!option.blocker}"${option.blocker ? html` title="${option.blocker}"` : null}>
-      <span class="material-symbols-outlined md-20 forward-destination-icon" aria-hidden="true">${option.icon}</span>
-      <span class="forward-destination-copy"><strong>${option.label}</strong>${
-        option.blocker || option.detail ? html`<small>${option.blocker ?? option.detail ?? ''}</small>` : null}</span>
-      <span class="material-symbols-outlined md-20 forward-destination-check" aria-hidden="true">check_circle</span>
-    </button>`)}</div>`;
-}
-
-function markSelected(group: HTMLElement, attribute: typeof SERVER | typeof CHANNEL, value: string | null): void {
-  group.querySelectorAll<HTMLElement>(`[${attribute}]`).forEach(option => {
-    option.setAttribute('aria-pressed', String(option.getAttribute(attribute) === value));
-  });
+    .map(channel => {
+      const blocker = channelPostBlocker(server, channel.id, true);
+      if (!blocker) return option(channel.name, channel.id, 'tag');
+      const element = option(t('settings.logsSendChannelBlocked', { channel: channel.name, reason: blocker }), channel.id, 'tag', blocker);
+      element.disabled = true;
+      return element;
+    });
 }
 
 /**
@@ -69,68 +61,73 @@ export function openSendLogsModal(owner: AbortSignal): void {
       <div class="modal-header"><h2>${t('settings.logsSendTitle')}</h2></div>
       <div class="modal-body">
         <p class="send-logs-description">${t('settings.logsSendDesc')}</p>
-        <div class="forward-lists">
-          <section class="forward-section"><h3 class="forward-section-heading">${t('settings.logsSendServer')}</h3>
-            <div data-send-logs-servers></div></section>
-          <section class="forward-section"><h3 class="forward-section-heading">${t('settings.logsSendChannel')}</h3>
-            <div data-send-logs-channels></div></section>
-        </div>
+        <fieldset class="send-logs-fields" data-send-logs-fields>
+          <div class="form-group"><label for="send-logs-server">${t('settings.logsSendServer')}</label>
+            <select id="send-logs-server" class="input-field" data-send-logs-server
+              data-search-placeholder="${t('settings.logsSendServerSearch')}" data-empty-label="${t('settings.logsSendServerNoResults')}"></select></div>
+          <div class="form-group"><label for="send-logs-channel">${t('settings.logsSendChannel')}</label>
+            <select id="send-logs-channel" class="input-field" data-send-logs-channel
+              data-search-placeholder="${t('settings.logsSendChannelSearch')}" data-empty-label="${t('settings.logsSendChannelNoResults')}"></select></div>
+        </fieldset>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-modal-close>${t('common.cancel')}</button>
         <button type="button" class="btn btn-primary" data-send-logs-confirm disabled>${t('settings.logsSendAction')}</button>
       </div></div>`,
   });
-  const servers = modal.card.querySelector<HTMLElement>('[data-send-logs-servers]');
-  const channels = modal.card.querySelector<HTMLElement>('[data-send-logs-channels]');
+  const fields = modal.card.querySelector<HTMLFieldSetElement>('[data-send-logs-fields]');
+  const servers = modal.card.querySelector<HTMLSelectElement>('[data-send-logs-server]');
+  const channels = modal.card.querySelector<HTMLSelectElement>('[data-send-logs-channel]');
   const confirm = modal.card.querySelector<HTMLButtonElement>('[data-send-logs-confirm]');
-  if (!servers || !channels || !confirm) return;
+  if (!fields || !servers || !channels || !confirm) return;
 
   const selectedSession = (): ServerSession | undefined => connectedSessions().find(session => session.key === serverKey);
-  const syncConfirm = (): void => { confirm.disabled = busy || !selectedSession() || !channelId; };
+  const syncConfirm = (): void => {
+    fields.disabled = busy;
+    confirm.disabled = busy || !selectedSession() || !channelId;
+  };
 
-  const renderChannels = (): void => {
+  // Only the options are replaced, so an open search popup keeps its filter and the choice survives.
+  const syncChannels = (): void => {
     const session = selectedSession();
     const options = session ? textChannels(session) : [];
-    if (!options.some(option => option.value === channelId && !option.blocker)) channelId = null;
-    channels.innerHTML = (options.length
-      ? renderOptions(CHANNEL, t('settings.logsSendChannel'), options, channelId)
-      : html`<p class="forward-empty">${t(session ? 'settings.logsSendNoChannels' : 'settings.logsSendNoServers')}</p>`).toString();
+    if (!options.some(item => item.value === channelId && !item.disabled)) channelId = null;
+    const empty = t(!session ? 'settings.logsSendNoServers' : options.length ? 'settings.logsSendChannelPlaceholder' : 'settings.logsSendNoChannels');
+    channels.replaceChildren(placeholder(empty, options.length > 0), ...options);
+    channels.value = channelId ?? '';
+    channels.disabled = !options.length;
     syncConfirm();
   };
 
-  const renderServers = (): void => {
+  const syncServers = (): void => {
     const sessions = connectedSessions();
     if (!sessions.some(session => session.key === serverKey)) {
       const active = sessionManager.getActive();
       serverKey = (sessions.find(session => session.key === active?.key) ?? sessions[0])?.key ?? null;
+      channelId = null;
     }
-    servers.innerHTML = (sessions.length
-      ? renderOptions(SERVER, t('settings.logsSendServer'), sessions.map(session => ({
-        value: session.key, label: serverName(session), detail: `${session.host}:${session.port}`, icon: 'dns',
-      })), serverKey)
-      : html`<p class="forward-empty">${t('settings.logsSendNoServers')}</p>`).toString();
-    renderChannels();
+    servers.replaceChildren(...(sessions.length
+      ? sessions.map(session => option(serverName(session), session.key, 'dns', `${session.host}:${session.port}`))
+      : [placeholder(t('settings.logsSendNoServers'), false)]));
+    servers.value = serverKey ?? '';
+    servers.disabled = !sessions.length;
+    syncChannels();
   };
 
-  modal.card.addEventListener('click', event => {
-    const option = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('.forward-destination') : null;
-    if (!option || busy || option.getAttribute('aria-disabled') === 'true') return;
-    const server = option.getAttribute(SERVER);
-    const channel = option.getAttribute(CHANNEL);
-    if (server && server !== serverKey) {
-      serverKey = server;
-      channelId = null;
-      markSelected(servers, SERVER, serverKey);
-      renderChannels();
-    } else if (channel) {
-      channelId = channel;
-      markSelected(channels, CHANNEL, channelId);
-      syncConfirm();
-    }
+  servers.addEventListener('change', () => {
+    if (busy || servers.value === serverKey) return;
+    serverKey = servers.value;
+    channelId = null;
+    syncChannels();
   }, { signal: modal.signal });
 
-  const unsubscribe = appEvents.on('session.connections_changed', () => { if (!busy) renderServers(); });
+  channels.addEventListener('change', () => {
+    if (busy) return;
+    channelId = channels.value || null;
+    syncConfirm();
+  }, { signal: modal.signal });
+
+  const unsubscribe = appEvents.on('session.connections_changed', () => { if (!busy) syncServers(); });
   modal.signal.addEventListener('abort', unsubscribe, { once: true });
 
   confirm.addEventListener('click', () => {
@@ -139,7 +136,7 @@ export function openSendLogsModal(owner: AbortSignal): void {
     if (busy || !target) return;
     if (!session) {
       reportError(t('settings.logsSendServerGone'));
-      renderServers();
+      syncServers();
       return;
     }
     busy = true;
@@ -154,11 +151,11 @@ export function openSendLogsModal(owner: AbortSignal): void {
       }
       busy = false;
       if (sent) modal.close();
-      else if (!modal.signal.aborted) renderServers();
+      else if (!modal.signal.aborted) syncServers();
     });
   }, { signal: modal.signal });
 
-  renderServers();
+  syncServers();
 }
 
 async function sendLogs(session: ServerSession, channelId: string): Promise<void> {
