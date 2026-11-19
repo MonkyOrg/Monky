@@ -78,9 +78,16 @@ export type ClientLogBundle =
   | { success: true; fileName: string; content: string; truncated: boolean }
   | { success: false; error: 'no-logs' | 'failed' };
 
-/** Name of the file the client logs are exported to, on disk or in a channel. */
+/**
+ * Name of the file the client logs are exported to, on disk or in a channel:
+ * local date and time down to the second, so exports of the same day neither
+ * collide nor sort out of order. Windows refuses `:` in file names.
+ */
 export function clientLogExportName(now: Date = new Date()): string {
-  return `monky-logs-${now.toISOString().slice(0, 10)}.txt`;
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const time = `${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+  return `monky-logs-${date}_${time}.txt`;
 }
 
 const NEWLINE = 0x0a;

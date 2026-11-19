@@ -30,6 +30,9 @@ test('newestLogBytes never splits a multi-byte character', () => {
   }
 });
 
-test('clientLogExportName names the file after the day', () => {
-  assert.equal(clientLogExportName(new Date('2026-11-19T15:00:00Z')), 'monky-logs-2026-11-19.txt');
+test('clientLogExportName names the file after the local date and time', () => {
+  // Built from local fields: late at night the name keeps the local day, not the UTC one.
+  assert.equal(clientLogExportName(new Date(2026, 10, 19, 23, 30, 5)), 'monky-logs-2026-11-19_23-30-05.txt');
+  assert.notEqual(clientLogExportName(new Date(2026, 10, 19, 9, 0, 0)), clientLogExportName(new Date(2026, 10, 19, 9, 0, 1)),
+    'Two exports of the same day get different names');
 });

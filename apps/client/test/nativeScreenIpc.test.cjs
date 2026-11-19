@@ -790,7 +790,7 @@ test('logs sent to a channel keep the newest whole lines that fit the server fil
   const whole = await logger.bundleLogs(1024 * 1024);
   assert.equal(whole.success, true);
   assert.equal(whole.truncated, false);
-  assert.match(whole.fileName, /^monky-logs-\d{4}-\d{2}-\d{2}\.txt$/);
+  assert.match(whole.fileName, /^monky-logs-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.txt$/);
   assert.match(whole.content, /^\n--- session-old\.jsonl \(0\.0 KB\) ---\n\{"old":1\}\n\{"old":2\}\n\n--- session-.+newest entry/s,
     'Sessions keep the exported layout, oldest first.');
   const current = whole.content.slice(whole.content.indexOf('\n--- session-', 1));

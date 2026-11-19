@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O arquivo de logs exportado ou enviado para um canal agora leva a data e a hora no nome, no horário local, então dois logs do mesmo dia não têm mais o mesmo nome.",
+  "en": "The log file you export or send to a channel now carries the local date and time in its name, so two logs from the same day no longer share a name."
+}
