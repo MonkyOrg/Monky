@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Em Enviar logs para um canal, o servidor e o canal agora são escolhidos em campos com busca, com a foto de cada servidor, em vez de uma lista de cartões que crescia sem limite com muitos servidores ou canais.",
+  "en": "In Send logs to a channel, the server and the channel are now picked in searchable fields that show each server's picture, instead of a list of cards that grew without bound with many servers or channels."
+}
