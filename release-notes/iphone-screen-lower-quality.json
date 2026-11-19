@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A tela do iPhone compartilhada pelo Monky Web não fica mais minúscula (220×480) para quem escolhe uma qualidade menor que a original: o lado maior da tela segue o lado maior da qualidade escolhida, como numa tela deitada.",
+  "en": "An iPhone screen shared from Monky Web no longer turns tiny (220×480) for viewers who pick a quality below the original: the screen's long side now follows the chosen quality's long side, as a landscape screen does."
+}

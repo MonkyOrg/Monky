@@ -1,5 +1,20 @@
-import type { NativeScreenVideoProfile } from '@monky/shared';
+import {
+  getScreenShareProfile, type NativeScreenVideoProfile, type ScreenCodec, type ScreenShareQuality,
+} from '@monky/shared';
 import type { CapturedVideoSettings } from './browserScreenProfile';
+
+/**
+ * The frame an upright source's rendition encodes in: the quality's limits applied long side to long side.
+ * The announced profile keeps the protocol's landscape limits, so every peer still names the rendition alike,
+ * but encoding inside it squeezed an iPhone's 480p down to 220×480.
+ */
+export function renditionFrame(
+  source: Readonly<NativeScreenVideoProfile>, quality: ScreenShareQuality, codec: ScreenCodec = 'h264',
+): Readonly<NativeScreenVideoProfile> {
+  if (source.height <= source.width) return getScreenShareProfile(source, quality, codec);
+  const turned = getScreenShareProfile({ ...source, width: source.height, height: source.width }, quality, codec);
+  return Object.freeze({ ...turned, width: turned.height, height: turned.width });
+}
 
 /**
  * The size limits that hold a capture inside its rendition in the orientation it has now. A rendition is a
