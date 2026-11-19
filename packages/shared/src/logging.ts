@@ -72,3 +72,29 @@ export const CLIENT_LOG_DEFAULTS: ClientLogConfig = {
 };
 
 export const LOG_LEVELS: LogLevel[] = ['INFO', 'WARN', 'ERROR'];
+
+/** The client logs gathered into one text file, ready to attach to a message. */
+export type ClientLogBundle =
+  | { success: true; fileName: string; content: string; truncated: boolean }
+  | { success: false; error: 'no-logs' | 'failed' };
+
+/** Name of the file the client logs are exported to, on disk or in a channel. */
+export function clientLogExportName(now: Date = new Date()): string {
+  return `monky-logs-${now.toISOString().slice(0, 10)}.txt`;
+}
+
+const NEWLINE = 0x0a;
+
+/**
+ * The newest `maxBytes` of UTF-8 log text, starting at a whole line: the oldest
+ * entries go first, and a cut never leaves half an entry or half a character.
+ */
+export function newestLogBytes(bytes: Uint8Array, maxBytes: number): Uint8Array {
+  if (bytes.length <= maxBytes) return bytes;
+  if (maxBytes <= 0) return bytes.subarray(bytes.length);
+  const tail = bytes.subarray(bytes.length - maxBytes);
+  // The byte just before the tail ending a line means the tail already starts on one.
+  if (bytes[bytes.length - maxBytes - 1] === NEWLINE) return tail;
+  const lineEnd = tail.indexOf(NEWLINE);
+  return lineEnd < 0 ? tail.subarray(tail.length) : tail.subarray(lineEnd + 1);
+}

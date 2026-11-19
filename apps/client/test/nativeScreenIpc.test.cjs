@@ -779,6 +779,33 @@ test('persistent screen logs use existing rotation and report export write failu
   assert.match(fs.readFileSync(exportPath, 'utf8'), /call-retirement-result/);
 });
 
+test('logs sent to a channel keep the newest whole lines that fit the server file limit', async t => {
+  const { logger, directory } = persistentLogger(t);
+  const oldPath = path.join(directory, 'client-logs', 'session-old.jsonl');
+  fs.writeFileSync(oldPath, '{"old":1}\n{"old":2}\n');
+  fs.utimesSync(oldPath, new Date(1_000), new Date(1_000));
+  logger.setConfig({ enabled: true });
+  logger.write({ timestamp: '2026-01-01T00:00:00.000Z', level: 'INFO', category: 'APP', message: 'newest entry' });
+
+  const whole = await logger.bundleLogs(1024 * 1024);
+  assert.equal(whole.success, true);
+  assert.equal(whole.truncated, false);
+  assert.match(whole.fileName, /^monky-logs-\d{4}-\d{2}-\d{2}\.txt$/);
+  assert.match(whole.content, /^\n--- session-old\.jsonl \(0\.0 KB\) ---\n\{"old":1\}\n\{"old":2\}\n\n--- session-.+newest entry/s,
+    'Sessions keep the exported layout, oldest first.');
+  const current = whole.content.slice(whole.content.indexOf('\n--- session-', 1));
+  const oldHeader = whole.content.slice(0, whole.content.indexOf('{"old":1}'));
+
+  const partial = await logger.bundleLogs(Buffer.byteLength(current) + Buffer.byteLength(oldHeader) + 11);
+  assert.equal(partial.truncated, true);
+  assert.equal(partial.content, `${oldHeader}{"old":2}\n${current}`, 'The oldest line goes first, and no line is cut.');
+
+  const newestOnly = await logger.bundleLogs(Buffer.byteLength(current) + 5);
+  assert.equal(newestOnly.truncated, true);
+  assert.equal(newestOnly.content, current, 'A session whose header does not fit is left out whole.');
+  assert.ok(Buffer.byteLength(newestOnly.content) <= Buffer.byteLength(current) + 5);
+});
+
 test('publisher diagnostics correlate profiles, demand, fallback and teardown without per-frame or polling logs', async t => {
   const f = fixture(t);
   await f.join(); await f.participants();

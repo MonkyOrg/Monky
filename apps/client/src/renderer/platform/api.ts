@@ -341,6 +341,7 @@ export interface PlatformApi {
   getClientLogConfig: Invoke<'client-log:get-config'>;
   setClientLogConfig: Invoke<'client-log:set-config'>;
   exportClientLogs: Invoke<'client-log:export'>;
+  bundleClientLogs: Invoke<'client-log:bundle'>;
   getClientLogSize: Invoke<'client-log:get-size'>;
   clearClientLogs: Invoke<'client-log:clear'>;
   platform: string;
