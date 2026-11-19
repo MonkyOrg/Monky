@@ -21,7 +21,7 @@ import { createWebMediaLibrary, supportsDirectoryPicker } from './webMediaLibrar
 import { createWebBotScreenDocument, removeWebBotScreenDocument, webBotScreenDocumentHost } from './webBotScreens';
 import { webBotStorage, wipeWebBotStorage } from './webBotStorage';
 import { createEventCalendar } from '../../utils/eventCalendar';
-import { clearWebLogs, exportWebLogs, getWebLogConfig, getWebLogSize, setWebLogConfig, writeWebLog } from './webClientLog';
+import { bundleWebLogs, clearWebLogs, exportWebLogs, getWebLogConfig, getWebLogSize, setWebLogConfig, writeWebLog } from './webClientLog';
 import { WebScreenRuntime, webScreenCapabilities } from './webScreen/webScreenRuntime';
 
 /**
@@ -529,6 +529,7 @@ export function createWebPlatformApi(): PlatformApi {
     getClientLogConfig: getWebLogConfig,
     setClientLogConfig: setWebLogConfig,
     exportClientLogs: exportWebLogs,
+    bundleClientLogs: bundleWebLogs,
     getClientLogSize: getWebLogSize,
     clearClientLogs: clearWebLogs,
   };

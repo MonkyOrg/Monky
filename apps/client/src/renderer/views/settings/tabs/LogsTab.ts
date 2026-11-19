@@ -3,6 +3,7 @@ import { clientLog } from '../../../core/ClientLogService';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { renderSwitch } from '../../../utils/formControls';
+import { openSendLogsModal } from '../SendLogsModal';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -11,6 +12,8 @@ function formatBytes(bytes: number): string {
 }
 
 export class LogsTab {
+  private lifetime = new AbortController();
+
   public renderHtml(): string {
     return `
       <!-- Logging Toggle -->
@@ -66,6 +69,10 @@ export class LogsTab {
             <span class="material-symbols-outlined md-16" style="margin-right: 4px;">download</span>
             ${t('settings.logsExport')}
           </button>
+          <button id="btn-send-logs" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px;">
+            <span class="material-symbols-outlined md-16" style="margin-right: 4px;">send</span>
+            ${t('settings.logsSendToChannel')}
+          </button>
           <button id="btn-clear-logs" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px; color: var(--text-danger); border-color: rgba(255, 80, 80, 0.4);">
             <span class="material-symbols-outlined md-16" style="margin-right: 4px;">delete</span>
             ${t('settings.logsClear')}
@@ -77,6 +84,9 @@ export class LogsTab {
   }
 
   public async attachEvents(container: HTMLElement): Promise<void> {
+    this.cleanup();
+    this.lifetime = new AbortController();
+    const signal = this.lifetime.signal;
     const checkboxEnabled = container.querySelector<HTMLInputElement>('#checkbox-logs-enabled');
     const selectMaxSize = container.querySelector<HTMLSelectElement>('#select-logs-max-size');
     const currentSizeEl = container.querySelector<HTMLElement>('#logs-current-size');
@@ -134,12 +144,18 @@ export class LogsTab {
       this.updateSize(currentSizeEl);
     });
 
+    container.querySelector('#btn-send-logs')?.addEventListener('click', () => openSendLogsModal(signal), { signal });
+
     // Clear
     btnClear?.addEventListener('click', async () => {
       await window.api.clearClientLogs();
       if (statusEl) statusEl.textContent = t('settings.logsClearSuccess');
       this.updateSize(currentSizeEl);
     });
+  }
+
+  public cleanup(): void {
+    this.lifetime.abort();
   }
 
   private async updateSize(el: HTMLElement | null): Promise<void> {

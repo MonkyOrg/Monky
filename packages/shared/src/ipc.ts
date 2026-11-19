@@ -14,7 +14,7 @@ export const AUTOMATION_CANCEL = 'automation:cancel' satisfies keyof IpcEvents;
 export const AUTOMATION_CHANGED = 'automation:changed' satisfies keyof IpcEvents;
 import type { MiniappBrowserOpen, MiniappBrowserOwnerCommand, MiniappBrowserControl, MiniappBrowserState } from './miniappBrowser.js';
 import type { DiscordWebCommand, DiscordWebDrop, DiscordWebFrame } from './discordWeb.js';
-import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
+import type { ClientLogBundle, ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
 import type { DevelopmentQaConfig, DevelopmentQaReport } from './developmentQa.js';
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
@@ -1191,6 +1191,8 @@ export interface IpcInvokeChannels extends DmInvokeChannels {
   'client-log:get-config': { args: []; returnType: ClientLogConfig };
   'client-log:set-config': { args: [config: Partial<ClientLogConfig>]; returnType: void };
   'client-log:export': { args: []; returnType: { success: boolean; filePath?: string; error?: string } };
+  /** The newest logs that fit in `maxBytes`, for sending to a channel. */
+  'client-log:bundle': { args: [maxBytes: number]; returnType: ClientLogBundle };
   'client-log:get-size': { args: []; returnType: number };
   'client-log:clear': { args: []; returnType: void };
 }

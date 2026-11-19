@@ -1,4 +1,7 @@
-import { CLIENT_LOG_DEFAULTS, type ClientLogConfig, type ClientLogEntry } from '@monky/shared';
+import {
+  CLIENT_LOG_DEFAULTS, clientLogExportName, newestLogBytes,
+  type ClientLogBundle, type ClientLogConfig, type ClientLogEntry,
+} from '@monky/shared';
 import { saveText } from './webFiles';
 import { deleteRecordsWithPrefix, readRecord, readRecordsWithPrefix, writeRecord, writeRecords } from './webStorage';
 
@@ -105,17 +108,40 @@ export async function clearWebLogs(): Promise<void> {
   await deleteRecordsWithPrefix(PREFIX);
 }
 
-/** Every session's lines in one text file, as the desktop exports them. */
-export async function exportWebLogs(): Promise<{ success: boolean; error?: string }> {
+/** Every session's lines in one text, as the desktop exports them; null when there are none. */
+async function logText(): Promise<string | null> {
   await flushWebLog();
   const all = await chunks();
-  if (all.length === 0) return { success: false, error: 'no-logs' };
+  if (all.length === 0) return null;
   const sessions = new Map<string, string[]>();
   for (const [key, chunk] of all) {
     const name = key.slice(PREFIX.length).split('/')[0];
     sessions.set(name, [...(sessions.get(name) ?? []), chunk]);
   }
-  const text = [...sessions].map(([name, parts]) => `\n--- session-${name} ---\n${parts.join('')}`).join('');
-  saveText(text, `monky-logs-${new Date().toISOString().slice(0, 10)}.txt`);
+  return [...sessions].map(([name, parts]) => `\n--- session-${name} ---\n${parts.join('')}`).join('');
+}
+
+export async function exportWebLogs(): Promise<{ success: boolean; error?: string }> {
+  const text = await logText();
+  if (text === null) return { success: false, error: 'no-logs' };
+  saveText(text, clientLogExportName());
   return { success: true };
+}
+
+/** The newest `maxBytes` of the log text, for sending to a channel. */
+export async function bundleWebLogs(maxBytes: number): Promise<ClientLogBundle> {
+  try {
+    const text = await logText();
+    if (text === null) return { success: false, error: 'no-logs' };
+    const encoded = new TextEncoder().encode(text);
+    const kept = newestLogBytes(encoded, maxBytes);
+    return {
+      success: true,
+      fileName: clientLogExportName(),
+      content: new TextDecoder().decode(kept),
+      truncated: kept.length < encoded.length,
+    };
+  } catch {
+    return { success: false, error: 'failed' };
+  }
 }

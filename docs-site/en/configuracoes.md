@@ -845,6 +845,15 @@ and remove sensitive content before sharing logs.
 The [Server Monitor](/en/criar-seu-servidor#server-monitor) is a separate query,
 subject to that server's permissions.
 
+### Send logs to a channel
+
+Under **Settings → Logs**, **Send to a channel** posts the logs as a text file
+in a text channel of any server you are connected to. Choose the server and the
+channel, then **Send**. Only channels where you can send files are available.
+Everyone with access to the channel can read the file. When the logs exceed the
+server's file size limit, only the most recent entries go, and the message says
+so.
+
 ### Diagnose screen sharing
 
 1. Under **Settings → Logs**, enable **Record logs** before reproducing.

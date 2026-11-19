@@ -5,10 +5,11 @@ import {
 } from '@monky/shared';
 import { t } from '../i18n';
 import { dmStore } from '../stores/dmStore';
-import { getActiveChatStore, type ChatStore } from '../stores/chatStore';
+import { getActiveChatStore } from '../stores/chatStore';
 import { getActiveServerStore, type ServerStore } from '../stores/serverStore';
 import { uploadAttachment } from './AttachmentUploader';
-import { getActiveNetworkClient, ProtocolRequestError, type NetworkClient } from './NetworkClient';
+import { getActiveNetworkClient, ProtocolRequestError } from './NetworkClient';
+import type { ServerSession } from './SessionManager';
 
 export interface ForwardAttachment {
   name: string;
@@ -72,6 +73,18 @@ export async function fetchAttachment(url: string): Promise<Blob> {
   return await response.blob();
 }
 
+/** The largest file `server` accepts as an attachment. */
+export function maxAttachmentBytes(server: ServerStore): number {
+  return server.serverDetails?.attachmentStorage?.maxFileBytes ?? LIMITS.MAX_ATTACHMENT_FILE_SIZE_DEFAULT;
+}
+
+/** Why the user cannot post (with files, when `hasFiles`) in `channelId` of `server`, or null. */
+export function channelPostBlocker(server: ServerStore, channelId: string, hasFiles: boolean): string | null {
+  if (!server.hasPermission(Permission.SEND_MESSAGES, channelId)) return t('chat.forwardNoPermission');
+  if (hasFiles && !server.hasPermission(Permission.ATTACH_FILES, channelId)) return t('chat.forwardNoFilePermission');
+  return null;
+}
+
 /**
  * Why `items` cannot go to `destination`, or null when they can. Checked before
  * anything is sent, so a forward never stops halfway over a predictable limit.
@@ -83,12 +96,11 @@ export function forwardBlocker(
 ): string | null {
   const hasFiles = items.some((item) => item.attachments.length > 0);
   if (destination.kind === 'channel') {
-    if (!server.hasPermission(Permission.SEND_MESSAGES, destination.channelId)) return t('chat.forwardNoPermission');
-    if (hasFiles && !server.hasPermission(Permission.ATTACH_FILES, destination.channelId)) return t('chat.forwardNoFilePermission');
-    const details = server.serverDetails;
-    const maxLength = messageLengthLimitFor(details);
+    const blocker = channelPostBlocker(server, destination.channelId, hasFiles);
+    if (blocker) return blocker;
+    const maxLength = messageLengthLimitFor(server.serverDetails);
     if (maxLength > 0 && items.some((item) => item.content.length > maxLength)) return t('chat.forwardTooLong', { max: maxLength });
-    const maxFile = details?.attachmentStorage?.maxFileBytes ?? LIMITS.MAX_ATTACHMENT_FILE_SIZE_DEFAULT;
+    const maxFile = maxAttachmentBytes(server);
     if (items.some((item) => item.attachments.some((file) => file.size > maxFile))) return t('chat.forwardFileTooLarge');
     if (items.some((item) => item.attachments.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE)) return t('chat.forwardTooManyFiles');
     return null;
@@ -101,13 +113,16 @@ export function forwardBlocker(
   return null;
 }
 
-async function forwardToChannel(
+/** The connection and state of one server, visible or in the background. */
+type ChannelSession = Pick<ServerSession, 'client' | 'serverStore' | 'chatStore'>;
+
+async function sendToChannel(
   items: readonly ForwardItem[], channelId: string, onProgress: (sent: number) => void,
-  client: NetworkClient, server: ServerStore, store: ChatStore,
+  { client, serverStore: server, chatStore: store }: ChannelSession, asForward: boolean,
 ): Promise<ForwardResult> {
   const features = server.serverDetails?.protocol?.features ?? [];
   if (!features.includes('chat-delivery')) return { sent: 0, error: t('chat.featureUpdateRequired') };
-  const marksForward = features.includes('message-forward');
+  const marksForward = asForward && features.includes('message-forward');
   let sent = 0;
   try {
     for (const item of items) {
@@ -165,7 +180,20 @@ export async function forwardMessages(
   const blocker = forwardBlocker(items, destination);
   if (blocker) return { sent: 0, error: blocker };
   return destination.kind === 'channel'
-    ? await forwardToChannel(items, destination.channelId, onProgress,
-      getActiveNetworkClient(), getActiveServerStore(), getActiveChatStore())
+    ? await sendToChannel(items, destination.channelId, onProgress, {
+      client: getActiveNetworkClient(), serverStore: getActiveServerStore(), chatStore: getActiveChatStore(),
+    }, true)
     : await forwardToDm(items, destination.peer, onProgress);
+}
+
+/**
+ * Sends new messages from this device (not forwards) to a channel of any
+ * connected server, with the same checks and pacing as a forward.
+ */
+export async function sendToServerChannel(
+  items: readonly ForwardItem[], channelId: string, session: ChannelSession,
+): Promise<ForwardResult> {
+  const blocker = forwardBlocker(items, { kind: 'channel', channelId }, session.serverStore);
+  if (blocker) return { sent: 0, error: blocker };
+  return await sendToChannel(items, channelId, () => undefined, session, false);
 }

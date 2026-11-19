@@ -158,6 +158,7 @@ export class SettingsModal {
       id: 'logs', icon: 'description', label: 'settings.tabLogs',
       render: () => this.logsTab.renderHtml(),
       attach: (root) => this.logsTab.attachEvents(root),
+      cleanup: () => this.logsTab.cleanup(),
     },
     {
       id: 'about', icon: 'info', label: 'settings.tabAbout', separated: true,

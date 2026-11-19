@@ -357,6 +357,7 @@ const api: PlatformApi = {
   getClientLogConfig: () => invoke('client-log:get-config'),
   setClientLogConfig: config => invoke('client-log:set-config', config),
   exportClientLogs: () => invoke('client-log:export'),
+  bundleClientLogs: maxBytes => invoke('client-log:bundle', maxBytes),
   getClientLogSize: () => invoke('client-log:get-size'),
   clearClientLogs: () => invoke('client-log:clear'),
   platform: process.platform,

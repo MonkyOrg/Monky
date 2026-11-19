@@ -13,12 +13,29 @@
 import { app, dialog } from 'electron';
 import fs from 'fs';
 import path from 'path';
-import type { ClientLogConfig, ClientLogEntry } from '@monky/shared';
-import { CLIENT_LOG_DEFAULTS } from '@monky/shared';
+import type { ClientLogBundle, ClientLogConfig, ClientLogEntry } from '@monky/shared';
+import { CLIENT_LOG_DEFAULTS, clientLogExportName, newestLogBytes } from '@monky/shared';
 
 const LOGS_DIR_NAME = 'client-logs';
 const CONFIG_FILE_NAME = 'log-config.json';
 const LOG_FILE_EXT = '.jsonl';
+
+const sectionHeader = (file: { path: string; size: number }): string =>
+  `\n--- ${path.basename(file.path)} (${(file.size / 1024).toFixed(1)} KB) ---\n`;
+
+/** The last `length` bytes of a file, without reading what comes before them. */
+function readTail(filePath: string, length: number): Buffer {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, size - length);
+    const buffer = Buffer.alloc(size - start);
+    const read = fs.readSync(fd, buffer, 0, buffer.length, start);
+    return buffer.subarray(0, read);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 export class ClientLogger {
   private logsDir: string;
@@ -221,7 +238,7 @@ export class ClientLogger {
 
       const result = await dialog.showSaveDialog({
         title: 'Exportar logs do Monky',
-        defaultPath: `monky-logs-${new Date().toISOString().slice(0, 10)}.txt`,
+        defaultPath: clientLogExportName(),
         filters: [
           { name: 'Logs', extensions: ['txt'] },
           { name: 'JSON Lines', extensions: ['jsonl'] },
@@ -243,8 +260,7 @@ export class ClientLogger {
         output.once('finish', resolve);
         try {
           for (const file of files) {
-            const fileName = path.basename(file.path);
-            output.write(`\n--- ${fileName} (${(file.size / 1024).toFixed(1)} KB) ---\n`);
+            output.write(sectionHeader(file));
             output.write(fs.readFileSync(file.path, 'utf8'));
           }
           output.end();
@@ -261,6 +277,45 @@ export class ClientLogger {
       // Re-open stream on error
       if (this.config.enabled) this.openStream();
       return { success: false, error: err instanceof Error ? err.message : 'unknown' };
+    }
+  }
+
+  /**
+   * The logs as one text of at most `maxBytes`, in the same layout as the
+   * exported file. What does not fit is the oldest: whole older sessions first,
+   * then the start of the oldest session kept.
+   */
+  public async bundleLogs(maxBytes: number): Promise<ClientLogBundle> {
+    try {
+      await this.flushWrites();
+      const files = this.listLogFiles();
+      if (files.length === 0) return { success: false, error: 'no-logs' };
+      const sections: Buffer[] = [];
+      let room = maxBytes;
+      let truncated = false;
+      for (const file of files.reverse()) {
+        const header = Buffer.from(sectionHeader(file), 'utf8');
+        const bodyRoom = room - header.length;
+        if (bodyRoom <= 0) {
+          truncated = true;
+          break;
+        }
+        // One byte more than fits tells whether the cut falls on a line boundary.
+        const tail = readTail(file.path, bodyRoom + 1);
+        const body = newestLogBytes(tail, bodyRoom);
+        truncated = tail.length > bodyRoom;
+        if (body.length > 0 || !truncated) sections.unshift(Buffer.concat([header, body]));
+        room = bodyRoom - body.length;
+        if (truncated) break;
+      }
+      return {
+        success: true,
+        fileName: clientLogExportName(),
+        content: Buffer.concat(sections).toString('utf8'),
+        truncated,
+      };
+    } catch {
+      return { success: false, error: 'failed' };
     }
   }
 
