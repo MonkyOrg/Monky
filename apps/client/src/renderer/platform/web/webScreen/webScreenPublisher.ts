@@ -6,7 +6,7 @@ import {
 import { BrowserScreenPeer } from './browserScreenPeer';
 import { encoderScaleDown, type CapturedVideoSettings } from './browserScreenProfile';
 import type { DisplayCapture } from './displayCaptures';
-import { renditionConstraints, watchCaptureSize } from './renditionGeometry';
+import { renditionConstraints, renditionFrame, watchCaptureSize } from './renditionGeometry';
 import { ScreenP2pPublisherPeer } from './screenP2pPublisherPeer';
 import { WebScreenSfuRendition, type WebScreenRpc } from './webScreenSfuRendition';
 
@@ -20,6 +20,8 @@ interface Pipeline {
   readonly key: string;
   readonly id: string;
   readonly profile: Readonly<NativeScreenVideoProfile>;
+  /** The profile turned to the source's orientation: the size the copy is encoded at. */
+  readonly frame: Readonly<NativeScreenVideoProfile>;
   readonly viewers: Map<string, Viewer>;
   readonly video: MediaStreamTrack;
   readonly audio: MediaStreamTrack | null;
@@ -206,7 +208,7 @@ export class WebScreenPublisher {
       if (!this.current(viewer)) throw cancelled();
       return this.pipelineFor(viewer);
     }
-    const pipeline = existing ?? this.createPipeline(key, profile);
+    const pipeline = existing ?? this.createPipeline(key, profile, renditionFrame(source.video, viewer.quality, source.codec));
     if (pipeline.viewers.size >= WEB_SCREEN_LIMITS.viewersPerProfile) throw capacity();
     viewer.pipeline = pipeline;
     pipeline.viewers.set(viewer.sessionId, viewer);
@@ -229,13 +231,15 @@ export class WebScreenPublisher {
     return pipeline;
   }
 
-  private createPipeline(key: string, profile: Readonly<NativeScreenVideoProfile>): Pipeline {
+  private createPipeline(
+    key: string, profile: Readonly<NativeScreenVideoProfile>, frame: Readonly<NativeScreenVideoProfile>,
+  ): Pipeline {
     if (this.pipelines.size >= WEB_SCREEN_LIMITS.profiles) throw capacity();
     const { capture } = this.options;
     const video = capture.video.clone();
     video.contentHint = 'detail';
     const pipeline: Pipeline = {
-      key, id: crypto.randomUUID(), profile, viewers: new Map(), video,
+      key, id: crypto.randomUUID(), profile, frame, viewers: new Map(), video,
       audio: this.options.source.audio && capture.audioTrack ? capture.audioTrack.clone() : null,
       scaleResolutionDownBy: 1, ready: Promise.resolve(), refitting: Promise.resolve(), geometry: new AbortController(),
       sfu: null, closing: null,
@@ -260,9 +264,9 @@ export class WebScreenPublisher {
 
   /** The browser scales the copy to the rendition; where it refuses (Safari), the encoder scales it instead. */
   private async fit(pipeline: Pipeline, captured: CapturedVideoSettings): Promise<void> {
-    await pipeline.video.applyConstraints(renditionConstraints(captured, pipeline.profile))
+    await pipeline.video.applyConstraints(renditionConstraints(captured, pipeline.frame))
       .catch((error: unknown) => console.warn('[WebScreen] The capture kept its own size for this rendition:', error));
-    pipeline.scaleResolutionDownBy = encoderScaleDown(pipeline.video.getSettings(), pipeline.profile);
+    pipeline.scaleResolutionDownBy = encoderScaleDown(pipeline.video.getSettings(), pipeline.frame);
   }
 
   private async failPipeline(pipeline: Pipeline, error: unknown): Promise<void> {

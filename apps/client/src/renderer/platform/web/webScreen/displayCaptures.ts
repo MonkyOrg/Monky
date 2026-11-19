@@ -9,6 +9,36 @@ interface ScreenCaptureOptions extends DisplayMediaStreamOptions {
   monitorTypeSurfaces?: 'include' | 'exclude';
 }
 
+/** Longest wait for a capture's first frame; a capture that shows none by then is shared as it reports itself. */
+export const FIRST_FRAME_TIMEOUT_MS = 3000;
+
+/**
+ * Resolves once `track` delivered its first frame. Until then Safari reports a placeholder size, 480 pixels
+ * tall (WebKit bug 258626), and a share announced from it stayed 220×480 for good.
+ */
+function firstFrame(track: MediaStreamTrack): Promise<void> {
+  const probe = document.createElement('video');
+  probe.muted = true;
+  probe.playsInline = true;
+  probe.srcObject = new MediaStream([track]);
+  return new Promise<void>(resolve => {
+    const done = new AbortController();
+    const finish = (): void => {
+      done.abort();
+      clearTimeout(timer);
+      probe.pause();
+      probe.srcObject = null;
+      resolve();
+    };
+    const timer = setTimeout(finish, FIRST_FRAME_TIMEOUT_MS);
+    const sized = (): void => { if (probe.videoWidth > 0 && probe.videoHeight > 0) finish(); };
+    probe.addEventListener('loadedmetadata', sized, { signal: done.signal });
+    probe.addEventListener('resize', sized, { signal: done.signal });
+    track.addEventListener('ended', finish, { signal: done.signal });
+    void probe.play().catch(() => {});
+  });
+}
+
 /** A browser capture the app holds while some share uses it. */
 export interface DisplayCapture extends BrowserDisplayCapture {
   readonly video: MediaStreamTrack;
@@ -56,6 +86,11 @@ export class DisplayCaptures {
       throw new Error('The browser shared no picture.');
     }
     video.contentHint = 'detail';
+    await firstFrame(video);
+    if (video.readyState === 'ended') {
+      stream.getTracks().forEach(track => track.stop());
+      return null;
+    }
     const audioTrack = request.audio ? stream.getAudioTracks()[0] ?? null : null;
     for (const track of stream.getAudioTracks()) if (track !== audioTrack) track.stop();
     const surface = video.getSettings().displaySurface;

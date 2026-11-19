@@ -220,8 +220,12 @@ test('an upright phone fills the chosen quality long side to long side, as a sid
     { width: 852, height: 478, fps: 30, maxBitrateKbps: 1500 });
 });
 
-test('the browser captures an upright phone up to the long side of the chosen quality, not inside a landscape box', async (t: TestContext) => {
-  const names = ['navigator', 'window'] as const;
+/**
+ * A browser whose screen capture reports `settings` and shows its first frame through a `<video>` probe when
+ * the test calls `showFrame`; until then the probe has no size, as before a capture's first frame.
+ */
+function fakeDisplayMedia(t: TestContext, settings: { width: number; height: number }) {
+  const names = ['navigator', 'window', 'document', 'MediaStream'] as const;
   const descriptors = names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
   t.after(() => {
     for (const [name, descriptor] of descriptors) {
@@ -229,20 +233,88 @@ test('the browser captures an upright phone up to the long side of the chosen qu
     }
   });
   const requests: DisplayMediaStreamOptions[] = [];
+  const size = { ...settings };
   const video = Object.assign(new EventTarget(), {
-    label: 'Screen', contentHint: '', getSettings: () => ({ width: 1320, height: 2868, displaySurface: 'monitor' }), stop: () => {},
+    label: 'Screen', contentHint: '', readyState: 'live',
+    getSettings: () => ({ ...size, displaySurface: 'monitor' }), stop: () => {},
   });
   const stream = { getVideoTracks: () => [video], getAudioTracks: () => [], getTracks: () => [video] };
   const getDisplayMedia = (options: DisplayMediaStreamOptions): Promise<typeof stream> => { requests.push(options); return Promise.resolve(stream); };
-  Object.defineProperty(globalThis, 'navigator', { value: { mediaDevices: { getDisplayMedia } }, configurable: true, writable: true });
-  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true, writable: true });
+  const probes: (EventTarget & { videoWidth: number; videoHeight: number; srcObject: unknown })[] = [];
+  const createElement = () => {
+    const probe = Object.assign(new EventTarget(), {
+      videoWidth: 0, videoHeight: 0, muted: false, playsInline: false, srcObject: null as unknown,
+      play: () => Promise.resolve(), pause: () => {},
+    });
+    probes.push(probe);
+    return probe;
+  };
+  const define = (name: typeof names[number], value: unknown): void => {
+    Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+  };
+  define('navigator', { mediaDevices: { getDisplayMedia } });
+  define('window', new EventTarget());
+  define('document', { createElement });
+  define('MediaStream', class { constructor(readonly tracks: unknown[]) {} });
+  const showFrame = (frame: { width: number; height: number }): void => {
+    Object.assign(size, frame);
+    for (const probe of probes) {
+      Object.assign(probe, { videoWidth: frame.width, videoHeight: frame.height });
+      probe.dispatchEvent(new Event('loadedmetadata'));
+    }
+  };
+  return { requests, probes, showFrame };
+}
+
+const settled = async (promise: Promise<unknown>): Promise<boolean> => {
+  let done = false;
+  void promise.then(() => { done = true; }, () => { done = true; });
+  for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+  return done;
+};
+
+test('the browser captures an upright phone up to the long side of the chosen quality, not inside a landscape box', async (t: TestContext) => {
+  const browser = fakeDisplayMedia(t, { width: 1320, height: 2868 });
   const { DisplayCaptures } = await import('../src/renderer/platform/web/webScreen/displayCaptures');
   const captures = new DisplayCaptures();
-  await captures.capture({ audio: false, video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 2500 } });
+  const capturing = captures.capture({ audio: false, video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 2500 } });
+  await settled(capturing);
+  browser.showFrame({ width: 1320, height: 2868 });
+  await capturing;
   captures.releaseAll();
-  const requested = requests[0]?.video;
+  const requested = browser.requests[0]?.video;
   assert.ok(requested && typeof requested === 'object');
   assert.deepEqual({ width: requested.width, height: requested.height }, { width: { max: 1280 }, height: { max: 1280 } });
+});
+
+test('an iPhone capture is shared at the size of its first frame, not the 480-pixel placeholder Safari reports before it', async (t: TestContext) => {
+  // WebKit bug 258626: until the first frame, the capture reports a placeholder 480 pixels tall.
+  const browser = fakeDisplayMedia(t, { width: 221, height: 480 });
+  const { DisplayCaptures } = await import('../src/renderer/platform/web/webScreen/displayCaptures');
+  const captures = new DisplayCaptures();
+  const requested = { width: 1280, height: 720, fps: 30, maxBitrateKbps: 2500 };
+  const capturing = captures.capture({ audio: false, video: requested });
+  assert.equal(await settled(capturing), false, 'the capture waits for its first frame');
+  browser.showFrame({ width: 1179, height: 2556 });
+  const capture = await capturing;
+  assert.ok(capture);
+  const settings = captures.get(capture.sourceId)?.video.getSettings() ?? {};
+  // Announced from the placeholder, the share stayed 220×480 for every viewer.
+  assert.deepEqual({ ...browserScreenProfile(requested, settings) }, { width: 588, height: 1280, fps: 30, maxBitrateKbps: 2500 });
+  assert.equal(browser.probes[0]?.srcObject, null, 'the probe lets go of the capture');
+  captures.releaseAll();
+});
+
+test('a capture that shows no frame is still shared once the wait for its first frame runs out', async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  fakeDisplayMedia(t, { width: 1920, height: 1080 });
+  const { DisplayCaptures, FIRST_FRAME_TIMEOUT_MS } = await import('../src/renderer/platform/web/webScreen/displayCaptures');
+  const captures = new DisplayCaptures();
+  const capturing = captures.capture({ audio: false, video: { width: 1920, height: 1080, fps: 30, maxBitrateKbps: 4500 } });
+  assert.equal(await settled(capturing), false);
+  t.mock.timers.tick(FIRST_FRAME_TIMEOUT_MS);
+  assert.ok(await capturing);
+  captures.releaseAll();
 });
 
 const macroblocks = (width: number, height: number): number => Math.ceil(width / 16) * Math.ceil(height / 16);

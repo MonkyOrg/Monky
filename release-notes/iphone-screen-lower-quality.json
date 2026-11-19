@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A tela do iPhone compartilhada pelo Monky Web volta a chegar nítida, em vez de minúscula (220×480): a transmissão espera o primeiro quadro da captura para saber o tamanho real da tela, e as qualidades menores seguem o lado maior da tela, como numa tela deitada.",
+  "en": "An iPhone screen shared from Monky Web arrives sharp again instead of tiny (220×480): the share waits for the capture's first frame to learn the screen's real size, and lower qualities follow the screen's long side, as a landscape screen does."
+}
