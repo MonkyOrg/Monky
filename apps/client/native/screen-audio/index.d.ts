@@ -178,7 +178,12 @@ export interface NativeMonitorInfo {
   isPrimary: boolean;
 }
 
-/** Metadata-only Windows enumeration. Throws if native identity inspection is unavailable. */
+/**
+ * Metadata-only Windows enumeration. Monitors without a usable device interface
+ * are still returned (often with an empty `deviceId`); the picker marks those
+ * unidentified instead of emptying the Screens tab. Throws only when the Win32
+ * enumeration itself is unavailable (for example DPI awareness cannot be set).
+ */
 export function listMonitors(): NativeMonitorInfo[];
 /** Returns null after disconnect. Changes of bounds/deviceName require explicit reselection. */
 export function getMonitorState(deviceId: string): NativeMonitorInfo | null;

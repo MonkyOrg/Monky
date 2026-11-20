@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No Windows, um monitor ou uma janela que o sistema não identifica com segurança aparece acinzentado na lista, sem esconder as outras telas e janelas que ainda podem ser compartilhadas.",
+  "en": "On Windows, a monitor or window the system cannot identify reliably shows up greyed out in the list, without hiding the other screens and windows that can still be shared."
+}
