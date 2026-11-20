@@ -2063,6 +2063,11 @@ html[data-compact-transition]::view-transition-new(compact-page) {
 :root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) .stage-card-controls {
   right: calc(10px + var(--stage-picture-x));
   bottom: calc(10px + var(--stage-picture-y));
+  /* Rotate (+ other tile actions) can outgrow a tall/narrow picture: wrap inside it
+     instead of spilling onto the letterbox that ImmersiveStageChrome still taps. */
+  max-width: calc(var(--stage-picture-width) - 20px);
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 :root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) .stage-viewers {
