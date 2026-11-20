@@ -1,3 +1,5 @@
+import { screenRotationTransform, type ScreenRotation } from './StageScreenRotate';
+
 const MAX_SCALE = 4;
 const STEP = 0.25;
 
@@ -56,11 +58,17 @@ export class FocusedScreenZoom {
 
     const apply = () => {
       const { scale, x, y } = this.transform;
-      video.style.transform = scale > 1 ? `translate(${x}px, ${y}px) scale(${scale})` : '';
+      const rotation = Number(video.dataset.screenRotation || 0) as ScreenRotation;
+      const orientation = screenRotationTransform(rotation);
+      const parts: string[] = [];
+      if (scale > 1) parts.push(`translate(${x}px, ${y}px)`, `scale(${scale})`);
+      if (orientation) parts.push(orientation);
+      video.style.transform = parts.join(' ');
       main.classList.toggle('is-zoomed', scale > 1);
     };
 
     apply();
+    main.addEventListener('monky:screen-rotation', () => apply(), { signal });
 
     main.addEventListener('wheel', (e: WheelEvent) => {
       if (e.target instanceof Element && e.target.closest('.stage-card-controls')) return;
@@ -139,8 +147,9 @@ export class FocusedScreenZoom {
     const binding = this.binding;
     if (!binding) return;
     // A pane kept when focus splits in two outlives its zoom: it must not stay cropped without the
-    // gestures that undo it. Rebinding the same screen applies the zoom again.
-    binding.video.style.transform = '';
+    // gestures that undo it. Rebinding the same screen applies the zoom again. Keep a viewer rotate.
+    const rotation = Number(binding.video.dataset.screenRotation || 0) as ScreenRotation;
+    binding.video.style.transform = screenRotationTransform(rotation);
     binding.main.classList.remove('is-zoomed', 'is-panning');
     binding.controller.abort();
     this.binding = null;

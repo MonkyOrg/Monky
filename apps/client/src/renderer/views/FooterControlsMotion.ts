@@ -320,6 +320,9 @@ function playHover(glyph: HTMLElement, play: Play, decorate: Decorate): Animatio
       }
       return replaceGlyph();
     }
+    case 'rotate_right':
+      // Viewer screen turn (#925): a full spin reads as "rotate", and stays above the 480 ms default.
+      return transform(['rotate(0deg)', 'rotate(90deg)', 'rotate(180deg)', 'rotate(270deg)', 'rotate(360deg)'], 760);
     case 'stop_circle': {
       const layer = decorate('stop', '<circle cx="12" cy="12" r="9"/>'
         + '<rect data-stop x="8" y="8" width="8" height="8" rx="1" fill="currentColor" stroke="none"/>');
