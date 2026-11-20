@@ -10029,6 +10029,7 @@
 
 .stage-fullscreen-btn,
 .stage-camera-flip-btn,
+.stage-screen-rotate-btn,
 .stage-pip-btn,
 .stage-diagnostics-btn {
   position: relative;
@@ -10057,9 +10058,15 @@
 
 .stage-fullscreen-btn:hover,
 .stage-camera-flip-btn:hover,
+.stage-screen-rotate-btn:hover,
 .stage-pip-btn:hover,
 .stage-diagnostics-btn:hover {
   background-color: rgba(0, 0, 0, 0.85);
+}
+
+.stage-screen-rotate-btn[aria-pressed="true"] {
+  background-color: rgba(0, 0, 0, 0.85);
+  color: var(--accent-primary, #7aa2ff);
 }
 
 /* Fullscreen a stage card (#68/#75): the <div> card — not the bare <video> —

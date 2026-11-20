@@ -1716,6 +1716,7 @@ export const en: TranslationMap = {
   'stage.cameraOn': 'Turn camera on',
   'stage.cameraOff': 'Turn camera off',
   'stage.switchCamera': 'Switch between front and rear camera',
+  'stage.rotateScreen': 'Rotate screen',
   'stage.stopScreenShare': 'Stop screen sharing',
   'stage.stopScreen': 'Stop screen',
   'stage.leaveChannel': 'Disconnect from channel',
