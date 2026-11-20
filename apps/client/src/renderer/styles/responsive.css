@@ -2043,8 +2043,9 @@ html[data-compact-transition]::view-transition-new(compact-page) {
 
 :root .main-layout[data-compact][data-compact-immersive] .stage-focused-main:has(video[data-video-tile-key]) .stage-badges-overlay {
   /* An upright share is too narrow for the name beside the tile's buttons: below
-     360px of picture the name rises above their row (0 or 52px, nothing between). */
-  bottom: calc(12px + var(--stage-picture-y) + clamp(0px, (360px - var(--stage-picture-width)) * 100, 52px));
+     360px of picture the name rises above their row. Two 44px rows (rotate wrap)
+     need ~108px of lift so the name stays clear of the wrapped controls. */
+  bottom: calc(12px + var(--stage-picture-y) + clamp(0px, (360px - var(--stage-picture-width)) * 100, 108px));
   left: calc(12px + var(--stage-picture-x));
   max-width: calc(var(--stage-picture-width) - 24px);
 }
