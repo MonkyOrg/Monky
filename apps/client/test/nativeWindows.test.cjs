@@ -555,11 +555,48 @@ test('unknown process births, ghost windows and malformed Electron IDs cannot be
   const { nativeWindowIdFromSourceId } = moduleFor();
   for (const id of ['window:0:0', 'window:123', 'window:123:0:extra', 'window:1e3:0', 'window:9007199254740992:0', 'screen:0:0'])
     assert.equal(nativeWindowIdFromSourceId(id), null);
-  for (const changed of [{ processCreationTime100ns: null }, { isToolWindow: true }, { isCloaked: true },
-    { isLayered: true, isTransparent: true }]) {
+  for (const changed of [{ isToolWindow: true }, { isCloaked: true }, { isLayered: true, isTransparent: true }]) {
     const f = fixture();
     f.setWindows([{ ...window, ...changed }]);
     assert.deepEqual(f.sources.listWindows(), []);
     assert.throws(() => f.sources.resolve('window:123:0', 'window'), /unavailable/);
   }
+});
+
+test('a window without process birth stays visible as unidentified next to shareable windows', async () => {
+  const f = fixture(), e = desktopEnumerator(f.sources);
+  f.setWindows([
+    { ...window, hwnd: 10, title: 'Unknown birth', processCreationTime100ns: null },
+    window,
+  ]);
+  const { sources, failedTypes } = await e.list(true);
+  assert.deepEqual(failedTypes, []);
+  assert.deepEqual(sources.filter(source => source.type === 'window').map(source =>
+    [source.name, source.unidentified === true]), [
+    ['Selected', false],
+    ['Unknown birth', true],
+  ]);
+  assert.equal(f.sources.resolve(sources.find(source => source.name === 'Selected').id, 'window').hwnd, window.hwnd);
+  assert.deepEqual(e.logs.map(entry => [entry.level, entry.data.kind, entry.data.reason]), [
+    ['WARN', 'window', 'invalid-identity'],
+  ]);
+});
+
+test('an incomplete native monitor does not empty the Screens tab', async () => {
+  const f = fixture(), e = desktopEnumerator(f.sources);
+  f.setMonitors([
+    { deviceId: '', deviceName: String.raw`\\.\DISPLAY1`, name: '', bounds: { x: 0, y: 0, width: 0, height: 0 },
+      isPrimary: true },
+    monitor,
+  ]);
+  const { sources, failedTypes } = await e.list(true);
+  assert.deepEqual(failedTypes, []);
+  assert.deepEqual(sources.filter(source => source.type === 'screen').map(source =>
+    [source.unidentified === true, source.displayNumber]), [
+    [true, 1],
+    [false, 2],
+  ]);
+  assert.equal(f.sources.resolve(sources.find(source => source.type === 'screen' && !source.unidentified).id, 'monitor')
+    .deviceId, monitor.deviceId);
+  assert.deepEqual(e.logs.map(entry => [entry.data.kind, entry.data.reason]), [['monitor', 'invalid-identity']]);
 });

@@ -17,7 +17,6 @@
 #include <vector>
 #include <string>
 #include <cmath>
-#include <set>
 #include "../packet_core.h"
 
 namespace {
@@ -252,38 +251,43 @@ struct MonitorRecord {
 
 struct MonitorEnumeration {
   std::vector<MonitorRecord> records;
-  bool failed = false;
+  // Stopped after the hard cap so EnumDisplayMonitors returns FALSE; the records
+  // collected so far stay valid and TypeScript marks incomplete ones unidentified.
+  bool truncated = false;
 };
+
+// One unreadable monitor must not hide the others: keep going and hand the
+// partial row to JS, which shows it greyed out and never selectable (#914 follow-up).
+void PushIncompleteMonitor(MonitorEnumeration& enumeration) {
+  enumeration.records.push_back({L"", L"", L"", RECT{}, false});
+}
 
 BOOL CALLBACK EnumMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM parameter) noexcept {
   auto& enumeration = *reinterpret_cast<MonitorEnumeration*>(parameter);
   try {
     if (enumeration.records.size() >= 64) {
-      enumeration.failed = true;
+      enumeration.truncated = true;
       return FALSE;
     }
     MONITORINFOEXW info{};
     info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+      PushIncompleteMonitor(enumeration);
+      return TRUE;
+    }
     DISPLAY_DEVICEW device{};
     device.cb = sizeof(device);
-    if (!GetMonitorInfoW(monitor, &info) ||
-        !EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) ||
-        !device.DeviceID[0]) {
-      enumeration.failed = true;
-      return FALSE;
-    }
-    const auto width = info.rcMonitor.right - info.rcMonitor.left;
-    const auto height = info.rcMonitor.bottom - info.rcMonitor.top;
-    if (width < 1 || width > 32768 || height < 1 || height > 32768) {
-      enumeration.failed = true;
-      return FALSE;
-    }
-    enumeration.records.push_back({device.DeviceID, info.szDevice, device.DeviceString,
+    const bool identified = EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) != FALSE
+        && device.DeviceID[0];
+    // Empty deviceId / odd bounds still reach JS: validateCaptureTarget rejects them
+    // as unidentified screens instead of emptying the Screens tab.
+    enumeration.records.push_back({identified ? std::wstring(device.DeviceID) : L"",
+        info.szDevice, identified ? std::wstring(device.DeviceString) : L"",
         info.rcMonitor, (info.dwFlags & MONITORINFOF_PRIMARY) != 0});
     return TRUE;
   } catch (...) {
-    enumeration.failed = true;
-    return FALSE;
+    PushIncompleteMonitor(enumeration);
+    return TRUE;
   }
 }
 
@@ -311,10 +315,9 @@ bool ReadMonitors(Napi::Env env, MonitorEnumeration& enumeration) {
   }
   const auto ok = EnumDisplayMonitors(nullptr, nullptr, EnumMonitor, reinterpret_cast<LPARAM>(&enumeration));
   SetThreadDpiAwarenessContext(previous);
-  std::set<std::wstring> ids;
-  for (const auto& monitor : enumeration.records)
-    if (!ids.insert(monitor.deviceId).second) enumeration.failed = true;
-  if (!ok || enumeration.failed) {
+  // Duplicate DeviceIDs are returned as-is; NativeDesktopSources marks them
+  // ambiguous/unidentified. Only a hard API failure with nothing listed is fatal.
+  if (!ok && enumeration.records.empty() && !enumeration.truncated) {
     Napi::Error::New(env, "Cannot enumerate unambiguous monitor device identities").ThrowAsJavaScriptException();
     return false;
   }

@@ -104,9 +104,14 @@ export class NativeDesktopSources {
       return state?.isTopLevel && state.processId === target.expectedProcessId
         && state.processCreationTime100ns === target.expectedProcessCreationTime100ns;
     }));
-    const candidates = this.inspect.windows().filter((window): window is NativeWindowInfo & { processCreationTime100ns: string } =>
-      !this.inspect.isWindowExcluded?.(window.hwnd) && !isGhostWindow(window) && (window.isVisible || window.isIconic)
-      && !!window.processCreationTime100ns);
+    // Ghost overlays stay hidden. Everything else that cannot be captured safely
+    // (no process birth, bad handle, duplicate HWND) is still listed as unidentified.
+    const visible = this.inspect.windows().filter(window =>
+      !this.inspect.isWindowExcluded?.(window.hwnd) && !isGhostWindow(window) && (window.isVisible || window.isIconic));
+    for (const window of visible.filter(window => !window.processCreationTime100ns))
+      onUnidentified({ kind: 'window', reason: 'invalid-identity', window });
+    const candidates = visible.filter((window): window is NativeWindowInfo & { processCreationTime100ns: string } =>
+      !!window.processCreationTime100ns);
     const ambiguous = repeated(candidates, window => window.hwnd);
     const result: ListedWindow[] = [];
     for (const window of candidates) {
