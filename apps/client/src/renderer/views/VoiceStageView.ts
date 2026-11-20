@@ -43,6 +43,7 @@ import {
 import { StageTelemetryMonitor } from './stage/StageTelemetryMonitor';
 import { FocusedScreenZoom } from './stage/FocusedScreenZoom';
 import { bindCameraFlip, renderCameraFlipButton } from './stage/StageCameraFlip';
+import { bindScreenRotate, renderScreenRotateButton, syncScreenRotations } from './stage/StageScreenRotate';
 import { bindFocusedVideoFrame, syncFocusedVideoFrames } from './stage/FocusedVideoFrame';
 import { announceCompactFocus } from './stage/compactFocusHint';
 import { bindWatchControls, renderStopWatchingButton, renderWatchOverlay } from './stage/StageWatchControls';
@@ -1162,6 +1163,7 @@ export class VoiceStageView {
 
     this.telemetry.applyOverlays();
     this.telemetry.sync();
+    syncScreenRotations(this.container);
     this.syncBotScreenLayout();
     this.refreshNativeScreenState();
     this.watchPendingLoadingOverlays();
@@ -1584,6 +1586,7 @@ export class VoiceStageView {
               </button>
             ` : ''}
             ${hasVideo && isLocal && tile.kind === 'camera' ? renderCameraFlipButton() : ''}
+            ${hasVideo && isScreenTile && !isLocked ? renderScreenRotateButton(tile.key) : ''}
             ${hasVideo ? html`<button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
               <span class="material-symbols-outlined md-18">fullscreen</span>
             </button>` : ''}
@@ -1757,6 +1760,7 @@ export class VoiceStageView {
     }
     this.unbindEvents.push(bindStageControlsMotion(this.container));
     this.unbindEvents.push(bindCameraFlip(this.container));
+    this.unbindEvents.push(bindScreenRotate(this.container));
     this.unbindEvents.push(bindFocusedVideoFrame(this.container));
     const btnMic = document.getElementById('stage-btn-mic');
     const btnDeafen = document.getElementById('stage-btn-deafen');

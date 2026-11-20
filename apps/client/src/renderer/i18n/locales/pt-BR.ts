@@ -1678,6 +1678,7 @@ export const ptBR = {
   'stage.cameraOn': 'Ligar Câmera',
   'stage.cameraOff': 'Desligar Câmera',
   'stage.switchCamera': 'Alternar entre câmera frontal e traseira',
+  'stage.rotateScreen': 'Girar tela',
   'stage.stopScreenShare': 'Parar Compartilhamento de Tela',
   'stage.stopScreen': 'Parar Tela',
   'stage.leaveChannel': 'Desconectar do canal',
