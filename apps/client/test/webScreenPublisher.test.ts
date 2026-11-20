@@ -15,6 +15,7 @@ import {
 } from '../src/renderer/platform/web/webScreen/screenP2pPublisherPeer';
 import type { ScreenMediaBinding } from '../src/renderer/platform/web/webScreen/screenSdp';
 import { planBrowserAudio, type LiveScreens } from '../src/renderer/views/screenShare/captureRules';
+import { browserScreenUnavailableKey } from '../src/renderer/views/screenShare/browserScreenAvailability';
 import { createScreenShareStream } from '../src/renderer/core/screenShareStream';
 import { webScreenCapabilities } from '../src/renderer/platform/web/webScreen/webScreenRuntime';
 import { webCapabilities } from '../src/renderer/platform/web/webPlatform';
@@ -439,6 +440,24 @@ test('a browser without a usable H.264 encoder shows screen sharing locked, as i
   inBrowser(t, NO_H264_VIDEO_CODECS, () => {
     assert.deepEqual({ capture: webScreenCapabilities().capture, reason: webScreenCapabilities().reason }, { capture: false, reason: 'encoder' });
     assert.equal(webCapabilities().screenShare, false);
+    assert.equal(browserScreenUnavailableKey('encoder'), 'screenShare.browserUnavailable');
+  });
+});
+
+test('a browser without getDisplayMedia reports platform capture unavailable, as on Android Chrome', (t: TestContext) => {
+  inBrowser(t, CHROMIUM_VIDEO_CODECS, () => {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: { mediaDevices: { getSupportedConstraints: () => ({}) } },
+      configurable: true,
+      writable: true,
+    });
+    assert.deepEqual(
+      { capture: webScreenCapabilities().capture, reason: webScreenCapabilities().reason, formats: webScreenCapabilities().browserFormats },
+      { capture: false, reason: 'platform', formats: [] },
+    );
+    assert.equal(webCapabilities().screenShare, false);
+    assert.equal(browserScreenUnavailableKey('platform'), 'screenShare.deviceUnavailable');
+    assert.equal(browserScreenUnavailableKey(undefined), 'screenShare.browserUnavailable');
   });
 });
 

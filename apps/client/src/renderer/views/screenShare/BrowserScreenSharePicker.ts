@@ -19,6 +19,7 @@ import { showErrorToast } from '../CopyToast';
 import { screenShareChooser } from '../ScreenShareChooser';
 import { ResourceAudiencePicker, type AudienceTexts } from '../ResourceAudiencePicker';
 import { hasUnownedAudio, planBrowserAudio, type LiveScreens } from './captureRules';
+import { browserScreenUnavailableKey } from './browserScreenAvailability';
 import { confirmExtraScreen } from './extraScreens';
 import { isDesktopOnly, setDesktopOnly } from '../../utils/desktopOnly';
 
@@ -157,13 +158,14 @@ export class BrowserScreenSharePicker {
       this.formats = capabilities.browserFormats ?? [];
       this.capabilitiesKnown = true;
       const info = modal.querySelector<HTMLElement>('#share-capture-info');
-      if (info && !capabilities.capture) info.textContent = t('screenShare.browserUnavailable');
+      if (info && !capabilities.capture) info.textContent = t(browserScreenUnavailableKey(capabilities.reason));
       this.renderFormats(modal);
       this.update();
     }, (error: unknown) => {
       console.error('[ScreenShare] Browser capture capabilities are unavailable:', error);
       const info = modal.querySelector<HTMLElement>('#share-capture-info');
-      if (this.shell === shell && info) info.textContent = t('screenShare.browserUnavailable');
+      // Without a reason from the runtime, keep the generic browser message — not the Android platform one.
+      if (this.shell === shell && info) info.textContent = t(browserScreenUnavailableKey(undefined));
     });
   }
 

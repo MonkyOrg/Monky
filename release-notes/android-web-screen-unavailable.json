@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "No Android, o Chrome e outros navegadores não capturam a tela pela web. O Monky agora deixa isso claro no botão e no seletor — é limite da plataforma, não defeito do app — e aponta o computador como caminho.",
+  "en": "On Android, Chrome and other browsers cannot capture the screen on the web. Monky now states that clearly on the button and picker — a platform limit, not an app defect — and points you to a computer."
+}

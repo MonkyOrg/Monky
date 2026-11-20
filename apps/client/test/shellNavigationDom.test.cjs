@@ -1335,7 +1335,7 @@ async function responsiveShellSmoke(width, height, mobile) {
     const lockedShare = callSheet.querySelector('.compact-call-action[data-desktop-only="screenShare"]');
     const shareReason = lockedShare && document.getElementById(lockedShare.getAttribute('aria-describedby'));
     check(visible(shareReason) && lockedShare.contains(shareReason)
-      && shareReason.textContent === t('desktopOnly.reason.screenShareDevice')
+      && shareReason.textContent === t('screenShare.deviceUnavailable')
       && getComputedStyle(lockedShare).opacity === '1',
     'a locked call action shows, undimmed and tied to it, why this device cannot share its screen');
     document.querySelector('.compact-call-sheet [data-modal-close]').click();

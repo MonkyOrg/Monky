@@ -54,8 +54,9 @@ export function desktopFeatureName(feature: DesktopFeature): string {
 
 /** Features a browser lacks for a reason worth naming: this browser or device, not the web version, cannot do them. */
 const FEATURE_REASONS: Partial<Readonly<Record<DesktopFeature, () => TranslationKey>>> = {
-  // A browser without the encoder has a sibling that shares; a device whose browser cannot capture may have none.
-  screenShare: () => browserCapturesDisplay() ? 'desktopOnly.reason.screenShare' : 'desktopOnly.reason.screenShareDevice',
+  // A browser without the encoder has a sibling that shares; a device whose browser cannot capture may have none
+  // (Android Chrome has no getDisplayMedia — platform limit, not a Monky defect).
+  screenShare: () => browserCapturesDisplay() ? 'desktopOnly.reason.screenShare' : 'screenShare.deviceUnavailable',
 };
 
 /** The tooltip of a locked `feature`: why it is locked, or just where it works. */

@@ -171,7 +171,7 @@ if (!process.versions.electron) {
           import("/utils/desktopOnly.ts").then(({ showDesktopOnly }) => showDesktopOnly("screenShare"))`);
         await waitFor(`${dialogs} === 1`, 'The screen-sharing offer opens on a device without screen capture');
         await check(`document.querySelector(".modal-backdrop:not([data-ui-closing]) .desktop-only-dialog__message").textContent
-          === window.qa.t("desktopOnly.reason.screenShareDevice")`, 'A device that cannot capture its screen says so, instead of sending to another browser');
+          === window.qa.t("screenShare.deviceUnavailable")`, 'A device that cannot capture its screen says so, instead of sending to another browser');
         await evaluate('delete navigator.mediaDevices.getDisplayMedia');
         await closeOffer();
 
